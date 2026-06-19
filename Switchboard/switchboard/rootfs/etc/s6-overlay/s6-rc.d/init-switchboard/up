@@ -1,0 +1,4 @@
+#!/command/with-contenv bashio
+# Render Asterisk configuration from the add-on options, then prepare runtime
+# directories. Runs once, before Asterisk and the web UI start.
+/usr/bin/switchboard-config
