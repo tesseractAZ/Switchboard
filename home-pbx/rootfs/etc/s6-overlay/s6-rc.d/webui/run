@@ -1,0 +1,14 @@
+#!/command/with-contenv bashio
+# Serve the Ingress management UI. Home Assistant proxies this port; we bind it
+# on the host (host_network) so the Supervisor can reach it.
+bashio::log.info "Starting Home PBX web UI on :8099 ..."
+
+# AMI credentials written by the config generator (localhost-only manager).
+if [ -f /run/pbx/ami.env ]; then
+    # shellcheck disable=SC1091
+    source /run/pbx/ami.env
+    export AMI_USER AMI_SECRET
+fi
+
+cd /usr/share/pbx/webui || exit 1
+exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log
