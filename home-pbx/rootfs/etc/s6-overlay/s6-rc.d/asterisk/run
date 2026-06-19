@@ -1,0 +1,11 @@
+#!/command/with-contenv bashio
+# Run Asterisk in the foreground under s6 supervision.
+bashio::log.info "Starting Asterisk..."
+
+# Ownership of runtime/state dirs (host_network + root inside the container).
+mkdir -p /var/run/asterisk /var/log/asterisk /var/lib/asterisk
+chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk 2>/dev/null || true
+
+# -f  foreground (no fork, so s6 supervises it)
+# -U/-G  drop to the asterisk user
+exec asterisk -f -U asterisk -G asterisk
