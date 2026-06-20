@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3
+
+Log cleanup (cosmetic — the add-on already runs).
+
+- Add a curated `modules.conf` that autoloads everything except the modules
+  that only probe for hardware that isn't present in a container: `chan_alsa`
+  and `chan_console` (the ALSA/JACK error spam), `chan_dahdi`, and a few
+  deprecated ADSI / unused SQLite CDR-CEL backends. Cleaner logs, less memory.
+
 ## 0.1.2
 
 Startup fix.
