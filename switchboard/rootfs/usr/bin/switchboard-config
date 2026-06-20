@@ -226,7 +226,8 @@ def render_extensions(opts: dict) -> str:
             f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
             " same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)",
             " same = n,Hangup()",
-            " same = n(invalid),Playback(invalid)",
+            # Generated congestion tone (no prompt sound file required).
+            " same = n(invalid),Congestion(5)",
             " same = n,Hangup()",
             "",
         ]
