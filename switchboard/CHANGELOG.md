@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2
+
+Startup fix.
+
+- Rework the AppArmor profile. The previous strict path allowlist blocked the
+  s6-overlay init (`/bin/sh: can't open '/init': Permission denied`, crash
+  loop). The profile now follows the documented HA add-on pattern: broad
+  file/capability/signal/network access under a named, mediated profile, with
+  explicit exec rules for the s6-overlay boot chain.
+
 ## 0.1.1
 
 Build fix.
