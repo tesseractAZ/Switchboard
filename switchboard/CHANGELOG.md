@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1
+
+Build fix.
+
+- Drop the non-existent `asterisk-pjsip` and `asterisk-sounds-en` Alpine
+  packages that broke the image build. PJSIP ships inside the main `asterisk`
+  package; `asterisk-sample-config` provides modules.conf so it autoloads.
+- Music-on-hold sounds and the Opus codec are now installed best-effort, so a
+  missing optional package can never fail the build.
+- Invalid-extension handling uses a generated congestion tone instead of a
+  prompt sound file (no sounds package required for core calling).
+
 ## 0.1.0
 
 Initial release.
