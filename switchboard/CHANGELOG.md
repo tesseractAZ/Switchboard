@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.6
+
+Fix an AMI regression from v0.1.4.
+
+- **AMI privileges (regression fix):** v0.1.4 emptied the manager `write` classes
+  on the assumption the Ingress UI was read-only. But Asterisk gates the UI's
+  status actions (`PJSIPShowEndpoints`, `PJSIPShowContacts`, `CoreShowChannels`)
+  on *write* authority, so every poll was denied (`RequestNotAllowed` in the
+  log) and the dashboard could never show a phone as registered. Restore the
+  minimum needed (`write = system,call,reporting`) while still excluding the
+  dangerous `command` (CLI/RCE) and `originate` (place-calls) classes — keeping
+  the least-privilege intent without breaking status.
+
 ## 0.1.5
 
 Close the two deferred high-severity items from the v0.1.4 review.
