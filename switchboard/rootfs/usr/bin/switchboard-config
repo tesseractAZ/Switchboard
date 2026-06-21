@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import string
 from pathlib import Path
@@ -45,13 +46,76 @@ def load_options() -> dict:
     if not OPTIONS_PATH.exists():
         log(f"WARNING: {OPTIONS_PATH} missing; using empty defaults")
         return {}
-    with OPTIONS_PATH.open() as fh:
-        return json.load(fh)
+    try:
+        with OPTIONS_PATH.open() as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        # A malformed options.json must not crash the init oneshot (which would
+        # silently take the whole add-on down); degrade to empty defaults + log.
+        log(f"ERROR: cannot read/parse {OPTIONS_PATH}: {exc}; using empty defaults")
+        return {}
 
 
 def gen_secret(n: int = 24) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def _int(value: object, default: int) -> int:
+    """Coerce to int, falling back to a default rather than crashing on junk."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _has_control(value: str) -> bool:
+    """True if value has CR/LF or other control chars (config-injection risk)."""
+    return bool(_CONTROL_RE.search(value))
+
+
+def _scrub(value: str) -> str:
+    """Strip control chars so a value can't break out of its .conf line/section."""
+    return _CONTROL_RE.sub("", value)
+
+
+def valid_rooms(rooms: list) -> list[dict]:
+    """Validate/sanitize room entries once; both renderers consume the result.
+
+    Skips (with a secret-safe log) rooms that are missing fields, have a
+    non-numeric ext, duplicate an earlier ext, or carry control characters in
+    the secret — so one bad entry can't inject config or shadow another room.
+    Returns dicts with cleaned ext/name/secret.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for room in rooms:
+        ext = str(room.get("ext", "")).strip()
+        name = str(room.get("name", ext))
+        sec = str(room.get("secret", ""))
+        if not ext or not sec.strip():
+            log(f"skipping room ext={ext!r}: missing ext or secret")
+            continue
+        if not re.fullmatch(r"[0-9]{2,6}", ext):
+            log(f"skipping room ext={ext!r}: ext must be 2-6 digits")
+            continue
+        if ext in seen:
+            log(f"skipping duplicate room ext={ext!r}")
+            continue
+        if _has_control(sec):
+            log(f"skipping room ext={ext!r}: secret contains control characters")
+            continue
+        seen.add(ext)
+        # Display name goes into a quoted callerid and a comment. Drop control
+        # chars (no section break-out), the quote char (no callerid quote break),
+        # and ';' (which would start an Asterisk comment mid-line and truncate
+        # the callerid). Keep everything else so legit names survive (e.g. "Café").
+        clean_name = _scrub(name).replace('"', "").replace(";", "").strip() or ext
+        out.append({"ext": ext, "name": clean_name, "secret": sec})
+    return out
 
 
 def write(path: Path, content: str) -> None:
@@ -105,12 +169,10 @@ def render_pjsip(opts: dict) -> str:
     ]
 
     for room in rooms:
-        ext = str(room.get("ext", "")).strip()
-        name = str(room.get("name", ext)).strip()
-        sec = str(room.get("secret", "")).strip()
-        if not ext or not sec:
-            log(f"skipping room with missing ext/secret: {room!r}")
-            continue
+        # rooms have already been validated/sanitized by valid_rooms() in main().
+        ext = room["ext"]
+        name = room["name"]
+        sec = room["secret"]
         parts += [
             f";; Room {ext} — {name}",
             f"[{ext}](room-aor)",
@@ -137,16 +199,26 @@ def render_pjsip(opts: dict) -> str:
 
 
 def render_trunk_pjsip(trunk: dict, allow: str) -> list[str]:
-    host = str(trunk.get("provider_host", "")).strip()
-    port = int(trunk.get("port", 5060) or 5060)
-    user = str(trunk.get("username", "")).strip()
-    sec = str(trunk.get("secret", "")).strip()
-    from_user = str(trunk.get("from_user", "") or user).strip()
-    from_domain = str(trunk.get("from_domain", "") or host).strip()
+    host = _scrub(str(trunk.get("provider_host", "")).strip())
+    port = _int(trunk.get("port", 5060) or 5060, 5060)
+    user = _scrub(str(trunk.get("username", "")).strip())
+    sec = str(trunk.get("secret", ""))
+    from_user = _scrub(str(trunk.get("from_user", "") or user).strip())
+    from_domain = _scrub(str(trunk.get("from_domain", "") or host).strip())
     do_register = bool(trunk.get("registns", True))
 
     if not host or not user:
         log("trunk enabled but provider_host/username missing — skipping trunk")
+        return []
+    # Fail closed on values that could inject extra PJSIP directives/sections.
+    if _has_control(sec):
+        log("trunk: secret contains control characters — skipping trunk")
+        return []
+    if not re.fullmatch(r"[A-Za-z0-9._:\-]+", host):
+        log("trunk: invalid provider_host — skipping trunk")
+        return []
+    if not re.fullmatch(r"[A-Za-z0-9._@:\-]+", user):
+        log("trunk: invalid username — skipping trunk")
         return []
 
     lines = [
@@ -202,9 +274,16 @@ def render_trunk_pjsip(trunk: dict, allow: str) -> list[str]:
 def render_extensions(opts: dict) -> str:
     rooms = opts.get("rooms", []) or []
     trunk = opts.get("trunk", {}) or {}
-    exts = [str(r.get("ext", "")).strip() for r in rooms if r.get("ext")]
-    prefix = str(trunk.get("dial_prefix", "9") or "9").strip()
-    caller_id = str(trunk.get("outbound_caller_id", "") or "").strip()
+    # rooms are pre-validated/deduped by valid_rooms(); keep pjsip + dialplan in sync.
+    exts = [r["ext"] for r in rooms]
+    prefix_raw = str(trunk.get("dial_prefix", "9") or "9").strip()
+    prefix = prefix_raw if re.fullmatch(r"[0-9*#]+", prefix_raw) else "9"
+    if prefix != prefix_raw:
+        log(f"trunk: invalid dial_prefix {prefix_raw!r}; using '9'")
+    caller_id_raw = str(trunk.get("outbound_caller_id", "") or "").strip()
+    caller_id = caller_id_raw if re.fullmatch(r"[0-9+]*", caller_id_raw) else ""
+    if caller_id != caller_id_raw:
+        log("trunk: invalid outbound_caller_id (digits/+ only); ignoring")
 
     parts = [
         ";; GENERATED by switchboard-config — edits here are overwritten.",
@@ -234,11 +313,12 @@ def render_extensions(opts: dict) -> str:
 
     if trunk.get("enabled"):
         cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"
+        plen = len(prefix)  # strip the whole prefix, not a hardcoded single char
         parts += [
             ";; ----- Outbound via SIP trunk -----",
-            f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:1}})",
+            f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:{plen}}})",
             f" same = n,{cid}",
-            " same = n,Dial(PJSIP/${EXTEN:1}@trunk,60,rtT)",
+            f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rtT)",
             " same = n,Hangup()",
             "",
             ";; ----- Inbound from the trunk: ring every room -----",
@@ -263,9 +343,10 @@ def render_extensions(opts: dict) -> str:
 # rtp.conf
 # --------------------------------------------------------------------------- #
 def render_rtp(opts: dict) -> str:
-    start = int(opts.get("rtp_start", 10000) or 10000)
-    end = int(opts.get("rtp_end", 10200) or 10200)
+    start = _int(opts.get("rtp_start", 10000) or 10000, 10000)
+    end = _int(opts.get("rtp_end", 10200) or 10200, 10200)
     if end <= start:
+        log(f"rtp_end ({end}) <= rtp_start ({start}); using {start}-{start + 200}")
         end = start + 200
     return (
         ";; GENERATED by switchboard-config\n"
@@ -289,7 +370,10 @@ def render_manager(ami_user: str, ami_secret: str) -> str:
         f"[{ami_user}]\n"
         f"secret = {ami_secret}\n"
         "read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan\n"
-        "write = system,call,command,reporting,originate\n"
+        # The Ingress UI only issues read actions (status views). Grant no write
+        # classes so a foothold on this account can't originate calls or run
+        # system/CLI commands via AMI.
+        "write =\n"
         "permit = 127.0.0.1/255.255.255.255\n"
     )
 
@@ -315,6 +399,10 @@ def render_logger(opts: dict) -> str:
 
 def main() -> None:
     opts = load_options()
+    # Validate/sanitize/dedupe rooms once; both renderers consume the cleaned list.
+    opts["rooms"] = valid_rooms(opts.get("rooms", []) or [])
+    if not opts["rooms"]:
+        log("WARNING: no valid rooms configured — no phones will register")
     ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
 
