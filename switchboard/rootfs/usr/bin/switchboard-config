@@ -315,6 +315,20 @@ def render_extensions(opts: dict) -> str:
         cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"
         plen = len(prefix)  # strip the whole prefix, not a hardcoded single char
         parts += [
+            ";; ----- Blocked destinations (toll-fraud guard) -----",
+            ";; International (011) and premium-rate (900 / 1-900) are denied. These",
+            ";; patterns are more specific than the general rule below, so Asterisk",
+            ";; matches them first. Everything else still dials out normally.",
+            f"exten = _{prefix}011.,1,NoOp(Blocked international)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            f"exten = _{prefix}1900.,1,NoOp(Blocked premium 1-900)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            f"exten = _{prefix}900.,1,NoOp(Blocked premium 900)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "",
             ";; ----- Outbound via SIP trunk -----",
             f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:{plen}}})",
             f" same = n,{cid}",
