@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.5
+
+Close the two deferred high-severity items from the v0.1.4 review.
+
+- **Ingress access control (H1):** the web UI is host-network-exposed, so its
+  port was reachable directly on the LAN, bypassing Home Assistant Ingress auth
+  (the `/api/status` roster/call data leaked). Per the add-on docs, the app now
+  rejects any client other than the Supervisor (`172.30.32.2`, plus loopback)
+  with `403`. The bind is unchanged, so Ingress is unaffected.
+- **Toll-fraud guard (H2):** the outbound trunk dialplan now denies
+  international (`011`) and premium-rate (`900` / `1-900`) destinations before
+  the general outbound rule. Normal dialing is unchanged. (Trunk is still off by
+  default.)
+
 ## 0.1.4
 
 Security & robustness hardening of the config generator and Ingress UI
