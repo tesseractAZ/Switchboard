@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.4
+
+Security & robustness hardening of the config generator and Ingress UI
+(hardening only — no feature changes; for valid inputs the only generated-config
+change is the AMI least-privilege tightening below).
+
+- **Input validation / config-injection defense:** room names, secrets, and all
+  trunk fields are now scrubbed of control characters before being written into
+  `pjsip.conf` / `extensions.conf`; entries that can't be made safe are skipped
+  with a log instead of corrupting the config. `dial_prefix` and
+  `outbound_caller_id` are charset-validated.
+- **Rooms validated once (`valid_rooms`)** and shared by both renderers: dedupes
+  colliding extensions, enforces the 2–6 digit ext rule, and keeps `pjsip.conf`
+  and the dialplan in sync. Warns when zero valid rooms remain.
+- **No secrets in logs:** the skip log no longer prints the room dict (which
+  contained the plaintext secret) — only the extension.
+- **Least-privilege AMI:** the Ingress UI's manager account drops all write
+  classes (was `system,call,command,reporting,originate`); it only ever reads.
+- **Robust parsing:** a malformed `options.json` and non-numeric port/RTP values
+  no longer crash the init oneshot (which would take the whole add-on down);
+  they fall back to defaults with a clear log.
+- **Web UI XSS fix:** room labels and AMI caller-ID (attacker-controlled on
+  inbound trunk calls) are HTML-escaped before rendering; AMI errors are
+  reported to the browser as a generic message and logged server-side.
+- **Dialplan correctness:** multi-character `dial_prefix` now strips the whole
+  prefix (`${EXTEN:N}`) instead of a single character.
+
 ## 0.1.3
 
 Log cleanup (cosmetic — the add-on already runs).
