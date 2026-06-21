@@ -19,7 +19,7 @@ import os
 import socket
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 OPTIONS_PATH = Path("/data/options.json")
@@ -29,6 +29,27 @@ AMI_USER = os.environ.get("AMI_USER", "switchboard")
 AMI_SECRET = os.environ.get("AMI_SECRET", "")
 
 app = FastAPI(title="Switchboard", docs_url=None, redoc_url=None)
+
+# Home Assistant Ingress proxies every request from the Supervisor's fixed
+# internal IP (172.30.32.2). Because the add-on uses host_network, the port is
+# also reachable directly on the LAN — which would bypass Ingress auth. Per the
+# add-on docs ("Only connections from 172.30.32.2 must be allowed"), reject any
+# client that isn't the Supervisor (loopback kept for local health checks). This
+# closes the bypass without changing the bind, so Ingress keeps working.
+INGRESS_CLIENT = "172.30.32.2"
+_ALLOWED_CLIENTS = frozenset({INGRESS_CLIENT, "127.0.0.1", "::1"})
+
+
+def _client_allowed(host: str) -> bool:
+    return host in _ALLOWED_CLIENTS
+
+
+@app.middleware("http")
+async def restrict_to_ingress(request: Request, call_next):
+    client = request.client.host if request.client else ""
+    if not _client_allowed(client):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return await call_next(request)
 
 
 # --------------------------------------------------------------------------- #

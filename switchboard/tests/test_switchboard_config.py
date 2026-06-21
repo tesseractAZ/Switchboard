@@ -74,6 +74,21 @@ def test_whitespace_dial_prefix() -> None:
           "_9." in e and "${EXTEN:1}" in e and "exten = _.," not in e)
 
 
+def test_outbound_toll_fraud_blocks() -> None:
+    # Trunk outbound must deny international (011) and premium (900 / 1-900),
+    # while still allowing general dialing — and the blocks must precede the
+    # general rule so Asterisk's most-specific match denies first.
+    o = {"rooms": sbc.valid_rooms([{"ext": "101", "name": "K", "secret": "s1"}]),
+         "trunk": {"enabled": True, "provider_host": "sip.x.com", "username": "u",
+                   "secret": "s", "dial_prefix": "9"}}
+    e = sbc.render_extensions(o)
+    check("international (011) is blocked", "_9011." in e)
+    check("premium 1-900 is blocked", "_91900." in e)
+    check("premium 900 is blocked", "_9900." in e)
+    check("general outbound still allowed", "exten = _9.," in e)
+    check("blocks precede the general outbound rule", e.index("_9011.") < e.index("exten = _9.,"))
+
+
 def test_clean_config_unchanged() -> None:
     # A clean room still renders the expected endpoint/auth/aor (no regression).
     o = {"rooms": sbc.valid_rooms([{"ext": "201", "name": "Office", "secret": "Str0ngPass"}]), "trunk": {}}
@@ -86,6 +101,7 @@ def test_clean_config_unchanged() -> None:
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
+    test_outbound_toll_fraud_blocks()
     test_clean_config_unchanged()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
