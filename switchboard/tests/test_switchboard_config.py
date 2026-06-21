@@ -61,7 +61,9 @@ def test_hostile_inputs() -> None:
     check("junk rtp falls back to defaults", "rtpstart = 10000" in rtp and "rtpend = 10200" in rtp)
 
     mgr = sbc.render_manager("switchboard", "sek")
-    check("AMI write classes removed", "originate" not in mgr and "write =\n" in mgr)
+    write_line = [l for l in mgr.splitlines() if l.startswith("write =")][0]
+    check("AMI write excludes command + originate", "command" not in write_line and "originate" not in write_line)
+    check("AMI write keeps the status-action classes", "system" in write_line and "reporting" in write_line)
 
 
 def test_whitespace_dial_prefix() -> None:
