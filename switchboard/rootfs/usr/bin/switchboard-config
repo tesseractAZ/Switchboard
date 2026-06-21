@@ -384,10 +384,11 @@ def render_manager(ami_user: str, ami_secret: str) -> str:
         f"[{ami_user}]\n"
         f"secret = {ami_secret}\n"
         "read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan\n"
-        # The Ingress UI only issues read actions (status views). Grant no write
-        # classes so a foothold on this account can't originate calls or run
-        # system/CLI commands via AMI.
-        "write =\n"
+        # The UI runs PJSIPShowEndpoints / PJSIPShowContacts / CoreShowChannels,
+        # which Asterisk gates on *write* authority for their class. Grant the
+        # minimum those need (system/call/reporting) and deliberately omit the
+        # dangerous classes 'command' (CLI/RCE) and 'originate' (place calls).
+        "write = system,call,reporting\n"
         "permit = 127.0.0.1/255.255.255.255\n"
     )
 
