@@ -168,7 +168,9 @@ def api_status() -> JSONResponse:
         endpoints = get_endpoints()
     except AMIError as exc:
         ami_ok = False
-        error = str(exc)
+        # Return a generic marker to the client; log the detail server-side only.
+        error = "unreachable"
+        print(f"[switchboard-webui] AMI unavailable: {exc}", flush=True)
         endpoints = []
 
     contacts = get_contacts() if ami_ok else {}
@@ -275,6 +277,12 @@ INDEX_HTML = """<!doctype html>
   </section>
 
 <script>
+// Escape any server-supplied value before it touches innerHTML. Room labels and
+// AMI caller-ID (attacker-controlled on inbound trunk calls) are untrusted.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 async function refresh() {
   try {
     const res = await fetch('./api/status', {cache: 'no-store'});
@@ -283,7 +291,7 @@ async function refresh() {
     const banner = document.getElementById('banner');
     banner.innerHTML = data.ami_ok ? '' :
       '<div class="banner">Cannot reach Asterisk Manager: ' +
-      (data.error || 'unknown') + '. The PBX may still be starting.</div>';
+      esc(data.error || 'unknown') + '. The PBX may still be starting.</div>';
 
     const reg = data.rooms.filter(r => r.registered).length;
     document.getElementById('sub').textContent =
@@ -298,9 +306,9 @@ async function refresh() {
           (r.device_state||'').toLowerCase().includes('ring')) {
         cls = 'busy'; txt = r.device_state;
       }
-      return '<div class="card"><div class="ext">ext ' + r.ext + '</div>' +
-             '<div class="name">' + r.label + '</div>' +
-             '<span class="pill ' + cls + '">' + txt + '</span></div>';
+      return '<div class="card"><div class="ext">ext ' + esc(r.ext) + '</div>' +
+             '<div class="name">' + esc(r.label) + '</div>' +
+             '<span class="pill ' + cls + '">' + esc(txt) + '</span></div>';
     }).join('');
 
     const calls = document.querySelector('#calls tbody');
@@ -310,8 +318,8 @@ async function refresh() {
       calls.innerHTML =
         '<tr><th>Channel</th><th>State</th><th>From</th><th>To</th><th>Dur</th></tr>' +
         data.channels.map(c =>
-          '<tr><td>' + c.channel + '</td><td>' + c.state + '</td><td>' +
-          c.caller + '</td><td>' + c.connected + '</td><td>' + c.duration +
+          '<tr><td>' + esc(c.channel) + '</td><td>' + esc(c.state) + '</td><td>' +
+          esc(c.caller) + '</td><td>' + esc(c.connected) + '</td><td>' + esc(c.duration) +
           '</td></tr>').join('');
     }
   } catch (e) {
