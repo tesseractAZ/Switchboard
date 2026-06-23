@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0
+
+Add a **voice operator** — dial `0`, say a room name, get connected.
+
+- **Why:** rotary/pulse antique phones can't drive DTMF menus (no `*`/`#`), so
+  voice is the natural interface. Dial `0`, the operator greets you, you say the
+  room ("Kitchen", "the study"), and it connects the call.
+- **Fully offline.** Speech recognition is **whisper.cpp**, built from source in
+  the image (Vosk was evaluated first but ships only glibc wheels — no musl/apk —
+  so it can't run on the Alpine base). No cloud, nothing leaves the house.
+- **Architecture:** dial `0` → `[operator]` dialplan context → a stdlib Python
+  **AGI** that plays prompts, records the caller, and shells out to
+  `switchboard-stt` (the only component that touches whisper). The AGI sets
+  channel vars; the **dialplan does the Dial, and only to a known room ext** —
+  so a recognizer error can never dial an arbitrary endpoint. The recognizer is
+  biased toward your room names and a fuzzy matcher resolves near-misses; a
+  near-tie between two rooms re-prompts rather than guess.
+- **New options:** `operator.enabled` (default true) and `operator_synonyms`
+  (extra spoken names per room, e.g. "office"/"den" → the study).
+- Prompts are pre-recorded audio (no runtime TTS dependency). Build is
+  multi-stage so the C++ toolchain doesn't ship in the final image.
+
 ## 0.1.6
 
 Fix an AMI regression from v0.1.4.

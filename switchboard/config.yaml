@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.1.6"
+version: "0.2.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -32,6 +32,9 @@ options:
     - alaw
     - g722
     - opus
+  operator:
+    enabled: true
+  operator_synonyms: []
   rooms:
     - ext: "101"
       name: Kitchen
@@ -56,6 +59,12 @@ schema:
   rtp_end: int(1024,65535)
   codecs:
     - list(ulaw|alaw|g722|opus|g729|gsm|slin16)
+  operator:
+    enabled: bool?
+  operator_synonyms:
+    - ext: str
+      phrases:
+        - str
   rooms:
     - ext: match(^[0-9]{2,6}$)
       name: str

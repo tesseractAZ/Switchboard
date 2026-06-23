@@ -271,11 +271,41 @@ def render_trunk_pjsip(trunk: dict, allow: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 # extensions.conf  (dial plan)
 # --------------------------------------------------------------------------- #
+def render_operator_context(joined: str) -> list[str]:
+    """The [operator] context: dial 0 -> AGI voice operator -> validated Dial.
+
+    The AGI only *sets* OP_RESULT/OP_TARGET; the dialplan does the Dial, and only
+    to a known room ext (the ``joined`` allow-list), so a recognizer bug can
+    never dial an arbitrary endpoint. The AGI plays prompts, records the caller,
+    runs offline STT, and matches the speech to a room.
+    """
+    return [
+        ";; ----- Voice operator (dial 0) -----",
+        "[operator]",
+        "exten = s,1,NoOp(Operator session start)",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,AGI(switchboard-operator.agi)",
+        " same = n,NoOp(operator result=${OP_RESULT} target=${OP_TARGET})",
+        " same = n,GotoIf($[\"${OP_RESULT}\" = \"connect\"]?:bye)",
+        # Defense in depth: only dial a *known room* ext, even if the AGI misbehaves.
+        f" same = n,GotoIf($[\"${{OP_TARGET}}\" : \"^({joined})$\"]?connect:bye)",
+        " same = n(connect),Playback(switchboard/sw-connecting)",
+        " same = n,Dial(PJSIP/${OP_TARGET},30,rtT)",
+        " same = n,Goto(bye)",
+        " same = n(bye),Playback(switchboard/sw-goodbye)",
+        " same = n,Hangup()",
+        "",
+    ]
+
+
 def render_extensions(opts: dict) -> str:
     rooms = opts.get("rooms", []) or []
     trunk = opts.get("trunk", {}) or {}
     # rooms are pre-validated/deduped by valid_rooms(); keep pjsip + dialplan in sync.
     exts = [r["ext"] for r in rooms]
+    operator_on = bool((opts.get("operator") or {}).get("enabled", True))
     prefix_raw = str(trunk.get("dial_prefix", "9") or "9").strip()
     prefix = prefix_raw if re.fullmatch(r"[0-9*#]+", prefix_raw) else "9"
     if prefix != prefix_raw:
@@ -298,6 +328,14 @@ def render_extensions(opts: dict) -> str:
         "[rooms]",
     ]
 
+    if operator_on and exts:
+        # Literal '0' out-prioritizes the _X. pattern below, so ordering is safe.
+        parts += [
+            "exten = 0,1,NoOp(Operator requested by ${CALLERID(num)})",
+            " same = n,Goto(operator,s,1)",
+            "",
+        ]
+
     if exts:
         joined = "|".join(exts)
         parts += [
@@ -310,6 +348,9 @@ def render_extensions(opts: dict) -> str:
             " same = n,Hangup()",
             "",
         ]
+
+    if operator_on and exts:
+        parts += render_operator_context("|".join(exts))
 
     if trunk.get("enabled"):
         cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"
@@ -412,6 +453,48 @@ def render_logger(opts: dict) -> str:
     )
 
 
+def write_operator_runtime(opts: dict) -> None:
+    """Stage the voice-operator runtime, when enabled.
+
+    Creates an ``asterisk``-writable ASR scratch dir under /run (tmpfs: fast, no
+    SD-card wear, auto-cleared) and writes a sanitized rooms map the STT wrapper
+    reads — so the recognizer shares the generator's already-validated room list
+    (single source of truth) instead of re-parsing raw options.json. Synonyms
+    come from the optional ``operator_synonyms`` option.
+    """
+    if not (opts.get("operator") or {}).get("enabled", True):
+        return
+    asr_dir = RUN_DIR / "asr"
+    asr_dir.mkdir(parents=True, exist_ok=True)
+
+    synonyms: dict[str, list[str]] = {}
+    for entry in (opts.get("operator_synonyms") or []):
+        ext = str(entry.get("ext", "")).strip()
+        phrases = [str(p).strip() for p in (entry.get("phrases") or []) if str(p).strip()]
+        if ext and phrases:
+            synonyms.setdefault(ext, []).extend(phrases)
+
+    payload = {
+        # opts["rooms"] is already valid_rooms()-validated by main().
+        "rooms": [{"ext": r["ext"], "name": r["name"]} for r in (opts.get("rooms") or [])],
+        "synonyms": synonyms,
+        "threshold": 0.6,
+    }
+    op_path = RUN_DIR / "operator.json"
+    op_path.write_text(json.dumps(payload))
+    try:
+        import shutil
+        shutil.chown(asr_dir, user="asterisk", group="asterisk")
+        os.chmod(asr_dir, 0o750)
+        shutil.chown(op_path, user="asterisk", group="asterisk")
+        os.chmod(op_path, 0o640)
+    except (PermissionError, LookupError, KeyError, OSError) as exc:
+        # The init oneshot runs as root before Asterisk starts, so this normally
+        # succeeds; warn (don't crash) if the asterisk user isn't present yet.
+        log(f"WARNING: could not set asterisk ownership on operator runtime: {exc}")
+    log(f"operator: staged {len(payload['rooms'])} room(s) for voice recognition")
+
+
 def main() -> None:
     opts = load_options()
     # Validate/sanitize/dedupe rooms once; both renderers consume the cleaned list.
@@ -420,6 +503,7 @@ def main() -> None:
         log("WARNING: no valid rooms configured — no phones will register")
     ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    write_operator_runtime(opts)
 
     ami_user = "switchboard"
     ami_secret = gen_secret()
