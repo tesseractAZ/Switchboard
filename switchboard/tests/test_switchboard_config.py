@@ -100,10 +100,32 @@ def test_clean_config_unchanged() -> None:
                                 "password = Str0ngPass", 'callerid = "Office" <201>']))
 
 
+def test_operator_voice_dialplan() -> None:
+    # Voice operator (dial 0) wires into [rooms] and adds a validated [operator].
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Living Room", "secret": "s2"}])
+    on = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
+    check("dial 0 routes to the operator",
+          "exten = 0,1,NoOp(Operator" in on and "Goto(operator,s,1)" in on)
+    check("[operator] context present",
+          "[operator]" in on and "AGI(switchboard-operator.agi)" in on)
+    check("operator only dials a known room ext (allow-list)",
+          'GotoIf($["${OP_TARGET}" : "^(11|12)$"]?connect:bye)' in on)
+    check("operator connects via the room endpoint", "Dial(PJSIP/${OP_TARGET},30,rtT)" in on)
+    # Defaults to on when the option is absent.
+    default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("operator enabled by default", "[operator]" in default_on)
+    # Disabled -> no operator artifacts at all.
+    off = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": False}, "trunk": {}})
+    check("operator disabled removes dial-0 + [operator]",
+          "[operator]" not in off and "exten = 0," not in off)
+
+
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
     test_clean_config_unchanged()
+    test_operator_voice_dialplan()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

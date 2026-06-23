@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+"""Switchboard voice operator — AGI call controller.
+
+Invoked from the [operator] dialplan context (dial 0). Runs as the ``asterisk``
+user, talks AGI over stdin/stdout (stdlib only — no pyst2), and:
+
+  1. greets the caller and records a short utterance (rotary-safe: no DTMF, the
+     prompt plays fully and a 2 s silence ends the recording),
+  2. shells out to ``switchboard-stt`` for offline recognition + room matching,
+  3. on a match, sets channel vars OP_TARGET (ext) + OP_RESULT=connect and
+     returns — the *dialplan* does the validated Dial (this AGI never dials).
+
+On no match it retries once, then plays "couldn't reach that room" and returns
+OP_RESULT=bye. Any error is caught so the channel never wedges; the dialplan
+falls through to goodbye + hangup.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+STT = "/usr/bin/switchboard-stt"
+ASR_DIR = "/run/switchboard/asr"
+MAX_ATTEMPTS = 2
+RECORD_MS = 6000          # hard cap on a single utterance
+SILENCE_S = 2             # stop recording after this much trailing silence
+
+
+def read_env() -> dict:
+    """Drain the AGI environment block (lines until a blank line). Mandatory —
+    skipping it desyncs every subsequent command/response."""
+    env: dict[str, str] = {}
+    while True:
+        line = sys.stdin.readline()
+        if not line or not line.strip():
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def agi(command: str) -> str:
+    """Send one AGI command, return the response line (e.g. '200 result=0')."""
+    sys.stdout.write(command + "\n")
+    sys.stdout.flush()
+    return sys.stdin.readline().strip()
+
+
+def stream(soundfile: str) -> None:
+    # Empty escape-digits => plays to completion (rotary phones can't send DTMF).
+    agi(f'STREAM FILE {soundfile} ""')
+
+
+def set_var(name: str, value: str) -> None:
+    agi(f'SET VARIABLE {name} "{value}"')
+
+
+def recognize(attempt: int) -> str:
+    """Record one utterance and return the matched extension ('' if none)."""
+    rec = f"{ASR_DIR}/utt-{os.getpid()}-{attempt}"
+    # RECORD FILE <name> <fmt> <escape> <timeout_ms> <offset> BEEP s=<silence>
+    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} 0 BEEP s={SILENCE_S}')
+    stream("switchboard/sw-onemoment")  # cover STT latency (no dead air)
+    wav = rec + ".wav"
+    ext = ""
+    try:
+        proc = subprocess.run([STT, "--in", wav], capture_output=True,
+                              text=True, timeout=25)
+        ext = (proc.stdout or "").strip()
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)  # transcript/decision -> Asterisk log
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        sys.stderr.write(f"[operator] stt error: {exc}\n")
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+    return ext
+
+
+def main() -> None:
+    read_env()
+    for attempt in range(MAX_ATTEMPTS):
+        stream("switchboard/sw-greeting" if attempt == 0 else "switchboard/sw-didnt-catch")
+        ext = recognize(attempt)
+        if ext:
+            set_var("OP_TARGET", ext)
+            set_var("OP_RESULT", "connect")
+            return
+    stream("switchboard/sw-no-such-room")
+    set_var("OP_RESULT", "bye")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001  (never wedge the channel)
+        sys.stderr.write(f"[operator] fatal: {exc}\n")
+        try:
+            set_var("OP_RESULT", "bye")
+        except Exception:
+            pass
