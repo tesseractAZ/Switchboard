@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+Fix an Asterisk crash-loop introduced in 0.2.0.
+
+- **astdb ownership (regression fix):** the operator added files under
+  `rootfs/var/lib/asterisk/` (the AGI + prompt audio), and `COPY rootfs /` reset
+  `/var/lib/asterisk` to root-owned. Asterisk runs as the `asterisk` user and
+  could no longer create `astdb.sqlite3` there (`ASTdb initialization failed —
+  ASTERISK EXITING`), crash-looping with 0 phones registered. The asterisk
+  service's startup chown now covers `/var/lib/asterisk` alongside run/log.
+
 ## 0.2.0
 
 Add a **voice operator** — dial `0`, say a room name, get connected.

@@ -2,8 +2,11 @@
 # Run Asterisk in the foreground under s6 supervision.
 bashio::log.info "Starting Asterisk..."
 
+# /var/lib/asterisk must be asterisk-owned so Asterisk can create astdb.sqlite3
+# there. `COPY rootfs /` (operator AGI + prompts now live under that tree) resets
+# the dir to root, so chown it back alongside run/log on every start.
 mkdir -p /var/run/asterisk /var/log/asterisk /var/lib/asterisk
-chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk 2>/dev/null || true
+chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk /var/lib/asterisk 2>/dev/null || true
 
 # -f  foreground (no fork, so s6 supervises it)
 # -U/-G  drop to the asterisk user
