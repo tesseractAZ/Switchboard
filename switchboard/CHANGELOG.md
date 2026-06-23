@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3
+
+Tune the operator from the first real on-Pi calls (whisper.cpp recognized
+"Kitchen", "Living Room", and a full sentence at 1.0 — these are polish fixes).
+
+- **Clipped-word recognition (prefix match):** the narrowband line drops soft
+  word tails, so whisper heard "Basement" as "Base." The matcher scored that an
+  ambiguous tie (Basement vs incidental fuzzy overlap with Master Bedroom) and
+  refused to connect. Added a word-prefix bonus so a heard word that's a clean
+  prefix of a room name wins decisively ("Base"->Basement, "Din"->Dining).
+- **Double "Goodbye":** on a no-match the AGI prompt already ended with
+  "Goodbye" and the dialplan played another — dropped it from
+  `sw-no-such-room` ("Sorry, I couldn't reach that room.") so there's one.
+- **Log noise:** silence the `audioop` DeprecationWarning the STT wrapper
+  emitted on every call.
+
 ## 0.2.2
 
 Fix the voice operator never recording (no pause to speak, prompts running

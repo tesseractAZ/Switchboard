@@ -23,7 +23,13 @@ import re
 import subprocess
 import sys
 import tempfile
+import warnings
 import wave
+
+# audioop (used for 8k->16k resampling) is deprecation-warned on py3.12 but is
+# the right stdlib tool on the Alpine base; silence the warning so each call
+# doesn't spam the Asterisk log.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 sys.path.insert(0, "/usr/share/switchboard/operator")
 import match as matcher  # noqa: E402  (shared, unit-tested room matcher)

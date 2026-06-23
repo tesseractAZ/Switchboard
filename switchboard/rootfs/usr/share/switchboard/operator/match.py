@@ -94,6 +94,15 @@ def _score(toks: list[str], spoken: str, ptoks: list[str]) -> float:
     score = max(overlap, fuzzy)
     if set(ptoks) <= set(toks):  # every candidate word was heard
         score = max(score, 0.95)
+    # Word-prefix bonus: the recognizer clips word tails on a narrowband line
+    # ("Basement" -> "Base", "Dining" -> "Din"). If a heard word is a clean
+    # prefix of a candidate word (or vice versa), treat it as a strong match so
+    # the right room wins decisively over incidental fuzzy overlap.
+    for st in toks:
+        if len(st) >= 3:
+            for pt in ptoks:
+                if len(pt) >= 3 and (pt.startswith(st) or st.startswith(pt)):
+                    score = max(score, 0.9)
     return score
 
 
@@ -140,6 +149,7 @@ if __name__ == "__main__":
         ("connect me to the study", "15"), ("office", "15"), ("the garage", "17"),
         ("kitchin", "11"), ("living", "12"), ("extension eleven", "11"),
         ("one four", "14"), ("17", "17"), ("master", "14"),
+        ("kitch", "11"), ("the work", "17"),       # recognizer-clipped word -> prefix match
         ("nobody", None), ("the basement", None), ("", None),
     ]
     passed = 0
@@ -154,6 +164,14 @@ if __name__ == "__main__":
     amb_ok = got is None and reason == "ambiguous"
     passed += amb_ok
     print(f"  [{'ok ' if amb_ok else 'FAIL'}] {'bedroom (ambiguous)':34} -> ext={got} ({reason}, {score})  exp None/ambiguous")
-    total = len(cases) + 1
+    # Real-world regression: whisper clipped "Basement" -> "Base." over the
+    # narrowband line; the prefix bonus must resolve it to Basement (was an
+    # ambiguous tie with Master Bedroom before).
+    prod = [{"ext": "14", "name": "Master Bedroom"}, {"ext": "18", "name": "Basement"}]
+    got, score, reason = match("Base.", prod)
+    base_ok = got == "18"
+    passed += base_ok
+    print(f"  [{'ok ' if base_ok else 'FAIL'}] {'Base. -> Basement':34} -> ext={got} ({reason}, {score})  exp 18")
+    total = len(cases) + 2
     print(f"\n{passed}/{total} passed")
     raise SystemExit(0 if passed == total else 1)
