@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2
+
+Fix the voice operator never recording (no pause to speak, prompts running
+together).
+
+- **`RECORD FILE` aborted before recording:** the AGI passed an offset arg and
+  `BEEP` to `RECORD FILE`. The minimal Alpine `asterisk-sounds` has no built-in
+  `beep` file, and — worse — the offset positional makes `res_agi` treat it as a
+  beep request and abort the record, so no audio file was ever written. The STT
+  wrapper then ran on a nonexistent file and both retry prompts played
+  back-to-back with no chance to speak. Fixed: record as
+  `RECORD FILE … <timeout> s=<silence>` (no offset, no `BEEP`), and play a
+  bundled `sw-beep` "speak now" cue instead of the absent system beep. Also
+  bumped the record window to 7 s / 3 s trailing-silence for slower speakers.
+
 ## 0.2.1
 
 Fix an Asterisk crash-loop introduced in 0.2.0.
