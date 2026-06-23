@@ -24,8 +24,8 @@ import sys
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
-RECORD_MS = 6000          # hard cap on a single utterance
-SILENCE_S = 2             # stop recording after this much trailing silence
+RECORD_MS = 7000          # hard cap on a single utterance
+SILENCE_S = 3             # stop recording after this much trailing silence
 
 
 def read_env() -> dict:
@@ -61,8 +61,12 @@ def set_var(name: str, value: str) -> None:
 def recognize(attempt: int) -> str:
     """Record one utterance and return the matched extension ('' if none)."""
     rec = f"{ASR_DIR}/utt-{os.getpid()}-{attempt}"
-    # RECORD FILE <name> <fmt> <escape> <timeout_ms> <offset> BEEP s=<silence>
-    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} 0 BEEP s={SILENCE_S}')
+    stream("switchboard/sw-beep")  # "speak now" cue — Alpine asterisk-sounds has no built-in beep
+    # RECORD FILE <name> <fmt> <escape> <timeout_ms> s=<silence>.
+    # No offset arg and no BEEP keyword: the offset position makes res_agi try to
+    # play the (absent) 'beep' sound and abort the recording before it writes the
+    # file. 's=N' contains '=', so res_agi correctly skips the beep path.
+    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     stream("switchboard/sw-onemoment")  # cover STT latency (no dead air)
     wav = rec + ".wav"
     ext = ""
