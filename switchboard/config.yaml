@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.2.6"
+version: "0.2.7"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
