@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0
+
+Wake-up calls — set by voice, delivered on schedule.
+
+- **Request by voice:** dial **42** (`wakeup_ext`) and *say* the time — "seven
+  a.m.", "six thirty", "quarter past seven", "noon". Rotary phones can't key in
+  digits mid-call, so it uses the same offline whisper STT as the operator, with
+  a forgiving spoken-time parser; it reads the time back to confirm. Say a new
+  time to change it, or "cancel" to clear it.
+- **Delivery:** a new `wakeup-scheduler` service rings the room at the set time
+  (AMI Originate into a `[wakeup-deliver]` dialplan) and speaks "Good morning,
+  this is your wake-up call, the time is …". One-shot, with a grace window so a
+  brief outage can't fire a stale wake-up at the wrong hour. `wakeup_ring_seconds`
+  controls how long it rings (default 60).
+- **See & cancel anywhere:** pending wake-ups show on the web dashboard and the
+  telnet console, each cancelable there (or by dialing 42 and saying "cancel").
+- Pure, unit-tested cores (`wakeup/timeparse.py`, `wakeup/store.py`) +
+  `tests/test_wakeup.py`. Stored in `/data/wakeups.json` (survives restarts).
+- Timezone auto-detect now also tries the Supervisor IP (`172.30.32.2`) so it
+  works on this host-network add-on (otherwise set `timezone` explicitly).
+
 ## 0.3.1
 
 Talking clock + a real local timezone.

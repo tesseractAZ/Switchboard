@@ -236,6 +236,9 @@ def test_connect_hangup_guards() -> None:
     # hangup_channel rejects empty + CRLF (AMI-injection) channel strings.
     check("hangup: rejects empty channel", ami.hangup_channel("") is False)
     check("hangup: rejects CRLF channel", ami.hangup_channel("PJSIP/11\r\nAction: Command") is False)
+    # originate_wakeup digit-guards the room ext before any socket.
+    check("wakeup: originate rejects injection-y ext", ami.originate_wakeup("9;evil") is False)
+    check("wakeup: originate rejects empty ext", ami.originate_wakeup("") is False)
 
 
 def test_no_calls() -> None:

@@ -9,8 +9,13 @@ action key handling (navigation + mode transitions + guarded actions). The AMI
 side effects (ring/connect/hangup) are exercised only on their guard paths,
 which never open a socket.
 """
+import os
+import tempfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+
+# Point the wake-up store at a throwaway path before the console imports it.
+os.environ.setdefault("SWITCHBOARD_WAKEUPS", os.path.join(tempfile.mkdtemp(), "wakeups.json"))
 
 CONSOLE_PATH = Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console" / "console.py"
 console = SourceFileLoader("switchboard_console", str(CONSOLE_PATH)).load_module()
@@ -112,6 +117,34 @@ def test_connect_mode_transitions() -> None:
     check("connect: esc cancels", sess["mode"] == "normal" and "connect_from" not in sess)
 
 
+def test_fmt12() -> None:
+    check("fmt12: 07:05 -> 7:05 AM", console.fmt12("07:05") == "7:05 AM")
+    check("fmt12: 19:30 -> 7:30 PM", console.fmt12("19:30") == "7:30 PM")
+    check("fmt12: 00:00 -> 12:00 AM", console.fmt12("00:00") == "12:00 AM")
+    check("fmt12: 12:00 -> 12:00 PM", console.fmt12("12:00") == "12:00 PM")
+
+
+def test_render_wakeups() -> None:
+    b = console.Board()
+    b.set({"ami_ok": True, "rooms": ROOMS, "calls": [],
+           "wakeups": [{"ext": "11", "label": "Kitchen", "hhmm": "07:00", "target_epoch": 0}], "ts": 0.0})
+    text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0))
+    check("render: wake-ups section", "WAKE-UPS" in text and "Kitchen" in text and "7:00 AM" in text)
+    check("render: cancel-wake-up in command bar", "cancel wake-up" in text)
+
+
+def test_cancel_wakeup_key() -> None:
+    console.wakeup_store.set_wakeup("11", "07:00")
+    board = console.Board()
+    board.set({"ami_ok": True, "rooms": ROOMS, "calls": [], "wakeups": [], "ts": 0.0})
+    sess = {"sel": 0, "mode": "normal"}  # sel 0 -> ext 11 (Kitchen)
+    console.apply_key(sess, "x", board, lambda m: None)
+    check("x: cancels the selected room's wake-up",
+          "cancelled wake-up" in sess.get("msg", "").lower() and console.wakeup_store.get("11") is None)
+    console.apply_key(sess, "x", board, lambda m: None)
+    check("x: no wake-up -> message", "no wake-up" in sess.get("msg", "").lower())
+
+
 def test_guarded_actions() -> None:
     board = _board(ROOMS)
     # Ring an OFFLINE room (sel=2 Garage) → guarded, no AMI, flash message.
@@ -131,6 +164,9 @@ def main() -> None:
     test_render_ami_down()
     test_navigation()
     test_connect_mode_transitions()
+    test_fmt12()
+    test_render_wakeups()
+    test_cancel_wakeup_key()
     test_guarded_actions()
     print()
     if _failures:

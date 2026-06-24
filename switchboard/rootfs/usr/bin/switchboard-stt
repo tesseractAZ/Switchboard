@@ -122,11 +122,50 @@ def transcribe(wav16: str, prompt: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _recording_to_text(infile: str, prompt: str) -> str:
+    """Resample the recording to 16 kHz and transcribe it. Shared by both modes."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", dir="/run/switchboard/asr",
+                                     delete=False) as tf:
+        wav16 = tf.name
+    try:
+        if not to_16k_wav(infile, wav16):
+            return ""
+        return transcribe(wav16, prompt)
+    finally:
+        try:
+            os.unlink(wav16)
+        except OSError:
+            pass
+
+
+# Time vocabulary to bias whisper for the wake-up flow.
+_TIME_PROMPT = ("A time of day, for example: seven a.m., six thirty, "
+                "quarter past seven, ten forty five, half past six, noon, midnight.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="infile", required=True)
+    ap.add_argument("--mode", default="rooms", choices=["rooms", "time"])
     args = ap.parse_args()
 
+    if args.mode == "time":
+        # Recognize a spoken time -> "HH:MM" (24h) for the wake-up flow.
+        sys.path.insert(0, "/usr/share/switchboard/wakeup")
+        import timeparse  # noqa: E402
+        text = _recording_to_text(args.infile, _TIME_PROMPT)
+        hhmm = timeparse.parse(text)
+        if hhmm:
+            log(f"heard={text!r} -> time={hhmm}")
+            print(hhmm)
+        elif re.search(r"\b(cancel|clear|remove|delete|never mind|nevermind|stop|forget)\b", text.lower()):
+            log(f"heard={text!r} -> CANCEL")
+            print("CANCEL")
+        else:
+            log(f"heard={text!r} -> time=None")
+        return 0
+
+    # rooms mode (the voice operator).
     op = load_operator()
     rooms = op.get("rooms") or []
     synonyms = op.get("synonyms") or {}
@@ -141,19 +180,7 @@ def main() -> int:
         vocab += list(extras)
     prompt = "Rooms: " + ", ".join(v for v in vocab if v) + "."
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", dir="/run/switchboard/asr",
-                                     delete=False) as tf:
-        wav16 = tf.name
-    try:
-        if not to_16k_wav(args.infile, wav16):
-            return 0
-        text = transcribe(wav16, prompt)
-    finally:
-        try:
-            os.unlink(wav16)
-        except OSError:
-            pass
-
+    text = _recording_to_text(args.infile, prompt)
     ext, score, reason = matcher.match(text, rooms, synonyms, threshold)
     log(f"heard={text!r} -> ext={ext} ({reason}, {score})")
     if ext:

@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # parsing can be unit-tested without FastAPI. Ensure this directory is importable
 # regardless of how uvicorn is launched.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, "/usr/share/switchboard/wakeup")
 from ami import (  # noqa: E402
     AMIError,
     get_channels,
@@ -35,6 +36,10 @@ from ami import (  # noqa: E402
     ring_extension,
     summarize_calls,
 )
+try:
+    import store as wakeup_store  # noqa: E402  (wake-up store; absent in dev)
+except ImportError:  # pragma: no cover
+    wakeup_store = None
 
 OPTIONS_PATH = Path("/data/options.json")
 
@@ -68,6 +73,27 @@ def load_options() -> dict:
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def wakeups_list(rooms_by_ext: dict) -> list[dict]:
+    """Pending wake-ups (room + time), soonest first."""
+    if wakeup_store is None:
+        return []
+    try:
+        data = wakeup_store.all_wakeups()
+    except Exception:  # never let a store hiccup break /api/status
+        return []
+    out = [
+        {
+            "ext": ext,
+            "label": rooms_by_ext.get(ext, ext),
+            "hhmm": e.get("hhmm", ""),
+            "target_epoch": e.get("target_epoch", 0),
+        }
+        for ext, e in data.items()
+    ]
+    out.sort(key=lambda w: w["target_epoch"])
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +177,7 @@ def api_status() -> JSONResponse:
             "error": error,
             "rooms": rooms,
             "calls": summary["calls"],
+            "wakeups": wakeups_list(rooms_by_ext),
             "trunk": {
                 "enabled": bool(trunk.get("enabled")),
                 "provider": trunk.get("provider_host", ""),
@@ -176,6 +203,19 @@ def api_ring(ext: str) -> JSONResponse:
     except (AMIError, OSError) as exc:
         print(f"[switchboard-webui] ring {ext} failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
+
+
+@app.post("/api/wakeup/{ext}/cancel")
+def api_wakeup_cancel(ext: str) -> JSONResponse:
+    """Cancel a room's pending wake-up. Ingress-only (middleware applies)."""
+    if wakeup_store is None:
+        return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503)
+    try:
+        ok = wakeup_store.cancel(ext)
+    except Exception as exc:
+        print(f"[switchboard-webui] wakeup cancel {ext} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "error"}, status_code=500)
     return JSONResponse({"ok": ok})
 
 
@@ -244,6 +284,11 @@ INDEX_HTML = """<!doctype html>
     <div id="calls"><div class="muted">—</div></div>
   </section>
 
+  <section>
+    <h2 style="font-size:1rem;">⏰ Wake-up calls</h2>
+    <div id="wakeups"><div class="muted">—</div></div>
+  </section>
+
 <script>
 // Escape any server-supplied value before it touches innerHTML. Room labels and
 // AMI caller-ID (attacker-controlled on inbound trunk calls) are untrusted.
@@ -252,6 +297,13 @@ function esc(s) {
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function fmtDur(d) { return String(d || '').replace(/^00:/, ''); }
+function fmt12(hhmm) {
+  const m = /^(\\d{1,2}):(\\d{2})$/.exec(hhmm || '');
+  if (!m) return hhmm || '';
+  let h = +m[1]; const ap = h < 12 ? 'AM' : 'PM';
+  h = h % 12 || 12;
+  return h + ':' + m[2] + ' ' + ap;
+}
 
 // Keep a "Ringing…" button disabled across the 4s auto-refreshes for ~one ring
 // cycle, so clicking Test ring gives durable feedback.
@@ -307,6 +359,19 @@ async function refresh() {
         (c.duration ? ' · ' + esc(fmtDur(c.duration)) : '') + '</span></li>'
       ).join('') + '</ul>';
     }
+
+    const wakeEl = document.getElementById('wakeups');
+    const wk = data.wakeups || [];
+    if (!wk.length) {
+      wakeEl.innerHTML = '<div class="muted">None set — dial 42 and say a time.</div>';
+    } else {
+      wakeEl.innerHTML = '<ul class="calllist">' + wk.map(w =>
+        '<li><span class="detail">⏰ ' + esc(w.label) + '</span>' +
+        '<span class="meta">' + esc(fmt12(w.hhmm)) +
+        ' <button class="ringbtn" style="width:auto;margin:0 0 0 .6rem;padding:.15rem .5rem;" ' +
+        'data-cancel="' + esc(w.ext) + '">Cancel</button></span></li>'
+      ).join('') + '</ul>';
+    }
   } catch (e) {
     document.getElementById('sub').textContent = 'Status unavailable';
   }
@@ -328,6 +393,18 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     btn.textContent = 'Failed';
     setTimeout(() => { btn.disabled = false; btn.textContent = '🔔 Test ring'; }, 1800);
   }
+});
+
+// Cancel a wake-up (delegated; the section is rebuilt each refresh).
+document.getElementById('wakeups').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-cancel]');
+  if (!btn || btn.disabled) return;
+  const ext = btn.getAttribute('data-cancel');
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await fetch('./api/wakeup/' + encodeURIComponent(ext) + '/cancel', {method: 'POST'});
+    refresh();
+  } catch (err) { btn.disabled = false; btn.textContent = 'Cancel'; }
 });
 
 refresh();

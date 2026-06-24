@@ -1,0 +1,137 @@
+#!/usr/bin/python3
+"""Switchboard wake-up — AGI call controller (dial the wake-up code, or routed
+from the operator).
+
+Rotary-safe voice flow, same shape as the operator AGI: greet, record a short
+utterance, shell out to ``switchboard-stt --mode time`` for offline recognition,
+then SET / CHANGE / CANCEL the caller's wake-up. The AGI only records the request
+in the store and sets channel vars (WAKEUP_RESULT, WAKEUP_EPOCH); the *dialplan*
+reads the confirmation back (Playback + SayUnixTime). The scheduler service rings
+the room at the chosen time.
+
+The caller's room ext is taken from the channel name (PJSIP/<ext>-...), so it
+works regardless of caller-ID config.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, "/usr/share/switchboard/wakeup")
+import store  # noqa: E402
+
+STT = "/usr/bin/switchboard-stt"
+ASR_DIR = "/run/switchboard/asr"
+MAX_ATTEMPTS = 2
+RECORD_MS = 7000
+SILENCE_S = 3
+
+
+def read_env() -> dict:
+    env: dict[str, str] = {}
+    while True:
+        line = sys.stdin.readline()
+        if not line or not line.strip():
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def agi(command: str) -> str:
+    sys.stdout.write(command + "\n")
+    sys.stdout.flush()
+    return sys.stdin.readline().strip()
+
+
+def stream(soundfile: str) -> None:
+    agi(f'STREAM FILE {soundfile} ""')
+
+
+def set_var(name: str, value: str) -> None:
+    agi(f'SET VARIABLE {name} "{value}"')
+
+
+def channel_ext(channel: str) -> str:
+    """PJSIP/11-0000000a -> 11."""
+    if "/" not in channel:
+        return ""
+    tail = channel.split("/", 1)[1].split(";", 1)[0]
+    return tail.rsplit("-", 1)[0] if "-" in tail else tail
+
+
+def recognize(attempt: int) -> str:
+    """Record one utterance; return an 'HH:MM', 'CANCEL', or '' (nothing)."""
+    rec = f"{ASR_DIR}/wake-{os.getpid()}-{attempt}"
+    stream("switchboard/sw-beep")
+    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    stream("switchboard/sw-onemoment")
+    wav = rec + ".wav"
+    out = ""
+    try:
+        proc = subprocess.run([STT, "--in", wav, "--mode", "time"],
+                              capture_output=True, text=True, timeout=25)
+        out = (proc.stdout or "").strip()
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        sys.stderr.write(f"[wakeup] stt error: {exc}\n")
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+    return out
+
+
+def main() -> None:
+    env = read_env()
+    ext = channel_ext(env.get("agi_channel", ""))
+    if not ext:
+        # Can't identify the room -> nothing to schedule against.
+        set_var("WAKEUP_RESULT", "none")
+        return
+
+    existing = store.get(ext)
+    for attempt in range(MAX_ATTEMPTS):
+        if existing:
+            # Read back what's set (guarding a corrupt/empty epoch), then keep
+            # offering change/cancel — including across the retry.
+            if attempt == 0:
+                stream("switchboard/sw-wakeup-exists")  # "You have a wake-up set for…"
+                tgt = existing.get("target_epoch")
+                if isinstance(tgt, int) and tgt > 0:
+                    agi(f"EXEC SayUnixTime {tgt},,IMp")
+            else:
+                stream("switchboard/sw-wakeup-didnt-catch")
+            stream("switchboard/sw-wakeup-change")  # "…say a new time, or say cancel."
+        else:
+            stream("switchboard/sw-wakeup-ask" if attempt == 0 else "switchboard/sw-wakeup-didnt-catch")
+
+        result = recognize(attempt)
+        if result == "CANCEL":
+            store.cancel(ext)
+            set_var("WAKEUP_RESULT", "cancelled")
+            return
+        if re.fullmatch(r"\d{2}:\d{2}", result):
+            entry = store.set_wakeup(ext, result)
+            set_var("WAKEUP_EPOCH", str(entry["target_epoch"]))
+            set_var("WAKEUP_RESULT", "set")
+            return
+
+    set_var("WAKEUP_RESULT", "none")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001  (never wedge the channel)
+        sys.stderr.write(f"[wakeup] fatal: {exc}\n")
+        try:
+            set_var("WAKEUP_RESULT", "none")
+        except Exception:
+            pass
