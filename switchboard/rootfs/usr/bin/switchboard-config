@@ -69,18 +69,23 @@ def resolve_timezone(opts: dict) -> str:
         return tz
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if token:
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                "http://supervisor/info", headers={"Authorization": f"Bearer {token}"}
-            )
-            data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-            tz = ((data.get("data") or {}).get("timezone") or "").strip()
-            if tz:
-                log(f"timezone: auto-detected {tz} from Home Assistant")
-                return tz
-        except Exception as exc:  # network/permission/parse — fall back, don't crash
-            log(f"timezone: Supervisor lookup failed ({exc}); falling back")
+        import urllib.request
+        # `supervisor` is the Docker-internal DNS name (works for bridge-network
+        # add-ons); 172.30.32.2 is the Supervisor's fixed IP, reachable from a
+        # host_network add-on (where the `supervisor` name doesn't resolve). Try
+        # both so auto-detect works regardless of the add-on's network mode.
+        for host in ("http://supervisor", "http://172.30.32.2"):
+            try:
+                req = urllib.request.Request(
+                    f"{host}/info", headers={"Authorization": f"Bearer {token}"}
+                )
+                data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+                tz = ((data.get("data") or {}).get("timezone") or "").strip()
+                if tz:
+                    log(f"timezone: auto-detected {tz} from Home Assistant ({host})")
+                    return tz
+            except Exception as exc:  # network/permission/parse — try next, don't crash
+                log(f"timezone: lookup via {host} failed ({exc})")
     return "UTC"
 
 
@@ -370,6 +375,47 @@ def render_operator_context(joined: str) -> list[str]:
     ]
 
 
+def render_wakeup_context() -> list[str]:
+    """The [wakeup] context (dial the code -> AGI sets/changes/cancels a wake-up,
+    then the dialplan reads it back) and [wakeup-deliver] (the scheduler service
+    originates the room INTO this to actually ring it at the chosen time)."""
+    return [
+        ";; ----- Wake-up calls -----",
+        "[wakeup]",
+        "exten = s,1,NoOp(Wake-up request from ${CHANNEL})",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,AGI(switchboard-wakeup.agi)",
+        " same = n,NoOp(wakeup result=${WAKEUP_RESULT} epoch=${WAKEUP_EPOCH})",
+        " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"set\"]?setdone)",
+        " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"cancelled\"]?cancelled)",
+        " same = n,Goto(none)",
+        " same = n(setdone),Playback(switchboard/sw-wakeup-set)",
+        " same = n,SayUnixTime(${WAKEUP_EPOCH},,IMp)",
+        " same = n,Goto(bye)",
+        " same = n(cancelled),Playback(switchboard/sw-wakeup-cancelled)",
+        " same = n,Goto(bye)",
+        " same = n(none),Playback(switchboard/sw-wakeup-none)",
+        " same = n(bye),Playback(switchboard/sw-goodbye)",
+        " same = n,Playback(switchboard/sw-endtone)",
+        " same = n,Hangup()",
+        "",
+        "[wakeup-deliver]",
+        "exten = s,1,NoOp(Wake-up delivery to ${CHANNEL})",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        " same = n,SayUnixTime(,,IMp)",
+        " same = n,Wait(1)",
+        " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        " same = n,SayUnixTime(,,IMp)",
+        " same = n,Hangup()",
+        "",
+    ]
+
+
 def render_extensions(opts: dict) -> str:
     rooms = opts.get("rooms", []) or []
     trunk = opts.get("trunk", {}) or {}
@@ -429,6 +475,22 @@ def render_extensions(opts: dict) -> str:
                 "",
             ]
 
+    # Wake-up calls — dial the code to set/change/cancel by voice. Literal
+    # extension; skipped if it collides with a room or the clock.
+    wakeup_on = bool(opts.get("wakeup_enabled", True))
+    wakeup_ext = str(opts.get("wakeup_ext", "42") or "42").strip()
+    if wakeup_on and exts:
+        if not re.fullmatch(r"[0-9]{2,6}", wakeup_ext):
+            log(f"wakeup: invalid wakeup_ext {wakeup_ext!r}; dial code disabled")
+        elif wakeup_ext in exts or wakeup_ext == clock_ext:
+            log(f"wakeup: wakeup_ext {wakeup_ext} collides with a room/clock ext; dial code disabled")
+        else:
+            parts += [
+                f"exten = {wakeup_ext},1,NoOp(Wake-up call)",
+                " same = n,Goto(wakeup,s,1)",
+                "",
+            ]
+
     if exts:
         joined = "|".join(exts)
         parts += [
@@ -444,6 +506,11 @@ def render_extensions(opts: dict) -> str:
 
     if operator_on and exts:
         parts += render_operator_context("|".join(exts))
+
+    # The [wakeup]/[wakeup-deliver] contexts exist whenever wake-ups are on, even
+    # if the dial code collided (the scheduler still delivers into wakeup-deliver).
+    if wakeup_on and exts:
+        parts += render_wakeup_context()
 
     if trunk.get("enabled"):
         cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"

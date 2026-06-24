@@ -1,0 +1,21 @@
+#!/command/with-contenv bashio
+# Wake-up scheduler — rings rooms at their set time via AMI Originate.
+if ! bashio::config.true 'wakeup_enabled'; then
+    bashio::log.info "Wake-up calls disabled (wakeup_enabled: false); scheduler idling."
+    exec sleep infinity
+fi
+
+bashio::log.info "Starting Switchboard wake-up scheduler ..."
+
+if [ -f /run/switchboard/ami.env ]; then
+    # shellcheck disable=SC1091
+    source /run/switchboard/ami.env
+    export AMI_USER AMI_SECRET
+fi
+
+# Local time for next-occurrence math (matches the talking-clock TZ handling).
+export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
+WRS="$(bashio::config 'wakeup_ring_seconds')"
+export WAKEUP_RING_SECONDS="${WRS:-60}"
+
+exec python3 /usr/share/switchboard/wakeup/scheduler.py

@@ -25,7 +25,13 @@ import time
 # Reuse the AMI engine that backs the web dashboard.
 sys.path.insert(0, "/usr/share/switchboard/webui")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "webui"))
+sys.path.insert(0, "/usr/share/switchboard/wakeup")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wakeup"))
 import ami  # noqa: E402
+try:
+    import store as wakeup_store  # noqa: E402
+except ImportError:  # pragma: no cover
+    wakeup_store = None
 
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 POLL_SECONDS = 1.5
@@ -200,7 +206,28 @@ def build_board(rooms_cfg: dict) -> dict:
                 "device_state": "Unavailable", "call_state": "", "peer": "", "channel": "",
             })
     rooms.sort(key=lambda r: r["ext"])
-    return {"ami_ok": ami_ok, "rooms": rooms, "calls": summary["calls"], "ts": time.time()}
+
+    wakeups = []
+    if wakeup_store is not None:
+        try:
+            for ext, e in wakeup_store.all_wakeups().items():
+                wakeups.append({"ext": ext, "label": rooms_by_ext.get(ext, ext),
+                                "hhmm": e.get("hhmm", ""), "target_epoch": e.get("target_epoch", 0)})
+            wakeups.sort(key=lambda w: w["target_epoch"])
+        except Exception:
+            wakeups = []
+    return {"ami_ok": ami_ok, "rooms": rooms, "calls": summary["calls"],
+            "wakeups": wakeups, "ts": time.time()}
+
+
+def fmt12(hhmm: str) -> str:
+    """'07:05' -> '7:05 AM'."""
+    try:
+        h, m = (int(x) for x in hhmm.split(":"))
+    except (ValueError, AttributeError):
+        return hhmm or ""
+    ap = "AM" if h < 12 else "PM"
+    return f"{(h % 12) or 12}:{m:02d} {ap}"
 
 
 class Board:
@@ -290,6 +317,13 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             tail = color(GREY, c.get("state", "") + (f"  {dur}" if dur else ""))
             lines.append(f"    {g}  {c.get('detail','')}   {tail}")
 
+    wakeups = board.get("wakeups", [])
+    if wakeups:
+        lines.append(rule)
+        lines.append("  " + color(BOLD, "WAKE-UPS"))
+        for w in wakeups:
+            lines.append(f"    ⏰  {w.get('label','')}   " + color(GREY, fmt12(w.get("hhmm", ""))))
+
     lines.append(rule)
     if sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
@@ -297,6 +331,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     else:
         bar = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
                + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up   ")
+               + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
                + color(BOLD, "Q") + color(GREY, " quit"))
         lines.append(bar)
     msg = sess.get("msg", "")
@@ -388,6 +423,18 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
         except (ami.AMIError, OSError) as exc:
             log(f"hangup {room['ext']} failed: {exc}")
         flash(f"Hung up {room['label']}" if ok else "Hang up failed")
+        return
+    if key in ("x", "X"):
+        if wakeup_store is None:
+            return
+        try:
+            cancelled = wakeup_store.cancel(room["ext"])
+        except Exception as exc:
+            log(f"wakeup cancel {room['ext']} failed: {exc}")
+            flash("Wake-up cancel failed")
+            return
+        flash(f"Cancelled wake-up for {room['label']}" if cancelled
+              else f"{room['label']} has no wake-up set")
         return
 
 

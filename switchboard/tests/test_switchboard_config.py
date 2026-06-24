@@ -161,6 +161,25 @@ def test_timezone_resolution() -> None:
     check("tz: blank option falls through (no crash)", isinstance(sbc.resolve_timezone({"timezone": ""}), str))
 
 
+def test_wakeup_dialplan() -> None:
+    rooms = [{"ext": "11", "name": "Kitchen", "secret": "s1"},
+             {"ext": "12", "name": "Office", "secret": "s2"}]
+    on = sbc.render_extensions({"rooms": rooms, "wakeup_enabled": True, "wakeup_ext": "42", "trunk": {}})
+    check("wakeup: dial code routes to [wakeup]",
+          "exten = 42,1,NoOp(Wake-up call)" in on and "Goto(wakeup,s,1)" in on)
+    check("wakeup: [wakeup] context runs the AGI", "[wakeup]" in on and "AGI(switchboard-wakeup.agi)" in on)
+    check("wakeup: [wakeup-deliver] context greets + says the time",
+          "[wakeup-deliver]" in on and "switchboard/sw-wakeup-greeting" in on and "SayUnixTime(,,IMp)" in on)
+    default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("wakeup: on by default at 42", "exten = 42,1,NoOp(Wake-up call)" in default_on)
+    off = sbc.render_extensions({"rooms": rooms, "wakeup_enabled": False, "trunk": {}})
+    check("wakeup: disabled removes the contexts", "[wakeup]" not in off and "Wake-up call" not in off)
+    # Colliding with the clock (default 41) skips the dial code but keeps delivery.
+    coll = sbc.render_extensions({"rooms": rooms, "wakeup_ext": "41", "trunk": {}})
+    check("wakeup: clock collision skips dial code, keeps delivery",
+          "exten = 41,1,NoOp(Wake-up call)" not in coll and "[wakeup-deliver]" in coll)
+
+
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
@@ -169,5 +188,6 @@ if __name__ == "__main__":
     test_operator_voice_dialplan()
     test_talking_clock()
     test_timezone_resolution()
+    test_wakeup_dialplan()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

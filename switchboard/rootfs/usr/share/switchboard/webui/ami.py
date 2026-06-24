@@ -451,6 +451,33 @@ def connect_extensions(a: str, b: str, allowed_exts, caller_id: str = "Operator 
     )
 
 
+def originate_wakeup(room_ext: str, ring_seconds: int = 60) -> bool:
+    """Ring a room and deliver its wake-up: originate the room into the fixed
+    [wakeup-deliver] dialplan context. room_ext is digit-guarded; the context is
+    constant (not caller-supplied), so this can only ring a known room."""
+    if not _EXT_RE.fullmatch(room_ext or ""):
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        [
+            "Action: Originate",
+            f"Channel: PJSIP/{room_ext}",
+            "Context: wakeup-deliver",
+            "Exten: s",
+            "Priority: 1",
+            "CallerID: Wake-up <0>",
+            f"Timeout: {int(ring_seconds * 1000)}",
+            "Async: true",
+        ],
+        single_response=True,
+        action_id=action_id,
+    )
+    return any(
+        blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+        for blk in blocks
+    )
+
+
 def hangup_channel(channel: str) -> bool:
     """Hang up one channel by its Asterisk channel name (operator "hang up").
 

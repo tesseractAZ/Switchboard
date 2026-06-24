@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.3.1"
+version: "0.4.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -44,6 +44,9 @@ options:
   timezone: ""
   clock_enabled: true
   clock_ext: "41"
+  wakeup_enabled: true
+  wakeup_ext: "42"
+  wakeup_ring_seconds: 60
   rooms:
     - ext: "101"
       name: Kitchen
@@ -80,6 +83,9 @@ schema:
   timezone: str?
   clock_enabled: bool?
   clock_ext: str?
+  wakeup_enabled: bool?
+  wakeup_ext: str?
+  wakeup_ring_seconds: int(10,600)?
   rooms:
     - ext: match(^[0-9]{2,6}$)
       name: str
