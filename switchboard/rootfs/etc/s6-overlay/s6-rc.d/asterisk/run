@@ -9,5 +9,7 @@ mkdir -p /var/run/asterisk /var/log/asterisk /var/lib/asterisk
 chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk /var/lib/asterisk 2>/dev/null || true
 
 # -f  foreground (no fork, so s6 supervises it)
+# -vvv  verbose dialplan/call tracing in the log (Dial outcomes, DIALSTATUS) —
+#       invaluable for diagnosing call flow; call volume on a home PBX is low
 # -U/-G  drop to the asterisk user
-exec asterisk -f -U asterisk -G asterisk
+exec asterisk -f -vvv -U asterisk -G asterisk

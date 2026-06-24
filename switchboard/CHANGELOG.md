@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.4
+
+Operator now tells the caller *why* a connection didn't complete.
+
+- **Busy / no-answer / unavailable handling:** when the operator dialed a room
+  that was busy, didn't answer, or wasn't registered, the dialplan fell through
+  to a bland "Goodbye" — indistinguishable outcomes. Now it branches on
+  `${DIALSTATUS}` and plays a spoken status: "That line is busy…",
+  "There's no answer…", or "That room isn't available right now." (new prompts
+  `sw-busy`, `sw-noanswer`, `sw-unavailable`).
+- **Observability:** Asterisk now runs at `-vvv`, so the log shows dial outcomes
+  (`Operator dial <ext> -> <DIALSTATUS>`) and full call tracing — call volume on
+  a home PBX is low, so the extra verbosity is worth the diagnosability.
+
 ## 0.2.3
 
 Tune the operator from the first real on-Pi calls (whisper.cpp recognized
