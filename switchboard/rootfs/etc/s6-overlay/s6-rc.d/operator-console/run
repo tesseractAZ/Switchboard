@@ -20,5 +20,8 @@ fi
 
 export CONSOLE_PORT="${PORT}"
 export CONSOLE_HOST="${BIND}"
+# Timezone backstop: the init step points /etc/localtime at the resolved zone,
+# but also export TZ so the board clock is right even if the symlink didn't take.
+export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
 cd /usr/share/switchboard/console || exit 1
 exec python3 console.py

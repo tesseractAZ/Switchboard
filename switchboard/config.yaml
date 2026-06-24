@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.3.0"
+version: "0.3.1"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -14,6 +14,9 @@ arch:
 init: false
 host_network: true
 apparmor: true
+# Read-only Supervisor API access — used only to auto-detect the Home Assistant
+# timezone (for the talking clock / wake-up calls) when `timezone` is left blank.
+hassio_api: true
 ingress: true
 ingress_port: 8099
 panel_icon: mdi:phone-classic
@@ -38,6 +41,9 @@ options:
   console_enabled: true
   console_port: 2300
   console_bind: "0.0.0.0"
+  timezone: ""
+  clock_enabled: true
+  clock_ext: "41"
   rooms:
     - ext: "101"
       name: Kitchen
@@ -71,6 +77,9 @@ schema:
   console_enabled: bool?
   console_port: port?
   console_bind: str?
+  timezone: str?
+  clock_enabled: bool?
+  clock_ext: str?
   rooms:
     - ext: match(^[0-9]{2,6}$)
       name: str

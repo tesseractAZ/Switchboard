@@ -8,6 +8,11 @@ bashio::log.info "Starting Asterisk..."
 mkdir -p /var/run/asterisk /var/log/asterisk /var/lib/asterisk
 chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk /var/lib/asterisk 2>/dev/null || true
 
+# Timezone backstop for SayUnixTime (the talking clock): the init step points
+# /etc/localtime at the resolved zone, but also export TZ so the spoken time is
+# right even if the symlink didn't take.
+export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
+
 # -f  foreground (no fork, so s6 supervises it)
 # -vvv  verbose dialplan/call tracing in the log (Dial outcomes, DIALSTATUS) —
 #       invaluable for diagnosing call flow; call volume on a home PBX is low
