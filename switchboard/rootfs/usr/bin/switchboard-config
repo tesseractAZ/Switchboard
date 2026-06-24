@@ -468,8 +468,10 @@ def render_extensions(opts: dict) -> str:
                 " same = n,Answer()",
                 " same = n,Set(CHANNEL(language)=en)",
                 " same = n,Wait(1)",
-                " same = n,Playback(switchboard/sw-time-is)",
+                # Old-style speaking clock: "At the tone, the time will be …" + a pip.
+                " same = n,Playback(switchboard/sw-at-the-tone)",
                 " same = n,SayUnixTime(,,IMp)",
+                " same = n,Playback(switchboard/sw-tone)",
                 " same = n,Wait(1)",
                 " same = n,Hangup()",
                 "",

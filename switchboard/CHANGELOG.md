@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+Old-style speaking clock. The talking clock (dial 41) now announces "At the
+tone, the time will be …" followed by a clean 1 kHz pip — the classic
+speaking-clock cadence — instead of a plain "The time is …". New `sw-at-the-tone`
+prompt + a generated `sw-tone` pip.
+
 ## 0.4.0
 
 Wake-up calls — set by voice, delivered on schedule.
