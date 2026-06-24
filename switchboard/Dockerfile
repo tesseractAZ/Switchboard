@@ -62,9 +62,11 @@ COPY rootfs /
 RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /usr/bin/switchboard-stt \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-operator.agi \
+    && chmod +x /usr/share/switchboard/console/console.py \
     && chmod +x /etc/s6-overlay/s6-rc.d/init-switchboard/up \
     && chmod +x /etc/s6-overlay/s6-rc.d/asterisk/run \
-    && chmod +x /etc/s6-overlay/s6-rc.d/webui/run
+    && chmod +x /etc/s6-overlay/s6-rc.d/webui/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run
 
 EXPOSE 5060/udp
 EXPOSE 8099/tcp
@@ -73,4 +75,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.2.8"
+    io.hass.version="0.3.0"

@@ -1,0 +1,24 @@
+#!/command/with-contenv bashio
+# Telnet operator console — a live switchboard board an operator drives over
+# telnet (ring a room, connect two rooms, hang up). host_network exposes the
+# port on the LAN, so `telnet <host> <port>` reaches it directly.
+if ! bashio::config.true 'console_enabled'; then
+    bashio::log.info "Operator console disabled (console_enabled: false); idling."
+    exec sleep infinity
+fi
+
+PORT="$(bashio::config 'console_port')"
+BIND="$(bashio::config 'console_bind')"
+bashio::log.info "Starting Switchboard operator console on ${BIND}:${PORT} ..."
+bashio::log.notice "The operator console is UNAUTHENTICATED on the LAN and can ring/connect/hang up phones. Set console_bind to 127.0.0.1 to restrict it, or console_enabled:false to turn it off."
+
+if [ -f /run/switchboard/ami.env ]; then
+    # shellcheck disable=SC1091
+    source /run/switchboard/ami.env
+    export AMI_USER AMI_SECRET
+fi
+
+export CONSOLE_PORT="${PORT}"
+export CONSOLE_HOST="${BIND}"
+cd /usr/share/switchboard/console || exit 1
+exec python3 console.py
