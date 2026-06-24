@@ -62,7 +62,11 @@ def test_hostile_inputs() -> None:
 
     mgr = sbc.render_manager("switchboard", "sek")
     write_line = [l for l in mgr.splitlines() if l.startswith("write =")][0]
-    check("AMI write excludes command + originate", "command" not in write_line and "originate" not in write_line)
+    # 'command' (CLI/RCE) stays excluded. 'originate' IS granted (paired with
+    # 'system') for the per-room test-ring button — the web app constrains it to
+    # ringing a known ext with a fixed Playback, never an outside Dial.
+    check("AMI write still excludes command (no CLI/RCE)", "command" not in write_line)
+    check("AMI write grants originate (test-ring) + system", "originate" in write_line and "system" in write_line)
     check("AMI write keeps the status-action classes", "system" in write_line and "reporting" in write_line)
 
 

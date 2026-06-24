@@ -14,6 +14,7 @@ The pure helpers (``parse_ami_blocks``, ``*_from_blocks``, ``is_registered``,
 from __future__ import annotations
 
 import os
+import re
 import socket
 
 AMI_HOST = "127.0.0.1"
@@ -33,6 +34,11 @@ OFFLINE_STATES = frozenset({"unavailable", "invalid", "unknown", ""})
 # Reachable / Unreachable / NonQualified / Unknown / Removed. A qualify-disabled
 # AOR reports "NonQualified" for an otherwise-up contact.
 _REGISTERED_CONTACT_STATUSES = frozenset({"reachable", "nonqualified", "created"})
+
+# A room extension is 1-6 digits. Used to guard anything that interpolates an
+# ext into an AMI Channel string, so no caller can smuggle in CRLF / a dial
+# string even if it skipped its own validation.
+_EXT_RE = re.compile(r"[0-9]{1,6}")
 
 
 class AMIError(Exception):
@@ -138,16 +144,138 @@ def channels_from_blocks(blocks: list[dict]) -> list[dict]:
     chans: list[dict] = []
     for b in blocks:
         if (b.get("event") or "").lower() == "coreshowchannel":
+            channel = b.get("channel", "")
             chans.append(
                 {
-                    "channel": b.get("channel", ""),
+                    "channel": channel,
+                    "ext": channel_ext(channel),
                     "state": b.get("channelstatedesc", ""),
                     "caller": b.get("calleridnum", ""),
+                    "caller_name": b.get("calleridname", ""),
                     "connected": b.get("connectedlinenum", ""),
+                    "connected_name": b.get("connectedlinename", ""),
                     "duration": b.get("duration", ""),
+                    # Linkedid ties every leg of one call together; context tells us
+                    # an operator/IVR leg from a room-to-room leg.
+                    "linkedid": b.get("linkedid", ""),
+                    "context": b.get("context", ""),
+                    "exten": b.get("exten", ""),
                 }
             )
     return chans
+
+
+def channel_ext(channel: str) -> str:
+    """Endpoint id from a PJSIP channel name: "PJSIP/11-0000000a" -> "11",
+    "PJSIP/trunk-..." -> "trunk". Empty for anything unexpected."""
+    if "/" not in channel:
+        return ""
+    # Drop a ";1"/";2" half-channel marker (Local channels) before the uniqueid.
+    tail = channel.split("/", 1)[1].split(";", 1)[0]
+    return tail.rsplit("-", 1)[0] if "-" in tail else tail
+
+
+def _leg_label(ch: dict, rooms_by_ext: dict) -> str:
+    """Human label for one call leg: a configured room's name, or "Outside"
+    (with the external number when we have it)."""
+    ext = ch.get("ext", "")
+    if ext in rooms_by_ext:
+        return rooms_by_ext[ext]
+    # Trunk / unknown leg → an outside party. Show the number that is genuinely
+    # external (NOT one of our room exts, which is what connected/caller may echo
+    # for the *other* leg of the call).
+    for cand in (ch.get("caller", ""), ch.get("connected", "")):
+        if cand and cand not in rooms_by_ext:
+            return f"Outside ({cand})"
+    return "Outside"
+
+
+def _dur_secs(d: str) -> int:
+    """AMI Duration ("HH:MM:SS") -> seconds, for picking a call's longest leg."""
+    try:
+        secs = 0
+        for p in str(d).split(":"):
+            secs = secs * 60 + int(p)
+        return secs
+    except (ValueError, TypeError):
+        return 0
+
+
+def _group_calls(channels: list[dict]) -> list[list[dict]]:
+    """Group channel legs into calls by Linkedid (falling back to the channel
+    name), preserving first-seen order."""
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for ch in channels:
+        key = ch.get("linkedid") or ch.get("channel") or ""
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ch)
+    return [groups[k] for k in order]
+
+
+def summarize_calls(channels: list[dict], rooms_by_ext: dict) -> dict:
+    """Turn raw channel legs into (a) a readable list of calls and (b) a per-ext
+    map of what each room is currently doing — so the UI can say "Kitchen ↔
+    Office", "Garage ↔ Outside", or "Kitchen → Operator" instead of dumping
+    channel names. Returns {"calls": [...], "by_ext": {ext: {state, peer}}}.
+    """
+    calls: list[dict] = []
+    by_ext: dict[str, dict] = {}
+    for legs in _group_calls(channels):
+        operator = any(
+            (ch.get("context") or "").lower() == "operator" or ch.get("exten") == "0"
+            for ch in legs
+        )
+        outside = any(ch.get("ext") == "trunk" for ch in legs)
+
+        labels: list[str] = []
+        for ch in legs:
+            lab = _leg_label(ch, rooms_by_ext)
+            if lab not in labels:
+                labels.append(lab)
+
+        joined = " ".join((ch.get("state") or "") for ch in legs).lower()
+        if "ring" in joined:
+            state = "Ringing"
+        elif "up" in joined:
+            state = "Talking"
+        else:
+            state = (legs[0].get("state") or "") if legs else ""
+
+        duration = max((ch.get("duration", "") for ch in legs), key=_dur_secs, default="")
+
+        # Only list real connections/sessions as "active calls". A lone leg with
+        # a single room party (a test ring's Playback, or the &lt;1s before a
+        # callee leg is created) is reflected on the room card via by_ext below,
+        # but isn't a call worth listing.
+        if operator and len(labels) == 1:
+            calls.append({"detail": f"{labels[0]} → Operator", "state": state,
+                          "duration": duration, "kind": "operator"})
+        elif len(labels) >= 2:
+            kind = "outside" if outside else "internal"
+            calls.append({"detail": " ↔ ".join(labels[:2]), "state": state,
+                          "duration": duration, "kind": kind})
+
+        # Per-room view: each room leg's peer is the other party (or the operator).
+        for ch in legs:
+            ext = ch.get("ext", "")
+            if ext not in rooms_by_ext:
+                continue
+            peers = [_leg_label(o, rooms_by_ext) for o in legs if o is not ch]
+            peers = [p for p in peers if p != rooms_by_ext[ext]]
+            if peers:
+                peer = peers[0]
+            elif operator:
+                peer = "Operator"
+            else:
+                peer = ""
+            leg_state = "Ringing" if "ring" in (ch.get("state") or "").lower() else (
+                "Talking" if "up" in (ch.get("state") or "").lower() else (ch.get("state") or "")
+            )
+            by_ext[ext] = {"state": leg_state, "peer": peer}
+    return {"calls": calls, "by_ext": by_ext}
 
 
 def is_registered(device_state: str, contact_status: str = "") -> bool:
@@ -166,10 +294,37 @@ def is_registered(device_state: str, contact_status: str = "") -> bool:
 # --------------------------------------------------------------------------- #
 # Socket conversation.
 # --------------------------------------------------------------------------- #
-def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
-    """Run one AMI action and return the list of event/response blocks."""
+_action_seq = 0
+
+
+def _next_action_id() -> str:
+    global _action_seq
+    _action_seq += 1
+    return f"sb-{os.getpid()}-{_action_seq}"
+
+
+def _ami_command(
+    action_lines: list[str],
+    timeout: float = 4.0,
+    single_response: bool = False,
+    action_id: str = "",
+) -> list[dict]:
+    """Run one AMI action and return the list of event/response blocks.
+
+    List actions (PJSIPShow* / CoreShowChannels) stream events terminated by a
+    "...Complete" event — read until that. Single-response actions (Originate /
+    Hangup) have no Complete event, so they tag the action with an ActionID and
+    stop as soon as that action's own response block arrives (instead of waiting
+    out the full socket timeout). Callers that need to attribute the response
+    pass their own ``action_id``.
+    """
     if not AMI_SECRET:
         raise AMIError("AMI secret not configured")
+
+    if single_response:
+        if not action_id:
+            action_id = _next_action_id()
+        action_lines = list(action_lines) + [f"ActionID: {action_id}"]
 
     with socket.create_connection((AMI_HOST, AMI_PORT), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -199,10 +354,17 @@ def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
             # tiny, but never buffer without an upper bound.
             if len(data) > 1_000_000:
                 break
+            if single_response:
+                # Stop once our action's own response (matched by ActionID) lands.
+                if any(
+                    b.get("actionid") == action_id and "response" in b
+                    for b in parse_ami_blocks(bytes(data))
+                ):
+                    break
             # Stop at the list terminator, and only log off AFTER — logging off
             # before the stream finishes makes Asterisk close the socket and
             # truncate the events (the original "all Unregistered" bug).
-            if stream_complete(bytes(data)):
+            elif stream_complete(bytes(data)):
                 break
         try:
             send(["Action: Logoff"])
@@ -214,6 +376,40 @@ def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
         # Generic message; the caller logs detail server-side.
         raise AMIError("authentication failed")
     return blocks
+
+
+def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: int = 8) -> bool:
+    """Place a short "test ring" to a room phone via AMI Originate.
+
+    The caller MUST have validated ``ext`` against the configured rooms — this
+    only ever rings a known endpoint and runs a fixed Playback (never Dial), so
+    it cannot place an outside call even though the AMI account holds the
+    originate privilege. Async: the phone rings for ``ring_seconds`` (≈ one ring
+    cycle) and, if answered, hears the test prompt. Returns True if Asterisk
+    accepted (queued) the originate.
+    """
+    if not _EXT_RE.fullmatch(ext or ""):
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        [
+            "Action: Originate",
+            f"Channel: PJSIP/{ext}",
+            "Application: Playback",
+            f"Data: {sound}",
+            f"CallerID: Switchboard Test <{ext}>",
+            f"Timeout: {int(ring_seconds * 1000)}",
+            "Async: true",
+        ],
+        single_response=True,
+        action_id=action_id,
+    )
+    # Success = THIS originate's own response block came back Success (scoped by
+    # ActionID, not by matching brittle message wording).
+    return any(
+        b.get("actionid") == action_id and b.get("response", "").lower() == "success"
+        for b in blocks
+    )
 
 
 def get_endpoints() -> list[dict]:

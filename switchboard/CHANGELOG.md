@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.8
+
+Make the dashboard interactive and call-aware.
+
+- **Test-ring button per room:** each phone card has a 🔔 **Test ring** that
+  places a one-cycle ring to that extension (AMI `Originate` → a short
+  `sw-test` prompt if you pick up). The button is disabled for offline phones
+  and shows "Ringing…". The originate is constrained server-side to ringing a
+  *known room ext* with a fixed `Playback` — it can never dial an outside line —
+  and the AMI account's new `originate` privilege is paired with `system` for
+  that (still no `command`/CLI).
+- **Readable call details:** the "Active calls" list now shows who's talking to
+  whom by room name — "Kitchen ↔ Office", "Garage ↔ Outside (+1…)", or
+  "Kitchen → Operator" — with state (Ringing/Talking) and duration, grouped per
+  call via Linkedid instead of dumping raw channel names.
+- **Per-card "talking to":** a busy room's card shows its current peer
+  (↔ Office / ↔ Outside / ↔ Operator) and the live call state.
+- New `POST /api/ring/{ext}` (Ingress-only, validates the ext); new
+  `summarize_calls`/`channel_ext` helpers + test coverage in `tests/test_webui.py`.
+
 ## 0.2.7
 
 Actually fix the dashboard showing every registered phone as "Offline" (the

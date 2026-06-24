@@ -125,6 +125,111 @@ def test_stream_terminator() -> None:
           ami.stream_complete(b"Event: ContactList\r\nEndpoint: 11\r\n\r\n") is False)
 
 
+ROOMS_BY_EXT = {"11": "Kitchen", "16": "Office", "17": "Garage"}
+
+
+def _coreshow(*legs: str) -> bytes:
+    head = (
+        "Asterisk Call Manager/9.0.0\r\n\r\n"
+        "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+        "Response: Success\r\nEventList: start\r\nMessage: Channels will follow\r\n\r\n"
+    )
+    tail = "Event: CoreShowChannelsComplete\r\nEventList: Complete\r\nListItems: 0\r\n\r\n"
+    return (head + "".join(legs) + tail).encode()
+
+
+def test_channel_ext() -> None:
+    check("channel_ext: PJSIP/11-0000000a -> 11", ami.channel_ext("PJSIP/11-0000000a") == "11")
+    check("channel_ext: trunk", ami.channel_ext("PJSIP/trunk-00000001") == "trunk")
+    check("channel_ext: drops ;1 half-channel marker", ami.channel_ext("PJSIP/11-0000000a;1") == "11")
+    check("channel_ext: junk -> ''", ami.channel_ext("") == "")
+
+
+def test_calls_internal() -> None:
+    blocks = ami.parse_ami_blocks(_coreshow(
+        "Event: CoreShowChannel\r\nChannel: PJSIP/11-00000001\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 11\r\nConnectedLineNum: 16\r\nContext: rooms\r\nExten: 16\r\n"
+        "Linkedid: call-A\r\nDuration: 00:00:42\r\n\r\n",
+        "Event: CoreShowChannel\r\nChannel: PJSIP/16-00000002\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 16\r\nConnectedLineNum: 11\r\nContext: rooms\r\nExten: s\r\n"
+        "Linkedid: call-A\r\nDuration: 00:00:42\r\n\r\n",
+    ))
+    summary = ami.summarize_calls(ami.channels_from_blocks(blocks), ROOMS_BY_EXT)
+    calls = summary["calls"]
+    check("calls: one internal call", len(calls) == 1)
+    check("calls: detail Kitchen <-> Office", calls[0]["detail"] == "Kitchen ↔ Office")
+    check("calls: state Talking", calls[0]["state"] == "Talking")
+    check("calls: kind internal", calls[0]["kind"] == "internal")
+    check("calls: by_ext peer for Kitchen is Office", summary["by_ext"].get("11", {}).get("peer") == "Office")
+    check("calls: by_ext peer for Office is Kitchen", summary["by_ext"].get("16", {}).get("peer") == "Kitchen")
+
+
+def test_calls_outside() -> None:
+    blocks = ami.parse_ami_blocks(_coreshow(
+        "Event: CoreShowChannel\r\nChannel: PJSIP/17-00000003\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 17\r\nConnectedLineNum: 14805551234\r\nContext: rooms\r\n"
+        "Linkedid: call-B\r\nDuration: 00:01:05\r\n\r\n",
+        "Event: CoreShowChannel\r\nChannel: PJSIP/trunk-00000004\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 14805551234\r\nConnectedLineNum: 17\r\nContext: from-trunk\r\n"
+        "Linkedid: call-B\r\nDuration: 00:01:05\r\n\r\n",
+    ))
+    summary = ami.summarize_calls(ami.channels_from_blocks(blocks), ROOMS_BY_EXT)
+    call = summary["calls"][0]
+    check("calls: outside kind", call["kind"] == "outside")
+    check("calls: outside detail names Garage + Outside",
+          call["detail"].startswith("Garage ↔ Outside") and "14805551234" in call["detail"])
+    check("calls: Garage peer is the external number",
+          "14805551234" in (summary["by_ext"].get("17", {}).get("peer") or ""))
+
+
+def test_calls_operator() -> None:
+    blocks = ami.parse_ami_blocks(_coreshow(
+        "Event: CoreShowChannel\r\nChannel: PJSIP/11-00000005\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 11\r\nContext: operator\r\nExten: s\r\nLinkedid: call-C\r\nDuration: 00:00:08\r\n\r\n",
+    ))
+    summary = ami.summarize_calls(ami.channels_from_blocks(blocks), ROOMS_BY_EXT)
+    call = summary["calls"][0]
+    check("calls: operator kind", call["kind"] == "operator")
+    check("calls: operator detail Kitchen -> Operator", call["detail"] == "Kitchen → Operator")
+    check("calls: Kitchen peer Operator", summary["by_ext"].get("11", {}).get("peer") == "Operator")
+
+
+def test_calls_ringing() -> None:
+    # Caller (Kitchen) up, callee (Office) ringing — two legs, one call.
+    blocks = ami.parse_ami_blocks(_coreshow(
+        "Event: CoreShowChannel\r\nChannel: PJSIP/11-00000006\r\nChannelStateDesc: Up\r\n"
+        "CallerIDNum: 11\r\nConnectedLineNum: 16\r\nContext: rooms\r\nExten: 16\r\nLinkedid: call-D\r\nDuration: 00:00:03\r\n\r\n",
+        "Event: CoreShowChannel\r\nChannel: PJSIP/16-00000007\r\nChannelStateDesc: Ringing\r\n"
+        "CallerIDNum: 11\r\nConnectedLineNum: 11\r\nContext: rooms\r\nLinkedid: call-D\r\nDuration: 00:00:03\r\n\r\n",
+    ))
+    summary = ami.summarize_calls(ami.channels_from_blocks(blocks), ROOMS_BY_EXT)
+    check("calls: ringing state", summary["calls"][0]["state"] == "Ringing")
+    check("calls: ringing by_ext (callee)", summary["by_ext"].get("16", {}).get("state") == "Ringing")
+
+
+def test_lone_leg_excluded() -> None:
+    # A single test-ring (Playback) leg shows on the room card (by_ext) but is
+    # NOT listed as an active call.
+    blocks = ami.parse_ami_blocks(_coreshow(
+        "Event: CoreShowChannel\r\nChannel: PJSIP/11-00000009\r\nChannelStateDesc: Ringing\r\n"
+        "CallerIDNum: 11\r\nContext: \r\nLinkedid: ring-1\r\nDuration: 00:00:02\r\n\r\n",
+    ))
+    summary = ami.summarize_calls(ami.channels_from_blocks(blocks), ROOMS_BY_EXT)
+    check("lone leg: not listed as an active call", summary["calls"] == [])
+    check("lone leg: still shown on the room card", summary["by_ext"].get("11", {}).get("state") == "Ringing")
+
+
+def test_ring_ext_guard() -> None:
+    # The regex guard rejects a non-numeric ext before any AMI socket is opened.
+    check("ring: rejects injection-y ext", ami.ring_extension("9;evil") is False)
+    check("ring: rejects empty ext", ami.ring_extension("") is False)
+
+
+def test_no_calls() -> None:
+    summary = ami.summarize_calls([], ROOMS_BY_EXT)
+    check("calls: empty -> no calls", summary["calls"] == [] and summary["by_ext"] == {})
+
+
 def main() -> None:
     test_endpoints()
     test_contacts()
@@ -132,6 +237,14 @@ def main() -> None:
     test_lowercasing()
     test_login_failure()
     test_stream_terminator()
+    test_channel_ext()
+    test_calls_internal()
+    test_calls_outside()
+    test_calls_operator()
+    test_calls_ringing()
+    test_lone_leg_excluded()
+    test_ring_ext_guard()
+    test_no_calls()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")
