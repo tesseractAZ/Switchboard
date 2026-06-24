@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.7
+
+Actually fix the dashboard showing every registered phone as "Offline" (the
+0.2.6 read-until-Complete change addressed the wrong layer).
+
+- **Root cause (diagnosed live):** `PJSIPShowEndpoints` parsing was fine —
+  `/api/status` already returned `DeviceState: "Not in use"` for all 8 rooms.
+  The failure was isolated to two places: (1) `registered` was derived *only*
+  from a `PJSIPShowContacts` match that never landed because the AMI client read
+  fields with the wrong casing (`AOR`/`URI`/`Status` vs Asterisk's `Aor`/`Uri`),
+  so every contact keyed on `""`; and (2) the browser pill used
+  `device_state.includes('use')`, which matches `"Not in use"` and painted idle
+  phones orange.
+- **Case-insensitive AMI parse:** `_ami_command` now lower-cases every response
+  key, so no caller can be broken by Asterisk's inconsistent field casing again
+  (applies to endpoints, contacts, and channels at once).
+- **Registration from device state:** a PJSIP endpoint reads `Unavailable` with
+  no reachable contact and `Not in use` once one binds — so `registered` is now
+  taken from `DeviceState` (the signal Asterisk already aggregates), with
+  contact reachability as a secondary confirm. The per-contact row is enrichment
+  (status text + RTT) only. Contacts are keyed by `aor`/`endpointname` with an
+  `objectname` fallback so a renamed field can't silently drop them.
+- **Pill fix:** `"Not in use"` → green **Registered**; only an active call state
+  (`In use`/`Ringing`/`Busy`/`On Hold`) → orange; otherwise red **Offline**.
+- **Contacts keyed correctly:** the `ContactList` event has no `Aor` field — the
+  endpoint identity is its `Endpoint` field — so RTT and real contact status now
+  populate instead of silently dropping (an adversarial review caught that the
+  prior keying only worked by `ObjectName` accident).
+- **Auth failures are now visible:** a wrong/rotated AMI secret previously read
+  as `ami_ok=true` with every phone "Offline" and no banner — indistinguishable
+  from a real outage. A failed AMI login now surfaces the "cannot reach Asterisk
+  Manager" banner.
+- **Hardened stream read:** the list terminator is matched on a real
+  `Event: …Complete` line (not a bare substring), so an attacker-influenced field
+  value — an inbound trunk `CallerIDName` or a phone `UserAgent` containing
+  "Complete" — can't truncate the live view; plus an upper bound on the buffer.
+- **Testability:** the AMI client moved to a framework-free `webui/ami.py` and
+  gained a plain-`python3` test suite (`tests/test_webui.py`) covering the
+  casing, ContactList identity, DeviceState registration, terminator, and
+  auth-failure paths — the regression net that was missing.
+
 ## 0.2.6
 
 Fix the Ingress dashboard always showing rooms as "Offline".

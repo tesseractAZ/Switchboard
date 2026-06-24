@@ -16,17 +16,25 @@ from __future__ import annotations
 
 import json
 import os
-import socket
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+# The AMI client lives in a framework-free sibling module so its wire-format
+# parsing can be unit-tested without FastAPI. Ensure this directory is importable
+# regardless of how uvicorn is launched.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ami import (  # noqa: E402
+    AMIError,
+    get_channels,
+    get_contacts,
+    get_endpoints,
+    is_registered,
+)
+
 OPTIONS_PATH = Path("/data/options.json")
-AMI_HOST = "127.0.0.1"
-AMI_PORT = 5038
-AMI_USER = os.environ.get("AMI_USER", "switchboard")
-AMI_SECRET = os.environ.get("AMI_SECRET", "")
 
 app = FastAPI(title="Switchboard", docs_url=None, redoc_url=None)
 
@@ -50,128 +58,6 @@ async def restrict_to_ingress(request: Request, call_next):
     if not _client_allowed(client):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     return await call_next(request)
-
-
-# --------------------------------------------------------------------------- #
-# Minimal AMI client (synchronous, single request/response).
-# --------------------------------------------------------------------------- #
-class AMIError(Exception):
-    pass
-
-
-def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
-    """Run one AMI action and return the list of event/response blocks."""
-    if not AMI_SECRET:
-        raise AMIError("AMI secret not configured")
-
-    with socket.create_connection((AMI_HOST, AMI_PORT), timeout=timeout) as sock:
-        sock.settimeout(timeout)
-        buf = b""
-
-        def send(lines: list[str]) -> None:
-            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
-
-        try:
-            buf += sock.recv(4096)
-        except socket.timeout:
-            pass
-
-        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
-        send(action_lines)
-
-        data = bytearray(buf)
-        while True:
-            try:
-                chunk = sock.recv(8192)
-            except socket.timeout:
-                break
-            if not chunk:
-                break
-            data += chunk
-            # Each list action (PJSIPShow* / CoreShowChannels) streams its results
-            # as async events ending with a "...Complete" event. Stop once that
-            # arrives, and only log off AFTER. Logging off before the stream
-            # finishes makes Asterisk close the socket and truncate the events —
-            # which made every room read "Unregistered" even when registered.
-            if b"Complete\r\n" in data:
-                break
-        try:
-            send(["Action: Logoff"])
-        except OSError:
-            pass
-
-    blocks: list[dict] = []
-    for raw in data.decode(errors="replace").split("\r\n\r\n"):
-        raw = raw.strip()
-        if not raw:
-            continue
-        block: dict[str, str] = {}
-        for line in raw.split("\r\n"):
-            if ": " in line:
-                k, v = line.split(": ", 1)
-                block[k.strip()] = v.strip()
-        if block:
-            blocks.append(block)
-    return blocks
-
-
-def get_endpoints() -> list[dict]:
-    """Registration state per PJSIP endpoint (room)."""
-    try:
-        blocks = _ami_command(["Action: PJSIPShowEndpoints"])
-    except (OSError, AMIError) as exc:
-        raise AMIError(str(exc)) from exc
-
-    endpoints: list[dict] = []
-    for b in blocks:
-        if b.get("Event") == "EndpointList":
-            endpoints.append(
-                {
-                    "name": b.get("ObjectName", "?"),
-                    "state": b.get("DeviceState", "Unknown"),
-                    "channels": b.get("ActiveChannels", ""),
-                }
-            )
-    return endpoints
-
-
-def get_contacts() -> dict[str, dict]:
-    """Contact/qualify status keyed by endpoint (aor) id."""
-    try:
-        blocks = _ami_command(["Action: PJSIPShowContacts"])
-    except (OSError, AMIError):
-        return {}
-    out: dict[str, dict] = {}
-    for b in blocks:
-        if b.get("Event") == "ContactList":
-            aor = b.get("AOR", "")
-            out[aor] = {
-                "status": b.get("Status", "Unknown"),
-                "uri": b.get("URI", ""),
-                "rtt": b.get("RoundtripUsec", ""),
-            }
-    return out
-
-
-def get_channels() -> list[dict]:
-    """Currently active channels (calls in progress)."""
-    try:
-        blocks = _ami_command(["Action: CoreShowChannels"])
-    except (OSError, AMIError):
-        return []
-    chans: list[dict] = []
-    for b in blocks:
-        if b.get("Event") == "CoreShowChannel":
-            chans.append(
-                {
-                    "channel": b.get("Channel", ""),
-                    "state": b.get("ChannelStateDesc", ""),
-                    "caller": b.get("CallerIDNum", ""),
-                    "connected": b.get("ConnectedLineNum", ""),
-                    "duration": b.get("Duration", ""),
-                }
-            )
-    return chans
 
 
 def load_options() -> dict:
@@ -205,6 +91,9 @@ def api_status() -> JSONResponse:
     contacts = get_contacts() if ami_ok else {}
     channels = get_channels() if ami_ok else []
 
+    # Registration is derived from DeviceState (the signal Asterisk already
+    # aggregates from contact reachability); the contact row is enrichment
+    # (status text + RTT) only. See ami.is_registered.
     rooms = []
     seen = set()
     for ep in endpoints:
@@ -214,13 +103,16 @@ def api_status() -> JSONResponse:
         seen.add(name)
         cfg = rooms_cfg.get(name, {})
         contact = contacts.get(name, {})
+        device_state = ep["state"]
+        c_status = contact.get("status", "")
+        registered = is_registered(device_state, c_status)
         rooms.append(
             {
                 "ext": name,
                 "label": cfg.get("name", name),
-                "device_state": ep["state"],
-                "registered": contact.get("status", "").lower() in ("reachable", "created", "non_qualified"),
-                "contact_status": contact.get("status", "Unregistered"),
+                "device_state": device_state,
+                "registered": registered,
+                "contact_status": c_status or ("Reachable" if registered else "Unregistered"),
                 "rtt": contact.get("rtt", ""),
             }
         )
@@ -329,12 +221,15 @@ async function refresh() {
 
     const grid = document.getElementById('rooms');
     grid.innerHTML = data.rooms.map(r => {
-      let cls = r.registered ? 'up' : 'down';
-      let txt = r.registered ? 'Registered' : 'Offline';
-      if ((r.device_state||'').toLowerCase().includes('use') ||
-          (r.device_state||'').toLowerCase().includes('ring')) {
-        cls = 'busy'; txt = r.device_state;
-      }
+      // "Not in use" means registered-and-idle (green) — only an active call
+      // state ("In use", "Ringing", "Busy", "On Hold") is busy (orange).
+      const ds = (r.device_state||'').toLowerCase();
+      const active = (ds.includes('use') && ds !== 'not in use') ||
+                     ds.includes('ring') || ds === 'busy' || ds === 'on hold';
+      let cls, txt;
+      if (active) { cls = 'busy'; txt = r.device_state; }
+      else if (r.registered) { cls = 'up'; txt = 'Registered'; }
+      else { cls = 'down'; txt = 'Offline'; }
       return '<div class="card"><div class="ext">ext ' + esc(r.ext) + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
              '<span class="pill ' + cls + '">' + esc(txt) + '</span></div>';
