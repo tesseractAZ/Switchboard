@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.6
+
+Fix the Ingress dashboard always showing rooms as "Offline".
+
+- **AMI event truncation:** the web UI sent `Login → action → Logoff`
+  back-to-back, but `PJSIPShowContacts`/`PJSIPShowEndpoints` stream their
+  results as async events ending in a "...Complete" event. Sending `Logoff`
+  immediately made Asterisk close the socket before the events finished, so the
+  contact list arrived empty and every room read "Unregistered" even when fully
+  registered. Now reads until the action's "...Complete" event, then logs off.
+
 ## 0.2.5
 
 Engaged-line handling + end-of-call tone, from live testing.

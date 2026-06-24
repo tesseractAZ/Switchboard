@@ -78,7 +78,6 @@ def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
 
         send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
         send(action_lines)
-        send(["Action: Logoff"])
 
         data = bytearray(buf)
         while True:
@@ -89,8 +88,17 @@ def _ami_command(action_lines: list[str], timeout: float = 4.0) -> list[dict]:
             if not chunk:
                 break
             data += chunk
-            if b"Goodbye" in data or b"Logoff" in chunk:
+            # Each list action (PJSIPShow* / CoreShowChannels) streams its results
+            # as async events ending with a "...Complete" event. Stop once that
+            # arrives, and only log off AFTER. Logging off before the stream
+            # finishes makes Asterisk close the socket and truncate the events —
+            # which made every room read "Unregistered" even when registered.
+            if b"Complete\r\n" in data:
                 break
+        try:
+            send(["Action: Logoff"])
+        except OSError:
+            pass
 
     blocks: list[dict] = []
     for raw in data.decode(errors="replace").split("\r\n\r\n"):
