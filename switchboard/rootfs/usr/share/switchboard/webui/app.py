@@ -32,6 +32,8 @@ from ami import (  # noqa: E402
     get_contacts,
     get_endpoints,
     is_registered,
+    ring_extension,
+    summarize_calls,
 )
 
 OPTIONS_PATH = Path("/data/options.json")
@@ -91,6 +93,12 @@ def api_status() -> JSONResponse:
     contacts = get_contacts() if ami_ok else {}
     channels = get_channels() if ami_ok else []
 
+    # Turn raw channel legs into readable calls ("Kitchen ↔ Office") and a
+    # per-room "what is this phone doing right now" map.
+    rooms_by_ext = {ext: (cfg.get("name") or ext) for ext, cfg in rooms_cfg.items()}
+    summary = summarize_calls(channels, rooms_by_ext)
+    by_ext = summary["by_ext"]
+
     # Registration is derived from DeviceState (the signal Asterisk already
     # aggregates from contact reachability); the contact row is enrichment
     # (status text + RTT) only. See ami.is_registered.
@@ -106,6 +114,7 @@ def api_status() -> JSONResponse:
         device_state = ep["state"]
         c_status = contact.get("status", "")
         registered = is_registered(device_state, c_status)
+        call = by_ext.get(name, {})
         rooms.append(
             {
                 "ext": name,
@@ -114,6 +123,10 @@ def api_status() -> JSONResponse:
                 "registered": registered,
                 "contact_status": c_status or ("Reachable" if registered else "Unregistered"),
                 "rtt": contact.get("rtt", ""),
+                # What this phone is doing now (empty when idle): "Ringing" /
+                # "Talking" and the other party ("Office", "Outside", "Operator").
+                "call_state": call.get("state", ""),
+                "call_peer": call.get("peer", ""),
             }
         )
     for ext, cfg in rooms_cfg.items():
@@ -126,6 +139,8 @@ def api_status() -> JSONResponse:
                     "registered": False,
                     "contact_status": "Unregistered",
                     "rtt": "",
+                    "call_state": "",
+                    "call_peer": "",
                 }
             )
     rooms.sort(key=lambda r: r["ext"])
@@ -135,13 +150,33 @@ def api_status() -> JSONResponse:
             "ami_ok": ami_ok,
             "error": error,
             "rooms": rooms,
-            "channels": channels,
+            "calls": summary["calls"],
             "trunk": {
                 "enabled": bool(trunk.get("enabled")),
                 "provider": trunk.get("provider_host", ""),
             },
         }
     )
+
+
+@app.post("/api/ring/{ext}")
+def api_ring(ext: str) -> JSONResponse:
+    """Place a one-cycle test ring to a room phone.
+
+    The ext is validated against the configured rooms before anything is sent to
+    Asterisk, so this can only ring a known endpoint (never originate an outside
+    call). Reached only via Ingress (the Supervisor-only middleware applies).
+    """
+    opts = load_options()
+    known = {str(r.get("ext")) for r in (opts.get("rooms") or [])}
+    if ext not in known:
+        return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
+    try:
+        ok = ring_extension(ext)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] ring {ext} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -164,24 +199,36 @@ INDEX_HTML = """<!doctype html>
   .grid { display: grid; gap: .6rem;
           grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
   .card { background: var(--card, #fff); border-radius: 12px; padding: .8rem .9rem;
-          box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+          box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; flex-direction: column; }
   .card .ext { font-size: .75rem; color: #999; }
   .card .name { font-weight: 600; font-size: 1rem; margin: .1rem 0 .4rem; }
   .pill { display: inline-block; font-size: .72rem; padding: .15rem .5rem;
-          border-radius: 999px; font-weight: 600; }
+          border-radius: 999px; font-weight: 600; align-self: flex-start; }
   .up { background: #e3f7e8; color: #1a7f37; }
   .down { background: #fde7e7; color: #b42318; }
   .busy { background: #fff4e0; color: #b25e00; }
+  .conn { font-size: .75rem; color: #b25e00; margin-top: .4rem; }
+  .ringbtn { margin-top: .6rem; width: 100%; font-size: .75rem; font-weight: 600;
+             padding: .35rem .5rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
+             background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
+  .ringbtn:hover:not(:disabled) { background: var(--btnh, #e8eaed); }
+  .ringbtn:disabled { opacity: .5; cursor: default; }
   section { margin-top: 1.5rem; }
-  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
-  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #eee; }
-  .muted { color: #999; }
+  .muted { color: #999; font-size: .85rem; }
+  .calllist { list-style: none; padding: 0; margin: 0; }
+  .calllist li { display: flex; justify-content: space-between; gap: .6rem; align-items: baseline;
+                 padding: .5rem .2rem; border-bottom: 1px solid var(--bd, #eee); font-size: .95rem; }
+  .calllist .detail { font-weight: 600; }
+  .calllist .meta { color: #888; font-size: .8rem; white-space: nowrap; }
+  .kind-outside .detail::before { content: "📞 "; }
+  .kind-operator .detail::before { content: "🎧 "; }
+  .kind-internal .detail::before { content: "🏠 "; }
   .banner { background: #fde7e7; color: #b42318; padding: .6rem .8rem;
             border-radius: 8px; margin-bottom: 1rem; font-size: .85rem; }
   @media (prefers-color-scheme: dark) {
     body { --bg:#111418; color:#e6e6e6; }
     .card { --card:#1b1f24; }
-    th,td { border-color:#2a2f36; }
+    :root { --bd:#2a2f36; --btn:#262b31; --btnh:#2f353c; }
   }
 </style>
 </head>
@@ -194,7 +241,7 @@ INDEX_HTML = """<!doctype html>
 
   <section>
     <h2 style="font-size:1rem;">Active calls</h2>
-    <table id="calls"><tbody><tr><td class="muted">—</td></tr></tbody></table>
+    <div id="calls"><div class="muted">—</div></div>
   </section>
 
 <script>
@@ -204,6 +251,12 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function fmtDur(d) { return String(d || '').replace(/^00:/, ''); }
+
+// Keep a "Ringing…" button disabled across the 4s auto-refreshes for ~one ring
+// cycle, so clicking Test ring gives durable feedback.
+const ringingUntil = {};
+
 async function refresh() {
   try {
     const res = await fetch('./api/status', {cache: 'no-store'});
@@ -219,6 +272,7 @@ async function refresh() {
       reg + ' of ' + data.rooms.length + ' phones registered' +
       (data.trunk.enabled ? ' · trunk: ' + (data.trunk.provider || 'on') : ' · no trunk');
 
+    const now = Date.now();
     const grid = document.getElementById('rooms');
     grid.innerHTML = data.rooms.map(r => {
       // "Not in use" means registered-and-idle (green) — only an active call
@@ -227,29 +281,55 @@ async function refresh() {
       const active = (ds.includes('use') && ds !== 'not in use') ||
                      ds.includes('ring') || ds === 'busy' || ds === 'on hold';
       let cls, txt;
-      if (active) { cls = 'busy'; txt = r.device_state; }
+      if (active) { cls = 'busy'; txt = r.call_state || r.device_state; }
       else if (r.registered) { cls = 'up'; txt = 'Registered'; }
       else { cls = 'down'; txt = 'Offline'; }
+      // Who this phone is talking to / ringing, when known.
+      const conn = r.call_peer ? '<div class="conn">↔ ' + esc(r.call_peer) + '</div>' : '';
+      const ringing = (ringingUntil[r.ext] || 0) > now;
+      const dis = (!r.registered || ringing) ? ' disabled' : '';
+      const label = ringing ? 'Ringing…' : '🔔 Test ring';
+      const btn = '<button class="ringbtn" data-ext="' + esc(r.ext) + '"' + dis + '>' + label + '</button>';
       return '<div class="card"><div class="ext">ext ' + esc(r.ext) + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
-             '<span class="pill ' + cls + '">' + esc(txt) + '</span></div>';
+             '<span class="pill ' + cls + '">' + esc(txt) + '</span>' +
+             conn + btn + '</div>';
     }).join('');
 
-    const calls = document.querySelector('#calls tbody');
-    if (!data.channels.length) {
-      calls.innerHTML = '<tr><td class="muted">No active calls</td></tr>';
+    const callsEl = document.getElementById('calls');
+    if (!data.calls || !data.calls.length) {
+      callsEl.innerHTML = '<div class="muted">No active calls</div>';
     } else {
-      calls.innerHTML =
-        '<tr><th>Channel</th><th>State</th><th>From</th><th>To</th><th>Dur</th></tr>' +
-        data.channels.map(c =>
-          '<tr><td>' + esc(c.channel) + '</td><td>' + esc(c.state) + '</td><td>' +
-          esc(c.caller) + '</td><td>' + esc(c.connected) + '</td><td>' + esc(c.duration) +
-          '</td></tr>').join('');
+      callsEl.innerHTML = '<ul class="calllist">' + data.calls.map(c =>
+        '<li class="kind-' + esc(c.kind || 'internal') + '">' +
+        '<span class="detail">' + esc(c.detail) + '</span>' +
+        '<span class="meta">' + esc(c.state || '') +
+        (c.duration ? ' · ' + esc(fmtDur(c.duration)) : '') + '</span></li>'
+      ).join('') + '</ul>';
     }
   } catch (e) {
     document.getElementById('sub').textContent = 'Status unavailable';
   }
 }
+
+// Test-ring: delegated click handler survives the innerHTML rebuilds.
+document.getElementById('rooms').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.ringbtn');
+  if (!btn || btn.disabled) return;
+  const ext = btn.getAttribute('data-ext');
+  btn.disabled = true; btn.textContent = 'Ringing…';
+  ringingUntil[ext] = Date.now() + 9000;
+  try {
+    const res = await fetch('./api/ring/' + encodeURIComponent(ext), {method: 'POST'});
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error || 'failed');
+  } catch (err) {
+    ringingUntil[ext] = 0;
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.disabled = false; btn.textContent = '🔔 Test ring'; }, 1800);
+  }
+});
+
 refresh();
 setInterval(refresh, 4000);
 </script>
