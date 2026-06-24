@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+Add a **telnet switchboard operator console** — a live TUI for working the
+board like a cord-board operator.
+
+- **Connect over telnet:** `telnet <host> <port>` (default **2300**,
+  `console_port` / `console_enabled` options). A raw-TCP ANSI TUI — no client
+  install, works from any terminal.
+- **Live board:** every room with real-time status — ● Registered, ○ Offline,
+  ◐ Ringing, ◉ On call ↔ *peer* — plus an Active-calls panel ("Kitchen ↔
+  Office · 02:14"), refreshed ~1.5 s.
+- **Operator actions:** **R** ring/page the selected room, **C** connect two
+  rooms (rings A, then dials B via the room dialplan), **H** hang up the
+  selected room's call, **↑↓ / j k** select, **Q** quit. Connect/ring/hangup go
+  through the same room-validated AMI helpers as the web button, so the console
+  can't place an outside call.
+- Implemented in Python stdlib (telnet IAC negotiation, NAWS resize,
+  frame-hash anti-flicker, alt-screen) as a new s6 `operator-console` service,
+  reusing the `webui/ami.py` engine. New `connect_extensions` / `hangup_channel`
+  AMI helpers + `tests/test_console.py`.
+- **Security note:** like the EcoFlow telnet console, this is **unauthenticated
+  on the LAN** and performs call-control (ring/connect/hang up) — so it assumes a
+  trusted home network. It's hardened to that scope: connect is validated against
+  the configured room set (never the trunk's outbound pattern, even with a trunk
+  enabled), sessions are capped (5) and idle-timed-out (15 min), and the bind is
+  configurable via `console_bind` (set `127.0.0.1` to keep it host-local, or
+  `console_enabled: false` to turn it off).
+
 ## 0.2.8
 
 Make the dashboard interactive and call-aware.

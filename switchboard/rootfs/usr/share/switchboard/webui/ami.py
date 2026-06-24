@@ -13,6 +13,7 @@ The pure helpers (``parse_ami_blocks``, ``*_from_blocks``, ``is_registered``,
 
 from __future__ import annotations
 
+import itertools
 import os
 import re
 import socket
@@ -294,13 +295,13 @@ def is_registered(device_state: str, contact_status: str = "") -> bool:
 # --------------------------------------------------------------------------- #
 # Socket conversation.
 # --------------------------------------------------------------------------- #
-_action_seq = 0
+_action_seq = itertools.count(1)
 
 
 def _next_action_id() -> str:
-    global _action_seq
-    _action_seq += 1
-    return f"sb-{os.getpid()}-{_action_seq}"
+    # next() on an itertools.count is GIL-atomic, so this is safe across the
+    # operator console's concurrent session threads without an explicit lock.
+    return f"sb-{os.getpid()}-{next(_action_seq)}"
 
 
 def _ami_command(
@@ -409,6 +410,64 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
     return any(
         b.get("actionid") == action_id and b.get("response", "").lower() == "success"
         for b in blocks
+    )
+
+
+def connect_extensions(a: str, b: str, allowed_exts, caller_id: str = "Operator <0>") -> bool:
+    """Patch a call between two CONFIGURED room phones (operator "connect").
+
+    Originates room ``a`` into the generated ``[rooms]`` dialplan at extension
+    ``b``: ``a`` rings, and when it answers the dialplan dials ``b`` — the
+    room-to-room path. Both exts MUST be in ``allowed_exts`` (the configured
+    room set). This matters: when the SIP trunk is enabled, the ``[rooms]``
+    context also holds the outbound ``_<prefix>.`` pattern, so a digits-only
+    guard would let a value like "9911" reach the trunk. Restricting ``b`` to
+    the actual room set means it can only match the room ``_X.`` pattern, never
+    the trunk pattern. Returns True if Asterisk accepted the originate.
+    """
+    allowed = set(allowed_exts or ())
+    if a not in allowed or b not in allowed:
+        return False
+    if not (_EXT_RE.fullmatch(a) and _EXT_RE.fullmatch(b)):
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        [
+            "Action: Originate",
+            f"Channel: PJSIP/{a}",
+            "Context: rooms",
+            f"Exten: {b}",
+            "Priority: 1",
+            f"CallerID: {caller_id}",
+            "Timeout: 30000",
+            "Async: true",
+        ],
+        single_response=True,
+        action_id=action_id,
+    )
+    return any(
+        blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+        for blk in blocks
+    )
+
+
+def hangup_channel(channel: str) -> bool:
+    """Hang up one channel by its Asterisk channel name (operator "hang up").
+
+    The channel string comes from CoreShowChannels (Asterisk-supplied), but we
+    still reject CRLF defensively so it can't inject extra AMI lines.
+    """
+    if not channel or "\r" in channel or "\n" in channel:
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        ["Action: Hangup", f"Channel: {channel}"],
+        single_response=True,
+        action_id=action_id,
+    )
+    return any(
+        blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+        for blk in blocks
     )
 
 

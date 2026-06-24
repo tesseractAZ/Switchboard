@@ -225,6 +225,19 @@ def test_ring_ext_guard() -> None:
     check("ring: rejects empty ext", ami.ring_extension("") is False)
 
 
+def test_connect_hangup_guards() -> None:
+    allowed = {"11", "12"}
+    # connect_extensions only patches exts in the configured room set — a value
+    # like "9911" must NOT be accepted (it could reach the trunk's _9. pattern).
+    check("connect: rejects target not in room set", ami.connect_extensions("11", "9911", allowed) is False)
+    check("connect: rejects source not in room set", ami.connect_extensions("99", "11", allowed) is False)
+    check("connect: rejects injection-y ext", ami.connect_extensions("9;evil", "11", allowed) is False)
+    check("connect: rejects empty to", ami.connect_extensions("11", "", allowed) is False)
+    # hangup_channel rejects empty + CRLF (AMI-injection) channel strings.
+    check("hangup: rejects empty channel", ami.hangup_channel("") is False)
+    check("hangup: rejects CRLF channel", ami.hangup_channel("PJSIP/11\r\nAction: Command") is False)
+
+
 def test_no_calls() -> None:
     summary = ami.summarize_calls([], ROOMS_BY_EXT)
     check("calls: empty -> no calls", summary["calls"] == [] and summary["by_ext"] == {})
@@ -244,6 +257,7 @@ def main() -> None:
     test_calls_ringing()
     test_lone_leg_excluded()
     test_ring_ext_guard()
+    test_connect_hangup_guards()
     test_no_calls()
     print()
     if _failures:
