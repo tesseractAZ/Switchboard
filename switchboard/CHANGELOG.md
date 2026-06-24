@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.5
+
+Engaged-line handling + end-of-call tone, from live testing.
+
+- **Instant busy on an engaged line:** the operator now checks the room's
+  `DEVICE_STATE` before dialing — if it's already on a call, it plays "That line
+  is busy" immediately instead of dialing (which made the gateway *call-waiting-
+  ring* the busy line, so the caller heard rings then a delayed message). No
+  gateway change needed.
+- **End-of-call tone:** every operator hangup path (and the end of a connected
+  call, when the far end hangs up) now plays a short two-tone cue (`sw-endtone`)
+  so a caller on an antique handset hears that the line is down.
+
 ## 0.2.4
 
 Operator now tells the caller *why* a connection didn't complete.

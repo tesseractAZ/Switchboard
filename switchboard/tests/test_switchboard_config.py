@@ -110,13 +110,18 @@ def test_operator_voice_dialplan() -> None:
     check("[operator] context present",
           "[operator]" in on and "AGI(switchboard-operator.agi)" in on)
     check("operator only dials a known room ext (allow-list)",
-          'GotoIf($["${OP_TARGET}" : "^(11|12)$"]?connect:bye)' in on)
+          'GotoIf($["${OP_TARGET}" : "^(11|12)$"]?:bye)' in on)
     check("operator connects via the room endpoint", "Dial(PJSIP/${OP_TARGET},30,rtT)" in on)
     check("operator speaks busy/no-answer/unavailable status (not a bland goodbye)",
           'GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)' in on
           and "Playback(switchboard/sw-busy)" in on
           and "Playback(switchboard/sw-noanswer)" in on
           and "Playback(switchboard/sw-unavailable)" in on)
+    check("operator short-circuits an engaged line to busy (DEVICE_STATE)",
+          "DEVICE_STATE(PJSIP/${OP_TARGET})" in on
+          and 'GotoIf($["${DS}" != "NOT_INUSE"]?busy)' in on)
+    check("operator plays an end-of-call tone before hangup",
+          "Playback(switchboard/sw-endtone)" in on and on.count("Hangup()") >= 1)
     # Defaults to on when the option is absent.
     default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
     check("operator enabled by default", "[operator]" in default_on)

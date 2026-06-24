@@ -290,7 +290,13 @@ def render_operator_context(joined: str) -> list[str]:
         " same = n,NoOp(operator result=${OP_RESULT} target=${OP_TARGET})",
         " same = n,GotoIf($[\"${OP_RESULT}\" = \"connect\"]?:bye)",
         # Defense in depth: only dial a *known room* ext, even if the AGI misbehaves.
-        f" same = n,GotoIf($[\"${{OP_TARGET}}\" : \"^({joined})$\"]?connect:bye)",
+        f" same = n,GotoIf($[\"${{OP_TARGET}}\" : \"^({joined})$\"]?:bye)",
+        # Engaged-line short-circuit: if the room is already on a call, say "busy"
+        # at once instead of dialing it (the gateway would call-waiting-ring a busy
+        # line instead of returning busy). DEVICE_STATE is the live FXS port state.
+        " same = n,Set(DS=${DEVICE_STATE(PJSIP/${OP_TARGET})})",
+        " same = n,GotoIf($[\"${DS}\" = \"UNAVAILABLE\" | \"${DS}\" = \"INVALID\"]?unavail)",
+        " same = n,GotoIf($[\"${DS}\" != \"NOT_INUSE\"]?busy)",
         " same = n(connect),Playback(switchboard/sw-connecting)",
         " same = n,Dial(PJSIP/${OP_TARGET},30,rtT)",
         # Dial fell through (didn't answer): tell the caller WHY rather than a
@@ -302,12 +308,15 @@ def render_operator_context(joined: str) -> list[str]:
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"CONGESTION\"]?unavail)",
         " same = n,Goto(bye)",
         " same = n(busy),Playback(switchboard/sw-busy)",
-        " same = n,Hangup()",
+        " same = n,Goto(endtone)",
         " same = n(noanswer),Playback(switchboard/sw-noanswer)",
-        " same = n,Hangup()",
+        " same = n,Goto(endtone)",
         " same = n(unavail),Playback(switchboard/sw-unavailable)",
-        " same = n,Hangup()",
+        " same = n,Goto(endtone)",
+        # Also reached after a connected call ends (Dial returns): the end-of-call
+        # tone tells the caller on an antique handset that the line is down.
         " same = n(bye),Playback(switchboard/sw-goodbye)",
+        " same = n(endtone),Playback(switchboard/sw-endtone)",
         " same = n,Hangup()",
         "",
     ]
