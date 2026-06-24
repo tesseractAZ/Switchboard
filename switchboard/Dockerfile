@@ -39,6 +39,7 @@ RUN apk add --no-cache \
         python3 \
         py3-pip \
         libstdc++ \
+        tzdata \
     && pip install --no-cache-dir --break-system-packages \
         "fastapi==0.115.*" \
         "uvicorn==0.32.*" \
@@ -51,6 +52,18 @@ RUN apk add --no-cache asterisk-sounds-moh 2>/dev/null || true; \
     apk add --no-cache asterisk-opus 2>/dev/null \
       || apk add --no-cache asterisk-codec-opus 2>/dev/null \
       || echo "NOTE: no prebuilt Opus codec package; Opus disabled at runtime"
+
+# Asterisk core English sound files (digits + time words) — needed by
+# SayUnixTime / SayNumber for the talking clock and wake-up calls. µ-law matches
+# the analog FXS path. Best-effort: a download hiccup must not fail the whole
+# image (the clock just stays silent until the files are present).
+ARG CORE_SOUNDS=asterisk-core-sounds-en-ulaw-current.tar.gz
+RUN mkdir -p /var/lib/asterisk/sounds/en \
+    && ( wget -qO /tmp/cs.tgz "https://downloads.asterisk.org/pub/telephony/sounds/${CORE_SOUNDS}" \
+         && tar -xzf /tmp/cs.tgz -C /var/lib/asterisk/sounds/en \
+         && rm -f /tmp/cs.tgz \
+         && echo "core sounds installed ($(ls /var/lib/asterisk/sounds/en/digits | wc -l) digit files)" ) \
+       || echo "NOTE: core sound download failed; time speech unavailable until added"
 
 # whisper-cli + the recognition model, from the builder stage.
 COPY --from=whisper-builder /out/ /
@@ -75,4 +88,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.3.0"
+    io.hass.version="0.3.1"

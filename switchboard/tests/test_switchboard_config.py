@@ -135,11 +135,39 @@ def test_operator_voice_dialplan() -> None:
           "[operator]" not in off and "exten = 0," not in off)
 
 
+def test_talking_clock() -> None:
+    rooms = [{"ext": "11", "name": "Kitchen", "secret": "s1"},
+             {"ext": "12", "name": "Office", "secret": "s2"}]
+    on = sbc.render_extensions({"rooms": rooms, "clock_enabled": True, "clock_ext": "41", "trunk": {}})
+    check("clock: extension present", "exten = 41,1,NoOp(Talking clock)" in on)
+    check("clock: speaks the time", "SayUnixTime(,,IMp)" in on and "Playback(switchboard/sw-time-is)" in on)
+    # Default-on.
+    default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("clock: on by default at ext 41", "exten = 41,1,NoOp(Talking clock)" in default_on)
+    # Disabled.
+    off = sbc.render_extensions({"rooms": rooms, "clock_enabled": False, "trunk": {}})
+    check("clock: disabled removes the extension", "Talking clock" not in off)
+    # Collision with a room ext is skipped (12 is Office).
+    collide = sbc.render_extensions({"rooms": rooms, "clock_ext": "12", "trunk": {}})
+    check("clock: collision with a room ext is skipped", "Talking clock" not in collide)
+    # Invalid ext skipped.
+    bad = sbc.render_extensions({"rooms": rooms, "clock_ext": "9;evil", "trunk": {}})
+    check("clock: invalid clock_ext is skipped", "Talking clock" not in bad)
+
+
+def test_timezone_resolution() -> None:
+    # An explicit option short-circuits any network lookup.
+    check("tz: explicit option wins", sbc.resolve_timezone({"timezone": "America/Phoenix"}) == "America/Phoenix")
+    check("tz: blank option falls through (no crash)", isinstance(sbc.resolve_timezone({"timezone": ""}), str))
+
+
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()
+    test_talking_clock()
+    test_timezone_resolution()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+Talking clock + a real local timezone.
+
+- **Talking clock:** dial **41** (configurable `clock_ext`) and hear the current
+  local time — "The time is eight oh five p.m." Uses Asterisk `SayUnixTime`.
+- **Local timezone:** the add-on container runs in UTC, which made the console
+  clock (and anything time-based) wrong. The init step now resolves a zone —
+  explicit `timezone` option, else the Home Assistant timezone (auto-detected via
+  the Supervisor), else UTC — and points `/etc/localtime` at it, so Asterisk and
+  the operator console both read local time. `tzdata` is now bundled.
+- **Core sounds:** Asterisk's core English sound files (digits + time words) are
+  now included — needed by `SayUnixTime`/`SayNumber` (and the upcoming wake-up
+  calls). µ-law, matching the analog path.
+- New options: `timezone`, `clock_enabled`, `clock_ext`. Lays the groundwork for
+  wake-up calls (v0.4.0).
+
 ## 0.3.0
 
 Add a **telnet switchboard operator console** — a live TUI for working the
