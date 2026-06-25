@@ -312,6 +312,19 @@ def test_feature_code_collisions() -> None:
           "exten = 42,1,NoOp(Automation)" not in wk and "Wake-up call" in wk)
 
 
+def test_modules_conf() -> None:
+    # res_mwi_external (MWIUpdate) refuses to load alongside app_voicemail, so
+    # the generated modules.conf must noload the voicemail apps and load the
+    # external-MWI + intercom modules — else MWIUpdate is never registered.
+    m = sbc.render_modules({})
+    check("modules: autoload on", "autoload = yes" in m)
+    check("modules: app_voicemail noloaded", "noload = app_voicemail.so" in m)
+    check("modules: res_mwi_external loaded", "load = res_mwi_external.so" in m)
+    check("modules: MWI AMI action module loaded", "load = res_mwi_external_ami.so" in m)
+    check("modules: confbridge + page loaded",
+          "load = app_confbridge.so" in m and "load = app_page.so" in m)
+
+
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
@@ -327,5 +340,6 @@ if __name__ == "__main__":
     test_automation_dialplan()
     test_operator_mwi_clear()
     test_feature_code_collisions()
+    test_modules_conf()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
