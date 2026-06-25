@@ -1,0 +1,115 @@
+#!/usr/bin/python3
+"""Switchboard message-waiting indicator (MWI) control — the "you have a message,
+call the operator" stutter dial tone.
+
+Two state holders must stay in lock-step:
+
+  * Asterisk's live MWI (set via ``ami.set_mwi`` -> the FXS gateway renders a
+    stutter dial tone on the handset). This is IN-MEMORY and resets on restart.
+  * ``mwi_store`` — the persistent JSON source of truth the TUI / web dashboard
+    read to show a ✉ badge, and which an init step REPLAYS into Asterisk after a
+    restart.
+
+Usage:
+
+    switchboard-mwi set   <ext>   # set Asterisk MWI + persist the flag
+    switchboard-mwi clear <ext>   # clear Asterisk MWI + drop the flag
+    switchboard-mwi replay        # re-assert every persisted flag into Asterisk
+
+The store is authoritative for the UI, so ``set``/``clear`` ALWAYS update the
+store even if the AMI call fails (a later ``replay`` re-asserts Asterisk). If the
+AMI side fails we still exit non-zero (with a logged note) so the caller knows
+the live tone may be out of sync, but we never crash — the dialplan's
+``System()`` invocation must not take a call leg down.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import time
+
+# The shared AMI engine + the persistent MWI store live with the webui.
+sys.path.insert(0, "/usr/share/switchboard/webui")
+
+import ami  # noqa: E402
+import mwi_store  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="switchboard-mwi: %(message)s")
+
+USAGE = "usage: switchboard-mwi set <ext> | clear <ext> | replay"
+
+# `replay` runs at startup BEFORE Asterisk/AMI are ready, so it retries the whole
+# replay until the flags assert (or the bound is hit). Overridable via env so a
+# test can drive the give-up path quickly without waiting ~30s.
+REPLAY_MAX_ATTEMPTS = int(os.environ.get("SWITCHBOARD_MWI_REPLAY_ATTEMPTS", "10"))
+REPLAY_RETRY_SECS = float(os.environ.get("SWITCHBOARD_MWI_REPLAY_INTERVAL", "3"))
+
+
+def _set_ami(ext: str, on: bool) -> bool:
+    """Best-effort Asterisk MWI update; never raises (AMI may be down)."""
+    try:
+        return ami.set_mwi(ext, on)
+    except (OSError, ami.AMIError) as exc:
+        logging.warning("AMI MWIUpdate for %s failed: %s", ext, exc)
+        return False
+
+
+def cmd_set(ext: str, on: bool) -> int:
+    # Store is the UI source of truth — update it regardless of AMI success.
+    mwi_store.set_flag(ext, on)
+    ami_ok = _set_ami(ext, on)
+    verb = "set" if on else "cleared"
+    if ami_ok:
+        print(f"{verb} MWI for {ext} (store + Asterisk)")
+        return 0
+    print(f"{verb} MWI for {ext} in store; Asterisk MWI update failed (replay later)")
+    return 1
+
+
+def cmd_replay() -> int:
+    flagged = mwi_store.exts()
+    if not flagged:
+        print("replay: no MWI flags to assert")
+        return 0
+    # Asterisk's MWI is in-memory and reset on restart; this runs at startup
+    # (detached) BEFORE Asterisk/AMI are up, so retry the whole replay until the
+    # flags assert or the bound (~30s default) is hit, then give up gracefully.
+    for attempt in range(1, REPLAY_MAX_ATTEMPTS + 1):
+        failed = [ext for ext in flagged if not _set_ami(ext, True)]
+        if not failed:
+            print(f"replay: asserted {len(flagged)} MWI flag(s) into Asterisk")
+            return 0
+        if attempt < REPLAY_MAX_ATTEMPTS:
+            logging.info(
+                "replay: asserted %d/%d (failed %s); AMI not ready, retry %d/%d in %.0fs",
+                len(flagged) - len(failed), len(flagged), ",".join(failed),
+                attempt, REPLAY_MAX_ATTEMPTS, REPLAY_RETRY_SECS,
+            )
+            time.sleep(REPLAY_RETRY_SECS)
+    print(
+        f"replay: gave up after {REPLAY_MAX_ATTEMPTS} attempt(s); "
+        f"asserted {len(flagged) - len(failed)}/{len(flagged)}; failed {','.join(failed)}"
+    )
+    return 1
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print(USAGE, file=sys.stderr)
+        return 2
+    cmd = argv[0]
+    if cmd in ("set", "clear"):
+        if len(argv) != 2:
+            print(USAGE, file=sys.stderr)
+            return 2
+        return cmd_set(argv[1], on=(cmd == "set"))
+    if cmd == "replay":
+        return cmd_replay()
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -241,6 +241,25 @@ def test_connect_hangup_guards() -> None:
     check("wakeup: originate rejects empty ext", ami.originate_wakeup("") is False)
 
 
+def test_page_all_guard() -> None:
+    # These all short-circuit on the _EXT_RE guard BEFORE any AMI socket: an
+    # empty list has nothing to originate, and an injection-y / all-invalid list
+    # is skipped entirely. No I/O happens, so the return is a pure False.
+    check("page_all: empty list -> False (no I/O)", ami.page_all([]) is False)
+    check("page_all: injection-y ext skipped -> False", ami.page_all(["9;evil"]) is False)
+    check("page_all: CRLF ext skipped -> False", ami.page_all(["11\r\nAction: x"]) is False)
+    check("page_all: all-invalid list -> False", ami.page_all(["", "abc", "1234567"]) is False)
+
+
+def test_set_mwi_guard() -> None:
+    # set_mwi validates the ext with _EXT_RE.fullmatch before any AMI socket, so
+    # an empty or CRLF-bearing ext is rejected without touching the network.
+    check("set_mwi: empty ext -> False", ami.set_mwi("", True) is False)
+    check("set_mwi: CRLF ext -> False", ami.set_mwi("1\r\n2", True) is False)
+    check("set_mwi: non-digit ext -> False", ami.set_mwi("9;evil", False) is False)
+    check("set_mwi: over-long ext -> False", ami.set_mwi("1234567", True) is False)
+
+
 def test_no_calls() -> None:
     summary = ami.summarize_calls([], ROOMS_BY_EXT)
     check("calls: empty -> no calls", summary["calls"] == [] and summary["by_ext"] == {})
@@ -261,6 +280,8 @@ def main() -> None:
     test_lone_leg_excluded()
     test_ring_ext_guard()
     test_connect_hangup_guards()
+    test_page_all_guard()
+    test_set_mwi_guard()
     test_no_calls()
     print()
     if _failures:

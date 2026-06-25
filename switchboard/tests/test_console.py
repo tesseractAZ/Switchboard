@@ -14,8 +14,9 @@ import tempfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
-# Point the wake-up store at a throwaway path before the console imports it.
+# Point the wake-up + MWI stores at throwaway paths before the console imports them.
 os.environ.setdefault("SWITCHBOARD_WAKEUPS", os.path.join(tempfile.mkdtemp(), "wakeups.json"))
+os.environ.setdefault("SWITCHBOARD_MWI", os.path.join(tempfile.mkdtemp(), "mwi.json"))
 
 CONSOLE_PATH = Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console" / "console.py"
 console = SourceFileLoader("switchboard_console", str(CONSOLE_PATH)).load_module()
@@ -289,6 +290,196 @@ def test_center() -> None:
     check("center: board indented on a wide screen", lines[0] == "" and any(ln.startswith("   ") for ln in lines if ln.strip()))
 
 
+def test_page_confirm_accept() -> None:
+    # P opens the confirm gate (does not page yet), Y fires page_all over the
+    # REGISTERED rooms only.
+    board = _board(ROOMS)
+    sess = {"sel": 0, "mode": "normal"}
+    console.apply_key(sess, "P", board, lambda m: None)
+    check("page: P enters confirm mode", sess["mode"] == "pageconfirm")
+    captured = {}
+    orig = console.ami.page_all
+    console.ami.page_all = lambda exts: captured.setdefault("exts", list(exts)) or True
+    try:
+        console.apply_key(sess, "y", board, lambda m: None)
+    finally:
+        console.ami.page_all = orig
+    check("page: Y calls page_all with registered exts only",
+          captured.get("exts") == ["11", "12"])  # 13 Garage is offline
+    check("page: Y returns to normal + flashes paging",
+          sess["mode"] == "normal" and "paging" in sess.get("msg", "").lower())
+
+
+def test_page_confirm_cancel() -> None:
+    board = _board(ROOMS)
+    sess = {"sel": 0, "mode": "normal"}
+    console.apply_key(sess, "p", board, lambda m: None)
+    called = {"n": 0}
+    orig = console.ami.page_all
+    console.ami.page_all = lambda exts: called.__setitem__("n", called["n"] + 1) or True
+    try:
+        console.apply_key(sess, "n", board, lambda m: None)
+    finally:
+        console.ami.page_all = orig
+    check("page: N cancels without paging",
+          sess["mode"] == "normal" and called["n"] == 0 and "cancel" in sess.get("msg", "").lower())
+    # Esc also cancels.
+    console.apply_key(sess, "p", board, lambda m: None)
+    console.apply_key(sess, "esc", board, lambda m: None)
+    check("page: Esc cancels too", sess["mode"] == "normal")
+
+
+def test_mwi_toggle() -> None:
+    console.mwi_store.set_flag("11", False)  # ensure clear
+    captured = []
+    orig = console.ami.set_mwi
+    console.ami.set_mwi = lambda ext, on: captured.append((ext, on)) or True
+    board = _board(ROOMS)
+    sess = {"sel": 0, "mode": "normal"}  # sel 0 -> Kitchen (ext 11)
+    try:
+        console.apply_key(sess, "M", board, lambda m: None)
+        set_ok = (console.mwi_store.is_set("11") and captured == [("11", True)]
+                  and "message set" in sess.get("msg", "").lower())
+        check("mwi: M sets the store + ami + flashes 'message set'", set_ok)
+        console.apply_key(sess, "M", board, lambda m: None)
+        clear_ok = (not console.mwi_store.is_set("11") and captured == [("11", True), ("11", False)]
+                    and "cleared message" in sess.get("msg", "").lower())
+        check("mwi: M again clears the store + ami + flashes 'cleared message'", clear_ok)
+    finally:
+        console.ami.set_mwi = orig
+        console.mwi_store.set_flag("11", False)
+
+
+def test_mwi_set_failure() -> None:
+    # A SET that Asterisk REFUSES (ami.set_mwi → False) must NOT set the badge,
+    # and must flash a PBX-failure message. Optimistic-CLEAR, honest-SET.
+    console.mwi_store.set_flag("11", False)  # ensure clear
+    captured = []
+    orig = console.ami.set_mwi
+    console.ami.set_mwi = lambda ext, on: captured.append((ext, on)) or False
+    board = _board(ROOMS)
+    sess = {"sel": 0, "mode": "normal"}  # sel 0 -> Kitchen (ext 11)
+    try:
+        console.apply_key(sess, "M", board, lambda m: None)
+        fail_ok = (not console.mwi_store.is_set("11")  # badge stayed OFF
+                   and captured == [("11", True)]      # the SET was attempted
+                   and "failed" in sess.get("msg", "").lower())
+        check("mwi: a refused SET leaves the badge off + flashes failure", fail_ok)
+        # Now make set_mwi succeed → the badge DOES set.
+        captured.clear()
+        console.ami.set_mwi = lambda ext, on: captured.append((ext, on)) or True
+        console.apply_key(sess, "M", board, lambda m: None)
+        set_ok = (console.mwi_store.is_set("11") and captured == [("11", True)]
+                  and "message set" in sess.get("msg", "").lower())
+        check("mwi: an accepted SET sets the badge + flashes 'message set'", set_ok)
+    finally:
+        console.ami.set_mwi = orig
+        console.mwi_store.set_flag("11", False)
+
+
+def test_mwi_badge_render() -> None:
+    rooms = [dict(ROOMS[0], mwi=True), dict(ROOMS[1], mwi=False)]
+    board = _board(rooms)
+    text = "\n".join(console.render(board.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0))
+    check("render: ✉ badge on a room with MWI set", "✉" in text)
+    # Only the flagged room's row carries it.
+    row = [ln for ln in console.render(board.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0)
+           if "Office" in ln][0]
+    check("render: ✉ absent from a room without MWI", "✉" not in row)
+
+
+_FAKE_LIGHTS = [
+    {"entity_id": "light.kitchen", "name": "Kitchen Main", "state": "on", "area": "Kitchen"},
+    {"entity_id": "light.office", "name": "Office Lamp", "state": "off", "area": "Office"},
+]
+
+
+def test_lights_entry_and_unavailable() -> None:
+    board = _board(ROOMS)
+    # HA returns nothing → flash unavailable, stay normal.
+    orig = console.ha_client.get_lights
+    console.ha_client.get_lights = lambda: []
+    try:
+        sess = {"sel": 0, "mode": "normal"}
+        console.apply_key(sess, "L", board, lambda m: None)
+        check("lights: empty list → unavailable, stays normal",
+              sess["mode"] == "normal" and "unavailable" in sess.get("msg", "").lower())
+        # HA returns lights → enter lights mode with the list stashed in sess.
+        console.ha_client.get_lights = lambda: [dict(li) for li in _FAKE_LIGHTS]
+        console.apply_key(sess, "l", board, lambda m: None)
+        check("lights: L enters lights mode + stashes the fetched list",
+              sess["mode"] == "lights" and len(sess.get("lights", [])) == 2 and sess.get("lsel") == 0)
+        text = "\n".join(console.render(board.get(), sess, 0.0))
+        check("render: lights view shows names + on/off",
+              "LIGHTS" in text and "Kitchen Main" in text and "● on" in text and "○ off" in text)
+    finally:
+        console.ha_client.get_lights = orig
+
+
+def test_lights_nav_toggle_exit() -> None:
+    board = _board(ROOMS)
+    sess = {"mode": "lights", "lsel": 0, "lights": [dict(li) for li in _FAKE_LIGHTS], "w": 80}
+    console.apply_key(sess, "j", board, lambda m: None)
+    check("lights: j moves cursor down (clamped)", sess["lsel"] == 1)
+    console.apply_key(sess, "j", board, lambda m: None)
+    check("lights: j clamps at the last light", sess["lsel"] == 1)
+    console.apply_key(sess, "k", board, lambda m: None)
+    check("lights: k moves cursor up", sess["lsel"] == 0)
+    # Toggle the first (on → off) optimistically when set_light accepts.
+    calls = []
+    orig = console.ha_client.set_light
+    console.ha_client.set_light = lambda eid, on: calls.append((eid, on)) or True
+    try:
+        console.apply_key(sess, "enter", board, lambda m: None)
+        check("lights: Enter calls set_light(turn off) on the on-light",
+              calls == [("light.kitchen", False)])
+        check("lights: optimistic flip on → off + flash",
+              sess["lights"][0]["state"] == "off" and "off" in sess.get("msg", "").lower())
+    finally:
+        console.ha_client.set_light = orig
+    # Esc exits + clears the lights state.
+    console.apply_key(sess, "esc", board, lambda m: None)
+    check("lights: Esc exits to normal + clears state",
+          sess["mode"] == "normal" and "lights" not in sess and "lsel" not in sess)
+
+
+def test_lights_toggle_failure_no_flip() -> None:
+    board = _board(ROOMS)
+    sess = {"mode": "lights", "lsel": 0, "lights": [dict(li) for li in _FAKE_LIGHTS], "w": 80}
+    orig = console.ha_client.set_light
+    console.ha_client.set_light = lambda eid, on: False  # HA refused
+    try:
+        console.apply_key(sess, " ", board, lambda m: None)  # space toggles too
+    finally:
+        console.ha_client.set_light = orig
+    check("lights: a refused toggle does NOT flip + flashes failure",
+          sess["lights"][0]["state"] == "on" and "failed" in sess.get("msg", "").lower())
+
+
+def test_help_and_bar_have_new_keys() -> None:
+    board = _board(ROOMS)
+    help_text = "\n".join(console.render(board.get(), {"sel": 0, "mode": "help", "w": 80}, 0.0))
+    check("help: documents M / P / L + lights-mode keys",
+          "message-waiting" in help_text and "Page all" in help_text
+          and "Lights" in help_text and "toggle" in help_text)
+    bar_text = "\n".join(console.render(board.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0))
+    check("bar: command bar shows message / page all / lights",
+          "message" in bar_text and "page all" in bar_text and "lights" in bar_text)
+
+
+def test_command_bar_fits_80() -> None:
+    board = _board(ROOMS)
+    for mode in ("normal", "pageconfirm"):
+        lines = console.render(board.get(), {"sel": 0, "mode": mode, "w": 80, "h": 24}, 0.0)
+        widest = max((console.vis_width(ln) for ln in lines), default=0)
+        check(f"bar: {mode} render fits 80 cols (widest={widest})", widest <= 80)
+    lsess = {"mode": "lights", "lsel": 0, "w": 80, "h": 24,
+             "lights": [dict(li) for li in _FAKE_LIGHTS]}
+    lines = console.render(board.get(), lsess, 0.0)
+    widest = max((console.vis_width(ln) for ln in lines), default=0)
+    check(f"bar: lights view fits 80 cols (widest={widest})", widest <= 80)
+
+
 def main() -> None:
     test_parse_input()
     test_render()
@@ -311,6 +502,16 @@ def main() -> None:
     test_help_mode()
     test_vis_width()
     test_center()
+    test_page_confirm_accept()
+    test_page_confirm_cancel()
+    test_mwi_toggle()
+    test_mwi_set_failure()
+    test_mwi_badge_render()
+    test_lights_entry_and_unavailable()
+    test_lights_nav_toggle_exit()
+    test_lights_toggle_failure_no_flip()
+    test_help_and_bar_have_new_keys()
+    test_command_bar_fits_80()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")
