@@ -1,0 +1,31 @@
+#!/command/with-contenv bashio
+# Console web terminal — serves the operator console's TUI in the browser via
+# xterm.js, bridging WebSocket <-> the telnet console on 127.0.0.1:2300. Add it
+# to the Home Assistant sidebar with a panel_iframe pointing at this LAN port.
+# host_network exposes the port directly on the LAN.
+if ! bashio::config.true 'console_web_enabled'; then
+    bashio::log.info "Console web terminal disabled (console_web_enabled: false); idling."
+    exec sleep infinity
+fi
+
+# The web terminal is a front-end for the operator console; if that's off there
+# is nothing to bridge to, so idle instead of serving a dead page.
+if ! bashio::config.true 'console_enabled'; then
+    bashio::log.info "Operator console disabled (console_enabled: false); console web terminal idling."
+    exec sleep infinity
+fi
+
+PORT="$(bashio::config 'console_web_port')"
+bashio::log.info "Starting Switchboard console web terminal on :${PORT} ..."
+bashio::log.notice "The console web terminal is UNAUTHENTICATED on the LAN and drives the operator console (ring/connect/hang up). It exposes the same surface as the telnet console on port 2300. Set console_web_enabled:false to turn it off."
+
+export CONSOLE_WEB_PORT="${PORT}"
+# Bridge to the operator console on loopback; mirror its configured port so a
+# non-default console_port still works.
+export CONSOLE_WEB_TARGET_PORT="$(bashio::config 'console_port')"
+# Timezone backstop, matching the other services (the page itself shows no
+# clock, but keep the process TZ consistent).
+export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
+
+cd /usr/share/switchboard/console-web || exit 1
+exec python3 server.py

@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.4.1"
+version: "0.5.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -41,6 +41,8 @@ options:
   console_enabled: true
   console_port: 2300
   console_bind: "0.0.0.0"
+  console_web_enabled: true
+  console_web_port: 8100
   timezone: ""
   clock_enabled: true
   clock_ext: "41"
@@ -80,6 +82,8 @@ schema:
   console_enabled: bool?
   console_port: port?
   console_bind: str?
+  console_web_enabled: bool?
+  console_web_port: port?
   timezone: str?
   clock_enabled: bool?
   clock_ext: str?
