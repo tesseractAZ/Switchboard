@@ -187,23 +187,21 @@ def test_wakeup_dialplan() -> None:
           "exten = 41,1,NoOp(Wake-up call)" not in coll and "[wakeup-deliver]" in coll)
 
 
-def test_mwi_pjsip() -> None:
-    # MWI on by default: every room endpoint gets a mailbox + aggregate NOTIFY,
-    # so the FXS gateway plays stutter dial-tone when switchboard-mwi sets a flag.
+def test_mwi_pjsip_notify() -> None:
+    # MWI is delivered via PJSIPNotify (res_mwi_external isn't in the Alpine
+    # build), so the endpoints carry NO mailboxes=/voicemail wiring, and the
+    # on/off NOTIFY templates live in pjsip_notify.conf.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "12", "name": "Office", "secret": "s2"}])
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
-    check("mwi: each room endpoint has a mailbox",
-          "mailboxes = 11@default" in pj and "mailboxes = 12@default" in pj)
-    check("mwi: aggregate_mwi enabled", pj.count("aggregate_mwi = yes") == 2)
-    # Default-on with the option absent.
-    pj_def = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
-    check("mwi: on by default", "mailboxes = 11@default" in pj_def)
-    # Disabled removes the mailbox lines.
-    pj_off = sbc.render_pjsip({"rooms": rooms, "mwi_enabled": False, "trunk": {}})
-    check("mwi: disabled removes mailbox/aggregate lines",
-          "mailboxes =" not in pj_off and "aggregate_mwi" not in pj_off)
-    check("mwi: disabled still renders the endpoints", "[11](room-endpoint)" in pj_off)
+    check("mwi: no mailboxes=/aggregate_mwi on endpoints (PJSIPNotify path)",
+          "mailboxes =" not in pj and "aggregate_mwi" not in pj)
+    notify = sbc.render_pjsip_notify()
+    check("mwi: on/off NOTIFY templates present",
+          "[switchboard-mwi-on]" in notify and "[switchboard-mwi-off]" in notify)
+    check("mwi: message-summary event with Messages-Waiting",
+          "Event=message-summary" in notify and "Messages-Waiting: yes" in notify
+          and "Messages-Waiting: no" in notify)
 
 
 def test_confbridge_profiles() -> None:
@@ -318,9 +316,7 @@ def test_modules_conf() -> None:
     # external-MWI + intercom modules — else MWIUpdate is never registered.
     m = sbc.render_modules({})
     check("modules: autoload on", "autoload = yes" in m)
-    check("modules: app_voicemail noloaded", "noload = app_voicemail.so" in m)
-    check("modules: res_mwi_external loaded", "load = res_mwi_external.so" in m)
-    check("modules: MWI AMI action module loaded", "load = res_mwi_external_ami.so" in m)
+    check("modules: res_pjsip_notify loaded (MWI NOTIFY)", "load = res_pjsip_notify.so" in m)
     check("modules: confbridge + page loaded",
           "load = app_confbridge.so" in m and "load = app_page.so" in m)
 
@@ -334,7 +330,7 @@ if __name__ == "__main__":
     test_talking_clock()
     test_timezone_resolution()
     test_wakeup_dialplan()
-    test_mwi_pjsip()
+    test_mwi_pjsip_notify()
     test_confbridge_profiles()
     test_page_intercom()
     test_automation_dialplan()

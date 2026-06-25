@@ -548,21 +548,24 @@ def page_all(exts: list[str]) -> bool:
 def set_mwi(ext: str, on: bool) -> bool:
     """Set or clear a room's message-waiting indicator in Asterisk.
 
-    Uses ``res_mwi_external``'s ``MWIUpdate`` action against the ``{ext}@default``
-    mailbox; the FXS gateway then renders (or clears) a stutter dial tone on that
-    handset. ``ext`` is digit-guarded with ``_EXT_RE`` before it is interpolated
-    into the Mailbox string, so a CRLF-bearing value can't inject extra AMI lines
-    (and an empty/invalid ext is rejected outright). Returns True on Success.
+    Sends an unsolicited ``message-summary`` NOTIFY straight to the room's
+    registered contact via ``PJSIPNotify`` (res_pjsip_notify — part of the core
+    PJSIP stack), using the ``switchboard-mwi-on`` / ``switchboard-mwi-off``
+    templates generated into pjsip_notify.conf. The FXS gateway renders
+    "Messages-Waiting: yes" as a stutter dial tone (and "no" clears it). We use
+    PJSIPNotify rather than res_mwi_external's MWIUpdate because that module isn't
+    built into the Alpine Asterisk package. ``ext`` is digit-guarded with
+    ``_EXT_RE`` before it is interpolated into the Endpoint, so a CRLF-bearing
+    value can't inject extra AMI lines. Returns True on Success.
     """
     if not _EXT_RE.fullmatch(ext or ""):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(
         [
-            "Action: MWIUpdate",
-            f"Mailbox: {ext}@default",
-            f"NewMessages: {'1' if on else '0'}",
-            "OldMessages: 0",
+            "Action: PJSIPNotify",
+            f"Endpoint: {ext}",
+            f"Option: switchboard-mwi-{'on' if on else 'off'}",
         ],
         single_response=True,
         action_id=action_id,
