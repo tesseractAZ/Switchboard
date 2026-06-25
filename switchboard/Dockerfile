@@ -53,6 +53,23 @@ RUN apk add --no-cache asterisk-sounds-moh 2>/dev/null || true; \
       || apk add --no-cache asterisk-codec-opus 2>/dev/null \
       || echo "NOTE: no prebuilt Opus codec package; Opus disabled at runtime"
 
+# espeak-ng: tiny offline text-to-speech, used by the home-automation voice
+# operator to SPEAK dynamic strings (light names, on/off state, the room/light
+# lists) that have no canned prompt and that Asterisk's SayUnixTime/SayNumber
+# can't produce. Best-effort — if it's unavailable the automation flow degrades
+# to canned prompts only (see switchboard-tts, which no-ops gracefully).
+RUN apk add --no-cache espeak-ng 2>/dev/null \
+      || echo "NOTE: espeak-ng unavailable; home-automation voice readback limited to canned prompts"
+
+# Asterisk modules for the operator page-all intercom (ConfBridge / Page) and
+# message-waiting stutter tone (res_mwi_external). PJSIP, app_confbridge,
+# app_page and res_mwi_external all ship inside the main `asterisk` package on
+# Alpine 21; these explicit best-effort pulls are belt-and-suspenders for any
+# release that splits them out, and never fail the build.
+RUN for p in asterisk-page asterisk-confbridge asterisk-mwi-external; do \
+        apk add --no-cache "$p" 2>/dev/null || true; \
+    done; true
+
 # Asterisk core English sound files (digits + time words) — needed by
 # SayUnixTime / SayNumber for the talking clock and wake-up calls. µ-law matches
 # the analog FXS path. Best-effort: a download hiccup must not fail the whole
@@ -74,8 +91,11 @@ COPY rootfs /
 
 RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /usr/bin/switchboard-stt \
+    && chmod +x /usr/bin/switchboard-tts \
+    && chmod +x /usr/bin/switchboard-mwi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-operator.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-wakeup.agi \
+    && chmod +x /var/lib/asterisk/agi-bin/switchboard-automation.agi \
     && chmod +x /usr/share/switchboard/console/console.py \
     && chmod +x /usr/share/switchboard/console-web/server.py \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \

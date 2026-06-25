@@ -33,6 +33,12 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 sys.path.insert(0, "/usr/share/switchboard/operator")
 import match as matcher  # noqa: E402  (shared, unit-tested room matcher)
+# Pure automation-intent gate. Best-effort: rooms mode still resolves rooms even
+# if this can't import (it just won't short-circuit to the automation flow).
+try:
+    import lights_match  # noqa: E402
+except Exception:  # noqa: BLE001
+    lights_match = None
 
 WHISPER_BIN = os.environ.get("SW_WHISPER_BIN", "/usr/bin/whisper-cli")
 WHISPER_MODEL = os.environ.get("SW_WHISPER_MODEL", "/usr/share/whisper/model.bin")
@@ -143,11 +149,44 @@ _TIME_PROMPT = ("A time of day, for example: seven a.m., six thirty, "
                 "quarter past seven, ten forty five, half past six, noon, midnight.")
 
 
+def resolve_rooms_text(text: str, rooms: list, synonyms: dict | None = None,
+                       threshold: float = 0.6) -> str:
+    """Pure rooms-mode decision (importable for tests, no I/O).
+
+    A single transcript decides between the home-automation flow and a room
+    connection so the operator only runs whisper ONCE:
+
+      * a clear automation/lights request  -> the literal token 'automation'
+      * a recognized room name             -> that room's extension
+      * anything else                      -> '' (no match)
+
+    The automation check is intentionally conservative (lights_match keeps it so)
+    so an ordinary room name like "garage"/"office" still resolves to its ext."""
+    if lights_match is not None and lights_match.is_automation_request(text):
+        return "automation"
+    ext, _score, _reason = matcher.match(text, rooms, synonyms or {}, threshold)
+    return ext or ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="infile", required=True)
-    ap.add_argument("--mode", default="rooms", choices=["rooms", "time"])
+    ap.add_argument("--mode", default="rooms", choices=["rooms", "time", "transcribe"])
+    # Optional whisper --prompt bias (space-separated words) — used by the
+    # home-automation flow to seed light/area vocabulary for better recognition.
+    ap.add_argument("--bias", default="")
     args = ap.parse_args()
+
+    if args.mode == "transcribe":
+        # Raw transcript only — no room/time resolution. The home-automation AGI
+        # matches the text itself (area/light/intent) via lights_match.py. The
+        # optional --bias seeds whisper's --prompt with the live light/area names.
+        prompt = " ".join(args.bias.split())
+        text = _recording_to_text(args.infile, prompt)
+        log(f"transcribe heard={text!r}")
+        if text:
+            print(text)
+        return 0
 
     if args.mode == "time":
         # Recognize a spoken time -> "HH:MM" (24h) for the wake-up flow.
@@ -181,10 +220,16 @@ def main() -> int:
     prompt = "Rooms: " + ", ".join(v for v in vocab if v) + "."
 
     text = _recording_to_text(args.infile, prompt)
-    ext, score, reason = matcher.match(text, rooms, synonyms, threshold)
-    log(f"heard={text!r} -> ext={ext} ({reason}, {score})")
-    if ext:
-        print(ext)
+    # One whisper pass decides automation-vs-room so the operator AGI doesn't have
+    # to transcribe twice: a clear "lights"/"automation" prints the literal token
+    # 'automation'; otherwise we resolve the room extension exactly as before.
+    result = resolve_rooms_text(text, rooms, synonyms, threshold)
+    if result == "automation":
+        log(f"heard={text!r} -> automation")
+    else:
+        log(f"heard={text!r} -> ext={result or None}")
+    if result:
+        print(result)
     return 0
 
 

@@ -16,34 +16,68 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
-
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
 
 # The AMI client lives in a framework-free sibling module so its wire-format
 # parsing can be unit-tested without FastAPI. Ensure this directory is importable
 # regardless of how uvicorn is launched.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/usr/share/switchboard/wakeup")
+
+# FastAPI is optional at *import* time so the pure validation/shaping helpers
+# below (valid_ext, channel_has_crlf, build_lights_payload, parse_wakeup_hhmm,
+# is_light_entity passthrough) can be unit-tested with plain ``python3`` on a box
+# where FastAPI/httpx aren't installed — exactly the constraint the test suite
+# runs under. When FastAPI IS present (the add-on container) the real app and
+# routes are wired up at the bottom of this module; when it's absent, importing
+# this file still succeeds and ``app`` is None.
+try:
+    from fastapi import FastAPI, Request  # noqa: E402
+    from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+    _HAVE_FASTAPI = True
+except ImportError:  # pragma: no cover - exercised only on the test box
+    FastAPI = Request = HTMLResponse = JSONResponse = None  # type: ignore
+    _HAVE_FASTAPI = False
+
 from ami import (  # noqa: E402
     AMIError,
+    connect_extensions,
     get_channels,
     get_contacts,
     get_endpoints,
+    hangup_channel,
     is_registered,
+    page_all,
     ring_extension,
+    set_mwi,
     summarize_calls,
 )
 try:
     import store as wakeup_store  # noqa: E402  (wake-up store; absent in dev)
 except ImportError:  # pragma: no cover
     wakeup_store = None
+try:
+    import timeparse as wakeup_timeparse  # noqa: E402  (spoken-time parser; absent in dev)
+except ImportError:  # pragma: no cover
+    wakeup_timeparse = None
+try:
+    import mwi_store  # noqa: E402  (persistent MWI flags)
+except ImportError:  # pragma: no cover
+    mwi_store = None
+try:
+    import ha_client  # noqa: E402  (Home Assistant lights)
+except ImportError:  # pragma: no cover
+    ha_client = None
 
 OPTIONS_PATH = Path("/data/options.json")
 
-app = FastAPI(title="Switchboard", docs_url=None, redoc_url=None)
+# A room extension is 2-6 digits. Every endpoint that interpolates an ext into an
+# AMI call validates it against BOTH the configured room set AND this regex, so a
+# CRLF-bearing / dial-string value can never reach Asterisk even via a path that
+# skipped the room-set check.
+_EXT_RE = re.compile(r"^[0-9]{2,6}$")
 
 # Home Assistant Ingress proxies every request from the Supervisor's fixed
 # internal IP (172.30.32.2). Because the add-on uses host_network, the port is
@@ -59,12 +93,133 @@ def _client_allowed(host: str) -> bool:
     return host in _ALLOWED_CLIENTS
 
 
-@app.middleware("http")
-async def restrict_to_ingress(request: Request, call_next):
-    client = request.client.host if request.client else ""
-    if not _client_allowed(client):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return await call_next(request)
+class _NoApp:
+    """Stand-in for the FastAPI app when FastAPI isn't installed (the test box).
+
+    Its ``get``/``post``/``middleware`` return an identity decorator so the route
+    *functions* below still define cleanly (and stay importable/testable), but no
+    framework machinery is required. On the real add-on container ``app`` is a
+    genuine FastAPI instance instead."""
+
+    def _decorator(self, *_a, **_k):
+        def wrap(fn):
+            return fn
+        return wrap
+
+    get = post = middleware = _decorator
+
+
+app = FastAPI(title="Switchboard", docs_url=None, redoc_url=None) if _HAVE_FASTAPI else _NoApp()
+
+
+# --------------------------------------------------------------------------- #
+# Pure validation / shaping helpers (no FastAPI, no I/O) — unit-tested directly.
+# Every new POST endpoint funnels its untrusted path/body through one of these
+# before anything reaches an AMI / HA call.
+# --------------------------------------------------------------------------- #
+def valid_ext(ext: str) -> bool:
+    """A 2-6 digit room extension. Rejects empty, non-digit, CRLF-bearing, and
+    over-long values so an ext can never smuggle a dial string or extra AMI line
+    into an Originate/MWI Channel/Mailbox.
+
+    Uses ``fullmatch`` (not ``match``): ``$`` matches *before* a trailing newline,
+    so ``re.match(r"...$", "11\\n")`` would WRONGLY accept ``"11\\n"``. ``fullmatch``
+    anchors at end-of-string and rejects any trailing CR/LF."""
+    return bool(_EXT_RE.fullmatch(ext or ""))
+
+
+def channel_has_crlf(channel: str) -> bool:
+    """True if a channel name carries a CR/LF (AMI-injection) — used to reject a
+    /api/hangup body before it reaches ami.hangup_channel."""
+    return "\r" in (channel or "") or "\n" in (channel or "")
+
+
+def is_light_entity(entity_id: str) -> bool:
+    """Defence-in-depth ``light.*`` guard. Delegates to ha_client's validator
+    when available (single source of truth) and falls back to an identical regex
+    when ha_client can't be imported (the test box), so the guard is testable in
+    isolation."""
+    if ha_client is not None:
+        return bool(ha_client.is_light_entity(entity_id))
+    return bool(re.match(r"^light\.[a-z0-9_]+$", entity_id or ""))
+
+
+def parse_wakeup_hhmm(raw: str):
+    """Normalize a wake-up time from the GUI into canonical "HH:MM" (24h), or
+    None if it can't be understood.
+
+    Accepts both an already-formatted ``HH:MM`` (what the <input type=time> sends)
+    and a free-form spoken-style string ("7:30 am", "quarter past six") by
+    delegating to the shared wakeup timeparse. Always validates the final value
+    so a hand-crafted body like "99:99" or "1:2\r\nevil" is rejected."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    # Reject control characters (CR/LF/etc.) up front: the shared timeparse is
+    # deliberately lenient and would happily extract "07:30" out of a noisy body
+    # like "07:30\r\nevil" — we never want a hand-crafted body with embedded
+    # control bytes to be accepted as a clean time.
+    if any(ord(c) < 0x20 for c in s):
+        return None
+    m = re.fullmatch(r"([0-9]{1,2}):([0-9]{2})", s)
+    if m:
+        h, mn = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mn <= 59:
+            return f"{h:02d}:{mn:02d}"
+        return None
+    if wakeup_timeparse is not None:
+        return wakeup_timeparse.parse(s)
+    return None
+
+
+def configured_room_exts(opts: dict) -> set:
+    """The set of configured room extensions (strings) from the add-on options."""
+    return {str(r.get("ext")) for r in (opts.get("rooms") or []) if r.get("ext") is not None}
+
+
+def channels_by_ext(channels: list) -> dict:
+    """Map each room ext to its active channel name (the longest-running leg, so a
+    room in a real call wins over a momentary ring leg). Powers the per-room
+    "Hang up" button, which needs the Asterisk channel name. Pure."""
+    out: dict[str, str] = {}
+    best: dict[str, int] = {}
+    for ch in channels or []:
+        ext = ch.get("ext", "")
+        name = ch.get("channel", "")
+        if not ext or not name:
+            continue
+        dur = 0
+        try:
+            for p in str(ch.get("duration", "0")).split(":"):
+                dur = dur * 60 + int(p)
+        except (ValueError, TypeError):
+            dur = 0
+        if ext not in best or dur >= best[ext]:
+            best[ext] = dur
+            out[ext] = name
+    return out
+
+
+def build_lights_payload(by_area: dict, available: bool) -> dict:
+    """Shape ha_client.lights_by_area() into the /api/lights response.
+
+    {"areas": {area_label: [{entity_id,name,state}, ...], ...}, "lights_ok": bool}
+    — the empty-string "no area" bucket is surfaced under a friendly label, and
+    only the three UI-facing fields are echoed (never raw HA internals). Pure, so
+    the grouping shape is unit-tested without touching HA."""
+    areas: dict[str, list] = {}
+    for area, lights in (by_area or {}).items():
+        label = area if area else "Other"
+        areas[label] = [
+            {
+                "entity_id": lt.get("entity_id", ""),
+                "name": lt.get("name") or lt.get("entity_id", ""),
+                "state": lt.get("state") or "unknown",
+            }
+            for lt in lights
+            if is_light_entity(str(lt.get("entity_id", "")))
+        ]
+    return {"areas": areas, "lights_ok": bool(available)}
 
 
 def load_options() -> dict:
@@ -96,6 +251,14 @@ def wakeups_list(rooms_by_ext: dict) -> list[dict]:
     return out
 
 
+@app.middleware("http")
+async def restrict_to_ingress(request: Request, call_next):
+    client = request.client.host if request.client else ""
+    if not _client_allowed(client):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return await call_next(request)
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -124,6 +287,17 @@ def api_status() -> JSONResponse:
     rooms_by_ext = {ext: (cfg.get("name") or ext) for ext, cfg in rooms_cfg.items()}
     summary = summarize_calls(channels, rooms_by_ext)
     by_ext = summary["by_ext"]
+    # ext -> active channel name, so the "Hang up" button can target it.
+    chan_by_ext = channels_by_ext(channels)
+
+    # Which rooms have a "you have a message / call the operator" stutter-tone
+    # flag set (persistent UI source of truth; the badge mirrors it).
+    mwi_set = set()
+    if mwi_store is not None:
+        try:
+            mwi_set = set(mwi_store.exts())
+        except Exception:  # never let a store hiccup break /api/status
+            mwi_set = set()
 
     # Registration is derived from DeviceState (the signal Asterisk already
     # aggregates from contact reachability); the contact row is enrichment
@@ -153,6 +327,8 @@ def api_status() -> JSONResponse:
                 # "Talking" and the other party ("Office", "Outside", "Operator").
                 "call_state": call.get("state", ""),
                 "call_peer": call.get("peer", ""),
+                "channel": chan_by_ext.get(name, ""),
+                "mwi": name in mwi_set,
             }
         )
     for ext, cfg in rooms_cfg.items():
@@ -167,6 +343,8 @@ def api_status() -> JSONResponse:
                     "rtt": "",
                     "call_state": "",
                     "call_peer": "",
+                    "channel": "",
+                    "mwi": ext in mwi_set,
                 }
             )
     rooms.sort(key=lambda r: r["ext"])
@@ -219,6 +397,190 @@ def api_wakeup_cancel(ext: str) -> JSONResponse:
     return JSONResponse({"ok": ok})
 
 
+@app.post("/api/connect/{a}/{b}")
+def api_connect(a: str, b: str) -> JSONResponse:
+    """Patch a call between two CONFIGURED room phones (operator "connect").
+
+    Both exts must be in the configured room set; ami.connect_extensions enforces
+    that again (with the digit guard) so the originate can only match the room
+    ``_X.`` pattern, never the trunk's outbound pattern. Ingress-only."""
+    opts = load_options()
+    known = configured_room_exts(opts)
+    if a not in known or b not in known:
+        return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
+    if a == b:
+        return JSONResponse({"ok": False, "error": "same extension"}, status_code=400)
+    try:
+        ok = connect_extensions(a, b, known)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] connect {a}->{b} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
+
+
+@app.post("/api/hangup")
+async def api_hangup(request: Request) -> JSONResponse:
+    """Hang up one active channel by its Asterisk channel name.
+
+    The channel string is supplied by /api/status (Asterisk-derived), but we
+    reject a CRLF-bearing value defensively before it reaches the AMI Hangup so
+    it can't inject extra manager lines. Ingress-only."""
+    body = await _json_body(request)
+    channel = str(body.get("channel") or "")
+    if not channel or channel_has_crlf(channel):
+        return JSONResponse({"ok": False, "error": "bad channel"}, status_code=400)
+    try:
+        ok = hangup_channel(channel)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] hangup failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
+
+
+@app.post("/api/wakeup/{ext}/set")
+async def api_wakeup_set(ext: str, request: Request) -> JSONResponse:
+    """Schedule (or replace) a room's wake-up. Body: {"hhmm": ...} or {"time": ...}.
+
+    The ext is validated against the configured room set; the time is parsed and
+    re-validated via the shared timeparse/store so a hand-crafted "99:99" or a
+    CRLF-bearing value is rejected. Ingress-only."""
+    if wakeup_store is None:
+        return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503)
+    opts = load_options()
+    if ext not in configured_room_exts(opts):
+        return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
+    body = await _json_body(request)
+    raw = body.get("hhmm")
+    if raw is None:
+        raw = body.get("time")
+    hhmm = parse_wakeup_hhmm(str(raw or ""))
+    if not hhmm:
+        return JSONResponse({"ok": False, "error": "bad time"}, status_code=400)
+    try:
+        entry = wakeup_store.set_wakeup(ext, hhmm)
+    except Exception as exc:
+        print(f"[switchboard-webui] wakeup set {ext} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "error"}, status_code=500)
+    return JSONResponse({"ok": True, "hhmm": entry.get("hhmm", hhmm)})
+
+
+@app.post("/api/page")
+def api_page() -> JSONResponse:
+    """Page every REGISTERED room phone at once (intercom). Ingress-only.
+
+    Only registered rooms are paged (an unreachable handset would just ring out),
+    and ami.page_all digit-guards each ext before it reaches an Originate."""
+    opts = load_options()
+    known = configured_room_exts(opts)
+    targets = sorted(ext for ext in _registered_exts() if ext in known) or sorted(known)
+    if not targets:
+        return JSONResponse({"ok": False, "error": "no rooms"}, status_code=404)
+    try:
+        ok = page_all(targets)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] page failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok, "count": len(targets)})
+
+
+@app.post("/api/mwi/{ext}/{state}")
+def api_mwi(ext: str, state: str) -> JSONResponse:
+    """Set or clear a room's message-waiting indicator (stutter dial tone).
+
+    Validates the ext against BOTH the configured room set and the digit regex,
+    and the state against on|off, before touching Asterisk. Updates the AMI MWI
+    and the persistent UI flag with an "optimistic CLEAR, honest SET" rule:
+    persist the flag when the AMI call succeeded OR when clearing, but when a SET
+    is rejected by Asterisk leave the badge OFF and report the failure — so the ✉
+    badge never claims a stutter tone is playing when the tone was never set.
+    Ingress-only."""
+    opts = load_options()
+    if ext not in configured_room_exts(opts) or not valid_ext(ext):
+        return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
+    if state not in ("on", "off"):
+        return JSONResponse({"ok": False, "error": "bad state"}, status_code=400)
+    on = state == "on"
+    try:
+        ok = set_mwi(ext, on)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] mwi {ext} {state} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    # Optimistic CLEAR, honest SET: persist the flag when AMI accepted it, or
+    # always when clearing (on=False — a failed clear should still drop the
+    # badge). When a SET is REFUSED (ok is False), do NOT set the badge: the
+    # stutter tone never started, so claiming it did would be a lie the init
+    # replay would then re-push to Asterisk on the next restart.
+    if ok or not on:
+        if mwi_store is not None:
+            try:
+                mwi_store.set_flag(ext, on)
+            except Exception as exc:
+                print(f"[switchboard-webui] mwi flag {ext} failed: {exc}", flush=True)
+    elif not ok:  # a SET that Asterisk rejected — leave the badge off, report it
+        return JSONResponse({"ok": False, "error": "ami_rejected"}, status_code=502)
+    return JSONResponse({"ok": True, "mwi": on})
+
+
+@app.get("/api/lights")
+def api_lights() -> JSONResponse:
+    """All light entities grouped by HA area, plus a lights_ok reachability flag.
+
+    {"areas": {area: [{entity_id,name,state}]}, "lights_ok": bool}. lights_ok is
+    False (and areas empty) when HA is unreachable, so the UI can say
+    "HA unavailable" rather than render a misleading empty list. Ingress-only."""
+    if ha_client is None:
+        return JSONResponse(build_lights_payload({}, False))
+    try:
+        ok = ha_client.available()
+        by_area = ha_client.lights_by_area() if ok else {}
+    except Exception as exc:
+        print(f"[switchboard-webui] lights fetch failed: {exc}", flush=True)
+        return JSONResponse(build_lights_payload({}, False))
+    return JSONResponse(build_lights_payload(by_area, ok))
+
+
+@app.post("/api/lights/{entity_id}/{state}")
+def api_light_set(entity_id: str, state: str) -> JSONResponse:
+    """Turn one light on/off. The entity must be a real ``light.*`` entity (guard)
+    and the state must be on|off. Ingress-only."""
+    if ha_client is None:
+        return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503)
+    if not is_light_entity(entity_id):
+        return JSONResponse({"ok": False, "error": "not a light"}, status_code=400)
+    if state not in ("on", "off"):
+        return JSONResponse({"ok": False, "error": "bad state"}, status_code=400)
+    try:
+        ok = ha_client.set_light(entity_id, state == "on")
+    except Exception as exc:
+        print(f"[switchboard-webui] light {entity_id} {state} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
+
+
+async def _json_body(request: Request) -> dict:
+    """Best-effort JSON body as a dict ({} on empty / malformed)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _registered_exts() -> list[str]:
+    """The room exts Asterisk currently reports as registered (DeviceState online).
+    Empty if AMI is unreachable — page falls back to all configured rooms."""
+    try:
+        eps = get_endpoints()
+    except (AMIError, OSError):
+        return []
+    out = []
+    for ep in eps:
+        name = ep.get("name", "")
+        if name and name != "trunk" and is_registered(ep.get("state", "")):
+            out.append(name)
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
@@ -253,6 +615,32 @@ INDEX_HTML = """<!doctype html>
              background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
   .ringbtn:hover:not(:disabled) { background: var(--btnh, #e8eaed); }
   .ringbtn:disabled { opacity: .5; cursor: default; }
+  /* Per-card action row: small buttons sharing a line under the status pill. */
+  .actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; }
+  .actions .ringbtn { margin-top: 0; width: auto; flex: 1 1 auto; min-width: 0; padding: .35rem .4rem; }
+  .actions .iconbtn { flex: 0 0 auto; width: auto; }
+  .mwibadge { font-size: .9rem; line-height: 1; margin-left: .35rem; }
+  .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
+  .wakerow { display: flex; gap: .35rem; margin-top: .45rem; }
+  .wakerow input[type=time] { flex: 1 1 auto; min-width: 0; font: inherit; font-size: .75rem;
+             padding: .3rem .4rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
+             background: var(--card, #fff); color: inherit; }
+  .toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  .toolbar .ringbtn { width: auto; margin-top: 0; padding: .45rem .8rem; font-size: .82rem; }
+  .lightgrid { display: grid; gap: .6rem;
+          grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .areacard { background: var(--card, #fff); border-radius: 12px; padding: .8rem .9rem;
+          box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .areacard h3 { font-size: .8rem; margin: 0 0 .5rem; color: #888; text-transform: uppercase;
+          letter-spacing: .03em; }
+  .lightrow { display: flex; justify-content: space-between; align-items: center;
+          gap: .5rem; padding: .25rem 0; }
+  .lightrow .lname { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toggle { font-size: .72rem; font-weight: 600; padding: .25rem .6rem; border-radius: 999px;
+          border: 1px solid var(--bd, #d4d7dd); background: var(--btn, #f3f4f6); color: inherit;
+          cursor: pointer; flex: 0 0 auto; }
+  .toggle.on { background: #e3f7e8; color: #1a7f37; border-color: #a8e0b8; }
+  .toggle:disabled { opacity: .5; cursor: default; }
   section { margin-top: 1.5rem; }
   .muted { color: #999; font-size: .85rem; }
   .calllist { list-style: none; padding: 0; margin: 0; }
@@ -277,6 +665,11 @@ INDEX_HTML = """<!doctype html>
   <div class="sub" id="sub">Loading…</div>
   <div id="banner"></div>
 
+  <div class="toolbar">
+    <button class="ringbtn" id="pageall">📢 Page all</button>
+    <span class="muted" id="connecthint"></span>
+  </div>
+
   <div class="grid" id="rooms"></div>
 
   <section>
@@ -287,6 +680,11 @@ INDEX_HTML = """<!doctype html>
   <section>
     <h2 style="font-size:1rem;">⏰ Wake-up calls</h2>
     <div id="wakeups"><div class="muted">—</div></div>
+  </section>
+
+  <section>
+    <h2 style="font-size:1rem;">💡 Lights</h2>
+    <div id="lights"><div class="muted">—</div></div>
   </section>
 
 <script>
@@ -304,10 +702,31 @@ function fmt12(hhmm) {
   h = h % 12 || 12;
   return h + ':' + m[2] + ' ' + ap;
 }
+// The HH:MM of a room's pending wake-up (for prefilling its <input type=time>),
+// or '' when none is set.
+function pendingHHMM(wakeups, ext) {
+  const w = (wakeups || []).find(x => x.ext === ext);
+  return (w && /^\\d{1,2}:\\d{2}$/.test(w.hhmm || '')) ? w.hhmm : '';
+}
 
 // Keep a "Ringing…" button disabled across the 4s auto-refreshes for ~one ring
 // cycle, so clicking Test ring gives durable feedback.
 const ringingUntil = {};
+
+// Operator "connect" is a two-click gesture: click Connect on room A (arms it),
+// then click Connect on room B to patch them together. connectArm holds A's ext
+// while we wait for the second pick; clicking the armed room again cancels.
+let connectArm = null;
+
+// ext -> active Asterisk channel name (for the Hang up button), refreshed from
+// /api/status each cycle.
+const roomChannels = {};
+
+function updateConnectHint() {
+  const el = document.getElementById('connecthint');
+  if (!el) return;
+  el.textContent = connectArm ? ('Connecting ext ' + connectArm + ' — pick another room…') : '';
+}
 
 async function refresh() {
   try {
@@ -325,6 +744,9 @@ async function refresh() {
       (data.trunk.enabled ? ' · trunk: ' + (data.trunk.provider || 'on') : ' · no trunk');
 
     const now = Date.now();
+    // Refresh the ext->channel map (used by the Hang up button).
+    for (const k in roomChannels) delete roomChannels[k];
+    data.rooms.forEach(r => { if (r.channel) roomChannels[r.ext] = r.channel; });
     const grid = document.getElementById('rooms');
     grid.innerHTML = data.rooms.map(r => {
       // "Not in use" means registered-and-idle (green) — only an active call
@@ -338,15 +760,47 @@ async function refresh() {
       else { cls = 'down'; txt = 'Offline'; }
       // Who this phone is talking to / ringing, when known.
       const conn = r.call_peer ? '<div class="conn">↔ ' + esc(r.call_peer) + '</div>' : '';
+      const ex = esc(r.ext);
       const ringing = (ringingUntil[r.ext] || 0) > now;
-      const dis = (!r.registered || ringing) ? ' disabled' : '';
-      const label = ringing ? 'Ringing…' : '🔔 Test ring';
-      const btn = '<button class="ringbtn" data-ext="' + esc(r.ext) + '"' + dis + '>' + label + '</button>';
-      return '<div class="card"><div class="ext">ext ' + esc(r.ext) + '</div>' +
+      const ringDis = (!r.registered || ringing) ? ' disabled' : '';
+      const ringLbl = ringing ? 'Ringing…' : '🔔 Test ring';
+      const ringBtn = '<button class="ringbtn" data-ring="' + ex + '"' + ringDis + '>' + ringLbl + '</button>';
+
+      // Connect: arm this room, then pick another to patch them. The armed card
+      // highlights; offline rooms can't start/receive a patch.
+      const armed = connectArm === r.ext;
+      const connDis = (!r.registered) ? ' disabled' : '';
+      const connLbl = armed ? '✖ Cancel' : '🔗 Connect';
+      const connBtn = '<button class="ringbtn' + (armed ? ' armed' : '') +
+                      '" data-connect="' + ex + '"' + connDis + '>' + connLbl + '</button>';
+
+      // Hang up: only meaningful when this room has an active call leg.
+      const hangBtn = active
+        ? '<button class="ringbtn iconbtn" data-hangup="' + ex + '" title="Hang up">📵</button>' : '';
+
+      // Message-waiting (stutter dial tone): toggle on/off, badge when set.
+      const mwiState = r.mwi ? 'off' : 'on';
+      const mwiTitle = r.mwi ? 'Clear message-waiting' : 'Set message-waiting';
+      const mwiBtn = '<button class="ringbtn iconbtn" data-mwi="' + ex +
+                     '" data-state="' + mwiState + '" title="' + mwiTitle + '">' +
+                     (r.mwi ? '✉ on' : '✉') + '</button>';
+      const mwiBadge = r.mwi ? '<span class="mwibadge" title="message waiting">✉️</span>' : '';
+
+      // Per-room wake-up setter: a small time input + Set. fill the input with
+      // any pending time so it round-trips.
+      const wkVal = esc(pendingHHMM(data.wakeups, r.ext));
+      const wakeRow = '<div class="wakerow">' +
+        '<input type="time" data-waketime="' + ex + '" value="' + wkVal + '">' +
+        '<button class="ringbtn iconbtn" data-wakeset="' + ex + '" title="Set wake-up">⏰ Set</button></div>';
+
+      return '<div class="card"><div class="ext">ext ' + ex + mwiBadge + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
              '<span class="pill ' + cls + '">' + esc(txt) + '</span>' +
-             conn + btn + '</div>';
+             conn +
+             '<div class="actions">' + ringBtn + connBtn + hangBtn + mwiBtn + '</div>' +
+             wakeRow + '</div>';
     }).join('');
+    updateConnectHint();
 
     const callsEl = document.getElementById('calls');
     if (!data.calls || !data.calls.length) {
@@ -377,22 +831,94 @@ async function refresh() {
   }
 }
 
-// Test-ring: delegated click handler survives the innerHTML rebuilds.
+async function post(url) {
+  const res = await fetch(url, {method: 'POST'});
+  let j = {}; try { j = await res.json(); } catch (e) {}
+  if (!res.ok || !j.ok) throw new Error((j && j.error) || ('HTTP ' + res.status));
+  return j;
+}
+async function postJSON(url, body) {
+  const res = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(body)});
+  let j = {}; try { j = await res.json(); } catch (e) {}
+  if (!res.ok || !j.ok) throw new Error((j && j.error) || ('HTTP ' + res.status));
+  return j;
+}
+function flash(btn, msg) {
+  const prev = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => { if (btn.textContent === msg) btn.textContent = prev; }, 1600);
+}
+
+// All per-room actions are delegated off the (rebuilt-every-refresh) grid.
 document.getElementById('rooms').addEventListener('click', async (e) => {
-  const btn = e.target.closest('.ringbtn');
+  const btn = e.target.closest('button');
   if (!btn || btn.disabled) return;
-  const ext = btn.getAttribute('data-ext');
-  btn.disabled = true; btn.textContent = 'Ringing…';
-  ringingUntil[ext] = Date.now() + 9000;
-  try {
-    const res = await fetch('./api/ring/' + encodeURIComponent(ext), {method: 'POST'});
-    const j = await res.json();
-    if (!j.ok) throw new Error(j.error || 'failed');
-  } catch (err) {
-    ringingUntil[ext] = 0;
-    btn.textContent = 'Failed';
-    setTimeout(() => { btn.disabled = false; btn.textContent = '🔔 Test ring'; }, 1800);
+
+  // Test ring.
+  let ext = btn.getAttribute('data-ring');
+  if (ext) {
+    btn.disabled = true; btn.textContent = 'Ringing…';
+    ringingUntil[ext] = Date.now() + 9000;
+    try { await post('./api/ring/' + encodeURIComponent(ext)); }
+    catch (err) { ringingUntil[ext] = 0; btn.disabled = false; flash(btn, 'Failed'); }
+    return;
   }
+
+  // Connect (two-click patch): first click arms, second click on a different
+  // room patches them; clicking the armed room again cancels.
+  ext = btn.getAttribute('data-connect');
+  if (ext) {
+    if (connectArm === null) { connectArm = ext; updateConnectHint(); refresh(); return; }
+    if (connectArm === ext) { connectArm = null; updateConnectHint(); refresh(); return; }
+    const a = connectArm, b = ext; connectArm = null; updateConnectHint();
+    btn.disabled = true; btn.textContent = 'Connecting…';
+    try { await post('./api/connect/' + encodeURIComponent(a) + '/' + encodeURIComponent(b)); refresh(); }
+    catch (err) { btn.disabled = false; flash(btn, 'Failed'); }
+    return;
+  }
+
+  // Hang up an active call leg on this room.
+  ext = btn.getAttribute('data-hangup');
+  if (ext) {
+    const ch = (roomChannels[ext] || '');
+    if (!ch) { flash(btn, '—'); return; }
+    btn.disabled = true;
+    try { await postJSON('./api/hangup', {channel: ch}); refresh(); }
+    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    return;
+  }
+
+  // Message-waiting toggle (data-state is the target on/off).
+  ext = btn.getAttribute('data-mwi');
+  if (ext) {
+    const state = btn.getAttribute('data-state');
+    btn.disabled = true;
+    try { await post('./api/mwi/' + encodeURIComponent(ext) + '/' + state); refresh(); }
+    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    return;
+  }
+
+  // Set a wake-up from this card's time input.
+  ext = btn.getAttribute('data-wakeset');
+  if (ext) {
+    const inp = document.querySelector('input[data-waketime="' + ext + '"]');
+    const hhmm = inp ? inp.value : '';
+    if (!hhmm) { flash(btn, 'pick a time'); return; }
+    btn.disabled = true;
+    try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/set', {hhmm: hhmm}); refresh(); }
+    catch (err) { btn.disabled = false; flash(btn, 'Failed'); }
+    return;
+  }
+});
+
+// Page all: one click intercoms every registered room.
+document.getElementById('pageall').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = 'Paging…';
+  try { await post('./api/page'); btn.textContent = '📢 Paging…'; }
+  catch (err) { flash(btn, 'Failed'); }
+  finally { setTimeout(() => { btn.disabled = false; btn.textContent = prev; }, 2500); }
 });
 
 // Cancel a wake-up (delegated; the section is rebuilt each refresh).
@@ -407,8 +933,52 @@ document.getElementById('wakeups').addEventListener('click', async (e) => {
   } catch (err) { btn.disabled = false; btn.textContent = 'Cancel'; }
 });
 
+// ---- Lights (separate endpoint + cadence; a slow HA call must not stall the
+// fast PBX status refresh). Optimistic toggle on click, reconciled on refresh.
+async function refreshLights() {
+  const el = document.getElementById('lights');
+  let data;
+  try {
+    const res = await fetch('./api/lights', {cache: 'no-store'});
+    data = await res.json();
+  } catch (e) { el.innerHTML = '<div class="muted">Lights unavailable.</div>'; return; }
+  if (!data.lights_ok) { el.innerHTML = '<div class="muted">Home Assistant unavailable.</div>'; return; }
+  const areas = data.areas || {};
+  const names = Object.keys(areas).sort();
+  if (!names.length) { el.innerHTML = '<div class="muted">No light entities found.</div>'; return; }
+  el.innerHTML = '<div class="lightgrid">' + names.map(area =>
+    '<div class="areacard"><h3>' + esc(area) + '</h3>' +
+    (areas[area] || []).map(lt => {
+      const on = (lt.state || '').toLowerCase() === 'on';
+      const target = on ? 'off' : 'on';
+      return '<div class="lightrow"><span class="lname" title="' + esc(lt.entity_id) + '">' +
+             esc(lt.name) + '</span>' +
+             '<button class="toggle' + (on ? ' on' : '') + '" data-light="' + esc(lt.entity_id) +
+             '" data-target="' + target + '">' + (on ? 'On' : 'Off') + '</button></div>';
+    }).join('') + '</div>'
+  ).join('') + '</div>';
+}
+
+document.getElementById('lights').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-light]');
+  if (!btn || btn.disabled) return;
+  const id = btn.getAttribute('data-light');
+  const target = btn.getAttribute('data-target');
+  // Optimistic flip so the UI feels instant; reconcile from HA on next refresh.
+  const wantOn = target === 'on';
+  btn.disabled = true;
+  btn.classList.toggle('on', wantOn);
+  btn.textContent = wantOn ? 'On' : 'Off';
+  btn.setAttribute('data-target', wantOn ? 'off' : 'on');
+  try { await post('./api/lights/' + encodeURIComponent(id) + '/' + target); }
+  catch (err) { flash(btn, '✖'); }
+  finally { btn.disabled = false; setTimeout(refreshLights, 600); }
+});
+
 refresh();
+refreshLights();
 setInterval(refresh, 4000);
+setInterval(refreshLights, 15000);
 </script>
 </body>
 </html>

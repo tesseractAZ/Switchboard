@@ -1,0 +1,141 @@
+#!/usr/bin/python3
+"""Switchboard offline text-to-speech — speak dynamic strings on the phone line.
+
+The home-automation voice operator must say things that have no canned prompt and
+that Asterisk's SayUnixTime/SayNumber can't produce: light names, on/off state,
+the room/light lists. There's no cloud TTS on this box, so we use **espeak-ng**
+(tiny, offline, musl-friendly) and resample its output to the 8 kHz mono the
+analog FXS path wants, with the stdlib only (audioop, linear fallback) — the same
+approach switchboard-stt uses going the other way.
+
+    switchboard-tts "Kitchen Lights are on" /tmp/sw-tts-123
+
+writes /tmp/sw-tts-123.wav (8 kHz, 16-bit, mono). The dialplan then plays it with
+Playback(/tmp/sw-tts-123). Exit non-zero (and write nothing) if espeak-ng is
+missing or fails, so the AGI can fall back to a canned prompt instead of silence.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import shutil
+import subprocess
+import sys
+import warnings
+import wave
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+OUT_RATE = 8000
+ESPEAK_VOICE = os.environ.get("SW_TTS_VOICE", "en-us")
+ESPEAK_WPM = os.environ.get("SW_TTS_WPM", "150")  # words/min — clear on narrowband
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"[switchboard-tts] {msg}\n")
+
+
+def _espeak_bin() -> str | None:
+    for name in ("espeak-ng", "espeak"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _linear_resample(data: bytes, in_rate: int, out_rate: int) -> bytes:
+    """Mono 16-bit nearest/linear resampler — audioop-free fallback."""
+    if in_rate == out_rate or not data:
+        return data
+    import array
+    samples = array.array("h")
+    samples.frombytes(data)
+    n_in = len(samples)
+    n_out = max(1, int(n_in * out_rate / in_rate))
+    out = array.array("h", bytes(2 * n_out))
+    for i in range(n_out):
+        pos = i * in_rate / out_rate
+        j = int(pos)
+        if j + 1 < n_in:
+            frac = pos - j
+            out[i] = int(samples[j] * (1 - frac) + samples[j + 1] * frac)
+        else:
+            out[i] = samples[min(j, n_in - 1)]
+    return out.tobytes()
+
+
+def synthesize(text: str, out_base: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    espeak = _espeak_bin()
+    if not espeak:
+        log("espeak-ng not installed; cannot synthesize")
+        return False
+    try:
+        proc = subprocess.run(
+            [espeak, "-v", ESPEAK_VOICE, "-s", str(ESPEAK_WPM), "--stdout", text],
+            capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"espeak failed: {exc}")
+        return False
+    if proc.returncode != 0 or not proc.stdout:
+        log(f"espeak returned {proc.returncode}, {len(proc.stdout)} bytes")
+        return False
+
+    # espeak-ng emits a RIFF wav (typically 22050 Hz, 16-bit, mono). Resample to
+    # 8 kHz mono for the telephone path.
+    try:
+        with wave.open(io.BytesIO(proc.stdout), "rb") as w:
+            ch, sw, fr = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            data = w.readframes(w.getnframes())
+    except (wave.Error, EOFError, OSError) as exc:
+        log(f"cannot parse espeak wav: {exc}")
+        return False
+
+    if sw != 2:  # we only handle 16-bit; bail rather than emit noise
+        log(f"unexpected sample width {sw}")
+        return False
+    try:
+        import audioop
+        if ch != 1:
+            data = audioop.tomono(data, 2, 0.5, 0.5)
+        if fr != OUT_RATE:
+            data, _ = audioop.ratecv(data, 2, 1, fr, OUT_RATE, None)
+    except Exception as exc:  # noqa: BLE001 — any audioop issue -> linear path
+        log(f"audioop unavailable ({exc}); linear resample")
+        if ch != 1:
+            # crude downmix: take left channel
+            import array
+            a = array.array("h"); a.frombytes(data)
+            data = array.array("h", a[0::ch]).tobytes()
+        data = _linear_resample(data, fr, OUT_RATE)
+
+    out_path = out_base if out_base.endswith(".wav") else out_base + ".wav"
+    tmp = out_path + ".part"
+    try:
+        with wave.open(tmp, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(OUT_RATE)
+            w.writeframes(data)
+        os.replace(tmp, out_path)
+    except (OSError, wave.Error) as exc:
+        log(f"cannot write {out_path}: {exc}")
+        return False
+    return True
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        log('usage: switchboard-tts "text to speak" /path/out (writes /path/out.wav)')
+        return 2
+    text = sys.argv[1]
+    out_base = sys.argv[2]
+    return 0 if synthesize(text, out_base) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

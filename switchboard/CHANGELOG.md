@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.8.0
+
+Operator superpowers — voice home-automation, a full-featured web dashboard,
+a house-wide page intercom, and message-waiting stutter tones.
+
+- **Control your lights by voice.** Dial **0** and say "automation" (or dial
+  **43**) → say a room → say a light → hear its state → say "turn it on/off".
+  It reads the live state and toggles it through Home Assistant. Offline
+  throughout: whisper for listening, **espeak-ng** for speaking the light names,
+  state and lists (no cloud, no canned-prompt-per-light). The add-on now uses
+  the Home Assistant Core API (`homeassistant_api: true`) via the Supervisor
+  proxy with its own token — no separate credential.
+- **The web dashboard caught up to the console.** Each room card can now
+  **connect** two rooms, **hang up** a call, **set/cancel a wake-up**, and toggle
+  a **message-waiting** indicator; plus a **Page all** button and a **Lights**
+  panel (grouped by room, on/off toggles). The operator console (telnet/browser
+  TUI) gained the matching **P** page-all, **M** message, and **L** lights keys.
+- **Page all — a house-wide intercom.** Press **P** in the console / **Page all**
+  in the dashboard (or dial **44** from any phone): every phone rings and whoever
+  answers joins one shared intercom (Asterisk ConfBridge / `Page`).
+- **"You have a message" stutter tone (MWI).** The operator can flag a room
+  (TUI **M** / dashboard ✉) so its phone gives the classic **stutter dial tone** —
+  "call the operator". It **clears automatically** when that room dials 0, and the
+  ✉ badge persists across restarts (re-asserted on startup). Requires the
+  Grandstream's "MWI → stutter tone" setting (see DOCS §; one-time per port).
+- New options: `automation_enabled`/`automation_ext` (43), `page_enabled`/
+  `page_ext` (44), `mwi_enabled`. No change to existing room/trunk config.
+- New shared modules (`ha_client`, `mwi_store`) + CLIs (`switchboard-tts`,
+  `switchboard-mwi`); all pure logic unit-tested (suite 411 → 495 checks).
+  Built as five parallel workstreams, then hardened by a five-dimension
+  adversarial review (10 findings fixed, incl. restart MWI-replay, the offline
+  "Unassigned"-area voice path, and operator-answer latency).
+
 ## 0.7.0
 
 Bigger, centered board — the operator console no longer sits jammed in the

@@ -55,7 +55,11 @@ def test_hostile_inputs() -> None:
 
     ext_conf = sbc.render_extensions(opts)
     check("dial_prefix 99 strips two chars (EXTEN:2)", "${EXTEN:2}" in ext_conf and "_99." in ext_conf)
-    check("caller_id command injection ignored", "System(" not in ext_conf)
+    # The injected CID payload must not produce its System(touch ...) call. (A
+    # legitimate System(/usr/bin/switchboard-mwi clear ...) from the operator
+    # MWI-clear may appear; assert on the actual injection string, not "System(".)
+    check("caller_id command injection ignored",
+          "touch /tmp/pwn" not in ext_conf and "System(touch" not in ext_conf)
 
     rtp = sbc.render_rtp(opts)
     check("junk rtp falls back to defaults", "rtpstart = 10000" in rtp and "rtpend = 10200" in rtp)
@@ -183,6 +187,131 @@ def test_wakeup_dialplan() -> None:
           "exten = 41,1,NoOp(Wake-up call)" not in coll and "[wakeup-deliver]" in coll)
 
 
+def test_mwi_pjsip() -> None:
+    # MWI on by default: every room endpoint gets a mailbox + aggregate NOTIFY,
+    # so the FXS gateway plays stutter dial-tone when switchboard-mwi sets a flag.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
+    check("mwi: each room endpoint has a mailbox",
+          "mailboxes = 11@default" in pj and "mailboxes = 12@default" in pj)
+    check("mwi: aggregate_mwi enabled", pj.count("aggregate_mwi = yes") == 2)
+    # Default-on with the option absent.
+    pj_def = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
+    check("mwi: on by default", "mailboxes = 11@default" in pj_def)
+    # Disabled removes the mailbox lines.
+    pj_off = sbc.render_pjsip({"rooms": rooms, "mwi_enabled": False, "trunk": {}})
+    check("mwi: disabled removes mailbox/aggregate lines",
+          "mailboxes =" not in pj_off and "aggregate_mwi" not in pj_off)
+    check("mwi: disabled still renders the endpoints", "[11](room-endpoint)" in pj_off)
+
+
+def test_confbridge_profiles() -> None:
+    cb = sbc.render_confbridge()
+    check("confbridge: bridge profile present",
+          "[switchboard_bridge]" in cb and "type = bridge" in cb)
+    check("confbridge: user profile present",
+          "[switchboard_user]" in cb and "type = user" in cb)
+    check("confbridge: quiet/no-spam intercom settings",
+          "quiet = yes" in cb and "announce_join_leave = no" in cb)
+
+
+def test_page_intercom() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    on = sbc.render_extensions({"rooms": rooms, "page_enabled": True, "page_ext": "44", "trunk": {}})
+    check("page: [page] ConfBridge intercom context present",
+          "[page]" in on
+          and "ConfBridge(switchboard-page,switchboard_bridge,switchboard_user)" in on)
+    check("page: dial code 44 builds PAGEPEERS from room exts and pages duplex",
+          "exten = 44,1,NoOp(Page)" in on
+          and "Set(PAGEPEERS=PJSIP/11&PJSIP/12)" in on
+          and "Page(${PAGEPEERS},d)" in on)
+    # Default-on.
+    default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("page: on by default at 44 with a [page] context",
+          "exten = 44,1,NoOp(Page)" in default_on and "[page]" in default_on)
+    # Disabled removes both the dial code and the context.
+    off = sbc.render_extensions({"rooms": rooms, "page_enabled": False, "trunk": {}})
+    check("page: disabled removes dial code + [page] context",
+          "exten = 44," not in off and "[page]" not in off)
+    # Collision with a room ext skips the dial code but keeps the [page] target
+    # (ami.page_all still originates rooms into it).
+    coll = sbc.render_extensions({"rooms": rooms, "page_ext": "12", "trunk": {}})
+    check("page: room collision skips dial code, keeps [page] context",
+          "exten = 12,1,NoOp(Page)" not in coll and "[page]" in coll)
+
+
+def test_automation_dialplan() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    on = sbc.render_extensions({"rooms": rooms, "automation_enabled": True,
+                                "automation_ext": "43", "trunk": {}})
+    check("automation: dial code 43 routes to [automation]",
+          "exten = 43,1,NoOp(Automation)" in on and "Goto(automation,s,1)" in on)
+    check("automation: [automation] context runs the AGI",
+          "[automation]" in on and "AGI(switchboard-automation.agi)" in on)
+    # Operator routes a spoken "automation" into the flow (default operator on).
+    check("automation: operator routes OP_RESULT=automation -> Goto(automation,s,1)",
+          'GotoIf($["${OP_RESULT}" = "automation"]?automation,s,1)' in on)
+    # Default-on.
+    default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("automation: on by default at 43", "exten = 43,1,NoOp(Automation)" in default_on)
+    # Disabled removes dial code, context, AND the operator route.
+    off = sbc.render_extensions({"rooms": rooms, "automation_enabled": False, "trunk": {}})
+    check("automation: disabled removes dial code + [automation] + operator route",
+          "exten = 43," not in off and "[automation]" not in off
+          and '"automation"]?automation' not in off)
+    # Collision with a room ext skips the dial code but keeps the context (the
+    # operator can still route a spoken "automation" here).
+    coll = sbc.render_extensions({"rooms": rooms, "automation_ext": "12", "trunk": {}})
+    check("automation: room collision skips dial code, keeps [automation] context",
+          "exten = 12,1,NoOp(Automation)" not in coll and "[automation]" in coll)
+
+
+def test_operator_mwi_clear() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    # The clear is backgrounded ('&') and placed AFTER Answer() so a wedged AMI
+    # can never delay the answered caller (it would block up to the AMI timeout).
+    check("operator: clears the caller's MWI on dialing 0 (backgrounded)",
+          "System(/usr/bin/switchboard-mwi clear ${CALLERID(num)} &)" in on)
+    lines = on.splitlines()
+    answer_i = next(i for i, l in enumerate(lines) if l.strip() == "same = n,Answer()")
+    clear_i = next(i for i, l in enumerate(lines) if "switchboard-mwi clear" in l)
+    check("operator: MWI-clear runs AFTER Answer() (no ring-path latency)",
+          clear_i > answer_i)
+    # The injected CID payload must never appear (security regression guard).
+    check("operator: no injection payload in the MWI-clear path",
+          "System(touch" not in on and "rm -rf" not in on)
+    # Gated on mwi_enabled.
+    off = sbc.render_extensions({"rooms": rooms, "mwi_enabled": False, "trunk": {}})
+    check("operator: no MWI-clear when MWI disabled",
+          "switchboard-mwi clear" not in off and "[operator]" in off)
+
+
+def test_feature_code_collisions() -> None:
+    # page_ext and automation_ext must not collide with each other, '0', the
+    # clock, the wakeup code, or a room ext. First-claimed wins; the loser's
+    # dial code is dropped (but its standalone context stays).
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"},
+                             {"ext": "12", "name": "O", "secret": "s2"}])
+    # Both point at the same code: page (rendered first) takes it.
+    same = sbc.render_extensions({"rooms": rooms, "page_ext": "55",
+                                  "automation_ext": "55", "trunk": {}})
+    check("collision: page claims a shared code, automation dial code dropped",
+          "exten = 55,1,NoOp(Page)" in same and "exten = 55,1,NoOp(Automation)" not in same)
+    # page_ext colliding with the clock (41) is skipped.
+    clk = sbc.render_extensions({"rooms": rooms, "page_ext": "41", "trunk": {}})
+    check("collision: page_ext == clock_ext is skipped",
+          "exten = 41,1,NoOp(Page)" not in clk and "Talking clock" in clk)
+    # automation_ext colliding with the wakeup code (42) is skipped.
+    wk = sbc.render_extensions({"rooms": rooms, "automation_ext": "42", "trunk": {}})
+    check("collision: automation_ext == wakeup_ext is skipped",
+          "exten = 42,1,NoOp(Automation)" not in wk and "Wake-up call" in wk)
+
+
 if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
@@ -192,5 +321,11 @@ if __name__ == "__main__":
     test_talking_clock()
     test_timezone_resolution()
     test_wakeup_dialplan()
+    test_mwi_pjsip()
+    test_confbridge_profiles()
+    test_page_intercom()
+    test_automation_dialplan()
+    test_operator_mwi_clear()
+    test_feature_code_collisions()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

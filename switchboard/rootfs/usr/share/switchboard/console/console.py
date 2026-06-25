@@ -39,6 +39,14 @@ try:
     import timeparse  # noqa: E402
 except ImportError:  # pragma: no cover
     timeparse = None
+try:
+    import mwi_store  # noqa: E402
+except ImportError:  # pragma: no cover
+    mwi_store = None
+try:
+    import ha_client  # noqa: E402
+except ImportError:  # pragma: no cover
+    ha_client = None
 
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 POLL_SECONDS = 1.5
@@ -194,6 +202,14 @@ def build_board(rooms_cfg: dict) -> dict:
         if e in rooms_by_ext and e not in chan_by_ext:
             chan_by_ext[e] = ch.get("channel", "")
 
+    def _mwi(ext: str) -> bool:
+        if mwi_store is None:
+            return False
+        try:
+            return mwi_store.is_set(ext)
+        except Exception:
+            return False
+
     rooms = []
     seen = set()
     for ep in endpoints:
@@ -208,13 +224,14 @@ def build_board(rooms_cfg: dict) -> dict:
         rooms.append({
             "ext": name, "label": rooms_by_ext.get(name, name), "registered": registered,
             "device_state": ds, "call_state": call.get("state", ""), "peer": call.get("peer", ""),
-            "channel": chan_by_ext.get(name, ""),
+            "channel": chan_by_ext.get(name, ""), "mwi": _mwi(name),
         })
     for ext, cfg in rooms_cfg.items():
         if ext not in seen:
             rooms.append({
                 "ext": ext, "label": cfg.get("name") or ext, "registered": False,
                 "device_state": "Unavailable", "call_state": "", "peer": "", "channel": "",
+                "mwi": _mwi(ext),
             })
     rooms.sort(key=lambda r: r["ext"])
 
@@ -327,12 +344,52 @@ def _help_lines(width: int) -> list[str]:
         f"  {b('W')}         Set a wake-up — type a time (7:30, \"quarter past six\",",
         "            0730, noon), then Enter. Esc cancels.",
         f"  {b('X')}         Cancel the selected room's wake-up",
+        f"  {b('M')}         Toggle a message-waiting ✉ (stutter tone) on the room",
+        f"  {b('P')}         Page all — ring every phone into the intercom (confirm)",
+        f"  {b('L')}         Lights — control Home Assistant lights",
         f"  {b('?')}         This help",
         f"  {b('Q')} / {b('Ctrl-C')}  Quit",
+        rule,
+        "  " + color(BOLD, "In the lights view:") + color(GREY, "  ↑↓/jk move · Enter/Space toggle"),
+        "  " + color(GREY, "                     r refresh · Esc back to the board"),
         rule,
         "  " + color(GREY, "Wake-ups place a spoken “good morning” call at the set time."),
         "  " + color(CYAN, "Press any key to return to the board."),
     ]
+
+
+def _lights_lines(sess: dict, width: int) -> list[str]:
+    """The `L` lights view — an area-grouped list of HA lights with a cursor.
+    Pure: reads the list already fetched into sess['lights'] (render never does
+    I/O), so it works the same in tests as it does live."""
+    lights = sess.get("lights", []) or []
+    lsel = max(0, min(sess.get("lsel", 0), max(0, len(lights) - 1)))
+    rule = color(GREY, "─" * min(width, 72))
+    on_n = sum(1 for li in lights if str(li.get("state", "")).lower() == "on")
+    head_right = color(GREY, f"{on_n}/{len(lights)} on ")
+    lines = [
+        f" {BOLD}💡 LIGHTS{RESET}   {head_right}",
+        rule,
+    ]
+    if not lights:
+        lines.append("  " + color(GREY, "— no lights —"))
+    else:
+        last_area = object()  # sentinel so a real "" area still prints once
+        for idx, li in enumerate(lights):
+            area = li.get("area") or ""
+            if area != last_area:
+                last_area = area
+                lines.append("  " + color(BOLD, area or "Unassigned"))
+            cursor = color(CYAN, "▸") if idx == lsel else " "
+            is_on = str(li.get("state", "")).lower() == "on"
+            badge = color(GREEN, "● on") if is_on else color(GREY, "○ off")
+            name = (li.get("name") or li.get("entity_id") or "")[:28].ljust(28)
+            lines.append(f"    {cursor} {name}  {badge}")
+    lines.append(rule)
+    lines.append("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "Enter") + color(GREY, " toggle   ")
+                 + color(BOLD, "r") + color(GREY, " refresh   ")
+                 + color(BOLD, "Esc") + color(GREY, " back   ") + color(BOLD, "Q") + color(GREY, " quit"))
+    return lines
 
 
 def render(board: dict, sess: dict, now: float) -> list[str]:
@@ -342,6 +399,11 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     height = sess.get("h", 24)
     if sess.get("mode") == "help":
         return center(_help_lines(width), width, height)
+    if sess.get("mode") == "lights":
+        lines = _lights_lines(sess, width)
+        msg = sess.get("msg", "")
+        lines.append("  " + color(CYAN, "› " + msg) if (msg and sess.get("msg_until", 0) > now) else "")
+        return center(lines, width, height)
     rooms = board.get("rooms", [])
     calls = board.get("calls", [])
     sel = sess.get("sel", 0)
@@ -368,7 +430,10 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         ext = f"{r['ext']:<3}"
         label = (r.get("label") or r["ext"])[:16].ljust(16)
         status = color(col, f"{glyph} {txt}")
-        row = f"  {cursor} {BOLD}{ext}{RESET}  {label}  {status}{color(GREY, suffix)}"
+        # ✉ marker for a room with a message-waiting flag set. The glyph is a
+        # narrow (width-1) char, so it lines up like any other trailing badge.
+        mwi = color(YELLOW, "  ✉") if r.get("mwi") else ""
+        row = f"  {cursor} {BOLD}{ext}{RESET}  {label}  {status}{color(GREY, suffix)}{mwi}"
         lines.append(row)
 
     lines.append(rule)
@@ -405,15 +470,23 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
         lines.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+    elif sess.get("mode") == "pageconfirm":
+        lines.append("  " + color(YELLOW, "PAGE ALL — ring every phone into the intercom?")
+                     + color(GREY, "   ") + color(BOLD, "[Y]") + color(GREY, " yes    ")
+                     + color(BOLD, "[N]") + color(GREY, " cancel"))
     else:
         bar1 = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
                 + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up"))
         bar2 = ("  " + color(BOLD, "W") + color(GREY, " set wake-up   ")
                 + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
+                + color(BOLD, "M") + color(GREY, " message   ")
+                + color(BOLD, "P") + color(GREY, " page all"))
+        bar3 = ("  " + color(BOLD, "L") + color(GREY, " lights   ")
                 + color(BOLD, "?") + color(GREY, " help   ")
                 + color(BOLD, "Q") + color(GREY, " quit"))
         lines.append(bar1)
         lines.append(bar2)
+        lines.append(bar3)
     msg = sess.get("msg", "")
     if msg and sess.get("msg_until", 0) > now:
         lines.append("  " + color(CYAN, "› " + msg))
@@ -436,17 +509,93 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
     snap = board.get()
     rooms = snap.get("rooms", [])
     n = len(rooms)
-    # Help overlay: any key dismisses it (works even with no rooms).
-    if sess.get("mode") == "help":
-        sess["mode"] = "normal"
-        return
-    if n == 0:
-        return
-    sess["sel"] = max(0, min(sess.get("sel", 0), n - 1))
 
     def flash(m):
         sess["msg"] = m
         sess["msg_until"] = time.time() + 4
+
+    # Help overlay: any key dismisses it (works even with no rooms).
+    if sess.get("mode") == "help":
+        sess["mode"] = "normal"
+        return
+
+    # Page-all confirm — a y/n gate, intercepted before the nav block (like the
+    # wake-up field) so the arrows/hotkeys can't leak through. Works even with no
+    # rooms (an empty page is just a no-op).
+    if sess.get("mode") == "pageconfirm":
+        if key in ("y", "Y", "enter"):
+            sess["mode"] = "normal"
+            exts = [r["ext"] for r in rooms if r.get("registered")]
+            ok = False
+            try:
+                ok = ami.page_all(exts)
+            except (ami.AMIError, OSError) as exc:
+                log(f"page_all failed: {exc}")
+            flash("Paging all rooms into the intercom…" if ok else "Page failed")
+            return
+        if key in ("n", "N", "esc"):
+            sess["mode"] = "normal"
+            flash("Page cancelled")
+            return
+        return  # ignore other keys while confirming
+
+    # Lights view — its own mode, driven entirely off the list fetched into
+    # sess['lights'] (render stays pure; the only I/O is ha_client.set_light /
+    # re-fetch here). Intercepted before nav so j/k drive the light cursor.
+    if sess.get("mode") == "lights":
+        lights = sess.get("lights", []) or []
+        ln = len(lights)
+        if key == "esc":
+            sess["mode"] = "normal"
+            for k in ("lights", "lsel"):
+                sess.pop(k, None)
+            return
+        if ln == 0:
+            if key == "r" and ha_client is not None:
+                try:
+                    sess["lights"] = ha_client.get_lights() or []
+                except Exception as exc:
+                    log(f"lights refresh failed: {exc}")
+                    sess["lights"] = []
+                sess["lsel"] = 0
+            return
+        sess["lsel"] = max(0, min(sess.get("lsel", 0), ln - 1))
+        if key in ("up", "k"):
+            sess["lsel"] = max(0, sess["lsel"] - 1)
+            return
+        if key in ("down", "j"):
+            sess["lsel"] = min(ln - 1, sess["lsel"] + 1)
+            return
+        if key in ("enter", " "):
+            li = lights[sess["lsel"]]
+            is_on = str(li.get("state", "")).lower() == "on"
+            ok = False
+            if ha_client is not None:
+                try:
+                    ok = ha_client.set_light(li.get("entity_id", ""), not is_on)
+                except Exception as exc:
+                    log(f"set_light {li.get('entity_id','')} failed: {exc}")
+            if ok:
+                li["state"] = "off" if is_on else "on"  # optimistic flip
+                flash(f"{li.get('name','Light')} → {'off' if is_on else 'on'}")
+            else:
+                flash("Light control failed")
+            return
+        if key == "r":
+            if ha_client is not None:
+                try:
+                    sess["lights"] = ha_client.get_lights() or []
+                except Exception as exc:
+                    log(f"lights refresh failed: {exc}")
+                    sess["lights"] = []
+            sess["lsel"] = max(0, min(sess.get("lsel", 0), max(0, len(sess.get("lights", [])) - 1)))
+            flash("Lights refreshed")
+            return
+        return  # ignore other keys in the lights view
+
+    if n == 0:
+        return
+    sess["sel"] = max(0, min(sess.get("sel", 0), n - 1))
 
     # Wake-up text entry — the TUI's one typed field. Capture EVERY key as text
     # or editing, so the room hotkeys (r/c/h/x) and nav (j/k) are typed
@@ -579,6 +728,60 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
         except Exception:
             seed = ""
         sess["wakeup_buf"] = seed
+        return
+    if key in ("m", "M"):
+        # Toggle the room's message-waiting indicator (stutter tone) with an
+        # "optimistic CLEAR, honest SET" rule: only persist the badge for a SET
+        # when Asterisk actually accepted it, so the ✉ never claims a stutter
+        # tone is playing when the tone never started. A CLEAR always drops the
+        # badge regardless.
+        if mwi_store is None:
+            return
+        ext = room["ext"]
+        try:
+            was_set = mwi_store.is_set(ext)
+        except Exception as exc:
+            log(f"mwi read {ext} failed: {exc}")
+            flash("Message toggle failed")
+            return
+        new_on = not was_set
+        try:
+            ok = ami.set_mwi(ext, new_on)
+        except (ami.AMIError, OSError) as exc:
+            log(f"set_mwi {ext} failed: {exc}")
+            ok = False
+        # Honest SET: a refused SET leaves the badge off and reports the failure.
+        if new_on and not ok:
+            flash("Message set failed (PBX)")
+            return
+        try:
+            mwi_store.set_flag(ext, new_on)
+        except Exception as exc:
+            log(f"mwi store {ext} failed: {exc}")
+            flash("Message toggle failed")
+            return
+        flash(f"Message set for {room['label']} — stutter tone" if new_on
+              else f"Cleared message for {room['label']}")
+        return
+    if key in ("p", "P"):
+        sess["mode"] = "pageconfirm"
+        flash("Page all rooms? Press Y to confirm.")
+        return
+    if key in ("l", "L"):
+        if ha_client is None:
+            flash("Home Assistant unavailable")
+            return
+        try:
+            lights = ha_client.get_lights() or []
+        except Exception as exc:
+            log(f"get_lights failed: {exc}")
+            lights = []
+        if not lights:
+            flash("Home Assistant unavailable")
+            return
+        sess["mode"] = "lights"
+        sess["lights"] = lights
+        sess["lsel"] = 0
         return
     if key == "?":
         sess["mode"] = "help"
