@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+Fix the message-waiting (MWI) stutter tone, found by live testing v0.8.0.
+`MWIUpdate` was rejected because Asterisk's `res_mwi_external` **declines to load
+while `app_voicemail` is loaded** (they both own a mailbox's MWI), and the stock
+autoload loads `app_voicemail`. The add-on now generates `modules.conf` that
+noloads the voicemail apps (we run no voicemail) and explicitly loads
+`res_mwi_external` + `res_mwi_external_ami` (and `app_confbridge`/`app_page` for
+the page intercom). No other behavior change.
+
 ## 0.8.0
 
 Operator superpowers — voice home-automation, a full-featured web dashboard,
