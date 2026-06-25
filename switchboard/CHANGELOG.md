@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0
+
+Set wake-up calls right from the operator console (telnet + browser) — plus a
+help overlay and a live time preview.
+
+- **Set a wake-up in the TUI:** select a room and press **W**, then *type* a
+  time — `7:30`, `quarter past six`, `0730`, `noon`, `nineteen thirty` (the same
+  forgiving parser the dial-42 voice flow uses, so the two paths can never
+  disagree). Enter sets it; the board reads back the 12-hour time and whether
+  it's today or tomorrow. Press **W** on a room that already has a wake-up to
+  edit it (its time is pre-filled); **X** still cancels. Esc aborts with nothing
+  written.
+- **Live preview while typing:** as you type, the prompt shows the parser's
+  reading (`→ 7:30 AM`) so a mistyped time is obvious before you commit.
+- **Help overlay:** press **?** for a one-screen key reference.
+- This is the TUI's first text-entry mode, which needed two small enabling
+  fixes: `parse_input` now recognizes Backspace/Delete (the web terminal sends
+  `0x7f`), and **q**/**Q** only quit from the board — a literal `q` while typing
+  a time (e.g. "quarter") stays text (Ctrl-C is always a hard exit).
+- No new options, services, or dependencies. Wake-ups set in the TUI are
+  delivered by the existing scheduler exactly like voice-set ones.
+
 ## 0.5.0
 
 Operator console in the browser — a sidebar web terminal.

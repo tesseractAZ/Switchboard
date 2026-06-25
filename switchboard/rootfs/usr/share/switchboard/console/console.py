@@ -21,6 +21,7 @@ import socketserver
 import sys
 import threading
 import time
+from datetime import date
 
 # Reuse the AMI engine that backs the web dashboard.
 sys.path.insert(0, "/usr/share/switchboard/webui")
@@ -32,6 +33,10 @@ try:
     import store as wakeup_store  # noqa: E402
 except ImportError:  # pragma: no cover
     wakeup_store = None
+try:
+    import timeparse  # noqa: E402
+except ImportError:  # pragma: no cover
+    timeparse = None
 
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 POLL_SECONDS = 1.5
@@ -144,6 +149,10 @@ def parse_input(buf: bytes):
             events.append(("key", "ctrl-c"))
             i += 1
             continue
+        if b in (8, 127):  # Backspace / Delete (xterm sends 0x7f; raw telnet 0x08)
+            events.append(("key", "backspace"))
+            i += 1
+            continue
         if 32 <= b < 127:
             events.append(("key", chr(b)))
             i += 1
@@ -230,6 +239,12 @@ def fmt12(hhmm: str) -> str:
     return f"{(h % 12) or 12}:{m:02d} {ap}"
 
 
+def wakeup_when(target_epoch: float, now: float) -> str:
+    """'today' or 'tomorrow' for a wake-up, by local-date comparison of its
+    next-occurrence epoch against now (consistent with store.next_epoch's roll)."""
+    return "tomorrow" if date.fromtimestamp(target_epoch) != date.fromtimestamp(now) else "today"
+
+
 class Board:
     def __init__(self):
         self._lock = threading.Lock()
@@ -270,10 +285,34 @@ def _room_status(room: dict):
     return "●", GREEN, "Registered", ""
 
 
+def _help_lines(width: int) -> list[str]:
+    """The `?` help overlay — a one-screen key reference, dismissed by any key."""
+    rule = color(GREY, "─" * min(width, 72))
+    b = lambda s: color(BOLD, s)  # noqa: E731 (tiny local alias for the key glyphs)
+    return [
+        f" {BOLD}🔌 SWITCHBOARD OPERATOR — HELP{RESET}",
+        rule,
+        f"  {b('↑ ↓')} / {b('j k')}   Move the selection between rooms",
+        f"  {b('R')}         Ring the selected room (a short test ring)",
+        f"  {b('C')}         Connect — then pick another room and press Enter to patch",
+        f"  {b('H')}         Hang up the selected room's active call",
+        f"  {b('W')}         Set a wake-up — type a time (7:30, \"quarter past six\",",
+        "            0730, noon), then Enter. Esc cancels.",
+        f"  {b('X')}         Cancel the selected room's wake-up",
+        f"  {b('?')}         This help",
+        f"  {b('Q')} / {b('Ctrl-C')}  Quit",
+        rule,
+        "  " + color(GREY, "Wake-ups place a spoken “good morning” call at the set time."),
+        "  " + color(CYAN, "Press any key to return to the board."),
+    ]
+
+
 def render(board: dict, sess: dict, now: float) -> list[str]:
     """Return the screen as a list of plain+ANSI lines. CLEAR_EOL per line means
     we don't pad to full width; content is kept within it."""
     width = sess.get("w", 80)
+    if sess.get("mode") == "help":
+        return _help_lines(width)
     rooms = board.get("rooms", [])
     calls = board.get("calls", [])
     sel = sess.get("sel", 0)
@@ -325,15 +364,27 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             lines.append(f"    ⏰  {w.get('label','')}   " + color(GREY, fmt12(w.get("hhmm", ""))))
 
     lines.append(rule)
-    if sess.get("mode") == "connect":
+    if sess.get("mode") == "wakeup":
+        label = sess.get("wakeup_label", "?")
+        buf = sess.get("wakeup_buf", "")
+        hhmm = timeparse.parse(buf) if (timeparse is not None and buf) else None
+        # Live preview: show the (forgiving) parser's reading before committing —
+        # the same parse()+fmt12() the commit path uses, so they can't disagree.
+        preview = color(GREY, f"   → {fmt12(hhmm)}") if hhmm else ""
+        lines.append("  " + color(YELLOW, f"SET WAKE-UP {label}:  {buf}█") + preview)
+        lines.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · ⌫ deletes"))
+    elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
         lines.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
     else:
-        bar = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
-               + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up   ")
-               + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
-               + color(BOLD, "Q") + color(GREY, " quit"))
-        lines.append(bar)
+        bar1 = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
+                + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up"))
+        bar2 = ("  " + color(BOLD, "W") + color(GREY, " set wake-up   ")
+                + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
+                + color(BOLD, "?") + color(GREY, " help   ")
+                + color(BOLD, "Q") + color(GREY, " quit"))
+        lines.append(bar1)
+        lines.append(bar2)
     msg = sess.get("msg", "")
     if msg and sess.get("msg_until", 0) > now:
         lines.append("  " + color(CYAN, "› " + msg))
@@ -356,6 +407,10 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
     snap = board.get()
     rooms = snap.get("rooms", [])
     n = len(rooms)
+    # Help overlay: any key dismisses it (works even with no rooms).
+    if sess.get("mode") == "help":
+        sess["mode"] = "normal"
+        return
     if n == 0:
         return
     sess["sel"] = max(0, min(sess.get("sel", 0), n - 1))
@@ -363,6 +418,49 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
     def flash(m):
         sess["msg"] = m
         sess["msg_until"] = time.time() + 4
+
+    # Wake-up text entry — the TUI's one typed field. Capture EVERY key as text
+    # or editing, so the room hotkeys (r/c/h/x) and nav (j/k) are typed
+    # literally. Must precede the nav block below (unlike connect mode, which
+    # deliberately reuses the arrows).
+    if sess.get("mode") == "wakeup":
+        if key == "esc":
+            sess["mode"] = "normal"
+            for k in ("wakeup_ext", "wakeup_label", "wakeup_buf"):
+                sess.pop(k, None)
+            flash("Wake-up cancelled")
+            return
+        if key == "backspace":
+            sess["wakeup_buf"] = sess.get("wakeup_buf", "")[:-1]
+            return
+        if key == "enter":
+            buf = sess.get("wakeup_buf", "")
+            hhmm = timeparse.parse(buf) if timeparse is not None else None
+            if hhmm is None:
+                flash('Didn\'t catch a time — try 7:30 or "quarter past six"')
+                return  # stay in wakeup mode, buffer intact so they can fix it
+            ext = sess.get("wakeup_ext", "")
+            label = sess.get("wakeup_label", ext)
+            try:
+                entry = wakeup_store.set_wakeup(ext, hhmm)
+            except Exception as exc:
+                log(f"wakeup set {ext} failed: {exc}")
+                sess["mode"] = "normal"
+                for k in ("wakeup_ext", "wakeup_label", "wakeup_buf"):
+                    sess.pop(k, None)
+                flash("Set wake-up failed")
+                return
+            tgt = entry.get("target_epoch", time.time())
+            flash(f"Wake-up for {label} at {fmt12(hhmm)} {wakeup_when(tgt, time.time())}")
+            sess["mode"] = "normal"
+            for k in ("wakeup_ext", "wakeup_label", "wakeup_buf"):
+                sess.pop(k, None)
+            return
+        if len(key) == 1 and 32 <= ord(key) < 127:
+            if len(sess.get("wakeup_buf", "")) < 32:  # bound the buffer (flood guard)
+                sess["wakeup_buf"] = sess.get("wakeup_buf", "") + key
+            return
+        return  # ignore arrows / unknown keys while typing
 
     if key in ("up", "k"):
         sess["sel"] = (sess["sel"] - 1) % n
@@ -436,6 +534,26 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
         flash(f"Cancelled wake-up for {room['label']}" if cancelled
               else f"{room['label']} has no wake-up set")
         return
+    if key in ("w", "W"):
+        if wakeup_store is None or timeparse is None:
+            return  # can't store or can't parse a time — don't enter a dead mode
+        # A wake-up can be set for an OFFLINE room (the scheduler defers delivery
+        # until it's back), so — unlike ring — W is not gated on registration.
+        sess["mode"] = "wakeup"
+        sess["wakeup_ext"] = room["ext"]
+        sess["wakeup_label"] = room["label"]
+        seed = ""
+        try:  # editing an existing wake-up pre-fills its time (set_wakeup replaces)
+            existing = wakeup_store.get(room["ext"])
+            if existing:
+                seed = existing.get("hhmm", "")
+        except Exception:
+            seed = ""
+        sess["wakeup_buf"] = seed
+        return
+    if key == "?":
+        sess["mode"] = "help"
+        return
 
 
 def _frame(lines: list[str]) -> str:
@@ -445,6 +563,14 @@ def _frame(lines: list[str]) -> str:
         if idx < len(lines) - 1:
             body += "\r\n"
     return body + CLEAR_BELOW
+
+
+def is_quit(key: str, mode: str) -> bool:
+    """Whether a keypress should quit the session. Ctrl-C is always a hard exit;
+    q/Q quit from any screen EXCEPT the wake-up text field, where a literal 'q'
+    (as in "quarter past six") must be typed, not treated as a quit. (Connect and
+    help are not text fields, so q/Q still quit there, matching the help card.)"""
+    return key == "ctrl-c" or (key in ("q", "Q") and mode != "wakeup")
 
 
 def serve_session(sock: socket.socket, board: Board, stop: threading.Event, log) -> None:
@@ -492,7 +618,7 @@ def serve_session(sock: socket.socket, board: Board, stop: threading.Event, log)
                     if w > 0 and h > 0:
                         sess["w"] = max(60, min(200, w))
                         sess["h"] = max(16, min(80, h))
-                elif ev[1] in ("ctrl-c", "q", "Q"):
+                elif is_quit(ev[1], sess.get("mode", "normal")):
                     quit_ = True
                     break
                 else:
