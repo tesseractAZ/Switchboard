@@ -140,7 +140,10 @@ def test_talking_clock() -> None:
              {"ext": "12", "name": "Office", "secret": "s2"}]
     on = sbc.render_extensions({"rooms": rooms, "clock_enabled": True, "clock_ext": "41", "trunk": {}})
     check("clock: extension present", "exten = 41,1,NoOp(Talking clock)" in on)
-    check("clock: speaks the time", "SayUnixTime(,,IMp)" in on and "Playback(switchboard/sw-time-is)" in on)
+    check("clock: 'at the tone' style with a pip",
+          "SayUnixTime(,,IMp)" in on
+          and "Playback(switchboard/sw-at-the-tone)" in on
+          and "Playback(switchboard/sw-tone)" in on)
     # Default-on.
     default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
     check("clock: on by default at ext 41", "exten = 41,1,NoOp(Talking clock)" in default_on)
