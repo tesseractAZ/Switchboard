@@ -567,10 +567,20 @@ def set_mwi(ext: str, on: bool) -> bool:
         single_response=True,
         action_id=action_id,
     )
-    return any(
+    ok = any(
         blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
         for blk in blocks
     )
+    if not ok:
+        # Surface WHY Asterisk rejected it — almost always "unknown command"
+        # (res_mwi_external not loaded) or "permission denied" (manager class).
+        msg = next(
+            (blk.get("message", "") for blk in blocks
+             if blk.get("actionid") == action_id and blk.get("response", "").lower() == "error"),
+            "no matching response",
+        )
+        logging.warning("set_mwi %s on=%s rejected by AMI: %s", ext, on, msg)
+    return ok
 
 
 def hangup_channel(channel: str) -> bool:

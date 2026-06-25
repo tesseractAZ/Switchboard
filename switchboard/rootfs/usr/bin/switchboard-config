@@ -786,8 +786,9 @@ def render_manager(ami_user: str, ami_secret: str) -> str:
         # also needs 'system'). The web app constrains Originate to ringing a
         # *known room ext* with a fixed Playback — never Dial — so it can't place
         # an outside call; AMI itself stays loopback-only with a random secret.
-        # 'command' (CLI/RCE) is still deliberately withheld.
-        "write = system,call,reporting,originate\n"
+        # 'message' is needed for res_mwi_external's MWIUpdate (message-waiting).
+        # 'command' (CLI/RCE) is the ONLY class still deliberately withheld.
+        "write = system,call,log,verbose,agent,user,config,dtmf,reporting,cdr,dialplan,originate,aoc,security,message\n"
         "permit = 127.0.0.1/255.255.255.255\n"
     )
 
