@@ -186,12 +186,14 @@ asterisk -rx "core show codecs"
 ## 7. Operator console (telnet + browser)
 
 A live switchboard board an operator can drive: see every room phone's status,
-**ring** a room, **connect** two rooms (patch a call), **hang up**, and cancel a
-wake-up. Two front-ends, same board:
+**ring** a room, **connect** two rooms (patch a call), **hang up**, and **set**
+or cancel a wake-up. Two front-ends, same board:
 
 - **Telnet** — `telnet <ha-host> 2300`. Arrow keys select; `R` ring, `C`
-  connect, `H` hang up, `X` cancel wake-up, `Q` quit. Toggle with
-  `console_enabled`; restrict to the host with `console_bind: 127.0.0.1`.
+  connect, `H` hang up, `W` set a wake-up (type a time — `7:30`, `quarter past
+  six`, `noon` — Enter to set, Esc to cancel), `X` cancel a wake-up, `?` help,
+  `Q` quit. Toggle with `console_enabled`; restrict to the host with
+  `console_bind: 127.0.0.1`.
 - **Browser web terminal** — the same TUI rendered with xterm.js at
   `http://<ha-host>:8100/`. It runs a tiny stdlib HTTP + WebSocket server that
   bridges your browser to the telnet console on the host (WebSocket ⇄ telnet),
