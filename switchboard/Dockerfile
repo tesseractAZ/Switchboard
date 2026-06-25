@@ -77,18 +77,21 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-operator.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-wakeup.agi \
     && chmod +x /usr/share/switchboard/console/console.py \
+    && chmod +x /usr/share/switchboard/console-web/server.py \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \
     && chmod +x /etc/s6-overlay/s6-rc.d/init-switchboard/up \
     && chmod +x /etc/s6-overlay/s6-rc.d/asterisk/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/webui/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/console-web/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/wakeup-scheduler/run
 
 EXPOSE 5060/udp
 EXPOSE 8099/tcp
+EXPOSE 8100/tcp
 
 LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.4.1"
+    io.hass.version="0.5.0"
