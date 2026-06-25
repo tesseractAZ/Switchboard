@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+Operator console in the browser — a sidebar web terminal.
+
+- **New `console-web` service** serves the existing operator console TUI in a
+  browser via **xterm.js** (vendored offline, no CDN). It's a tiny stdlib-only
+  HTTP + WebSocket server (no new pip deps; the add-on is musl) that bridges your
+  browser to the telnet operator console on the host: WebSocket ⇄ telnet,
+  answering/stripping the console's IAC negotiation so only clean ANSI reaches
+  the page, forwarding keystrokes, and mapping the terminal's resize to a telnet
+  NAWS subnegotiation. Reachable on the LAN at `http://<ha-host>:8100/`.
+- **Add it to the Home Assistant sidebar** with a `panel_iframe` ("Switchboard
+  TUI") — see DOCS §7. The Ingress UI (`:8099`) is unchanged.
+- New options `console_web_enabled` (default true) and `console_web_port`
+  (default 8100). The web terminal idles if the operator console is disabled.
+- Same LAN-trust posture as the telnet console (unauthenticated; can
+  ring/connect/hang up). Session-capped, and turn-off-able via the new option.
+
 ## 0.4.1
 
 Old-style speaking clock. The talking clock (dial 41) now announces "At the

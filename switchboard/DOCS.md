@@ -33,6 +33,11 @@ codecs:                  # preference order offered to endpoints (see §8)
   - alaw                 #   G.711 a-law
   - g722                 #   wideband (HD) for IP endpoints
   - opus                 #   Opus (HD) for IP endpoints / softphones
+console_enabled: true    # telnet operator console on the LAN (see §7)
+console_port: 2300       # TCP port for the telnet operator console
+console_bind: "0.0.0.0"  # 127.0.0.1 to restrict the telnet console to the host
+console_web_enabled: true # browser version of the operator console (xterm.js)
+console_web_port: 8100   # TCP port for the console web terminal (LAN)
 rooms:
   - ext: "101"           # extension number you dial (2–6 digits)
     name: Kitchen        # friendly label shown in the UI / caller ID
@@ -178,7 +183,52 @@ asterisk -rx "core show codecs"
 
 ---
 
-## 7. How it's built
+## 7. Operator console (telnet + browser)
+
+A live switchboard board an operator can drive: see every room phone's status,
+**ring** a room, **connect** two rooms (patch a call), **hang up**, and cancel a
+wake-up. Two front-ends, same board:
+
+- **Telnet** — `telnet <ha-host> 2300`. Arrow keys select; `R` ring, `C`
+  connect, `H` hang up, `X` cancel wake-up, `Q` quit. Toggle with
+  `console_enabled`; restrict to the host with `console_bind: 127.0.0.1`.
+- **Browser web terminal** — the same TUI rendered with xterm.js at
+  `http://<ha-host>:8100/`. It runs a tiny stdlib HTTP + WebSocket server that
+  bridges your browser to the telnet console on the host (WebSocket ⇄ telnet),
+  so no telnet client is needed. Toggle with `console_web_enabled` /
+  `console_web_port`. It idles if `console_enabled` is false (nothing to bridge).
+
+### Add it to the Home Assistant sidebar
+
+The web terminal is a plain web page, so add it as a sidebar panel with a
+`panel_iframe` in your HA `configuration.yaml` (replace the host/IP):
+
+```yaml
+panel_iframe:
+  switchboard_tui:
+    title: "Switchboard TUI"
+    icon: mdi:console
+    url: "http://homeassistant.local:8100/"
+    require_admin: true
+```
+
+Restart Home Assistant; **Switchboard TUI** appears in the sidebar.
+
+> **Security:** both the telnet console and the web terminal are
+> **unauthenticated on the LAN** and can ring/connect/hang up phones. The web
+> terminal fronts the same console, but over a *browser* transport the raw telnet
+> port is not — so the WebSocket upgrade is **same-origin-gated** (a cross-origin
+> drive-by web page is rejected), and the bind follows `console_bind` (set
+> `console_web_bind`/`console_bind` to `127.0.0.1` to keep it host-local).
+> Sessions are capped and idle-timed-out. Still: anyone who can reach the port
+> with a same-origin page can drive the board — keep it on a trusted LAN, set
+> `require_admin: true` on the iframe panel, and use `console_*_enabled: false`
+> to turn either off. Home Assistant's own Ingress UI (sidebar **Switchboard**)
+> remains the authenticated management surface.
+
+---
+
+## 8. How it's built
 
 - **Asterisk 21 + PJSIP** is the only moving part; `chan_sip` is not used.
 - The add-on regenerates `/etc/asterisk/{pjsip,extensions,rtp,manager,logger}.conf`
@@ -190,7 +240,7 @@ asterisk -rx "core show codecs"
 
 ---
 
-## 8. Codecs and "HD voice" on analog phones — the honest version
+## 9. Codecs and "HD voice" on analog phones — the honest version
 
 The GXW4216 **V2** genuinely supports wideband codecs (**G.722, Opus**) on its
 SIP side. But "HD" is bounded by the audio *source*:

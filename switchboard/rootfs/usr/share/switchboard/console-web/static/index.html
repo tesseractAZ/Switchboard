@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Switchboard Operator Console</title>
+<!-- Vendored offline (no CDN): xterm 5.3.0. -->
+<link rel="stylesheet" href="./static/xterm.css" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0b0e14;
+    overflow: hidden;
+  }
+  #term {
+    position: absolute;
+    inset: 0;
+    padding: 6px;
+    box-sizing: border-box;
+  }
+  /* Keep the xterm viewport on the dark background even before it paints. */
+  .xterm, .xterm-viewport, .xterm-screen { background: #0b0e14 !important; }
+  #status {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    color: #8a93a6;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: center;
+    pointer-events: none;
+    z-index: 5;
+  }
+</style>
+</head>
+<body>
+  <div id="term"></div>
+  <div id="status">Connecting to the operator console…</div>
+  <script src="./static/xterm.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    var statusEl = document.getElementById("status");
+    function setStatus(text) {
+      if (!text) { statusEl.style.display = "none"; return; }
+      statusEl.style.display = "block";
+      statusEl.textContent = text;
+    }
+
+    var term = new Terminal({
+      convertEol: false,
+      cursorBlink: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
+      fontSize: 14,
+      scrollback: 1000,
+      theme: {
+        background: "#0b0e14",
+        foreground: "#d6deeb",
+        cursor: "#7fdbca"
+      }
+    });
+    term.open(document.getElementById("term"));
+
+    // Measure the terminal cell so we can size cols/rows to the window without
+    // pulling in the fit-addon (keeps the vendored payload to two files).
+    function measureCell() {
+      var probe = document.createElement("span");
+      probe.style.position = "absolute";
+      probe.style.visibility = "hidden";
+      probe.style.whiteSpace = "pre";
+      probe.style.fontFamily = term.options.fontFamily;
+      probe.style.fontSize = term.options.fontSize + "px";
+      probe.textContent = "MMMMMMMMMMMMMMMMMMMM"; // 20 chars
+      document.body.appendChild(probe);
+      var w = probe.getBoundingClientRect().width / 20;
+      var h = probe.getBoundingClientRect().height;
+      document.body.removeChild(probe);
+      return { w: w || 8.4, h: h || 17 };
+    }
+
+    function computeSize() {
+      var cell = measureCell();
+      var host = document.getElementById("term");
+      var padding = 12; // 6px each side from #term
+      var cols = Math.max(20, Math.floor((host.clientWidth - padding) / cell.w));
+      var rows = Math.max(6, Math.floor((host.clientHeight - padding) / cell.h));
+      return { cols: cols, rows: rows };
+    }
+
+    var ws = null;
+    var lastCols = 0, lastRows = 0;
+
+    function applySize(send) {
+      var s = computeSize();
+      if (s.cols === lastCols && s.rows === lastRows) return;
+      lastCols = s.cols;
+      lastRows = s.rows;
+      term.resize(s.cols, s.rows);
+      if (send && ws && ws.readyState === WebSocket.OPEN) {
+        // Tell the server the new dimensions; it maps them to a telnet NAWS
+        // subnegotiation for the operator console.
+        ws.send(JSON.stringify({ type: "resize", cols: s.cols, rows: s.rows }));
+      }
+    }
+
+    function connect() {
+      var proto = (location.protocol === "https:") ? "wss" : "ws";
+      // Relative path so this works no matter the host/port it's served on.
+      var base = location.pathname.replace(/\/+$/, "");
+      var url = proto + "://" + location.host + base + "/ws";
+      setStatus("Connecting to the operator console…");
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = function () {
+        setStatus("");
+        applySize(true);
+      };
+      ws.onmessage = function (ev) {
+        var data = ev.data;
+        if (data instanceof ArrayBuffer) {
+          term.write(new Uint8Array(data));
+        } else {
+          term.write(data);
+        }
+      };
+      ws.onclose = function () {
+        setStatus("Disconnected. Reconnecting in 2s…");
+        ws = null;
+        setTimeout(connect, 2000);
+      };
+      ws.onerror = function () {
+        try { ws.close(); } catch (e) {}
+      };
+    }
+
+    term.onData(function (data) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(data);
+      }
+    });
+
+    var resizeTimer = null;
+    window.addEventListener("resize", function () {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () { applySize(true); }, 120);
+    });
+
+    applySize(false);
+    connect();
+    term.focus();
+  })();
+  </script>
+</body>
+</html>
