@@ -372,7 +372,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         # the same parse()+fmt12() the commit path uses, so they can't disagree.
         preview = color(GREY, f"   → {fmt12(hhmm)}") if hhmm else ""
         lines.append("  " + color(YELLOW, f"SET WAKE-UP {label}:  {buf}█") + preview)
-        lines.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · ⌫ deletes"))
+        lines.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · Backspace deletes"))
     elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
         lines.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
