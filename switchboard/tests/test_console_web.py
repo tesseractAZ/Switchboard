@@ -183,6 +183,26 @@ def test_strip_telnet_partial_held() -> None:
     check("strip: completes across boundary", clean2 == b"y" and rest2 == b"")
 
 
+def test_origin_allowed() -> None:
+    H = "homeassistant.local:8100"
+    # Same-origin (the HA panel_iframe loads the page from this host) -> allowed.
+    check("origin: same-origin allowed",
+          ws.origin_allowed({"host": H, "origin": f"http://{H}"}) is True)
+    # A drive-by page on another origin -> rejected (the key fix).
+    check("origin: cross-origin rejected",
+          ws.origin_allowed({"host": H, "origin": "http://evil.lan"}) is False)
+    check("origin: cross-origin (other port) rejected",
+          ws.origin_allowed({"host": H, "origin": "http://homeassistant.local:9999"}) is False)
+    # Non-browser client (no Origin) -> allowed (same trust as the telnet console).
+    check("origin: missing Origin allowed (CLI)", ws.origin_allowed({"host": H}) is True)
+    # Explicit allowlist entry honored.
+    check("origin: explicit allowlist entry",
+          ws.origin_allowed({"host": H, "origin": "http://dash.lan"}, ["dash.lan"]) is True)
+    # https origin same authority still matches.
+    check("origin: https same-host allowed",
+          ws.origin_allowed({"host": H, "origin": f"https://{H}"}) is True)
+
+
 def main() -> None:
     test_accept_key()
     test_parse_http_headers()
@@ -197,6 +217,7 @@ def main() -> None:
     test_strip_telnet_subnegotiation()
     test_strip_telnet_escaped_ff()
     test_strip_telnet_partial_held()
+    test_origin_allowed()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")

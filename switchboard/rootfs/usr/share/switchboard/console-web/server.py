@@ -15,10 +15,13 @@ A small stdlib-only HTTP + WebSocket server (no pip deps; the add-on is musl):
                        {"type":"resize",...} message becomes a telnet NAWS
                        subnegotiation the console already understands.
 
-This server is reachable on the LAN (host_network). It exposes exactly what the
-operator console already exposes unauthenticated on :2300, on a friendlier
-transport — it adds no new capability. The pure framing/telnet helpers live in
-wsproto.py and are unit-tested; this file is only the socket plumbing.
+This server is reachable on the LAN (host_network). It fronts what the operator
+console already exposes unauthenticated on :2300 — but on a *browser* transport,
+which the raw telnet port is not. To avoid handing a drive-by web page that
+call-control reach, the WS upgrade is same-origin-gated (see wsproto.origin_allowed),
+the bind is configurable (CONSOLE_WEB_BIND, default follows console_bind), sessions
+are capped (MAX_SESSIONS) and browser-idle-timed-out. The pure framing/telnet
+helpers live in wsproto.py and are unit-tested; this file is only socket plumbing.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import socket
 import socketserver
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsproto  # noqa: E402
@@ -46,6 +50,14 @@ CONSOLE_PORT = int(os.environ.get("CONSOLE_WEB_TARGET_PORT", "2300"))
 # Match the operator console's own session cap so the browser front-end can't be
 # used to exhaust console sessions; this is an unauthenticated LAN service.
 MAX_SESSIONS = 5
+
+# Close a browser session that has sent no input for this long. The board redraws
+# ~1 Hz so the bridge is never select-idle — we time out on lack of *browser*
+# input, independently of the console's own idle reclaim.
+IDLE_SECONDS = 900
+
+# Extra origins explicitly allowed for the WS upgrade (comma-separated env).
+_ALLOWED_ORIGINS = [o for o in os.environ.get("CONSOLE_WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
 # Static assets we will serve, by URL path → (filesystem name, content type).
 _STATIC_FILES = {
@@ -179,10 +191,13 @@ def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
                 return False
         return True
 
+    last_input = time.monotonic()
     try:
         if not drain_ws_frames():
             open_ = False
         while open_:
+            if time.monotonic() - last_input > IDLE_SECONDS:
+                break  # browser idle too long — reclaim the session slot
             try:
                 readable, _, _ = select.select([sock, console], [], [], 30)
             except (OSError, ValueError):
@@ -207,6 +222,7 @@ def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
                     break
                 if not chunk:
                     break
+                last_input = time.monotonic()  # browser is active
                 ws_in += chunk
                 if len(ws_in) > 65536:  # malformed flood; drop the connection
                     break
@@ -305,6 +321,18 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
     if method == "GET" and path in ("/ws", "/ws/"):
         if not wsproto.is_websocket_upgrade(headers):
             _send_simple(sock, 426, "Upgrade Required", "Expected a WebSocket upgrade.")
+            return
+        if headers.get("sec-websocket-version", "").strip() != "13":
+            try:
+                sock.sendall(b"HTTP/1.1 426 Upgrade Required\r\n"
+                             b"Sec-WebSocket-Version: 13\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            return
+        # Drive-by / cross-site-WebSocket-hijack guard: this fronts an
+        # unauthenticated call-control console, so reject a cross-origin upgrade.
+        if not wsproto.origin_allowed(headers, _ALLOWED_ORIGINS):
+            _send_simple(sock, 403, "Forbidden", "Cross-origin WebSocket rejected.")
             return
         if not slots.acquire(blocking=False):
             _send_simple(sock, 503, "Service Unavailable",

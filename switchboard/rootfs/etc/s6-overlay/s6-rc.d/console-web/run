@@ -20,6 +20,16 @@ bashio::log.info "Starting Switchboard console web terminal on :${PORT} ..."
 bashio::log.notice "The console web terminal is UNAUTHENTICATED on the LAN and drives the operator console (ring/connect/hang up). It exposes the same surface as the telnet console on port 2300. Set console_web_enabled:false to turn it off."
 
 export CONSOLE_WEB_PORT="${PORT}"
+# Bind address: explicit console_web_bind wins; otherwise follow console_bind so
+# locking the telnet console to loopback also locks the web terminal.
+BIND="$(bashio::config 'console_web_bind')"
+if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
+    BIND="$(bashio::config 'console_bind')"
+fi
+if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
+    BIND="0.0.0.0"
+fi
+export CONSOLE_WEB_BIND="${BIND}"
 # Bridge to the operator console on loopback; mirror its configured port so a
 # non-default console_port still works.
 export CONSOLE_WEB_TARGET_PORT="$(bashio::config 'console_port')"

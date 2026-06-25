@@ -215,12 +215,16 @@ panel_iframe:
 Restart Home Assistant; **Switchboard TUI** appears in the sidebar.
 
 > **Security:** both the telnet console and the web terminal are
-> **unauthenticated on the LAN** and can ring/connect/hang up phones (the web
-> terminal exposes exactly the same surface as the telnet console, just over
-> HTTP/WebSocket). Anyone who can reach the port can drive the board. Keep them
-> on a trusted LAN, set `require_admin: true` on the iframe panel, and use
-> `console_*_enabled: false` to turn either off. Home Assistant's own Ingress UI
-> (sidebar **Switchboard**) remains the authenticated management surface.
+> **unauthenticated on the LAN** and can ring/connect/hang up phones. The web
+> terminal fronts the same console, but over a *browser* transport the raw telnet
+> port is not — so the WebSocket upgrade is **same-origin-gated** (a cross-origin
+> drive-by web page is rejected), and the bind follows `console_bind` (set
+> `console_web_bind`/`console_bind` to `127.0.0.1` to keep it host-local).
+> Sessions are capped and idle-timed-out. Still: anyone who can reach the port
+> with a same-origin page can drive the board — keep it on a trusted LAN, set
+> `require_admin: true` on the iframe panel, and use `console_*_enabled: false`
+> to turn either off. Home Assistant's own Ingress UI (sidebar **Switchboard**)
+> remains the authenticated management surface.
 
 ---
 
