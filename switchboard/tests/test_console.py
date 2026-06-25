@@ -271,6 +271,24 @@ def test_help_mode() -> None:
     check("help: any key returns to the board", sess["mode"] == "normal")
 
 
+def test_vis_width() -> None:
+    check("vis: plain ascii width", console.vis_width("Kitchen") == 7)
+    check("vis: ANSI codes don't count", console.vis_width(console.color(console.GREEN, "Registered")) == 10)
+    check("vis: wide emoji counts 2", console.vis_width("🔌X") == 3)
+    check("vis: ambiguous box/arrow glyphs count 1", console.vis_width("▸→●█") == 4)
+
+
+def test_center() -> None:
+    check("center: horizontal indent", console.center(["abcd"], 10, 1) == ["   abcd"])
+    check("center: vertical padding", console.center(["a", "b"], 1, 6) == ["", "", "a", "b"])
+    check("center: no padding when content fills", console.center(["abcd", "efgh"], 4, 2) == ["abcd", "efgh"])
+    check("center: empty input unchanged", console.center([], 80, 24) == [])
+    # On a wide+tall terminal the board floats off the top-left corner.
+    board = _board(ROOMS)
+    lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": 120, "h": 40}, 0.0)
+    check("center: board indented on a wide screen", lines[0] == "" and any(ln.startswith("   ") for ln in lines if ln.strip()))
+
+
 def main() -> None:
     test_parse_input()
     test_render()
@@ -291,6 +309,8 @@ def main() -> None:
     test_set_wakeup_edit_prefill()
     test_render_wakeup_mode()
     test_help_mode()
+    test_vis_width()
+    test_center()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")

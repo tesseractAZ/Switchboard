@@ -54,7 +54,7 @@
       convertEol: false,
       cursorBlink: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
-      fontSize: 14,
+      fontSize: 18,
       scrollback: 1000,
       theme: {
         background: "#0b0e14",
@@ -78,7 +78,7 @@
       var w = probe.getBoundingClientRect().width / 20;
       var h = probe.getBoundingClientRect().height;
       document.body.removeChild(probe);
-      return { w: w || 8.4, h: h || 17 };
+      return { w: w || 10.8, h: h || 22 };  // ~18px monospace fallback
     }
 
     function computeSize() {
