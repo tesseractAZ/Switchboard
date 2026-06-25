@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.3
+
+MWI stutter tone now works — switch from `res_mwi_external` to `PJSIPNotify`.
+Live testing proved `res_mwi_external` (the `MWIUpdate` action) is **not built
+into the Alpine Asterisk package** ("Invalid/unknown command: MWIUpdate"). The
+message-waiting indicator is now delivered the portable way: `ami.set_mwi` sends
+an unsolicited `message-summary` NOTIFY to the room's contact via **`PJSIPNotify`**
+(`res_pjsip_notify`, part of the core PJSIP stack), using on/off templates
+generated into `pjsip_notify.conf`. Endpoints no longer carry `mailboxes=`
+(unused without res_mwi_external); `modules.conf` loads `res_pjsip_notify` instead.
+The Grandstream still needs its "MWI → stutter tone" port setting for the audible
+tone (DOCS §4.2).
+
 ## 0.8.1
 
 Fix the message-waiting (MWI) stutter tone, found by live testing v0.8.0.
