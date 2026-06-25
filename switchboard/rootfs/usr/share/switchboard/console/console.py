@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import socketserver
 import sys
 import threading
 import time
+import unicodedata
 from datetime import date
 
 # Reuse the AMI engine that backs the web dashboard.
@@ -245,6 +247,32 @@ def wakeup_when(target_epoch: float, now: float) -> str:
     return "tomorrow" if date.fromtimestamp(target_epoch) != date.fromtimestamp(now) else "today"
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def vis_width(s: str) -> int:
+    """Visible column width of a line: strip ANSI SGR codes, count East-Asian
+    wide/fullwidth glyphs (our 🔌 / ⏰ emoji) as 2 and everything else — including
+    'ambiguous' box/arrow glyphs, which terminals render narrow — as 1."""
+    s = _ANSI_RE.sub("", s)
+    return sum(0 if unicodedata.combining(c) else (2 if unicodedata.east_asian_width(c) in ("W", "F") else 1)
+               for c in s)
+
+
+def center(lines: list[str], w: int, h: int) -> list[str]:
+    """Center a rendered block in a w×h terminal — the roster is small, so on a
+    big screen it would otherwise sit jammed in the top-left. Indent every line by
+    a common left margin and prepend blank lines, but never push content off-screen
+    (no padding once it's as wide/tall as the terminal). Pure; unit-tested."""
+    if not lines:
+        return lines
+    content_w = max((vis_width(ln) for ln in lines), default=0)
+    left = max(0, (w - content_w) // 2)
+    body = [(" " * left) + ln for ln in lines] if left else list(lines)
+    top = max(0, (h - len(lines)) // 2)
+    return [""] * top + body
+
+
 class Board:
     def __init__(self):
         self._lock = threading.Lock()
@@ -311,8 +339,9 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     """Return the screen as a list of plain+ANSI lines. CLEAR_EOL per line means
     we don't pad to full width; content is kept within it."""
     width = sess.get("w", 80)
+    height = sess.get("h", 24)
     if sess.get("mode") == "help":
-        return _help_lines(width)
+        return center(_help_lines(width), width, height)
     rooms = board.get("rooms", [])
     calls = board.get("calls", [])
     sel = sess.get("sel", 0)
@@ -390,7 +419,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         lines.append("  " + color(CYAN, "› " + msg))
     else:
         lines.append("")
-    return lines
+    return center(lines, width, height)
 
 
 # ── Session / input handling ─────────────────────────────────────────────────── #
