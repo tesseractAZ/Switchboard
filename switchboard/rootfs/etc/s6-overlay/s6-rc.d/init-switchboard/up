@@ -1,1 +1,1 @@
-/usr/bin/switchboard-config
+/bin/sh -c "/usr/bin/switchboard-config && { ( /usr/bin/switchboard-mwi replay >/dev/null 2>&1 ) & }"

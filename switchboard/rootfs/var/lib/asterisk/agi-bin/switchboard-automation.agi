@@ -1,0 +1,309 @@
+#!/usr/bin/python3
+"""Switchboard home automation — AGI voice lights flow.
+
+Reached from the [automation] dialplan context (dial the automation code, or
+routed from the operator when the caller says "lights"/"automation"). A
+rotary-safe, multi-step voice flow modeled on switchboard-wakeup.agi:
+
+    greet -> say a room -> say a light -> hear its state -> turn on/off/cancel.
+
+Every step records a short utterance, shells out to ``switchboard-stt
+--mode transcribe`` (with a --bias seeded from the live light/area names), and
+resolves the text with the pure ``lights_match`` matcher. All dynamic speech
+(area lists, light names, on/off confirmations) is synthesized with
+``switchboard-tts`` to a /tmp WAV and played with ``EXEC Playback``.
+
+Channel-safe by construction: the top-level handler swallows every exception so
+the channel never wedges, and a TTS or HA failure degrades to a canned spoken
+apology + graceful hangup — the caller is never left in silence.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+# Foundation modules: ha_client (HA Core API) + lights_match (pure matcher).
+sys.path.insert(0, "/usr/share/switchboard/webui")
+sys.path.insert(0, "/usr/share/switchboard/operator")
+try:
+    import ha_client  # noqa: E402
+except Exception:  # noqa: BLE001  (degrade gracefully if the client won't import)
+    ha_client = None
+try:
+    import lights_match  # noqa: E402
+except Exception:  # noqa: BLE001
+    lights_match = None
+
+STT = "/usr/bin/switchboard-stt"
+TTS = "/usr/bin/switchboard-tts"
+ASR_DIR = "/run/switchboard/asr"
+RECORD_MS = 7000
+SILENCE_S = 3
+MAX_ATTEMPTS = 2
+
+# Canned prompts shipped with the add-on (used for greeting + apology so the
+# flow still has *some* voice even if TTS is broken).
+PROMPT_BEEP = "switchboard/sw-beep"
+PROMPT_ONEMOMENT = "switchboard/sw-onemoment"
+PROMPT_GOODBYE = "switchboard/sw-goodbye"          # best-effort; may be absent
+
+_tts_seq = 0  # monotonically increasing so each utterance gets a unique file
+
+
+# --------------------------------------------------------------------------- #
+# AGI plumbing (same shape as the operator / wakeup AGIs)
+# --------------------------------------------------------------------------- #
+def read_env() -> dict:
+    env: dict[str, str] = {}
+    while True:
+        line = sys.stdin.readline()
+        if not line or not line.strip():
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def agi(command: str) -> str:
+    sys.stdout.write(command + "\n")
+    sys.stdout.flush()
+    return sys.stdin.readline().strip()
+
+
+def stream(soundfile: str) -> None:
+    agi(f'STREAM FILE {soundfile} ""')
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"[automation] {msg}\n")
+
+
+# --------------------------------------------------------------------------- #
+# Speech: dynamic via switchboard-tts -> Playback; canned fallback otherwise.
+# --------------------------------------------------------------------------- #
+def say(text: str) -> bool:
+    """Synthesize `text` with switchboard-tts and Playback it. Returns True on
+    success. On any failure the caller should fall back to a canned prompt — this
+    function never raises."""
+    global _tts_seq
+    _tts_seq += 1
+    base = f"/tmp/sw-auto-{os.getpid()}-{_tts_seq}"
+    wav = base + ".wav"
+    try:
+        proc = subprocess.run([TTS, text, base], capture_output=True,
+                              text=True, timeout=20)
+        if proc.returncode != 0 or not os.path.exists(wav):
+            log(f"tts failed rc={proc.returncode} for {text!r}: {(proc.stderr or '').strip()}")
+            return False
+        # Playback wants the path WITHOUT extension.
+        agi(f"EXEC Playback {base}")
+        return True
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"tts error for {text!r}: {exc}")
+        return False
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+
+
+def say_or(text: str, fallback_prompt: str) -> None:
+    """Speak dynamic `text`; if TTS fails, play a canned prompt so there's never
+    dead air."""
+    if not say(text):
+        stream(fallback_prompt)
+
+
+def apologize_and_bye() -> None:
+    """Graceful degradation: one spoken (or canned) apology, then return so the
+    dialplan hangs up."""
+    if not say("Sorry, home automation is unavailable right now. Goodbye."):
+        stream(PROMPT_GOODBYE)
+
+
+# --------------------------------------------------------------------------- #
+# Recording + recognition
+# --------------------------------------------------------------------------- #
+def listen(tag: str, attempt: int, bias: str = "") -> str:
+    """Record one utterance and return the raw transcript ('' on nothing)."""
+    rec = f"{ASR_DIR}/auto-{os.getpid()}-{tag}-{attempt}"
+    stream(PROMPT_BEEP)
+    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    stream(PROMPT_ONEMOMENT)
+    wav = rec + ".wav"
+    text = ""
+    try:
+        cmd = [STT, "--in", wav, "--mode", "transcribe"]
+        if bias:
+            cmd += ["--bias", bias]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        text = (proc.stdout or "").strip()
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"stt error: {exc}")
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+    return text
+
+
+def join_names(names: list[str]) -> str:
+    """'A', 'B', 'C' -> 'A, B, and C' for a natural spoken list."""
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+# --------------------------------------------------------------------------- #
+# Flow steps
+# --------------------------------------------------------------------------- #
+def pick_area(by_area: dict) -> str | None:
+    """Speak the area prompt, listen, resolve to an area name. 'list' speaks the
+    areas and re-prompts; no match retries once then returns None (goodbye)."""
+    areas = list(by_area.keys())
+    nice_areas = [a if a else "Unassigned" for a in areas]
+    bias = " ".join(nice_areas)
+    # attempt only advances on a real mis-match; a 'list' request re-prompts for
+    # free (a caller asking to hear the options shouldn't burn a retry).
+    attempt = 0
+    while attempt < MAX_ATTEMPTS:
+        if attempt == 0:
+            say_or("Home automation. Say a room, or say list.", PROMPT_BEEP)
+        else:
+            say_or("I didn't catch a room. Say a room, or say list.", PROMPT_BEEP)
+        text = listen("area", attempt, bias=bias)
+        if lights_match is None:
+            return None
+        if lights_match.match_intent(text) == "cancel":
+            return ""  # explicit cancel sentinel (caller treats as goodbye)
+        if lights_match.match_intent(text) == "list":
+            say(f"The rooms are: {join_names(nice_areas)}.")
+            continue  # re-prompt without consuming an attempt
+        area = lights_match.match_area(text, areas)
+        if area is not None:
+            return area
+        attempt += 1
+    return None
+
+
+def pick_light(area: str, lights: list[dict]) -> dict | None:
+    """Speak the light prompt for the chosen area, listen, resolve to one light.
+    'list' speaks the lights and re-prompts; no match retries once."""
+    names = [lt.get("name") or lt.get("entity_id", "") for lt in lights]
+    bias = " ".join(names)
+    # As in pick_area: a 'list' request re-prompts without consuming an attempt.
+    attempt = 0
+    while attempt < MAX_ATTEMPTS:
+        if attempt == 0:
+            say_or("Say a light, or say list.", PROMPT_BEEP)
+        else:
+            say_or("I didn't catch that. Say a light, or say list.", PROMPT_BEEP)
+        text = listen("light", attempt, bias=bias)
+        if lights_match is None:
+            return None
+        if lights_match.match_intent(text) == "cancel":
+            return None
+        if lights_match.match_intent(text) == "list":
+            say(f"The lights are: {join_names(names)}.")
+            continue  # re-prompt without consuming an attempt
+        light = lights_match.match_light(text, lights)
+        if light is not None:
+            return light
+        attempt += 1
+    return None
+
+
+def ask_action() -> str | None:
+    """Speak the action prompt, listen, return 'on' | 'off' | None (cancel)."""
+    for attempt in range(MAX_ATTEMPTS):
+        say_or("Say turn on, turn off, or cancel.", PROMPT_BEEP)
+        text = listen("action", attempt)
+        if lights_match is None:
+            return None
+        intent = lights_match.match_intent(text)
+        if intent in ("on", "off"):
+            return intent
+        if intent == "cancel":
+            return None
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    read_env()
+
+    if ha_client is None or lights_match is None:
+        log("ha_client or lights_match unavailable")
+        apologize_and_bye()
+        return
+
+    by_area = ha_client.lights_by_area()
+    if not by_area:
+        # No lights, or HA unreachable.
+        say_or("Sorry, I couldn't reach your lights right now. Goodbye.", PROMPT_GOODBYE)
+        return
+
+    area = pick_area(by_area)
+    if not area and area != "":
+        # None -> exhausted retries; speak a polite goodbye.
+        say_or("Sorry, I didn't get that. Goodbye.", PROMPT_GOODBYE)
+        return
+    if area == "":
+        say_or("Okay, goodbye.", PROMPT_GOODBYE)
+        return
+
+    lights = by_area.get(area, [])
+    if not lights:
+        say_or("That room has no lights. Goodbye.", PROMPT_GOODBYE)
+        return
+
+    light = pick_light(area, lights)
+    if light is None:
+        say_or("Sorry, I didn't get that. Goodbye.", PROMPT_GOODBYE)
+        return
+
+    name = light.get("name") or light.get("entity_id", "the light")
+    entity_id = light.get("entity_id", "")
+
+    # Report current state.
+    state = ha_client.get_light_state(entity_id)
+    if state in ("on", "off"):
+        say(f"{name} is {state}.")
+    else:
+        say(f"{name}.")
+
+    action = ask_action()
+    if action is None:
+        say_or("Okay, goodbye.", PROMPT_GOODBYE)
+        return
+
+    ok = ha_client.set_light(entity_id, action == "on")
+    if ok:
+        say_or(f"Turned {name} {action}. Goodbye.", PROMPT_GOODBYE)
+    else:
+        say_or("Sorry, I couldn't reach that light. Goodbye.", PROMPT_GOODBYE)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001  (never wedge the channel)
+        sys.stderr.write(f"[automation] fatal: {exc}\n")
+        try:
+            apologize_and_bye()
+        except Exception:
+            pass

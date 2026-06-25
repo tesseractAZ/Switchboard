@@ -1,0 +1,244 @@
+"""Behavioral tests for the Ingress UI app's pure validation/shaping helpers
+(webui/app.py).
+
+Run with plain Python (no pytest, no FastAPI, no network):
+
+    python3 switchboard/tests/test_app.py
+
+FastAPI/httpx are NOT importable on the test box, and app.py is written to
+tolerate that: its FastAPI import is guarded, so loading the module gives a stub
+``app`` and the pure helpers below are importable and testable in isolation.
+These pin exactly the input validation that every new operator/light POST funnels
+its untrusted path/body through before anything reaches an AMI or HA call:
+
+  * ext validation (2-6 digits, rejects CRLF / dial strings / over-long),
+  * the /api/hangup channel CRLF guard,
+  * the light.* entity guard,
+  * the wake-up HH:MM parse/validate wrapper,
+  * the /api/lights area-grouping response shape,
+  * the ext->channel map that powers the Hang up button,
+and that the embedded UI grew the new controls.
+"""
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+_WEBUI = _ROOT / "rootfs" / "usr" / "share" / "switchboard" / "webui"
+_WAKEUP = _ROOT / "rootfs" / "usr" / "share" / "switchboard" / "wakeup"
+
+# app.py inserts the (absolute, container-only) paths itself, but on the test box
+# those don't exist — add the repo's real dirs so the sibling modules (ami,
+# timeparse, store, mwi_store, ha_client) resolve and app.py loads fully wired.
+for p in (str(_WEBUI), str(_WAKEUP)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+app = SourceFileLoader("switchboard_app", str(_WEBUI / "app.py")).load_module()
+
+_failures = 0
+
+
+def check(name: str, cond: bool) -> None:
+    global _failures
+    print(("PASS " if cond else "FAIL ") + name)
+    if not cond:
+        _failures += 1
+
+
+def test_module_loads_without_fastapi() -> None:
+    # The whole point of the import guard: app.py is importable even though the
+    # test box has no FastAPI. The route functions still defined (stub app), and
+    # the pure helpers are present.
+    check("load: importable without FastAPI", app._HAVE_FASTAPI is False)
+    check("load: app is the stub when FastAPI absent", type(app.app).__name__ == "_NoApp")
+    for fn in ("valid_ext", "channel_has_crlf", "is_light_entity",
+               "parse_wakeup_hhmm", "configured_room_exts", "channels_by_ext",
+               "build_lights_payload"):
+        check(f"load: helper {fn} present", callable(getattr(app, fn, None)))
+
+
+def test_valid_ext() -> None:
+    check("ext: 2-digit room ok", app.valid_ext("11") is True)
+    check("ext: 6-digit ok", app.valid_ext("123456") is True)
+    check("ext: 1-digit rejected (no single-digit rooms; '0'=operator)", app.valid_ext("1") is False)
+    check("ext: empty rejected", app.valid_ext("") is False)
+    check("ext: None rejected", app.valid_ext(None) is False)
+    check("ext: 7-digit (over-long) rejected", app.valid_ext("1234567") is False)
+    check("ext: non-digit rejected", app.valid_ext("9;evil") is False)
+    check("ext: CRLF-injection rejected", app.valid_ext("11\r\nAction: x") is False)
+    # Digits-only "9911" passes the REGEX (the room-set membership check is the
+    # second, decisive gate that keeps it off the trunk's outbound pattern).
+    check("ext: digits-only 9911 passes regex (room-set is 2nd gate)", app.valid_ext("9911") is True)
+    check("ext: leading/trailing space rejected", app.valid_ext(" 11 ") is False)
+    check("ext: a 'noon'-style word rejected", app.valid_ext("noon") is False)
+    # Trailing-newline rejection: a "$"-anchored re.match() would WRONGLY accept
+    # "11\n" ($ matches just before a trailing \n); fullmatch closes that hole.
+    check("ext: trailing LF rejected", app.valid_ext("11\n") is False)
+    check("ext: trailing CRLF rejected", app.valid_ext("11\r\n") is False)
+
+
+def test_channel_has_crlf() -> None:
+    check("chan: clean PJSIP channel ok", app.channel_has_crlf("PJSIP/11-0000000a") is False)
+    check("chan: CR rejected", app.channel_has_crlf("PJSIP/11\rAction: Command") is True)
+    check("chan: LF rejected", app.channel_has_crlf("PJSIP/11\nAction: Command") is True)
+    check("chan: CRLF rejected", app.channel_has_crlf("PJSIP/11\r\nAction: Command") is True)
+    check("chan: empty has no CRLF (rejected elsewhere by emptiness)", app.channel_has_crlf("") is False)
+    check("chan: None tolerated", app.channel_has_crlf(None) is False)
+
+
+def test_is_light_entity() -> None:
+    check("light: light.kitchen ok", app.is_light_entity("light.kitchen") is True)
+    check("light: light.x_2 ok", app.is_light_entity("light.lamp_2") is True)
+    check("light: switch.* rejected", app.is_light_entity("switch.fan") is False)
+    check("light: scene/script rejected", app.is_light_entity("script.evil") is False)
+    check("light: uppercase rejected (HA entity ids are lower-case)", app.is_light_entity("light.Kitchen") is False)
+    check("light: empty rejected", app.is_light_entity("") is False)
+    check("light: None rejected", app.is_light_entity(None) is False)
+    check("light: domain-only rejected", app.is_light_entity("light.") is False)
+    check("light: injection rejected", app.is_light_entity("light.k; drop") is False)
+
+
+def test_parse_wakeup_hhmm() -> None:
+    # Canonical HH:MM (what <input type=time> sends) round-trips and is zero-padded.
+    check("wake: 07:30 -> 07:30", app.parse_wakeup_hhmm("07:30") == "07:30")
+    check("wake: 7:30 -> 07:30 (pads hour)", app.parse_wakeup_hhmm("7:30") == "07:30")
+    check("wake: 23:59 -> 23:59", app.parse_wakeup_hhmm("23:59") == "23:59")
+    check("wake: 00:00 -> 00:00", app.parse_wakeup_hhmm("00:00") == "00:00")
+    # Out-of-range / malformed rejected.
+    check("wake: 24:00 rejected", app.parse_wakeup_hhmm("24:00") is None)
+    check("wake: 12:60 rejected", app.parse_wakeup_hhmm("12:60") is None)
+    check("wake: 99:99 rejected", app.parse_wakeup_hhmm("99:99") is None)
+    check("wake: empty -> None", app.parse_wakeup_hhmm("") is None)
+    check("wake: None -> None", app.parse_wakeup_hhmm(None) is None)
+    check("wake: 7:5 (one-digit minute) rejected", app.parse_wakeup_hhmm("7:5") is None)
+    # A CRLF-bearing body can't slip through as a valid time.
+    check("wake: CRLF body rejected", app.parse_wakeup_hhmm("07:30\r\nevil") is None)
+    # Free-form spoken-style strings delegate to the shared timeparse (available
+    # here because the wakeup dir is on sys.path).
+    if app.wakeup_timeparse is not None:
+        check("wake: '7:30 am' -> 07:30 (timeparse)", app.parse_wakeup_hhmm("7:30 am") == "07:30")
+        check("wake: '7:30 pm' -> 19:30 (timeparse)", app.parse_wakeup_hhmm("7:30 pm") == "19:30")
+        check("wake: 'quarter past six' -> 06:15", app.parse_wakeup_hhmm("quarter past six") == "06:15")
+        check("wake: 'noon' -> 12:00", app.parse_wakeup_hhmm("noon") == "12:00")
+        check("wake: gibberish -> None", app.parse_wakeup_hhmm("zxcv") is None)
+
+
+def test_configured_room_exts() -> None:
+    opts = {"rooms": [{"ext": "11", "name": "Kitchen"}, {"ext": 12, "name": "Living"},
+                      {"name": "no-ext"}, {"ext": None}]}
+    exts = app.configured_room_exts(opts)
+    check("rooms: collects '11'", "11" in exts)
+    check("rooms: coerces int ext 12 -> '12'", "12" in exts)
+    check("rooms: skips ext-less + None entries", exts == {"11", "12"})
+    check("rooms: empty options -> empty set", app.configured_room_exts({}) == set())
+    check("rooms: missing rooms key -> empty set", app.configured_room_exts({"rooms": None}) == set())
+
+
+def test_channels_by_ext() -> None:
+    # Two legs for ext 11: the longer-running one wins (a real call over a ring).
+    chans = [
+        {"ext": "11", "channel": "PJSIP/11-short", "duration": "00:00:03"},
+        {"ext": "11", "channel": "PJSIP/11-long", "duration": "00:01:20"},
+        {"ext": "16", "channel": "PJSIP/16-a", "duration": "00:00:09"},
+        {"ext": "", "channel": "PJSIP/x", "duration": "00:00:01"},      # no ext -> skipped
+        {"ext": "17", "channel": "", "duration": "00:00:05"},            # no channel -> skipped
+    ]
+    m = app.channels_by_ext(chans)
+    check("chanmap: 11 -> longest leg", m.get("11") == "PJSIP/11-long")
+    check("chanmap: 16 mapped", m.get("16") == "PJSIP/16-a")
+    check("chanmap: leg without ext skipped", "" not in m)
+    check("chanmap: leg without channel skipped", "17" not in m)
+    check("chanmap: empty input -> {}", app.channels_by_ext([]) == {})
+    check("chanmap: None input -> {}", app.channels_by_ext(None) == {})
+
+
+def test_build_lights_payload() -> None:
+    by_area = {
+        "Kitchen": [{"entity_id": "light.kitchen", "name": "Kitchen", "state": "on"}],
+        "": [{"entity_id": "light.hall", "name": "Hall", "state": "off"}],
+    }
+    out = app.build_lights_payload(by_area, True)
+    check("lights: lights_ok True passthrough", out["lights_ok"] is True)
+    check("lights: areas keyed by area label", "Kitchen" in out["areas"])
+    check("lights: empty-area bucket relabeled 'Other'", "Other" in out["areas"])
+    k = out["areas"]["Kitchen"][0]
+    check("lights: only the 3 UI fields echoed",
+          set(k.keys()) == {"entity_id", "name", "state"})
+    check("lights: state carried", k["state"] == "on")
+    # Unreachable HA -> empty areas + lights_ok False (UI shows "unavailable").
+    down = app.build_lights_payload({}, False)
+    check("lights: unreachable -> lights_ok False", down["lights_ok"] is False)
+    check("lights: unreachable -> empty areas", down["areas"] == {})
+    # A non-light entity that somehow slipped into HA's list is filtered out.
+    bad = app.build_lights_payload({"X": [{"entity_id": "switch.evil", "name": "E", "state": "on"}]}, True)
+    check("lights: non-light entity filtered out of the shape", bad["areas"]["X"] == [])
+    # Missing name falls back to entity_id; missing state -> 'unknown'.
+    fb = app.build_lights_payload({"A": [{"entity_id": "light.x"}]}, True)
+    row = fb["areas"]["A"][0]
+    check("lights: name falls back to entity_id", row["name"] == "light.x")
+    check("lights: state falls back to 'unknown'", row["state"] == "unknown")
+
+
+def test_index_html_controls() -> None:
+    html = app.INDEX_HTML
+    # The frontend grew the operator + light controls (each wired to its endpoint
+    # by a data-* hook the delegated handlers read).
+    check("ui: Page all button present", "id=\"pageall\"" in html and "Page all" in html)
+    check("ui: Connect control present", "data-connect=" in html)
+    check("ui: Hang up control present", "data-hangup=" in html)
+    check("ui: wake-up time input present", "data-waketime=" in html and "type=\"time\"" in html)
+    check("ui: wake-up Set control present", "data-wakeset=" in html)
+    check("ui: MWI toggle present", "data-mwi=" in html)
+    check("ui: MWI badge rendered when set", "mwibadge" in html)
+    check("ui: Lights section present", "id=\"lights\"" in html and "💡 Lights" in html)
+    check("ui: light toggle hook present", "data-light=" in html)
+    check("ui: calls the new endpoints",
+          "./api/connect/" in html and "./api/hangup" in html and
+          "./api/page" in html and "./api/mwi/" in html and
+          "./api/lights" in html and "./api/wakeup/" in html)
+    check("ui: HA-unavailable message present",
+          "Home Assistant unavailable" in html)
+    # Untrusted values still escaped before innerHTML (XSS guard retained).
+    check("ui: esc() still used", "function esc(" in html)
+
+
+def test_route_handlers_defined() -> None:
+    # The route functions are defined as plain module-level callables even under
+    # the stub app, so the wiring is at least syntactically present/importable.
+    for fn in ("api_status", "api_ring", "api_connect", "api_hangup",
+               "api_wakeup_set", "api_wakeup_cancel", "api_page", "api_mwi",
+               "api_lights", "api_light_set", "index"):
+        check(f"route: {fn} defined", callable(getattr(app, fn, None)))
+
+
+def test_client_guard() -> None:
+    # The Ingress/Supervisor-only client guard is unchanged and reused by every
+    # new POST (via the middleware).
+    check("guard: Supervisor IP allowed", app._client_allowed("172.30.32.2") is True)
+    check("guard: loopback allowed", app._client_allowed("127.0.0.1") is True)
+    check("guard: LAN client rejected", app._client_allowed("192.168.1.10") is False)
+    check("guard: empty rejected", app._client_allowed("") is False)
+
+
+def main() -> None:
+    test_module_loads_without_fastapi()
+    test_valid_ext()
+    test_channel_has_crlf()
+    test_is_light_entity()
+    test_parse_wakeup_hhmm()
+    test_configured_room_exts()
+    test_channels_by_ext()
+    test_build_lights_payload()
+    test_index_html_controls()
+    test_route_handlers_defined()
+    test_client_guard()
+    print()
+    if _failures:
+        print(f"{_failures} FAILURE(S)")
+        raise SystemExit(1)
+    print("all app helper tests passed")
+
+
+if __name__ == "__main__":
+    main()

@@ -84,6 +84,16 @@ trunk:
   paging, **9** as the outside-line prefix.
 - Extensions are arbitrary — keep each `ext` unique.
 
+**Feature codes** (configurable; dial from any room phone):
+
+| Dial | Feature | Option |
+|-----:|---------|--------|
+| `0`  | Operator — speak a room to be connected, or say "automation" for lights | `operator.enabled` |
+| `41` | Talking clock | `clock_ext` |
+| `42` | Set/cancel a wake-up call (speak the time) | `wakeup_ext` |
+| `43` | Home automation — control your lights by voice | `automation_ext` |
+| `44` | Page all — ring every phone into one house-wide intercom | `page_ext` |
+
 ---
 
 ## 4. Grandstream GXW4216 V2 provisioning
@@ -119,6 +129,14 @@ For port _n_, under **FXS Ports**:
 | **Enable Port** | Yes |
 
 Save & **Apply**, reboot the gateway if ports don't register.
+
+> **Message-waiting stutter tone (optional).** For the operator's "you have a
+> message — call the operator" feature (TUI `M` / dashboard ✉) to produce the
+> classic **stutter dial tone** on an antique handset, the gateway must turn a
+> SIP MWI notification into the analog stutter. In **Profile 1** (or per-port),
+> enable **"Send Stutter Dialtone for MWI"** / **"MWI → Stutter Tone"** (the exact
+> label varies by firmware). Without it the indicator still tracks in the
+> dashboard, but the phone's dial tone won't stutter.
 
 ### 4.3 Dialing behavior
 
@@ -186,14 +204,18 @@ asterisk -rx "core show codecs"
 ## 7. Operator console (telnet + browser)
 
 A live switchboard board an operator can drive: see every room phone's status,
-**ring** a room, **connect** two rooms (patch a call), **hang up**, and **set**
-or cancel a wake-up. Two front-ends, same board:
+**ring** a room, **connect** two rooms (patch a call), **hang up**, **set/cancel
+a wake-up**, **page all** phones, leave a **message-waiting** stutter tone, and
+control **lights**. Two front-ends, same board:
 
 - **Telnet** — `telnet <ha-host> 2300`. Arrow keys select; `R` ring, `C`
   connect, `H` hang up, `W` set a wake-up (type a time — `7:30`, `quarter past
-  six`, `noon` — Enter to set, Esc to cancel), `X` cancel a wake-up, `?` help,
-  `Q` quit. Toggle with `console_enabled`; restrict to the host with
-  `console_bind: 127.0.0.1`.
+  six`, `noon`), `X` cancel a wake-up, `M` message (toggle the room's
+  call-the-operator stutter tone), `P` page all (ring everyone into one
+  intercom), `L` lights (browse Home Assistant lights and toggle them), `?`
+  help, `Q` quit. Toggle with `console_enabled`; restrict to the host with
+  `console_bind: 127.0.0.1`. (`M`/`P`/`L` drive your phones and home — keep the
+  console on a trusted LAN, or bind it to `127.0.0.1`.)
 - **Browser web terminal** — the same TUI rendered with xterm.js at
   `http://<ha-host>:8100/`. It runs a tiny stdlib HTTP + WebSocket server that
   bridges your browser to the telnet console on the host (WebSocket ⇄ telnet),

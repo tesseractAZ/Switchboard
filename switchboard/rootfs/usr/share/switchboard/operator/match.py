@@ -106,6 +106,30 @@ def _score(toks: list[str], spoken: str, ptoks: list[str]) -> float:
     return score
 
 
+# Automation-intent phrases. A spoken "lights"/"automation"/"home control" at
+# the operator jumps into the voice home-automation flow instead of room
+# matching. Kept conservative: only a clear automation phrase wins, so a real
+# room name ("Office", "Garage") always falls through to match() unchanged.
+_AUTOMATION_WORDS = (
+    "automation", "automations", "home automation", "home control",
+    "control", "lights", "light", "lighting", "the lights",
+)
+
+
+def is_automation(transcript: str) -> bool:
+    """True only when the transcript clearly asks for home automation / lights
+    (so the operator sets OP_RESULT=automation); False otherwise → fall through
+    to room matching. Delegates to lights_match when present, with a stdlib-only
+    fallback so this module never hard-depends on the sibling at import."""
+    try:
+        import lights_match  # noqa: PLC0415  (sibling on the same sys.path)
+        return lights_match.is_automation_request(transcript)
+    except Exception:  # noqa: BLE001  (matcher missing/broken → safe local check)
+        low = " " + re.sub(r"[^a-z0-9 ]+", " ", (transcript or "").lower()) + " "
+        low = re.sub(r"\s+", " ", low)
+        return any(f" {w} " in low for w in _AUTOMATION_WORDS)
+
+
 def match(transcript: str, rooms: list[dict], synonyms: dict | None = None,
           threshold: float = 0.6, margin: float = 0.08) -> tuple[str | None, float, str]:
     """Resolve a transcript to an extension. See module docstring."""

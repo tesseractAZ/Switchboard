@@ -14,6 +14,7 @@ The pure helpers (``parse_ami_blocks``, ``*_from_blocks``, ``is_registered``,
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import re
 import socket
@@ -22,6 +23,25 @@ AMI_HOST = "127.0.0.1"
 AMI_PORT = 5038
 AMI_USER = os.environ.get("AMI_USER", "switchboard")
 AMI_SECRET = os.environ.get("AMI_SECRET", "")
+
+# A process spawned by the dialplan — Asterisk `System()`, e.g. the operator's
+# MWI auto-clear running `switchboard-mwi clear <ext>` — inherits Asterisk's
+# environment, which does NOT carry the AMI secret (the s6 run scripts source
+# /run/switchboard/ami.env for the long-running services, but a System() child of
+# Asterisk doesn't). Fall back to that generated env file so any AMI consumer
+# works regardless of how it was launched. (`AMI_ENV` overrides the path in tests.)
+if not AMI_SECRET:
+    try:
+        with open(os.environ.get("AMI_ENV", "/run/switchboard/ami.env")) as _fh:
+            _env = dict(
+                ln.strip().split("=", 1)
+                for ln in _fh
+                if "=" in ln and not ln.strip().startswith("#")
+            )
+        AMI_USER = _env.get("AMI_USER", AMI_USER)
+        AMI_SECRET = _env.get("AMI_SECRET", AMI_SECRET)
+    except OSError:
+        pass
 
 # A PJSIP endpoint's DeviceState is Asterisk's own aggregate of contact
 # reachability: with no bound/qualified contact it reads "Unavailable", and the
@@ -468,6 +488,81 @@ def originate_wakeup(room_ext: str, ring_seconds: int = 60) -> bool:
             "CallerID: Wake-up <0>",
             f"Timeout: {int(ring_seconds * 1000)}",
             "Async: true",
+        ],
+        single_response=True,
+        action_id=action_id,
+    )
+    return any(
+        blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+        for blk in blocks
+    )
+
+
+def page_all(exts: list[str]) -> bool:
+    """Page every room phone at once (intercom): originate each valid ext into
+    the fixed ``[page]`` dialplan context, which auto-answers the FXS line and
+    joins it to the page ConfBridge so the pager is heard on every handset.
+
+    Each ext is digit-guarded with ``_EXT_RE`` before it is interpolated into a
+    Channel string, so an invalid/CRLF-bearing ext is silently skipped (never
+    smuggles extra AMI lines) — and the context is constant, so this can only
+    ring known room endpoints, never place an outside call. Returns True if at
+    least one originate was accepted (Success, scoped by its own ActionID);
+    per-ext failures are logged but don't abort the rest. Empty / all-invalid
+    input → False.
+    """
+    accepted = 0
+    for ext in exts or ():
+        if not _EXT_RE.fullmatch(ext or ""):
+            continue
+        action_id = _next_action_id()
+        try:
+            blocks = _ami_command(
+                [
+                    "Action: Originate",
+                    f"Channel: PJSIP/{ext}",
+                    "Context: page",
+                    "Exten: s",
+                    "Priority: 1",
+                    "CallerID: Page <0>",
+                    "Timeout: 30000",
+                    "Async: true",
+                ],
+                single_response=True,
+                action_id=action_id,
+            )
+        except (OSError, AMIError) as exc:
+            logging.warning("page_all: originate to %s failed: %s", ext, exc)
+            continue
+        ok = any(
+            blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+            for blk in blocks
+        )
+        if ok:
+            accepted += 1
+        else:
+            logging.warning("page_all: originate to %s not accepted", ext)
+    return accepted > 0
+
+
+def set_mwi(ext: str, on: bool) -> bool:
+    """Set or clear a room's message-waiting indicator in Asterisk.
+
+    Uses ``res_mwi_external``'s ``MWIUpdate`` action against the ``{ext}@default``
+    mailbox; the FXS gateway then renders (or clears) a stutter dial tone on that
+    handset. ``ext`` is digit-guarded with ``_EXT_RE`` before it is interpolated
+    into the Mailbox string, so a CRLF-bearing value can't inject extra AMI lines
+    (and an empty/invalid ext is rejected outright). Returns True on Success.
+    """
+    if not _EXT_RE.fullmatch(ext or ""):
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        [
+            "Action: MWIUpdate",
+            f"Mailbox: {ext}@default",
+            f"NewMessages: {'1' if on else '0'}",
+            "OldMessages: 0",
         ],
         single_response=True,
         action_id=action_id,

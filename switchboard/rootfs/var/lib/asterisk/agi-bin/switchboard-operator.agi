@@ -21,6 +21,11 @@ import os
 import subprocess
 import sys
 
+# A single whisper pass now handles both jobs: switchboard-stt --mode rooms
+# resolves a room extension OR prints the literal token 'automation' when the
+# caller asks for "lights"/"automation" (the gate lives in the STT wrapper), so
+# the operator transcribes each utterance only once.
+
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
@@ -58,8 +63,30 @@ def set_var(name: str, value: str) -> None:
     agi(f'SET VARIABLE {name} "{value}"')
 
 
-def recognize(attempt: int) -> str:
-    """Record one utterance and return the matched extension ('' if none)."""
+def _stt(args: list[str], wav: str) -> str:
+    """Run switchboard-stt with the given args on `wav`; return stdout (stripped),
+    '' on any error. Never raises."""
+    try:
+        proc = subprocess.run([STT, "--in", wav, *args], capture_output=True,
+                              text=True, timeout=25)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)  # transcript/decision -> Asterisk log
+        return (proc.stdout or "").strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        sys.stderr.write(f"[operator] stt error: {exc}\n")
+        return ""
+
+
+def recognize(attempt: int) -> tuple[str, str]:
+    """Record one utterance. Return (kind, value):
+      ('automation', '')  — caller said "lights"/"automation"
+      ('connect', ext)    — caller named a room
+      ('', '')            — nothing usable
+
+    A single whisper pass (rooms mode) does BOTH jobs: switchboard-stt now checks
+    the automation gate on the same transcript and prints the literal token
+    'automation' for a lights request, otherwise a room extension — so the
+    operator transcribes the recording only once."""
     rec = f"{ASR_DIR}/utt-{os.getpid()}-{attempt}"
     stream("switchboard/sw-beep")  # "speak now" cue — Alpine asterisk-sounds has no built-in beep
     # RECORD FILE <name> <fmt> <escape> <timeout_ms> s=<silence>.
@@ -69,29 +96,28 @@ def recognize(attempt: int) -> str:
     agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     stream("switchboard/sw-onemoment")  # cover STT latency (no dead air)
     wav = rec + ".wav"
-    ext = ""
     try:
-        proc = subprocess.run([STT, "--in", wav], capture_output=True,
-                              text=True, timeout=25)
-        ext = (proc.stdout or "").strip()
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)  # transcript/decision -> Asterisk log
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        sys.stderr.write(f"[operator] stt error: {exc}\n")
+        result = _stt(["--mode", "rooms"], wav)
+        if result == "automation":
+            sys.stderr.write("[operator] automation intent\n")
+            return "automation", ""
+        return ("connect", result) if result else ("", "")
     finally:
         try:
             os.unlink(wav)
         except OSError:
             pass
-    return ext
 
 
 def main() -> None:
     read_env()
     for attempt in range(MAX_ATTEMPTS):
         stream("switchboard/sw-greeting" if attempt == 0 else "switchboard/sw-didnt-catch")
-        ext = recognize(attempt)
-        if ext:
+        kind, ext = recognize(attempt)
+        if kind == "automation":
+            set_var("OP_RESULT", "automation")
+            return
+        if kind == "connect" and ext:
             set_var("OP_TARGET", ext)
             set_var("OP_RESULT", "connect")
             return
