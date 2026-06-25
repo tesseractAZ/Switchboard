@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1
+
+Cosmetic: the wake-up entry hint read `⌫ deletes`, but the backspace glyph
+(U+232B) has no character in the browser terminal's font and rendered as a
+circled-×. Replaced it with plain text — `Backspace deletes`. Caught by
+in-browser testing; no behavior change.
+
 ## 0.6.0
 
 Set wake-up calls right from the operator console (telnet + browser) — plus a
