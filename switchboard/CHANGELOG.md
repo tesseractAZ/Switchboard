@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+Bigger, centered board — the operator console no longer sits jammed in the
+top-left of a large terminal.
+
+- **Larger text in the browser terminal:** the xterm.js font goes 14 → 18px, so
+  the board reads comfortably on a full-size screen / the HA sidebar panel.
+- **Centered board:** the roster is small (8 rooms), so on a wide terminal it
+  used to float in the top-left with a big empty void. `render` now centers the
+  whole board — horizontal indent + vertical padding sized from the terminal's
+  NAWS dimensions — so it sits balanced with even margins. Falls back to no
+  padding on a terminal too small to center into (never pushes content
+  off-screen). Helps the telnet console too, not just the browser.
+- New pure helpers `vis_width()` (ANSI-stripping, wide-glyph-aware column count)
+  and `center()`, both unit-tested (test_console.py: 64 checks).
+
 ## 0.6.1
 
 Cosmetic: the wake-up entry hint read `⌫ deletes`, but the backspace glyph
