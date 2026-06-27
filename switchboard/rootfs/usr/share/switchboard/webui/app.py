@@ -331,6 +331,7 @@ def api_status() -> JSONResponse:
                 # "Talking" and the other party ("Office", "Outside", "Operator").
                 "call_state": call.get("state", ""),
                 "call_peer": call.get("peer", ""),
+                "call_codec": call.get("codec", ""),
                 "channel": chan_by_ext.get(name, ""),
                 "mwi": name in mwi_set,
             }
@@ -614,6 +615,7 @@ INDEX_HTML = """<!doctype html>
   .down { background: #fde7e7; color: #b42318; }
   .busy { background: #fff4e0; color: #b25e00; }
   .conn { font-size: .75rem; color: #b25e00; margin-top: .4rem; }
+  .conn .codec { color: #888; font-weight: 600; }
   .ringbtn { margin-top: .6rem; width: 100%; font-size: .75rem; font-weight: 600;
              padding: .35rem .5rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
              background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
@@ -767,8 +769,12 @@ async function refresh() {
       if (active) { cls = 'busy'; txt = r.call_state || r.device_state; }
       else if (r.registered) { cls = 'up'; txt = 'Registered'; }
       else { cls = 'down'; txt = 'Offline'; }
-      // Who this phone is talking to / ringing, when known.
-      const conn = r.call_peer ? '<div class="conn">↔ ' + esc(r.call_peer) + '</div>' : '';
+      // Who this phone is talking to / ringing, when known — plus the live codec.
+      const conn = r.call_peer
+        ? '<div class="conn">↔ ' + esc(r.call_peer) +
+            (r.call_codec ? ' <span class="codec">· ' + esc(codecName(r.call_codec)) + '</span>' : '') +
+          '</div>'
+        : '';
       const ex = esc(r.ext);
       const ringing = (ringingUntil[r.ext] || 0) > now;
       const ringDis = (!r.registered || ringing) ? ' disabled' : '';
