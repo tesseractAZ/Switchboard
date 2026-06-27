@@ -43,6 +43,7 @@ except ImportError:  # pragma: no cover - exercised only on the test box
 
 from ami import (  # noqa: E402
     AMIError,
+    codecs_for_channels,
     connect_extensions,
     get_endpoints,
     get_status_bundle,
@@ -281,8 +282,13 @@ def api_status() -> JSONResponse:
         endpoints, contacts, channels = [], {}, []
 
     # Turn raw channel legs into readable calls ("Kitchen ↔ Office") and a
-    # per-room "what is this phone doing right now" map.
+    # per-room "what is this phone doing right now" map. Tag each live leg with the
+    # codec it negotiated (only runs while a call is up — no channels, no reads),
+    # so the UI can show "↔ Outside · µ-law" and a transcode is visible at a glance.
     rooms_by_ext = {ext: (cfg.get("name") or ext) for ext, cfg in rooms_cfg.items()}
+    codecs = codecs_for_channels(channels)
+    for ch in channels:
+        ch["codec"] = codecs.get(ch.get("channel", ""), "")
     summary = summarize_calls(channels, rooms_by_ext)
     by_ext = summary["by_ext"]
     # ext -> active channel name, so the "Hang up" button can target it.
@@ -693,6 +699,11 @@ function esc(s) {
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function fmtDur(d) { return String(d || '').replace(/^00:/, ''); }
+function codecName(c) {
+  const m = {ulaw:'µ-law', alaw:'A-law', g722:'G.722', g729:'G.729', g723:'G.723', g726:'G.726', opus:'Opus', ilbc:'iLBC', slin16:'L16'};
+  // "g722/ulaw" (two legs, i.e. a transcode) renders as "G.722/µ-law".
+  return String(c || '').split('/').map(x => m[x.toLowerCase()] || x).join('/');
+}
 function fmt12(hhmm) {
   const m = /^(\\d{1,2}):(\\d{2})$/.exec(hhmm || '');
   if (!m) return hhmm || '';
@@ -808,7 +819,8 @@ async function refresh() {
         '<li class="kind-' + esc(c.kind || 'internal') + '">' +
         '<span class="detail">' + esc(c.detail) + '</span>' +
         '<span class="meta">' + esc(c.state || '') +
-        (c.duration ? ' · ' + esc(fmtDur(c.duration)) : '') + '</span></li>'
+        (c.duration ? ' · ' + esc(fmtDur(c.duration)) : '') +
+        (c.codec ? ' · ' + esc(codecName(c.codec)) : '') + '</span></li>'
       ).join('') + '</ul>';
     }
 

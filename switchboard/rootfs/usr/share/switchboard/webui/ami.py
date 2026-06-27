@@ -287,17 +287,22 @@ def summarize_calls(channels: list[dict], rooms_by_ext: dict) -> dict:
 
         duration = max((ch.get("duration", "") for ch in legs), key=_dur_secs, default="")
 
+        # Distinct codec(s) in use across the call's legs. One value means every
+        # leg shares it — no transcoding (e.g. "ulaw" end-to-end); two different
+        # values reveal a transcode (e.g. "g722/ulaw"). Empty until a leg reports.
+        codec = "/".join(sorted({(ch.get("codec") or "").lower() for ch in legs if ch.get("codec")}))
+
         # Only list real connections/sessions as "active calls". A lone leg with
         # a single room party (a test ring's Playback, or the &lt;1s before a
         # callee leg is created) is reflected on the room card via by_ext below,
         # but isn't a call worth listing.
         if operator and len(labels) == 1:
             calls.append({"detail": f"{labels[0]} → Operator", "state": state,
-                          "duration": duration, "kind": "operator"})
+                          "duration": duration, "kind": "operator", "codec": codec})
         elif len(labels) >= 2:
             kind = "outside" if outside else "internal"
             calls.append({"detail": " ↔ ".join(labels[:2]), "state": state,
-                          "duration": duration, "kind": kind})
+                          "duration": duration, "kind": kind, "codec": codec})
 
         # Per-room view: each room leg's peer is the other party (or the operator).
         for ch in legs:
@@ -315,7 +320,7 @@ def summarize_calls(channels: list[dict], rooms_by_ext: dict) -> dict:
             leg_state = "Ringing" if "ring" in (ch.get("state") or "").lower() else (
                 "Talking" if "up" in (ch.get("state") or "").lower() else (ch.get("state") or "")
             )
-            by_ext[ext] = {"state": leg_state, "peer": peer}
+            by_ext[ext] = {"state": leg_state, "peer": peer, "codec": (ch.get("codec") or "").lower()}
     return {"calls": calls, "by_ext": by_ext}
 
 
@@ -749,3 +754,46 @@ def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
         contacts_from_blocks(blocks),
         channels_from_blocks(blocks),
     )
+
+
+def get_channel_codec(channel: str) -> str:
+    """The audio codec a live channel is using (e.g. "ulaw", "g722"), read via
+    Getvar of ``CHANNEL(audioreadformat)``. "" when unavailable (channel gone /
+    AMI down).
+
+    Lets the dashboard show — and lets us *verify* — that a call is G.711 µ-law
+    with no transcoding: a leg reading "ulaw" bridged to a trunk leg also reading
+    "ulaw" is un-transcoded; a mismatch (e.g. "g722" ↔ "ulaw") reveals a transcode.
+
+    Uses only the ``call`` privilege the AMI account already holds — NOT the
+    deliberately-withheld ``command`` (CLI/RCE) class. ``channel`` comes from
+    CoreShowChannels (Asterisk-supplied); CRLF is rejected defensively so it can
+    never inject extra AMI lines.
+    """
+    if not channel or "\r" in channel or "\n" in channel:
+        return ""
+    action_id = _next_action_id()
+    try:
+        blocks = _ami_command(
+            ["Action: Getvar", f"Channel: {channel}", "Variable: CHANNEL(audioreadformat)"],
+            single_response=True,
+            action_id=action_id,
+        )
+    except (OSError, AMIError):
+        return ""
+    for b in blocks:
+        if b.get("actionid") == action_id and "value" in b:
+            return b.get("value", "")
+    return ""
+
+
+def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
+    """{channel name -> codec} for the given active channels. Empty input -> empty
+    output, so an idle status poll (no channels) does NO extra AMI work; the codec
+    reads only happen while a call is actually up."""
+    out: dict[str, str] = {}
+    for ch in channels:
+        name = ch.get("channel", "")
+        if name:
+            out[name] = get_channel_codec(name)
+    return out

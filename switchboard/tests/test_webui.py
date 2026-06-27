@@ -407,11 +407,102 @@ def test_status_bundle_socket_loop() -> None:
         ami.AMI_SECRET = orig_secret
 
 
+def test_call_codec_summary() -> None:
+    # summarize_calls surfaces a per-call codec from the legs' "codec" field: one
+    # value across both legs = no transcode; two different values = a transcode
+    # made visible (the whole point — proving a call is u-law end-to-end).
+    rooms = {"11": "Kitchen"}
+    clean = [
+        {"channel": "PJSIP/11-1", "ext": "11", "state": "Up", "linkedid": "c1", "codec": "ulaw"},
+        {"channel": "PJSIP/trunk-2", "ext": "trunk", "state": "Up", "linkedid": "c1",
+         "codec": "ulaw", "connected": "6025551212"},
+    ]
+    out = ami.summarize_calls(clean, rooms)
+    check("codec: clean u-law call shows a single codec", out["calls"][0]["codec"] == "ulaw")
+    check("codec: by_ext carries the leg codec", out["by_ext"]["11"]["codec"] == "ulaw")
+    transcode = [
+        {"channel": "PJSIP/11-3", "ext": "11", "state": "Up", "linkedid": "c2", "codec": "g722"},
+        {"channel": "PJSIP/trunk-4", "ext": "trunk", "state": "Up", "linkedid": "c2",
+         "codec": "ulaw", "connected": "6025551212"},
+    ]
+    out2 = ami.summarize_calls(transcode, rooms)
+    check("codec: a transcode shows both legs' codecs", out2["calls"][0]["codec"] == "g722/ulaw")
+
+
+def test_codecs_for_channels_no_io() -> None:
+    # No active channels -> empty map and NO AMI call (idle polls stay quiet).
+    check("codec: no channels -> no AMI work", ami.codecs_for_channels([]) == {})
+
+
+def test_get_channel_codec_guards() -> None:
+    # Empty / CRLF-bearing channel rejected before any socket use (injection guard).
+    check("codec: empty channel -> ''", ami.get_channel_codec("") == "")
+    check("codec: CRLF channel -> ''", ami.get_channel_codec("PJSIP/11\r\nAction: Command") == "")
+
+
+class _FakeGetvarSocket:
+    """Canned AMI peer for the get_channel_codec / Getvar single-response path."""
+
+    def __init__(self, value: str = "ulaw", auth_ok: bool = True) -> None:
+        self.value, self.auth_ok, self.sent, self._n = value, auth_ok, b"", 0
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def recv(self, _n: int) -> bytes:
+        self._n += 1
+        if self._n == 1:
+            return b"Asterisk Call Manager/9.0.0\r\n\r\n"
+        if self._n == 2:
+            if not self.auth_ok:
+                return b"Response: Error\r\nMessage: Authentication failed\r\n\r\n"
+            import re
+            aid = (re.findall(r"ActionID: (\S+)", self.sent.decode()) or [""])[0]
+            return (
+                "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+                f"Response: Success\r\nActionID: {aid}\r\n"
+                f"Variable: CHANNEL(audioreadformat)\r\nValue: {self.value}\r\n\r\n"
+            ).encode()
+        import socket as _s
+        raise _s.timeout()
+
+
+def test_get_channel_codec_reads_value() -> None:
+    # The Getvar response's Value (the codec) is read back over the socket, and an
+    # auth failure degrades to "" rather than raising into the status path.
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    try:
+        ami.socket.create_connection = lambda *a, **k: _FakeGetvarSocket(value="ulaw")
+        check("codec: Getvar Value parsed as the codec", ami.get_channel_codec("PJSIP/11-1") == "ulaw")
+        ami.socket.create_connection = lambda *a, **k: _FakeGetvarSocket(auth_ok=False)
+        check("codec: auth failure degrades to '' (no raise into status)", ami.get_channel_codec("PJSIP/11-1") == "")
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
 def main() -> None:
     test_endpoints()
     test_actions_complete()
     test_status_bundle_parse()
     test_status_bundle_socket_loop()
+    test_call_codec_summary()
+    test_codecs_for_channels_no_io()
+    test_get_channel_codec_guards()
+    test_get_channel_codec_reads_value()
     test_contacts()
     test_registered()
     test_lowercasing()

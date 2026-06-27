@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.4
+
+Show the live codec on active calls — so "is this call µ-law?" is verifiable.
+
+- **Per-call codec on the dashboard and operator console.** Each active call now
+  reads the codec its legs negotiated (via AMI `Getvar CHANNEL(audioreadformat)`)
+  and shows it, e.g. "📞 Cordless ↔ Outside · Talking · µ-law". One value means
+  no transcoding; two (e.g. "G.722/µ-law") reveals a transcode at a glance.
+- Uses only the `call` privilege the AMI account already holds — NOT the
+  deliberately-withheld `command`/CLI class, so the security boundary is unchanged.
+- Read **only while a call is up** (no active channels → no extra AMI work), so
+  the idle-poll churn reduction from 0.9.3 is preserved.
+- `/api/status` calls (and the console board) gain a `codec` field; tests cover
+  the Getvar value parse, the no-transcode vs transcode summary, the idle no-I/O
+  path, and the CRLF/empty-channel injection guard.
+
 ## 0.9.3
 
 Quiet the Asterisk manager log; cut AMI connection churn.
