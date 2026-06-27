@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.3
+
+Quiet the Asterisk manager log; cut AMI connection churn.
+
+- **One AMI session per status poll instead of three.** The dashboard and the
+  operator console each read endpoints + contacts + channels every refresh, and
+  each `get_*` opened its own connect→login→logoff cycle — so a steady stream of
+  "Manager 'switchboard' logged on/off" / `SuccessfulAuth` events filled the log
+  (~8 every 1.5s). New `ami.get_status_bundle()` runs all three list actions over
+  a single connection (one login, one logoff), with the read terminated only once
+  every action's own `...Complete` has arrived (matched by ActionID, so a spoofed
+  field value or an unrelated action can't end it early). The web `/api/status`
+  and the console poller both use it.
+- **Console board poll slowed 1.5s → 3s.** Registration/call state changes on the
+  order of seconds and operator actions refresh immediately, so this is invisible
+  in use but roughly halves the remaining poll rate. Net effect ≈ 6× fewer AMI
+  connections.
+- No behavior change to the dashboard, console, MWI, paging, or originate paths;
+  the stateless `/run/switchboard/ami.env` fallback for dialplan-spawned consumers
+  is untouched.
+
 ## 0.9.2
 
 Fix intermittent outbound "Service Unavailable" on the SIP trunk.
