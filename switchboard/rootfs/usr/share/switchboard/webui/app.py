@@ -44,9 +44,8 @@ except ImportError:  # pragma: no cover - exercised only on the test box
 from ami import (  # noqa: E402
     AMIError,
     connect_extensions,
-    get_channels,
-    get_contacts,
     get_endpoints,
+    get_status_bundle,
     hangup_channel,
     is_registered,
     page_all,
@@ -271,16 +270,15 @@ def api_status() -> JSONResponse:
     ami_ok = True
     error = None
     try:
-        endpoints = get_endpoints()
-    except AMIError as exc:
+        # One AMI session for all three reads (endpoints + contacts + channels)
+        # instead of three connect/login/logoff cycles per refresh.
+        endpoints, contacts, channels = get_status_bundle()
+    except (AMIError, OSError) as exc:
         ami_ok = False
         # Return a generic marker to the client; log the detail server-side only.
         error = "unreachable"
         print(f"[switchboard-webui] AMI unavailable: {exc}", flush=True)
-        endpoints = []
-
-    contacts = get_contacts() if ami_ok else {}
-    channels = get_channels() if ami_ok else []
+        endpoints, contacts, channels = [], {}, []
 
     # Turn raw channel legs into readable calls ("Kitchen ↔ Office") and a
     # per-room "what is this phone doing right now" map.

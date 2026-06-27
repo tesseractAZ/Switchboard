@@ -63,6 +63,14 @@ AUTH_FAIL = (
     "Response: Error\r\nMessage: Authentication failed\r\n\r\n"
 ).encode()
 
+# A CoreShowChannels capture (one active leg) — the third read in a status bundle.
+CHANNELS = (
+    "Response: Success\r\nEventList: start\r\nMessage: A listing of channels follows\r\n\r\n"
+    "Event: CoreShowChannel\r\nChannel: PJSIP/11-00000001\r\nChannelStateDesc: Up\r\n"
+    "CallerIDNum: 11\r\nLinkedid: c-1\r\n\r\n"
+    "Event: CoreShowChannelsComplete\r\nEventList: Complete\r\nListItems: 1\r\n\r\n"
+).encode()
+
 
 def test_endpoints() -> None:
     eps = ami.endpoints_from_blocks(ami.parse_ami_blocks(ENDPOINTS))
@@ -265,8 +273,145 @@ def test_no_calls() -> None:
     check("calls: empty -> no calls", summary["calls"] == [] and summary["by_ext"] == {})
 
 
+def test_actions_complete() -> None:
+    # The status bundle reads three list actions over one connection; the read may
+    # only end once ALL three have emitted their own "...Complete" (matched by
+    # ActionID), never on a spoofed field value or some other action's Complete.
+    ids = {"A", "B", "C"}
+    partial = (
+        "Event: EndpointListComplete\r\nActionID: A\r\n\r\n"
+        "Event: ContactListComplete\r\nActionID: B\r\n\r\n"
+    ).encode()
+    check("multi-term: not done until all three Complete", ami.actions_complete(partial, ids) is False)
+    full = partial + b"Event: CoreShowChannelsComplete\r\nActionID: C\r\n\r\n"
+    check("multi-term: done when all three Complete present", ami.actions_complete(full, ids) is True)
+    # A field value ending in "Complete" (not an Event name) must not satisfy C.
+    spoof = (
+        "Event: CoreShowChannel\r\nActionID: C\r\nCallerIDName: Job Complete\r\n\r\n"
+        "Event: EndpointListComplete\r\nActionID: A\r\n\r\n"
+        "Event: ContactListComplete\r\nActionID: B\r\n\r\n"
+    ).encode()
+    check("multi-term: spoofed field 'Complete' does not satisfy C", ami.actions_complete(spoof, ids) is False)
+    # A Complete for an ActionID we didn't ask for can't satisfy a wanted one.
+    foreign = (
+        "Event: EndpointListComplete\r\nActionID: A\r\n\r\n"
+        "Event: ContactListComplete\r\nActionID: B\r\n\r\n"
+        "Event: CoreShowChannelsComplete\r\nActionID: Z\r\n\r\n"
+    ).encode()
+    check("multi-term: foreign ActionID Complete is ignored", ami.actions_complete(foreign, ids) is False)
+
+
+def test_status_bundle_parse() -> None:
+    # get_status_bundle reads endpoints + contacts + channels over ONE socket.
+    # The concatenated stream (each action keeps its own ack + events) must still
+    # parse cleanly per event type — the parsers filter by Event, so merging them
+    # is safe. (The socket wiring of _ami_actions mirrors the tested _ami_command.)
+    combined = ENDPOINTS + CONTACTS + CHANNELS
+    blocks = ami.parse_ami_blocks(combined)
+    eps = ami.endpoints_from_blocks(blocks)
+    cs = ami.contacts_from_blocks(blocks)
+    chans = ami.channels_from_blocks(blocks)
+    check("bundle: endpoints parsed from combined stream", [e["name"] for e in eps] == ["11", "14", "trunk"])
+    check("bundle: contacts parsed from combined stream", set(cs) == {"11", "12", "13"})
+    check("bundle: channels parsed from combined stream", [c["ext"] for c in chans] == ["11"])
+
+
+class _FakeAMISocket:
+    """A canned AMI peer for driving the _ami_actions socket loop without a real
+    Asterisk: banner, then a response built from the ActionIDs the caller actually
+    sent, then a read timeout. ``echo`` toggles whether the terminating events
+    carry the ActionID (the load-bearing assumption); ``auth_ok`` the login."""
+
+    def __init__(self, echo: bool = True, auth_ok: bool = True) -> None:
+        self.echo, self.auth_ok, self.sent, self._n = echo, auth_ok, b"", 0
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def recv(self, _n: int) -> bytes:
+        self._n += 1
+        if self._n == 1:
+            return b"Asterisk Call Manager/9.0.0\r\n\r\n"
+        if self._n == 2:
+            return self._response()
+        import socket as _s
+        raise _s.timeout()  # a real read would block here, then time out
+
+    def _response(self) -> bytes:
+        if not self.auth_ok:
+            return b"Response: Error\r\nMessage: Authentication failed\r\n\r\n"
+        import re
+        ep, ct, ch = (re.findall(r"ActionID: (\S+)", self.sent.decode()) + ["", "", ""])[:3]
+        def tag(a: str) -> str:
+            return f"ActionID: {a}\r\n" if (self.echo and a) else ""
+        return (
+            "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+            f"Event: EndpointList\r\n{tag(ep)}ObjectName: 11\r\nDeviceState: Not in use\r\n\r\n"
+            f"Event: EndpointListComplete\r\n{tag(ep)}ListItems: 1\r\n\r\n"
+            f"Event: ContactList\r\n{tag(ct)}Endpoint: 11\r\nStatus: Reachable\r\nUri: sip:11@x\r\n\r\n"
+            f"Event: ContactListComplete\r\n{tag(ct)}ListItems: 1\r\n\r\n"
+            f"Event: CoreShowChannel\r\n{tag(ch)}Channel: PJSIP/11-1\r\nChannelStateDesc: Up\r\nLinkedid: c1\r\n\r\n"
+            f"Event: CoreShowChannelsComplete\r\n{tag(ch)}ListItems: 1\r\n\r\n"
+        ).encode()
+
+
+def test_status_bundle_socket_loop() -> None:
+    # Drive get_status_bundle()/_ami_actions end-to-end over a fake socket — the
+    # one genuinely new branch (send ActionIDs, read until each action's tagged
+    # Complete). Covers: happy path; the spec-says-impossible "ActionID not echoed"
+    # case (must still parse correct data via the timeout, not hang/corrupt); and
+    # an auth failure (must raise). Guards a future Asterisk that drops ActionID
+    # echo from silently slowing the live board with no test signal.
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+
+    def run(fake):
+        ami.socket.create_connection = lambda *a, **k: fake
+        try:
+            return ami.get_status_bundle()
+        finally:
+            ami.socket.create_connection = orig_conn
+
+    try:
+        fake = _FakeAMISocket(echo=True)
+        eps, cs, chans = run(fake)
+        check("bundle e2e: endpoints parsed over the socket", [e["name"] for e in eps] == ["11"])
+        check("bundle e2e: contacts parsed over the socket", set(cs) == {"11"})
+        check("bundle e2e: channels parsed over the socket", [c["ext"] for c in chans] == ["11"])
+        check("bundle e2e: three ActionIDs were actually sent", fake.sent.count(b"ActionID:") == 3)
+
+        eps2, cs2, chans2 = run(_FakeAMISocket(echo=False))
+        check("bundle e2e: no-echo still yields correct data (fail-safe latency, not bad data)",
+              [e["name"] for e in eps2] == ["11"] and set(cs2) == {"11"} and [c["ext"] for c in chans2] == ["11"])
+
+        raised = False
+        try:
+            run(_FakeAMISocket(auth_ok=False))
+        except ami.AMIError:
+            raised = True
+        check("bundle e2e: auth failure raises AMIError", raised)
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
 def main() -> None:
     test_endpoints()
+    test_actions_complete()
+    test_status_bundle_parse()
+    test_status_bundle_socket_loop()
     test_contacts()
     test_registered()
     test_lowercasing()
