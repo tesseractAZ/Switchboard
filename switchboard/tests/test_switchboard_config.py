@@ -99,6 +99,49 @@ def test_outbound_toll_fraud_blocks() -> None:
     check("blocks precede the general outbound rule", e.index("_9011.") < e.index("exten = _9.,"))
 
 
+def test_trunk_codec_pinned_to_ulaw() -> None:
+    # The outside line is the PSTN (always narrowband). The trunk endpoint must
+    # advertise ulaw ONLY (disallow=all) so the provider can't negotiate a
+    # wideband codec and force a transcode against the analog FXS phones. The
+    # HD codecs stay on the room template for internal SIP-to-SIP calls.
+    rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "100000_pi", "secret": "x", "dial_prefix": "9"}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    ep = pj[pj.index("[trunk]\n"):pj.index("[trunk-identify]")]
+    check("trunk endpoint disallows all then allows ulaw",
+          "disallow = all" in ep and "allow = ulaw" in ep)
+    check("trunk endpoint advertises no wideband/alaw codec",
+          not any(c in ep for c in ("g722", "opus", "alaw")))
+    check("room endpoints keep HD codecs (g722/opus) for SIP-to-SIP",
+          "g722" in pj and "opus" in pj)
+
+
+def test_trunk_inbound_routing() -> None:
+    # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
+    # empty rings the whole house; an ext that isn't a room is ignored (rings
+    # all) so a typo never silently drops inbound calls.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "19", "name": "Cordless", "secret": "s2"}])
+    base = {"enabled": True, "provider_host": "sip.x.com", "username": "u",
+            "secret": "s", "dial_prefix": "9"}
+
+    one = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "19"}})
+    ft = one[one.index("[from-trunk]"):]
+    check("inbound_ext=19 rings only PJSIP/19",
+          "Dial(PJSIP/19,30,rtT)" in ft and "PJSIP/11" not in ft)
+
+    allr = sbc.render_extensions({"rooms": rooms, "trunk": base})
+    fta = allr[allr.index("[from-trunk]"):]
+    check("no inbound_ext rings every room",
+          "Dial(PJSIP/11&PJSIP/19,30,rtT)" in fta)
+
+    bad = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "99"}})
+    ftb = bad[bad.index("[from-trunk]"):]
+    check("inbound_ext not a room -> rings every room (no silent drop)",
+          "Dial(PJSIP/11&PJSIP/19,30,rtT)" in ftb and "Dial(PJSIP/99," not in ftb)
+
+
 def test_clean_config_unchanged() -> None:
     # A clean room still renders the expected endpoint/auth/aor (no regression).
     o = {"rooms": sbc.valid_rooms([{"ext": "201", "name": "Office", "secret": "Str0ngPass"}]), "trunk": {}}
@@ -325,6 +368,8 @@ if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
+    test_trunk_codec_pinned_to_ulaw()
+    test_trunk_inbound_routing()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()
     test_talking_clock()
