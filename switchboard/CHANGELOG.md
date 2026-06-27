@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.5
+
+Show the active-call codec on the per-room tiles too (not just the calls list).
+
+- The room card / console row for a phone on a call now appends its live codec —
+  "↔ Outside · µ-law" — so you can see at a glance which codec each handset is on,
+  with a transcode showing as a slashed value ("G.722/µ-law"). The codec was
+  already carried in `by_ext`; this just surfaces it on the tile (`call_codec`).
+  No new AMI work.
+
 ## 0.9.4
 
 Show the live codec on active calls — so "is this call µ-law?" is verifiable.

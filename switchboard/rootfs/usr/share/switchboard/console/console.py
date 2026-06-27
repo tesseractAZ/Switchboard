@@ -245,6 +245,7 @@ def build_board(rooms_cfg: dict) -> dict:
         rooms.append({
             "ext": name, "label": rooms_by_ext.get(name, name), "registered": registered,
             "device_state": ds, "call_state": call.get("state", ""), "peer": call.get("peer", ""),
+            "codec": call.get("codec", ""),
             "channel": chan_by_ext.get(name, ""), "mwi": _mwi(name),
         })
     for ext, cfg in rooms_cfg.items():
@@ -340,7 +341,8 @@ def _room_status(room: dict):
     ds = (room.get("device_state") or "").lower()
     cs = (room.get("call_state") or "")
     peer = room.get("peer") or ""
-    suffix = f"  ↔ {peer}" if peer else ""
+    codec = _codec_label(room.get("codec", ""))
+    suffix = (f"  ↔ {peer}" if peer else "") + (f"  · {codec}" if (peer and codec) else "")
     if not room.get("registered"):
         return "○", RED, "Offline", ""
     if cs == "Ringing" or "ring" in ds:
