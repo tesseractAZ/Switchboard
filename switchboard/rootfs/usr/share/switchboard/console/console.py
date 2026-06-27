@@ -186,6 +186,17 @@ def load_rooms_cfg() -> dict:
     return {str(r.get("ext")): r for r in (opts.get("rooms") or [])}
 
 
+_CODEC_NAMES = {"ulaw": "µ-law", "alaw": "A-law", "g722": "G.722", "g729": "G.729",
+                "g723": "G.723", "g726": "G.726", "opus": "Opus", "ilbc": "iLBC", "slin16": "L16"}
+
+
+def _codec_label(codec: str) -> str:
+    """Pretty per-call codec for the board: "ulaw" -> "µ-law"; "g722/ulaw" (a
+    transcode across the two legs) -> "G.722/µ-law"; "" -> "" (no live leg yet)."""
+    codec = str(codec or "")
+    return "/".join(_CODEC_NAMES.get(x, x) for x in codec.split("/")) if codec else ""
+
+
 def build_board(rooms_cfg: dict) -> dict:
     """One AMI poll → a board dict the renderer consumes. Pure given the AMI
     helpers; isolated here so the renderer/tests never touch a socket."""
@@ -198,6 +209,10 @@ def build_board(rooms_cfg: dict) -> dict:
         ami_ok = True
     except (ami.AMIError, OSError):
         endpoints, contacts, channels, ami_ok = [], {}, [], False
+    # Tag each live leg with its negotiated codec (only reads while a call is up).
+    codecs = ami.codecs_for_channels(channels)
+    for ch in channels:
+        ch["codec"] = codecs.get(ch.get("channel", ""), "")
     summary = ami.summarize_calls(channels, rooms_by_ext)
     by_ext = summary["by_ext"]
 
@@ -453,7 +468,9 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             dur = str(c.get("duration", "") or "")
             if dur.startswith("00:"):
                 dur = dur[3:]
-            tail = color(GREY, c.get("state", "") + (f"  {dur}" if dur else ""))
+            cname = _codec_label(c.get("codec", ""))
+            meta = c.get("state", "") + (f"  {dur}" if dur else "") + (f"  {cname}" if cname else "")
+            tail = color(GREY, meta)
             lines.append(f"    {g}  {c.get('detail','')}   {tail}")
 
     wakeups = board.get("wakeups", [])
