@@ -24,6 +24,21 @@ def check(name: str, cond: bool) -> None:
         _failures += 1
 
 
+def _context_of(conf: str, needle: str):
+    """Name of the [context] that the first non-header line containing `needle`
+    falls under (None if not found). Used to assert a dialplan rule lives in the
+    right context, not merely that it exists somewhere."""
+    ctx = None
+    for line in conf.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            ctx = s[1:-1]
+            continue
+        if needle in s:
+            return ctx
+    return None
+
+
 def test_hostile_inputs() -> None:
     opts = {
         "rooms": [
@@ -97,6 +112,33 @@ def test_outbound_toll_fraud_blocks() -> None:
     check("premium 900 is blocked", "_9900." in e)
     check("general outbound still allowed", "exten = _9.," in e)
     check("blocks precede the general outbound rule", e.index("_9011.") < e.index("exten = _9.,"))
+
+
+def test_outbound_rules_live_in_rooms_context() -> None:
+    # REGRESSION: the outbound _9. rule + toll-fraud blocks MUST live in [rooms]
+    # (the context the phones dial from). If they land in a feature context, [rooms]
+    # has no _9., so an outbound number falls through the catch-all _X. room pattern
+    # -> "not a known room" -> Congestion, which phones surface as "Service
+    # Unavailable" (no call ever reaches the trunk). The inbound _X. is a SEPARATE
+    # rule that belongs in [from-trunk].
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "19", "name": "Cordless", "secret": "s2"}])
+    opts = {"rooms": rooms, "operator": {"enabled": True}, "automation_enabled": True,
+            "page_enabled": True, "clock_enabled": True, "wakeup_enabled": True,
+            "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
+                      "username": "100000_switchboard", "secret": "s", "dial_prefix": "9",
+                      "outbound_caller_id": "2025550100", "inbound_ext": "19"}}
+    e = sbc.render_extensions(opts)
+    check("outbound _9. lives in [rooms]", _context_of(e, "exten = _9.,") == "rooms")
+    check("Dial(...@trunk) lives in [rooms]", _context_of(e, "@trunk") == "rooms")
+    check("toll-fraud block _9011. lives in [rooms]", _context_of(e, "exten = _9011.,") == "rooms")
+    check("outbound _9. is NOT in a feature context (the regression)",
+          _context_of(e, "exten = _9.,") not in ("automation", "page", "operator", "wakeup"))
+    check("inbound ring rule lives in [from-trunk]", _context_of(e, "Inbound call") == "from-trunk")
+    check("outbound CID set before the trunk Dial",
+          e.index("CALLERID(num)=2025550100") < e.index("@trunk"))
+    # A non-prefixed extension still rings a room (the _X. room pattern is intact).
+    check("room pattern still present in [rooms]", _context_of(e, "Room call to") == "rooms")
 
 
 def test_trunk_codec_pinned_to_ulaw() -> None:
@@ -368,6 +410,7 @@ if __name__ == "__main__":
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
+    test_outbound_rules_live_in_rooms_context()
     test_trunk_codec_pinned_to_ulaw()
     test_trunk_inbound_routing()
     test_clean_config_unchanged()
