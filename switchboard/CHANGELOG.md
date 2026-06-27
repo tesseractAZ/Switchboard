@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.1
+
+Fix outbound calling on the SIP trunk (regression caught on 0.9.0's first live use).
+
+- **Outbound dialplan was emitted into the wrong context.** The `_9.` outbound
+  rule and the toll-fraud blocks were appended after the feature contexts, so they
+  landed in `[automation]` instead of `[rooms]`. With no `_9.` in `[rooms]`, a
+  dialed outside number fell through the catch-all `_X.` room pattern, didn't match
+  a known room, and hit `Congestion` — which phones report as **"Service
+  Unavailable"**, and no call ever reached the carrier. Outbound rules now render
+  inside `[rooms]`, where the literal-`9` patterns out-prioritize `_X.`; inbound
+  stays in its own `[from-trunk]` context. Inbound calling was unaffected.
+- Tests now assert the *context* each dialplan rule lives in (not just that it
+  exists), so this can't regress silently.
+
 ## 0.9.0
 
 Outside-line (SIP trunk) refinements for clean, low-latency PSTN calls.
