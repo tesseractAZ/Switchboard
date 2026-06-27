@@ -159,6 +159,23 @@ def test_trunk_codec_pinned_to_ulaw() -> None:
           "g722" in pj and "opus" in pj)
 
 
+def test_trunk_aor_not_qualified() -> None:
+    # The trunk's static contact must NOT be qualified. VoIP.ms doesn't reliably
+    # answer OPTIONS keep-alives, so qualifying flaps the contact to Unavailable
+    # and PJSIP then refuses outbound Dial(...@trunk) -> 503 "Service Unavailable"
+    # even while the registration (inbound) stays healthy. Room AORs keep qualify
+    # (LAN ATAs answer OPTIONS fine) — this disable is trunk-only.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9"}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    aor = pj[pj.index("[trunk-aor]"):pj.index("[trunk]\n")]
+    check("trunk AOR disables qualify (qualify_frequency=0)", "qualify_frequency = 0" in aor)
+    check("trunk AOR keeps the static provider contact",
+          "contact = sip:losangeles4.voip.ms:5060" in aor)
+    check("room AORs still qualify (trunk-only change)", "qualify_frequency = 60" in pj)
+
+
 def test_trunk_inbound_routing() -> None:
     # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
     # empty rings the whole house; an ext that isn't a room is ignored (rings
@@ -412,6 +429,7 @@ if __name__ == "__main__":
     test_outbound_toll_fraud_blocks()
     test_outbound_rules_live_in_rooms_context()
     test_trunk_codec_pinned_to_ulaw()
+    test_trunk_aor_not_qualified()
     test_trunk_inbound_routing()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()
