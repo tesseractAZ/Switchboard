@@ -49,7 +49,12 @@ except ImportError:  # pragma: no cover
     ha_client = None
 
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
-POLL_SECONDS = 1.5
+# Board refresh cadence. A phone board's registration/call state changes on the
+# order of seconds, and operator actions (ring/connect/hangup/page) refresh
+# immediately, so a few seconds of passive freshness is plenty — and a longer
+# interval (vs the old 1.5s) keeps Asterisk's manager log from filling with
+# poll-driven logon/logoff churn. Paired with the single-session get_status_bundle.
+POLL_SECONDS = 3.0
 # This is an unauthenticated LAN service; bound the blast radius of a misbehaving
 # or hostile client.
 MAX_SESSIONS = 5
@@ -186,12 +191,13 @@ def build_board(rooms_cfg: dict) -> dict:
     helpers; isolated here so the renderer/tests never touch a socket."""
     rooms_by_ext = {ext: (cfg.get("name") or ext) for ext, cfg in rooms_cfg.items()}
     try:
-        endpoints = ami.get_endpoints()
+        # One AMI session for the whole board read (endpoints + contacts +
+        # channels) instead of three per poll — this is the dominant source of
+        # the manager logon/logoff churn since the poller runs every few seconds.
+        endpoints, contacts, channels = ami.get_status_bundle()
         ami_ok = True
     except (ami.AMIError, OSError):
-        endpoints, ami_ok = [], False
-    contacts = ami.get_contacts() if ami_ok else {}
-    channels = ami.get_channels() if ami_ok else []
+        endpoints, contacts, channels, ami_ok = [], {}, [], False
     summary = ami.summarize_calls(channels, rooms_by_ext)
     by_ext = summary["by_ext"]
 

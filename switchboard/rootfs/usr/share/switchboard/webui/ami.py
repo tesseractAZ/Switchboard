@@ -108,6 +108,26 @@ def stream_complete(data: bytes) -> bool:
     return False
 
 
+def actions_complete(data: bytes, action_ids: set[str]) -> bool:
+    """True once every action in ``action_ids`` has emitted its own
+    ``...Complete`` event.
+
+    Used to read several list actions over ONE connection: each action is tagged
+    with an ActionID and Asterisk echoes it on that action's events (including the
+    terminating ``EndpointListComplete`` / ``ContactListComplete`` /
+    ``CoreShowChannelsComplete``). We key the terminator on the ActionID rather
+    than the event name so attacker-influenced field values (a ``UserAgent`` or
+    ``CallerIDName`` containing "complete") can never end the read early, and an
+    unsolicited event for some *other* ActionID can't either.
+    """
+    seen: set[str] = set()
+    for b in parse_ami_blocks(data):
+        aid = b.get("actionid", "")
+        if aid in action_ids and b.get("event", "").lower().endswith("complete"):
+            seen.add(aid)
+    return action_ids <= seen
+
+
 def login_failed(blocks: list[dict]) -> bool:
     """True if the parsed blocks contain an AMI authentication failure.
 
@@ -399,6 +419,82 @@ def _ami_command(
     return blocks
 
 
+def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
+    """Run several LIST actions over a SINGLE AMI connection and return every
+    parsed block.
+
+    One login + one logoff for the whole batch, instead of a fresh
+    connect/login/logoff per action. Each action is tagged with its own ActionID
+    and we read until *all* of them have signalled their ``...Complete`` event
+    (see :func:`actions_complete`). This is what collapses the dashboard/console
+    status poll — endpoints + contacts + channels — from three AMI sessions down
+    to one, which is the dominant source of the manager logon/logoff churn.
+
+    Mirrors :func:`_ami_command`'s read discipline (read until the real
+    terminator, then log off — never before, or Asterisk truncates the stream).
+    Raises :class:`AMIError` on a missing secret or an auth failure; lets socket
+    errors propagate so callers can fall back to an "AMI down" state.
+
+    The default ``timeout`` is deliberately kept *below* the console's
+    ``POLL_SECONDS`` cadence: the normal read completes in milliseconds on
+    loopback, and on the (spec-says-can't-happen) case where Asterisk failed to
+    echo an ActionID on the terminating event, a single stalled poll then falls
+    through to the timeout WITHOUT outrunning the poll interval and backing the
+    poller up. The parsed buffer is still correct in that case — the failure mode
+    is a little latency, never wrong data.
+    """
+    if not AMI_SECRET:
+        raise AMIError("AMI secret not configured")
+
+    want: set[str] = set()
+    tagged: list[list[str]] = []
+    for act in actions:
+        aid = _next_action_id()
+        want.add(aid)
+        tagged.append(list(act) + [f"ActionID: {aid}"])
+
+    with socket.create_connection((AMI_HOST, AMI_PORT), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+
+        def send(lines: list[str]) -> None:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+
+        buf = b""
+        try:
+            buf += sock.recv(4096)  # banner
+        except socket.timeout:
+            pass
+
+        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
+        for action_lines in tagged:
+            send(action_lines)
+
+        data = bytearray(buf)
+        while True:
+            try:
+                chunk = sock.recv(8192)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            data += chunk
+            # Loopback-only and tiny per action, but three lists stacked — keep a
+            # higher-than-single but still bounded cap so we never buffer forever.
+            if len(data) > 2_000_000:
+                break
+            if actions_complete(bytes(data), want):
+                break
+        try:
+            send(["Action: Logoff"])
+        except OSError:
+            pass
+
+    blocks = parse_ami_blocks(bytes(data))
+    if login_failed(blocks):
+        raise AMIError("authentication failed")
+    return blocks
+
+
 def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: int = 8) -> bool:
     """Place a short "test ring" to a room phone via AMI Originate.
 
@@ -628,3 +724,28 @@ def get_channels() -> list[dict]:
     except (OSError, AMIError):
         return []
     return channels_from_blocks(blocks)
+
+
+def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
+    """The whole dashboard/console status read — endpoints, contacts, channels —
+    over ONE AMI connection. Returns ``(endpoints, contacts, channels)``.
+
+    This is the hot path: the operator console polls it every few seconds and the
+    web dashboard on every refresh. Doing it as one login/logoff instead of three
+    (one per ``get_*``) is what keeps Asterisk's manager log from filling with
+    logon/logoff churn. Raises :class:`AMIError` (or lets ``OSError`` propagate)
+    on failure, exactly like :func:`get_endpoints`, so callers keep their existing
+    ``ami_ok`` fallback — set the trio empty and mark AMI down on either.
+    """
+    blocks = _ami_actions(
+        [
+            ["Action: PJSIPShowEndpoints"],
+            ["Action: PJSIPShowContacts"],
+            ["Action: CoreShowChannels"],
+        ]
+    )
+    return (
+        endpoints_from_blocks(blocks),
+        contacts_from_blocks(blocks),
+        channels_from_blocks(blocks),
+    )
