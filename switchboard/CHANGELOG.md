@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0
+
+Outside-line (SIP trunk) refinements for clean, low-latency PSTN calls.
+
+- **Trunk pinned to G.711 µ-law.** The outside line is the PSTN — always
+  narrowband — so the trunk endpoint now advertises `ulaw` only (`disallow=all`).
+  The provider can no longer negotiate a wideband codec and force a transcode
+  against the analog FXS phones (which only adds latency, never quality). HD
+  codecs (G.722/Opus) stay available for internal SIP-to-SIP calls between the
+  cordless/desk phones.
+- **Configurable inbound destination.** New `trunk.inbound_ext` routes an
+  incoming call to a single room (e.g. the cordless phone) instead of ringing the
+  whole house. Empty (default) keeps the ring-everyone behavior; an ext that
+  isn't a configured room is ignored (rings all) and logged.
+
 ## 0.8.3
 
 MWI stutter tone now works — switch from `res_mwi_external` to `PJSIPNotify`.

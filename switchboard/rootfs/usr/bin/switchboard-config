@@ -297,7 +297,12 @@ def render_trunk_pjsip(trunk: dict, allow: str) -> list[str]:
         "[trunk]",
         "type = endpoint",
         "context = from-trunk",
-        f"allow = {allow}",
+        # The outside line is the PSTN — always narrowband G.711. Pin the trunk
+        # leg to µ-law so the provider can never negotiate a wideband codec and
+        # force a transcode against the analog FXS phones (adds latency, no gain).
+        # HD codecs stay available for internal SIP-to-SIP calls via the rooms.
+        "disallow = all",
+        "allow = ulaw",
         "outbound_auth = trunk-auth",
         "aors = trunk-aor",
         f"from_user = {from_user}",
@@ -658,17 +663,25 @@ def render_extensions(opts: dict) -> str:
             f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rtT)",
             " same = n,Hangup()",
             "",
-            ";; ----- Inbound from the trunk: ring every room -----",
+            ";; ----- Inbound from the trunk -----",
             "[from-trunk]",
         ]
         if exts:
-            dial_all = "&".join(f"PJSIP/{e}" for e in exts)
+            # Where an incoming call rings: a single configured room ext
+            # (trunk.inbound_ext, e.g. the cordless phone), else every room. An
+            # inbound_ext that isn't a known room is ignored (rings all) + logged.
+            inbound_ext = str(trunk.get("inbound_ext", "") or "").strip()
+            if inbound_ext and inbound_ext not in exts:
+                log(f"trunk: inbound_ext {inbound_ext!r} is not a room ext; ringing all rooms")
+                inbound_ext = ""
+            dial_target = f"PJSIP/{inbound_ext}" if inbound_ext else "&".join(f"PJSIP/{e}" for e in exts)
+            where = f"ring {inbound_ext}" if inbound_ext else "ring every room"
             parts += [
-                "exten = _X.,1,NoOp(Inbound call ${EXTEN})",
-                f" same = n,Dial({dial_all},30,rtT)",
+                f"exten = _X.,1,NoOp(Inbound call ${{EXTEN}} -> {where})",
+                f" same = n,Dial({dial_target},30,rtT)",
                 " same = n,Hangup()",
                 "exten = s,1,NoOp(Inbound call, no DID)",
-                f" same = n,Dial({dial_all},30,rtT)",
+                f" same = n,Dial({dial_target},30,rtT)",
                 " same = n,Hangup()",
                 "",
             ]
