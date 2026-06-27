@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.2
+
+Fix intermittent outbound "Service Unavailable" on the SIP trunk.
+
+- **Stop qualifying the trunk's static contact.** VoIP.ms does not reliably answer
+  OPTIONS keep-alives, so Asterisk's qualify would flap the trunk contact to
+  "Unavailable" — and PJSIP then refuses to route outbound calls to it, so
+  `Dial(...@trunk)` fails with **503 "Service Unavailable"** even though the
+  registration (and therefore *inbound* calling) stays perfectly healthy. The
+  trunk AOR now sets `qualify_frequency = 0`; inbound liveness is covered by the
+  periodic re-REGISTER instead. Room AORs still qualify (LAN ATAs answer OPTIONS
+  fine) — this is a trunk-only change.
+
 ## 0.9.1
 
 Fix outbound calling on the SIP trunk (regression caught on 0.9.0's first live use).

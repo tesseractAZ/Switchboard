@@ -292,7 +292,14 @@ def render_trunk_pjsip(trunk: dict, allow: str) -> list[str]:
         "[trunk-aor]",
         "type = aor",
         f"contact = sip:{host}:{port}",
-        "qualify_frequency = 60",
+        # Do NOT qualify the trunk's static contact. VoIP.ms does not reliably
+        # answer OPTIONS keep-alives, so qualifying flaps the contact to
+        # "Unavailable" — and PJSIP then refuses to route outbound calls to it,
+        # so Dial(...@trunk) fails with 503 "Service Unavailable" even while the
+        # registration (and thus inbound) stays perfectly healthy. 0 disables the
+        # health check so the contact is always usable for outbound; inbound
+        # liveness is covered by the periodic re-REGISTER instead.
+        "qualify_frequency = 0",
         "",
         "[trunk]",
         "type = endpoint",
