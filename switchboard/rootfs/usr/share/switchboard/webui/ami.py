@@ -128,6 +128,18 @@ def actions_complete(data: bytes, action_ids: set[str]) -> bool:
     return action_ids <= seen
 
 
+def actions_responded(data: bytes, action_ids: set[str]) -> bool:
+    """True once every action in ``action_ids`` has produced its response block.
+
+    The sibling of :func:`actions_complete` for SINGLE-response actions (Getvar):
+    those return one ``Response:`` block tagged with the ActionID and emit NO
+    ``...Complete`` event, so we terminate the multiplexed read on responses
+    instead. Used to batch all the per-channel codec Getvars over one login.
+    """
+    seen = {b.get("actionid", "") for b in parse_ami_blocks(data) if "response" in b}
+    return action_ids <= seen
+
+
 def login_failed(blocks: list[dict]) -> bool:
     """True if the parsed blocks contain an AMI authentication failure.
 
@@ -788,12 +800,66 @@ def get_channel_codec(channel: str) -> str:
 
 
 def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
-    """{channel name -> codec} for the given active channels. Empty input -> empty
-    output, so an idle status poll (no channels) does NO extra AMI work; the codec
-    reads only happen while a call is actually up."""
-    out: dict[str, str] = {}
+    """{channel name -> codec} for the active channels, read over a SINGLE AMI
+    login — one Getvar CHANNEL(audioreadformat) per channel, multiplexed by
+    ActionID — instead of a fresh connect/login/logoff per channel.
+
+    Empty input -> empty output, so an idle poll does NO AMI work; and during a
+    call this is ONE login total, not one per leg — so the codec read no longer
+    multiplies the AMI sessions exactly when the PBX is busy (it kept undoing the
+    v0.9.3 single-session churn win). Best-effort: returns what it got (or {}) on
+    any error or auth failure — never raises into the status path.
+    """
+    items: list[tuple[str, str]] = []  # (action_id, channel)
     for ch in channels:
         name = ch.get("channel", "")
-        if name:
-            out[name] = get_channel_codec(name)
+        if name and "\r" not in name and "\n" not in name:
+            items.append((_next_action_id(), name))
+    if not items or not AMI_SECRET:
+        return {}
+    by_id = {aid: name for aid, name in items}
+    want = set(by_id)
+    out: dict[str, str] = {}
+    try:
+        with socket.create_connection((AMI_HOST, AMI_PORT), timeout=2.5) as sock:
+            sock.settimeout(2.5)
+
+            def send(lines: list[str]) -> None:
+                sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+
+            buf = b""
+            try:
+                buf += sock.recv(4096)
+            except socket.timeout:
+                pass
+            send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
+            for aid, name in items:
+                send(["Action: Getvar", f"Channel: {name}",
+                      "Variable: CHANNEL(audioreadformat)", f"ActionID: {aid}"])
+            data = bytearray(buf)
+            while True:
+                try:
+                    chunk = sock.recv(8192)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 1_000_000:
+                    break
+                if actions_responded(bytes(data), want):
+                    break
+            try:
+                send(["Action: Logoff"])
+            except OSError:
+                pass
+    except (OSError, AMIError):
+        return {}
+    blocks = parse_ami_blocks(bytes(data))
+    if login_failed(blocks):
+        return {}
+    for b in blocks:
+        aid = b.get("actionid", "")
+        if aid in by_id and "value" in b:
+            out[by_id[aid]] = b.get("value", "")
     return out
