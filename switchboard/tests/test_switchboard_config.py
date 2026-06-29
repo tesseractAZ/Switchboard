@@ -200,6 +200,45 @@ def test_trunk_inbound_routing() -> None:
     check("inbound_ext not a room -> rings every room (no silent drop)",
           "Dial(PJSIP/11&PJSIP/19,30,rtT)" in ftb and "Dial(PJSIP/99," not in ftb)
 
+    # --- group ring: inbound_ext accepts a comma-separated list ----------------
+    rooms3 = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                              {"ext": "19", "name": "Cordless", "secret": "s2"},
+                              {"ext": "20", "name": "iPhone", "secret": "s3"}])
+    grp = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,20"}})
+    ftg = grp[grp.index("[from-trunk]"):]
+    check("inbound_ext='19,20' rings the group PJSIP/19&PJSIP/20",
+          "Dial(PJSIP/19&PJSIP/20,30,rtT)" in ftg and "PJSIP/11" not in ftg)
+
+    grpws = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": " 19 , 20 "}})
+    ftws = grpws[grpws.index("[from-trunk]"):]
+    check("inbound_ext list tolerates surrounding whitespace",
+          "Dial(PJSIP/19&PJSIP/20,30,rtT)" in ftws)
+
+    part = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,99"}})
+    ftp = part[part.index("[from-trunk]"):]
+    check("inbound_ext='19,99' drops the non-room and rings only PJSIP/19",
+          "Dial(PJSIP/19,30,rtT)" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
+
+    allbad = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "98,99"}})
+    ftab = allbad[allbad.index("[from-trunk]"):]
+    check("fully-invalid inbound_ext list rings every room",
+          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,rtT)" in ftab and "PJSIP/98" not in ftab)
+
+    dup = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "20,19,20"}})
+    ftd = dup[dup.index("[from-trunk]"):]
+    check("inbound_ext list de-dups and preserves order",
+          "Dial(PJSIP/20&PJSIP/19,30,rtT)" in ftd)
+
+
+def test_features_conf_transfer() -> None:
+    # Analog (FXS) phones have no transfer button, so features.conf gives them
+    # in-call DTMF transfer codes (the Dial t/T flags arm them). SIP phones use
+    # their own Transfer button (REFER) and need no config.
+    feat = sbc.render_features()
+    check("features: blind transfer code present", "blindxfer => ##" in feat)
+    check("features: attended transfer code present", "atxfer => *2" in feat)
+    check("features: has a [featuremap] section", "[featuremap]" in feat)
+
 
 def test_clean_config_unchanged() -> None:
     # A clean room still renders the expected endpoint/auth/aor (no regression).
@@ -431,6 +470,7 @@ if __name__ == "__main__":
     test_trunk_codec_pinned_to_ulaw()
     test_trunk_aor_not_qualified()
     test_trunk_inbound_routing()
+    test_features_conf_transfer()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()
     test_talking_clock()
