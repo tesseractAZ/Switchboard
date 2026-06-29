@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.6
+
+Inbound ring-group, analog call-transfer, and an AMI-churn fix from the audit.
+
+- **Inbound ring group.** `trunk.inbound_ext` now accepts a comma-separated list
+  (e.g. "19,20") so an incoming outside call can ring the cordless **and** the
+  iPhone softphone together (Dial(PJSIP/19&PJSIP/20)). A single ext and empty
+  (=all rooms) work exactly as before; a typo'd/non-room entry is dropped+logged,
+  and a fully-invalid list falls back to ringing the whole house.
+- **Analog call transfer (features.conf).** The FXS phones have no transfer
+  button, so a generated features.conf gives them in-call DTMF transfer codes —
+  blind `##`+ext, attended `*2`+ext — armed by the Dial t/T flags already in the
+  dialplan. SIP phones (cordless, iPhone) keep using their own Transfer button
+  (SIP REFER, native to chan_pjsip).
+- **Codec read no longer multiplies AMI sessions during a call** (audit MEDIUM).
+  `codecs_for_channels` previously opened one connect/login/logoff PER active
+  channel on top of the status bundle — so a 2-leg call tripled the AMI logins
+  every poll, re-introducing the churn v0.9.3 removed exactly when busiest. It now
+  multiplexes all the codec Getvars over ONE login (ActionID-keyed), with a
+  response-based terminator. Idle polls still do zero codec AMI work.
+
 ## 0.9.5
 
 Show the active-call codec on the per-room tiles too (not just the calls list).

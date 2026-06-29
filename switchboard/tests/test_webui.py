@@ -494,9 +494,81 @@ def test_get_channel_codec_reads_value() -> None:
         ami.AMI_SECRET = orig_secret
 
 
+def test_actions_responded() -> None:
+    # The Getvar batch terminates when every action has a RESPONSE (Getvar emits
+    # no ...Complete event), unlike the list-action ...Complete terminator.
+    ids = {"A", "B"}
+    part = b"Response: Success\r\nActionID: A\r\nValue: ulaw\r\n\r\n"
+    check("responded: not done until all respond", ami.actions_responded(part, ids) is False)
+    full = part + b"Response: Success\r\nActionID: B\r\nValue: g722\r\n\r\n"
+    check("responded: done when every action responded", ami.actions_responded(full, ids) is True)
+
+
+class _FakeCodecBatchSocket:
+    """Canned AMI peer for codecs_for_channels: banner, then ONE response per
+    Getvar (mapping ActionID->codec by reading the channels actually sent)."""
+
+    def __init__(self, codec_for: dict) -> None:
+        self.codec_for, self.sent, self._n = codec_for, b"", 0
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def recv(self, _n: int) -> bytes:
+        self._n += 1
+        if self._n == 1:
+            return b"Asterisk Call Manager/9.0.0\r\n\r\n"
+        if self._n == 2:
+            import re
+            out = ["Response: Success\r\nMessage: Authentication accepted\r\n\r\n"]
+            for m in re.finditer(
+                r"Action: Getvar\r\nChannel: (\S+)\r\nVariable:[^\r]*\r\nActionID: (\S+)",
+                self.sent.decode()):
+                chan, aid = m.group(1), m.group(2)
+                out.append(f"Response: Success\r\nActionID: {aid}\r\n"
+                           f"Variable: CHANNEL(audioreadformat)\r\nValue: {self.codec_for.get(chan, 'ulaw')}\r\n\r\n")
+            return "".join(out).encode()
+        import socket as _s
+        raise _s.timeout()
+
+
+def test_codecs_for_channels_batched() -> None:
+    # All active channels' codecs read over ONE login (one Getvar each, ActionID-
+    # multiplexed) — not one connect/login/logoff per channel (the v0.9.4 churn).
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    try:
+        chans = [{"channel": "PJSIP/11-1"}, {"channel": "PJSIP/16-2"}]
+        fake = _FakeCodecBatchSocket({"PJSIP/11-1": "ulaw", "PJSIP/16-2": "g722"})
+        ami.socket.create_connection = lambda *a, **k: fake
+        out = ami.codecs_for_channels(chans)
+        check("codec batch: each channel maps to its own codec",
+              out == {"PJSIP/11-1": "ulaw", "PJSIP/16-2": "g722"})
+        check("codec batch: ONE login for all channels (no per-channel churn)",
+              fake.sent.count(b"Action: Login") == 1)
+        check("codec batch: one Getvar per channel", fake.sent.count(b"Action: Getvar") == 2)
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
 def main() -> None:
     test_endpoints()
     test_actions_complete()
+    test_actions_responded()
+    test_codecs_for_channels_batched()
     test_status_bundle_parse()
     test_status_bundle_socket_loop()
     test_call_codec_summary()
