@@ -22,7 +22,10 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-PATH = os.environ.get("SWITCHBOARD_WAKEUPS", "/data/wakeups.json")
+# /data/state is owned by the asterisk user (see switchboard-config ensure_state_dir),
+# so the dial-42 wake-up AGI — which Asterisk runs as that user — can write the lock
+# + atomic-rename temp files here. (Directly in /data only root could write → EPERM.)
+PATH = os.environ.get("SWITCHBOARD_WAKEUPS", "/data/state/wakeups.json")
 GRACE_SECONDS = 600  # fire a due wake-up only within 10 min of its time
 
 
@@ -36,6 +39,13 @@ class _Lock:
             return self
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self.fh = open(self.path, "a+")
+        # Keep the lock group-writable so the root services and the asterisk-user
+        # AGI can both open it (append mode needs write on the file). Best-effort:
+        # only the file's owner can chmod, which is whoever created it.
+        try:
+            os.chmod(self.path, 0o664)
+        except OSError:
+            pass
         fcntl.flock(self.fh, fcntl.LOCK_EX)
         return self
 
@@ -64,6 +74,13 @@ def _write(data: dict) -> None:
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
         os.replace(tmp, PATH)
+        # mkstemp makes the temp 0600; widen to 0664 so the OTHER writer (root vs
+        # the asterisk-user AGI, same group via the setgid /data/state dir) can
+        # rewrite it next time. Best-effort — the writer owns the file here.
+        try:
+            os.chmod(PATH, 0o664)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
