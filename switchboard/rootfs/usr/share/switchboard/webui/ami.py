@@ -719,6 +719,90 @@ def hangup_channel(channel: str) -> bool:
     )
 
 
+def transfer_channel(channel: str, target_ext: str, allowed_exts) -> bool:
+    """Blind-transfer a live channel to a configured room via AMI Redirect.
+
+    Moves ``channel`` into the generated ``[rooms]`` dialplan at ``target_ext`` — it
+    leaves its current bridge and rings/dials that room. The operator GUI/TUI picks
+    an active call and a destination room and redirects the FAR leg (see
+    :func:`peer_channels_by_ext`), so the outside/other party ends up on the chosen
+    room while the original handset drops — a one-touch operator blind transfer.
+
+    ``target_ext`` MUST be in ``allowed_exts`` (the configured room set), exactly
+    like :func:`connect_extensions` — so a redirect can only ever land on a known
+    room's ``_X.`` pattern, never the trunk's outbound ``_<prefix>.`` pattern. The
+    ``channel`` comes from CoreShowChannels but CRLF is rejected defensively. Uses
+    the AMI ``Redirect`` action (the ``call`` privilege the account holds) — NOT the
+    withheld ``command`` class. Returns True on Success.
+    """
+    allowed = set(allowed_exts or ())
+    if target_ext not in allowed or not _EXT_RE.fullmatch(target_ext or ""):
+        return False
+    if not channel or "\r" in channel or "\n" in channel:
+        return False
+    action_id = _next_action_id()
+    blocks = _ami_command(
+        ["Action: Redirect", f"Channel: {channel}", "Context: rooms",
+         f"Exten: {target_ext}", "Priority: 1"],
+        single_response=True,
+        action_id=action_id,
+    )
+    return any(
+        blk.get("actionid") == action_id and blk.get("response", "").lower() == "success"
+        for blk in blocks
+    )
+
+
+def peer_channels_by_ext(channels: list[dict], rooms_by_ext: dict | None = None) -> dict[str, str]:
+    """``{room ext -> the OTHER party's channel name}`` for active calls, so the
+    operator can blind-transfer the far party of a room's call elsewhere.
+
+    Legs are grouped into a call by ``Linkedid``. Picking the *right* far leg
+    matters once a call has more than two legs: an inbound trunk call that rings a
+    group (cordless + iPhone) is ONE Linkedid carrying the trunk leg PLUS a ringing
+    leg per room, so "the first other leg" (CoreShowChannels order is arbitrary)
+    could be a sibling ringing handset instead of the outside caller. Among a
+    room's peers we therefore prefer (1) the outside/trunk leg, then (2) an
+    answered (``Up``) leg, then (3) the longest-running leg. A leg sharing the
+    room's OWN ext (a transient duplicate mid-transfer) is skipped, so a room is
+    never mapped to its own sibling. ``rooms_by_ext`` tells a room leg from an
+    outside one; without it we still prefer the literal ``trunk`` leg. This mirrors
+    :func:`summarize_calls`' peer selection, so the channel we redirect matches the
+    "↔ Outside" / "↔ Office" label shown on the card.
+    """
+    rooms = set(rooms_by_ext or ())
+
+    def _is_outside(o: dict) -> bool:
+        oext = o.get("ext", "")
+        return oext == "trunk" or (bool(rooms) and bool(oext) and oext not in rooms)
+
+    def _rank(o: dict) -> tuple:
+        return (
+            0 if _is_outside(o) else 1,                          # outside party first
+            0 if "up" in (o.get("state") or "").lower() else 1,  # then an answered leg
+            -_dur_secs(o.get("duration", "")),                   # then the longest leg
+        )
+
+    by_link: dict[str, list[dict]] = {}
+    for ch in channels:
+        key = ch.get("linkedid") or ch.get("channel") or ""
+        by_link.setdefault(key, []).append(ch)
+    out: dict[str, str] = {}
+    for ch in channels:
+        ext = ch.get("ext", "")
+        if not ext:
+            continue
+        key = ch.get("linkedid") or ch.get("channel") or ""
+        peers = [
+            o for o in by_link.get(key, [])
+            if o.get("channel") and o.get("channel") != ch.get("channel")
+            and o.get("ext") != ext  # never the room's own (sibling) leg
+        ]
+        if peers:
+            out[ext] = min(peers, key=_rank)["channel"]
+    return out
+
+
 def get_endpoints() -> list[dict]:
     try:
         blocks = _ami_command(["Action: PJSIPShowEndpoints"])
