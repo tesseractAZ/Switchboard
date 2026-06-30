@@ -462,7 +462,76 @@ def test_modules_conf() -> None:
           "load = app_confbridge.so" in m and "load = app_page.so" in m)
 
 
+def test_state_dir_setup() -> None:
+    # /data/state must be created (asterisk-owned, so the dial-42 wake-up AGI and
+    # the dialplan MWI-clear can write their stores) and a pre-existing
+    # /data/{wakeups,mwi}.json migrated into it. The chown-to-asterisk LookupErrors
+    # off-box and is swallowed, but the dir + migration still happen.
+    import tempfile
+    from pathlib import Path as _P
+    root = _P(tempfile.mkdtemp())
+    data = root / "data"
+    data.mkdir()
+    (data / "wakeups.json").write_text('{"19": {"hhmm": "07:30", "target_epoch": 111}}')
+    (data / "mwi.json").write_text('{"12": {"set_at": 5}}')
+    orig_data, orig_state = sbc.DATA_DIR, sbc.STATE_DIR
+    sbc.DATA_DIR, sbc.STATE_DIR = data, data / "state"
+    try:
+        sbc.ensure_state_dir()
+        state = data / "state"
+        check("state: subdir created", state.is_dir())
+        check("state: wakeups.json migrated with contents",
+              (state / "wakeups.json").exists() and '"19"' in (state / "wakeups.json").read_text())
+        check("state: mwi.json migrated", (state / "mwi.json").exists())
+        check("state: old /data/wakeups.json moved out", not (data / "wakeups.json").exists())
+        # Lock files PRE-created (append-mode open needs write on the file; a
+        # root-created 0644 lock would otherwise lock out the asterisk user).
+        check("state: wakeups lock pre-created", (state / "wakeups.json.lock").exists())
+        check("state: mwi lock pre-created", (state / "mwi.json.lock").exists())
+        import stat as _stat
+        m = (state / "wakeups.json").stat().st_mode
+        check("state: store file is group-writable (0664)", bool(m & _stat.S_IWGRP))
+        dmode = state.stat().st_mode
+        check("state: dir is setgid + group-writable", bool(dmode & _stat.S_ISGID) and bool(dmode & _stat.S_IWGRP))
+        # Idempotent: a second run (old files gone) must not crash or clobber.
+        sbc.ensure_state_dir()
+        check("state: idempotent re-run keeps migrated file", (state / "wakeups.json").exists())
+        # Default store paths now point under /data/state.
+        check("state: wakeup store default path is under /data/state",
+              "/data/state/wakeups.json" in sbc_open_store_path())
+    finally:
+        sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
+
+
+def test_state_dir_setup_failure_is_graceful() -> None:
+    # If the state dir can't be created (here: its parent is a FILE), ensure_state_dir
+    # must degrade without raising — the add-on still boots; it just logs loudly.
+    import tempfile
+    from pathlib import Path as _P
+    root = _P(tempfile.mkdtemp())
+    blocker = root / "data"
+    blocker.write_text("not a directory")  # mkdir(STATE_DIR) under a file -> OSError
+    orig_data, orig_state = sbc.DATA_DIR, sbc.STATE_DIR
+    sbc.DATA_DIR, sbc.STATE_DIR = blocker, blocker / "state"
+    try:
+        sbc.ensure_state_dir()
+        check("state: setup failure degrades without raising", True)
+    except Exception:
+        check("state: setup failure degrades without raising", False)
+    finally:
+        sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
+
+
+def sbc_open_store_path() -> str:
+    """Read the wake-up store's source (it isn't importable here without a /data) —
+    proves the default PATH moved to /data/state."""
+    src = SBC_PATH.parents[1] / "share" / "switchboard" / "wakeup" / "store.py"
+    return src.read_text()
+
+
 if __name__ == "__main__":
+    test_state_dir_setup()
+    test_state_dir_setup_failure_is_graceful()
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()

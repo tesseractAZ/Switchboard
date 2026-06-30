@@ -32,6 +32,10 @@ from pathlib import Path
 OPTIONS_PATH = Path("/data/options.json")
 ASTERISK_ETC = Path("/etc/asterisk")
 RUN_DIR = Path("/run/switchboard")
+# Persistent JSON stores (wake-ups, MWI flags) that BOTH the root services AND
+# asterisk-user processes write — see ensure_state_dir().
+DATA_DIR = Path("/data")
+STATE_DIR = DATA_DIR / "state"
 
 # Codecs we know how to emit. slin16 = wideband linear (handy for IP/HD).
 KNOWN_CODECS = ("ulaw", "alaw", "g722", "opus", "g729", "gsm", "slin16")
@@ -905,6 +909,85 @@ def render_features() -> str:
     ])
 
 
+def ensure_state_dir() -> None:
+    """Create /data/state, owned by the asterisk user, for the runtime JSON stores.
+
+    The wake-up store (wakeup/store.py) and the MWI store (webui/mwi_store.py) are
+    written by BOTH the root services (wakeup-scheduler, webui) AND asterisk-user
+    processes — the dial-42 wake-up AGI and the dialplan's
+    ``System(/usr/bin/switchboard-mwi clear ...)``. Asterisk runs as ``-U asterisk``,
+    so those processes must be able to create the flock ``.lock`` and atomic-rename
+    temp files NEXT TO the JSON (an os.replace needs write on the containing dir).
+
+    These stores used to live directly in ``/data``, which only root can write — so
+    every voice wake-up crashed with ``EPERM`` on ``/data/wakeups.json.lock`` (the
+    dial-42 flow fell straight through with NO recording prompt) and the dial-0 MWI
+    auto-clear crashed on ``/data/mwi.json.lock``. A dedicated asterisk-owned subdir
+    fixes both while leaving the sensitive ``/data/options.json`` root-only. Root
+    services keep writing here (root overrides the mode); asterisk owns the dir so
+    its os.replace can swap a file the root service last wrote, and vice-versa.
+
+    Runs in the init oneshot as root, BEFORE Asterisk starts. Best-effort migrates a
+    pre-existing /data/{wakeups,mwi}.json so a pending wake-up/flag survives the move.
+    """
+    import shutil
+    names = ("wakeups.json", "mwi.json")
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # Migrate any pre-existing store from the old root-only /data location.
+        for name in names:
+            old, new = DATA_DIR / name, STATE_DIR / name
+            if old.exists() and not new.exists():
+                try:
+                    old.replace(new)  # same filesystem under /data
+                except OSError as exc:
+                    log(f"WARNING: could not migrate {name} into state dir: {exc}")
+        # Pre-create the JSON + flock files so they exist group-writable BEFORE any
+        # service opens them. The lock is opened in append mode (needs write on the
+        # FILE), and an atomic write leaves the JSON owned by whichever user wrote
+        # last — so without a shared group both the root services and the asterisk
+        # user would lock each other out. setgid on the dir makes new temp/lock files
+        # inherit the asterisk group; 0664 keeps them group-writable.
+        for name in names:
+            p = STATE_DIR / name
+            if not p.exists():
+                p.write_text("{}")
+            lock = STATE_DIR / (name + ".lock")
+            if not lock.exists():
+                lock.write_text("")
+        # chmod FIRST (always works as root) so an absent asterisk user off-box can't
+        # leave the modes unset; then hand the dir + files to the asterisk user.
+        os.chmod(STATE_DIR, 0o2775)  # setgid → children inherit the asterisk group
+        for f in STATE_DIR.iterdir():
+            try:
+                os.chmod(f, 0o664)
+            except OSError:
+                pass
+        try:
+            shutil.chown(STATE_DIR, user="asterisk", group="asterisk")
+            for f in STATE_DIR.iterdir():
+                shutil.chown(f, user="asterisk", group="asterisk")
+        except (LookupError, KeyError, PermissionError, OSError) as exc:
+            log(f"WARNING: could not chown state dir to asterisk: {exc}")
+    except (PermissionError, LookupError, KeyError, OSError) as exc:
+        # The init oneshot is root, so this normally succeeds; warn (don't crash)
+        # if something is off — the rest of the config still renders.
+        log(f"WARNING: could not prepare asterisk-writable state dir: {exc}")
+    # Surface a silent setup failure LOUDLY: if the dir isn't group-writable, the
+    # asterisk-user wake-up AGI + MWI-clear will EACCES again exactly as before, and
+    # the only other signal would be a single buried WARNING. Rare (init is root,
+    # /data is always mounted, and this re-runs idempotently every boot), but worth
+    # an ERROR line so it can't masquerade as a healthy boot.
+    try:
+        mode = STATE_DIR.stat().st_mode
+        if not (STATE_DIR.is_dir() and (mode & 0o020)):
+            log(f"ERROR: /data/state not group-writable (mode {oct(mode)}); dial-42 "
+                "wake-up + dial-0 MWI-clear may fail with permission denied")
+    except OSError:
+        log("ERROR: /data/state missing after setup; dial-42 wake-up + dial-0 "
+            "MWI-clear may fail with permission denied")
+
+
 def write_operator_runtime(opts: dict) -> None:
     """Stage the voice-operator runtime, when enabled.
 
@@ -955,6 +1038,10 @@ def main() -> None:
         log("WARNING: no valid rooms configured — no phones will register")
     ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    # Make /data/state asterisk-writable BEFORE Asterisk starts, so the dial-42
+    # wake-up AGI and the dialplan's MWI-clear (both run as the asterisk user) can
+    # write their JSON stores instead of crashing with EPERM.
+    ensure_state_dir()
     # Set the container's local time before Asterisk/console start, so the
     # talking clock and console clock read local time.
     tz = apply_timezone(resolve_timezone(opts))
