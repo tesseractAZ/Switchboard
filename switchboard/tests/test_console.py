@@ -118,6 +118,40 @@ def test_connect_mode_transitions() -> None:
     check("connect: esc cancels", sess["mode"] == "normal" and "connect_from" not in sess)
 
 
+# A room actively on a call to an outside party — peer_channel is the far leg the
+# operator would blind-transfer elsewhere.
+ROOMS_ONCALL = [
+    {"ext": "11", "label": "Kitchen", "registered": True, "device_state": "Not in use",
+     "call_state": "", "peer": "", "channel": "", "peer_channel": ""},
+    {"ext": "19", "label": "Cordless", "registered": True, "device_state": "In use",
+     "call_state": "Talking", "peer": "Outside", "channel": "PJSIP/19-0001",
+     "peer_channel": "PJSIP/trunk-0002"},
+]
+
+
+def test_render_transfer_mode() -> None:
+    board = _board(ROOMS_ONCALL)
+    sess = {"sel": 0, "mode": "transfer", "transfer_from_label": "Cordless", "w": 80}
+    text = "\n".join(console.render(board.get(), sess, 0.0))
+    check("render: transfer prompt", "TRANSFER Cordless" in text and "Enter" in text)
+
+
+def test_transfer_mode_transitions() -> None:
+    board = _board(ROOMS_ONCALL)
+    # 't' on a room with NO call must not enter transfer mode (nothing to hand off).
+    sess = {"sel": 0, "mode": "normal"}
+    console.apply_key(sess, "t", board, lambda m: None)
+    check("transfer: idle room does not arm", sess["mode"] == "normal" and "transfer_peer" not in sess)
+    # 't' on the on-call room arms transfer with the FAR leg as the channel to move.
+    sess = {"sel": 1, "mode": "normal"}
+    console.apply_key(sess, "t", board, lambda m: None)
+    check("transfer: on-call room arms with far leg",
+          sess["mode"] == "transfer" and sess.get("transfer_peer") == "PJSIP/trunk-0002"
+          and sess.get("transfer_from") == "19")
+    console.apply_key(sess, "esc", board, lambda m: None)
+    check("transfer: esc cancels", sess["mode"] == "normal" and "transfer_peer" not in sess)
+
+
 def test_fmt12() -> None:
     check("fmt12: 07:05 -> 7:05 AM", console.fmt12("07:05") == "7:05 AM")
     check("fmt12: 19:30 -> 7:30 PM", console.fmt12("19:30") == "7:30 PM")
@@ -487,6 +521,8 @@ def main() -> None:
     test_render_ami_down()
     test_navigation()
     test_connect_mode_transitions()
+    test_render_transfer_mode()
+    test_transfer_mode_transitions()
     test_fmt12()
     test_render_wakeups()
     test_cancel_wakeup_key()

@@ -564,6 +564,107 @@ def test_codecs_for_channels_batched() -> None:
         ami.AMI_SECRET = orig_secret
 
 
+def test_transfer_channel_guard() -> None:
+    # transfer_channel mirrors connect_extensions' allow-list: the target MUST be a
+    # configured room ext (else a Redirect could land on the trunk's _9. pattern),
+    # and the channel is CRLF-rejected before any socket — all pure False, no I/O.
+    allowed = {"11", "12", "13"}
+    check("transfer: rejects target not in room set",
+          ami.transfer_channel("PJSIP/11-1", "9911", allowed) is False)
+    check("transfer: rejects injection-y target",
+          ami.transfer_channel("PJSIP/11-1", "9;evil", allowed) is False)
+    check("transfer: rejects empty target",
+          ami.transfer_channel("PJSIP/11-1", "", allowed) is False)
+    check("transfer: rejects empty channel",
+          ami.transfer_channel("", "12", allowed) is False)
+    check("transfer: rejects CRLF channel",
+          ami.transfer_channel("PJSIP/11\r\nAction: Command", "12", allowed) is False)
+
+
+class _FakeRedirectSocket:
+    """Canned AMI peer for transfer_channel's single-response Redirect path."""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok, self.sent, self._n = ok, b"", 0
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def recv(self, _n: int) -> bytes:
+        self._n += 1
+        if self._n == 1:
+            return b"Asterisk Call Manager/9.0.0\r\n\r\n"
+        if self._n == 2:
+            import re
+            aid = (re.findall(r"ActionID: (\S+)", self.sent.decode()) or [""])[0]
+            status = "Success" if self.ok else "Error"
+            return (
+                "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+                f"Response: {status}\r\nActionID: {aid}\r\n\r\n"
+            ).encode()
+        import socket as _s
+        raise _s.timeout()
+
+
+def test_transfer_channel_redirect() -> None:
+    # A valid transfer issues exactly one Redirect into [rooms] at the target ext
+    # and returns True on Success; an Error response returns False (no exception).
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    allowed = {"11", "12"}
+    try:
+        fake = _FakeRedirectSocket(ok=True)
+        ami.socket.create_connection = lambda *a, **k: fake
+        ok = ami.transfer_channel("PJSIP/trunk-1", "12", allowed)
+        check("transfer: Redirect Success -> True", ok is True)
+        check("transfer: targets the [rooms] context", b"Context: rooms" in fake.sent)
+        check("transfer: sends the chosen target ext", b"Exten: 12" in fake.sent)
+        check("transfer: one Redirect action", fake.sent.count(b"Action: Redirect") == 1)
+        ami.socket.create_connection = lambda *a, **k: _FakeRedirectSocket(ok=False)
+        check("transfer: Redirect Error -> False",
+              ami.transfer_channel("PJSIP/trunk-1", "12", allowed) is False)
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
+def test_peer_channels_by_ext() -> None:
+    # peer_channels_by_ext maps each room ext to the OTHER leg's channel, grouped by
+    # Linkedid — so the operator transfers the far party, not the room's own leg.
+    two = [
+        {"ext": "19", "channel": "PJSIP/19-1", "linkedid": "c1"},
+        {"ext": "trunk", "channel": "PJSIP/trunk-2", "linkedid": "c1"},
+    ]
+    peers = ami.peer_channels_by_ext(two)
+    check("peer: room ext maps to the far (trunk) leg", peers.get("19") == "PJSIP/trunk-2")
+    check("peer: trunk leg maps back to the room leg", peers.get("trunk") == "PJSIP/19-1")
+    # A lone leg (no peer in its call) yields no mapping — nothing to transfer.
+    lone = [{"ext": "11", "channel": "PJSIP/11-1", "linkedid": "c9"}]
+    check("peer: lone leg has no peer", ami.peer_channels_by_ext(lone) == {})
+    # Two independent calls don't cross-link (grouping is per Linkedid).
+    twocalls = [
+        {"ext": "11", "channel": "PJSIP/11-1", "linkedid": "cA"},
+        {"ext": "12", "channel": "PJSIP/12-1", "linkedid": "cA"},
+        {"ext": "13", "channel": "PJSIP/13-1", "linkedid": "cB"},
+        {"ext": "14", "channel": "PJSIP/14-1", "linkedid": "cB"},
+    ]
+    p2 = ami.peer_channels_by_ext(twocalls)
+    check("peer: separate calls stay separate",
+          p2.get("11") == "PJSIP/12-1" and p2.get("13") == "PJSIP/14-1")
+
+
 def main() -> None:
     test_endpoints()
     test_actions_complete()
@@ -588,6 +689,9 @@ def main() -> None:
     test_lone_leg_excluded()
     test_ring_ext_guard()
     test_connect_hangup_guards()
+    test_transfer_channel_guard()
+    test_transfer_channel_redirect()
+    test_peer_channels_by_ext()
     test_page_all_guard()
     test_set_mwi_guard()
     test_no_calls()

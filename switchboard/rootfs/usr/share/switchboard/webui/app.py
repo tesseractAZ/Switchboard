@@ -50,9 +50,11 @@ from ami import (  # noqa: E402
     hangup_channel,
     is_registered,
     page_all,
+    peer_channels_by_ext,
     ring_extension,
     set_mwi,
     summarize_calls,
+    transfer_channel,
 )
 try:
     import store as wakeup_store  # noqa: E402  (wake-up store; absent in dev)
@@ -291,8 +293,10 @@ def api_status() -> JSONResponse:
         ch["codec"] = codecs.get(ch.get("channel", ""), "")
     summary = summarize_calls(channels, rooms_by_ext)
     by_ext = summary["by_ext"]
-    # ext -> active channel name, so the "Hang up" button can target it.
+    # ext -> active channel name, so the "Hang up" button can target it; and
+    # ext -> the FAR leg's channel, so "Transfer" can redirect the other party.
     chan_by_ext = channels_by_ext(channels)
+    peer_by_ext = peer_channels_by_ext(channels)
 
     # Which rooms have a "you have a message / call the operator" stutter-tone
     # flag set (persistent UI source of truth; the badge mirrors it).
@@ -333,6 +337,7 @@ def api_status() -> JSONResponse:
                 "call_peer": call.get("peer", ""),
                 "call_codec": call.get("codec", ""),
                 "channel": chan_by_ext.get(name, ""),
+                "peer_channel": peer_by_ext.get(name, ""),
                 "mwi": name in mwi_set,
             }
         )
@@ -438,6 +443,32 @@ async def api_hangup(request: Request) -> JSONResponse:
         ok = hangup_channel(channel)
     except (AMIError, OSError) as exc:
         print(f"[switchboard-webui] hangup failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok})
+
+
+@app.post("/api/transfer")
+async def api_transfer(request: Request) -> JSONResponse:
+    """Blind-transfer one active call to a room extension.
+
+    Body: {"channel": <far-leg channel>, "target": <room ext>}. The channel is
+    the OTHER party's leg (peer_channel from /api/status) so redirecting it sends
+    that caller to the chosen room while the operator drops out. Both the channel
+    (CRLF-rejected) and the target (must be a currently-configured room ext) are
+    validated before they reach the AMI Redirect — transfer_channel re-checks the
+    target against the same allow-list as defence in depth. Ingress-only."""
+    body = await _json_body(request)
+    channel = str(body.get("channel") or "")
+    target = str(body.get("target") or "")
+    if not channel or channel_has_crlf(channel):
+        return JSONResponse({"ok": False, "error": "bad channel"}, status_code=400)
+    allowed = configured_room_exts(load_options())
+    if target not in allowed:
+        return JSONResponse({"ok": False, "error": "bad target"}, status_code=400)
+    try:
+        ok = transfer_channel(channel, target, allowed)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] transfer failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
     return JSONResponse({"ok": ok})
 
@@ -732,6 +763,11 @@ let connectArm = null;
 // ext -> active Asterisk channel name (for the Hang up button), refreshed from
 // /api/status each cycle.
 const roomChannels = {};
+// ext -> the FAR leg's channel (for the Transfer button): redirecting it sends
+// the OTHER party to a chosen room. Refreshed alongside roomChannels.
+const roomPeers = {};
+// [{ext,label,registered}] snapshot of all rooms, used to offer transfer targets.
+let roomDirectory = [];
 
 function updateConnectHint() {
   const el = document.getElementById('connecthint');
@@ -755,9 +791,15 @@ async function refresh() {
       (data.trunk.enabled ? ' · trunk: ' + (data.trunk.provider || 'on') : ' · no trunk');
 
     const now = Date.now();
-    // Refresh the ext->channel map (used by the Hang up button).
+    // Refresh the ext->channel maps (Hang up uses the room's own leg; Transfer
+    // uses the far leg) and the room directory used to pick a transfer target.
     for (const k in roomChannels) delete roomChannels[k];
-    data.rooms.forEach(r => { if (r.channel) roomChannels[r.ext] = r.channel; });
+    for (const k in roomPeers) delete roomPeers[k];
+    data.rooms.forEach(r => {
+      if (r.channel) roomChannels[r.ext] = r.channel;
+      if (r.peer_channel) roomPeers[r.ext] = r.peer_channel;
+    });
+    roomDirectory = data.rooms.map(r => ({ext: r.ext, label: r.label, registered: r.registered}));
     const grid = document.getElementById('rooms');
     grid.innerHTML = data.rooms.map(r => {
       // "Not in use" means registered-and-idle (green) — only an active call
@@ -793,6 +835,11 @@ async function refresh() {
       const hangBtn = active
         ? '<button class="ringbtn iconbtn" data-hangup="' + ex + '" title="Hang up">📵</button>' : '';
 
+      // Transfer: only when there's a far party to hand off (peer_channel set).
+      // Sends the OTHER party to a room you pick, dropping this leg out.
+      const xferBtn = (active && r.peer_channel)
+        ? '<button class="ringbtn iconbtn" data-transfer="' + ex + '" title="Transfer call">↪</button>' : '';
+
       // Message-waiting (stutter dial tone): toggle on/off, badge when set.
       const mwiState = r.mwi ? 'off' : 'on';
       const mwiTitle = r.mwi ? 'Clear message-waiting' : 'Set message-waiting';
@@ -812,7 +859,7 @@ async function refresh() {
              '<div class="name">' + esc(r.label) + '</div>' +
              '<span class="pill ' + cls + '">' + esc(txt) + '</span>' +
              conn +
-             '<div class="actions">' + ringBtn + connBtn + hangBtn + mwiBtn + '</div>' +
+             '<div class="actions">' + ringBtn + connBtn + hangBtn + xferBtn + mwiBtn + '</div>' +
              wakeRow + '</div>';
     }).join('');
     updateConnectHint();
@@ -901,6 +948,26 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     if (!ch) { flash(btn, '—'); return; }
     btn.disabled = true;
     try { await postJSON('./api/hangup', {channel: ch}); refresh(); }
+    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    return;
+  }
+
+  // Transfer the far party of this room's call to another room. We redirect the
+  // PEER leg (roomPeers), so the chosen room rings while this leg drops out.
+  ext = btn.getAttribute('data-transfer');
+  if (ext) {
+    const ch = (roomPeers[ext] || '');
+    if (!ch) { flash(btn, '—'); return; }
+    const opts = roomDirectory
+      .filter(d => d.ext !== ext && d.registered)
+      .map(d => d.ext + ' — ' + d.label);
+    // Accept "12" or a pasted "12 — Office" line: take the leading digit run.
+    const raw = (prompt('Transfer call to which room?\n' + opts.join('\n'), '') || '');
+    const target = (raw.match(/[0-9]+/) || [''])[0];
+    if (!target) return;
+    btn.disabled = true;
+    // postJSON throws on a non-ok response (bad target / Redirect failed).
+    try { await postJSON('./api/transfer', {channel: ch, target: target}); refresh(); }
     catch (err) { btn.disabled = false; flash(btn, '✖'); }
     return;
   }

@@ -222,6 +222,8 @@ def build_board(rooms_cfg: dict) -> dict:
         e = ch.get("ext", "")
         if e in rooms_by_ext and e not in chan_by_ext:
             chan_by_ext[e] = ch.get("channel", "")
+    # ext -> the FAR leg's channel, so Transfer can redirect the other party.
+    peer_by_ext = ami.peer_channels_by_ext(channels)
 
     def _mwi(ext: str) -> bool:
         if mwi_store is None:
@@ -246,7 +248,8 @@ def build_board(rooms_cfg: dict) -> dict:
             "ext": name, "label": rooms_by_ext.get(name, name), "registered": registered,
             "device_state": ds, "call_state": call.get("state", ""), "peer": call.get("peer", ""),
             "codec": call.get("codec", ""),
-            "channel": chan_by_ext.get(name, ""), "mwi": _mwi(name),
+            "channel": chan_by_ext.get(name, ""), "peer_channel": peer_by_ext.get(name, ""),
+            "mwi": _mwi(name),
         })
     for ext, cfg in rooms_cfg.items():
         if ext not in seen:
@@ -364,6 +367,7 @@ def _help_lines(width: int) -> list[str]:
         f"  {b('R')}         Ring the selected room (a short test ring)",
         f"  {b('C')}         Connect — then pick another room and press Enter to patch",
         f"  {b('H')}         Hang up the selected room's active call",
+        f"  {b('T')}         Transfer — hand the selected call's other party to a room",
         f"  {b('W')}         Set a wake-up — type a time (7:30, \"quarter past six\",",
         "            0730, noon), then Enter. Esc cancels.",
         f"  {b('X')}         Cancel the selected room's wake-up",
@@ -495,13 +499,17 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
         lines.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+    elif sess.get("mode") == "transfer":
+        frm = sess.get("transfer_from_label", "?")
+        lines.append("  " + color(YELLOW, f"TRANSFER {frm}'s call → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
     elif sess.get("mode") == "pageconfirm":
         lines.append("  " + color(YELLOW, "PAGE ALL — ring every phone into the intercom?")
                      + color(GREY, "   ") + color(BOLD, "[Y]") + color(GREY, " yes    ")
                      + color(BOLD, "[N]") + color(GREY, " cancel"))
     else:
         bar1 = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
-                + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up"))
+                + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up   ")
+                + color(BOLD, "T") + color(GREY, " transfer"))
         bar2 = ("  " + color(BOLD, "W") + color(GREY, " set wake-up   ")
                 + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
                 + color(BOLD, "M") + color(GREY, " message   ")
@@ -697,6 +705,33 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
             return
         return  # ignore other keys while choosing the target
 
+    if sess.get("mode") == "transfer":
+        if key == "esc":
+            sess["mode"] = "normal"
+            for k in ("transfer_peer", "transfer_from", "transfer_from_label"):
+                sess.pop(k, None)
+            flash("Transfer cancelled")
+            return
+        if key == "enter":
+            peer = sess.get("transfer_peer", "")
+            src = sess.get("transfer_from")
+            src_label = sess.get("transfer_from_label", src)
+            target = room["ext"]
+            sess["mode"] = "normal"
+            for k in ("transfer_peer", "transfer_from", "transfer_from_label"):
+                sess.pop(k, None)
+            if target == src:
+                flash("Pick a different room to transfer to")
+                return
+            ok = False
+            try:
+                ok = ami.transfer_channel(peer, target, {r["ext"] for r in rooms})
+            except (ami.AMIError, OSError) as exc:
+                log(f"transfer {src}->{target} failed: {exc}")
+            flash(f"Transferred {src_label}'s call → {room['label']}" if ok else "Transfer failed")
+            return
+        return  # ignore other keys while choosing the destination
+
     if key in ("r", "R"):
         if not room["registered"]:
             flash(f"{room['label']} is offline")
@@ -724,6 +759,17 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
         except (ami.AMIError, OSError) as exc:
             log(f"hangup {room['ext']} failed: {exc}")
         flash(f"Hung up {room['label']}" if ok else "Hang up failed")
+        return
+    if key in ("t", "T"):
+        # Blind-transfer the FAR party of this room's call to a room you pick.
+        if not room.get("peer_channel"):
+            flash(f"{room['label']} has no call to transfer")
+            return
+        sess["mode"] = "transfer"
+        sess["transfer_peer"] = room["peer_channel"]
+        sess["transfer_from"] = room["ext"]
+        sess["transfer_from_label"] = room["label"]
+        flash(f"Transfer {room['label']}'s call to… (pick a room, Enter)")
         return
     if key in ("x", "X"):
         if wakeup_store is None:
