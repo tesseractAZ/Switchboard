@@ -22,7 +22,10 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-PATH = os.environ.get("SWITCHBOARD_MWI", "/data/mwi.json")
+# /data/state is owned by the asterisk user (see switchboard-config ensure_state_dir),
+# so the dialplan's System(switchboard-mwi clear ...) — run as that user — can write
+# the lock + temp files here. (Directly in /data only root could write → EPERM.)
+PATH = os.environ.get("SWITCHBOARD_MWI", "/data/state/mwi.json")
 
 
 class _Lock:
@@ -35,6 +38,12 @@ class _Lock:
             return self
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self.fh = open(self.path, "a+")
+        # Group-writable so the root webui and the asterisk-user switchboard-mwi
+        # (dialplan System()) can both open the lock. Best-effort (owner-only chmod).
+        try:
+            os.chmod(self.path, 0o664)
+        except OSError:
+            pass
         fcntl.flock(self.fh, fcntl.LOCK_EX)
         return self
 
@@ -63,6 +72,12 @@ def _write(data: dict) -> None:
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
         os.replace(tmp, PATH)
+        # Widen mkstemp's 0600 so the other writer (root webui vs asterisk-user
+        # switchboard-mwi, same group via the setgid /data/state dir) can rewrite.
+        try:
+            os.chmod(PATH, 0o664)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

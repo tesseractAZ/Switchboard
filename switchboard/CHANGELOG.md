@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.8
+
+Fix the voice **wake-up** (dial 42) and the dial-0 **MWI auto-clear**, which both
+crashed instantly with a permission error.
+
+- **Root cause.** The wake-up store (`/data/wakeups.json`) and MWI store
+  (`/data/mwi.json`) live in `/data`, which only **root** can write — but the
+  dial-42 wake-up AGI and the dialplan's `System(switchboard-mwi clear …)` run as
+  the **`asterisk`** user (Asterisk drops privileges). So the very first store
+  touch raised `EPERM` on the `.lock` file, the AGI's `except` set the result to
+  "none", and the dialplan skipped straight to "no wake-up → goodbye → hang up"
+  **with no pause to speak a time**. (Found in the add-on log: `[wakeup] fatal:
+  [Errno 13] Permission denied: '/data/wakeups.json.lock'` and the matching
+  `'/data/mwi.json.lock'`.)
+- **Fix.** Both stores now live in a dedicated **`/data/state/`** directory created
+  by the init step, owned by the `asterisk` user and **setgid + group-writable**, so
+  the root services (scheduler, webui) and the asterisk-user processes can all
+  read/write them. The lock + JSON files are pre-created group-writable, and each
+  atomic write re-applies `0664`, so neither user can lock the other out across the
+  flock + temp-file-rename. A pre-existing `/data/{wakeups,mwi}.json` is migrated in.
+  `/data/options.json` (which holds the SIP secrets) stays root-only.
+- **Defence in depth.** The wake-up AGI no longer aborts before recording if the
+  store *read* hiccups — it degrades to the "say a time" prompt so the caller always
+  gets their pause for input.
+
 ## 0.9.7
 
 One-touch operator call transfer from the GUI dashboard and the TUI console.

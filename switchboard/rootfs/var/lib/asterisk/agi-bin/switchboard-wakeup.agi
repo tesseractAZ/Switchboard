@@ -96,7 +96,15 @@ def main() -> None:
         set_var("WAKEUP_RESULT", "none")
         return
 
-    existing = store.get(ext)
+    # A store READ hiccup must not skip the recording prompt — degrade to the
+    # "ask for a time" path and still let the caller speak (the set below will
+    # surface any real write failure), rather than silently dropping the call with
+    # no pause for input.
+    try:
+        existing = store.get(ext)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[wakeup] store read failed, proceeding to record: {exc}\n")
+        existing = None
     for attempt in range(MAX_ATTEMPTS):
         if existing:
             # Read back what's set (guarding a corrupt/empty epoch), then keep
