@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.7
+
+One-touch operator call transfer from the GUI dashboard and the TUI console.
+
+- **Transfer an active call from the dashboard.** A room that's on a call now
+  shows a ↪ Transfer button: pick a destination room and the *other* party (the
+  outside caller, or whoever the room is talking to) is handed off there while
+  the original handset drops out. Implemented as an AMI `Redirect` of the FAR
+  leg into the `[rooms]` dialplan at the chosen extension — a blind transfer.
+- **Transfer from the TUI too.** The console gains a `T` key mirroring the
+  dashboard: press `T` on an on-call room, then pick a destination with ↑↓ and
+  Enter (Esc cancels) — the same modal target-pick gesture as `C` Connect.
+- **Guarded to room extensions only.** The transfer target is validated against
+  the configured room set on both the API and the AMI engine, so a redirect can
+  only ever land on a known room's `_X.` pattern — never the trunk's outbound
+  `_9.` pattern (no transferring a call out to the PSTN). The channel name is
+  CRLF-rejected before it reaches the manager socket, as with hang-up.
+- **Picks the right party in a ring group.** When an inbound trunk call rings
+  more than one room (e.g. cordless **and** iPhone), the call is one bridge with
+  the outside leg plus a ringing leg per room. Transfer now always hands off the
+  *outside* leg (preferring the trunk/answered leg, skipping a same-ext sibling)
+  so it can never accidentally redirect a sibling ringing handset instead of the
+  caller — and the redirected leg matches the "↔ Outside" label on the card.
+- **Refuses a transfer to an offline room** (both UIs and the API), so a redirect
+  can't silently drop the caller onto an unregistered extension.
+- This complements the per-device transfer methods already available: analog
+  FXS phones use the DTMF feature codes (`##`/`*2`) from v0.9.6, and SIP phones
+  (cordless, iPhone) use their own native Transfer button (SIP REFER).
+
 ## 0.9.6
 
 Inbound ring-group, analog call-transfer, and an AMI-churn fix from the audit.
