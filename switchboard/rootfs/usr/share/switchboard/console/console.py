@@ -222,8 +222,9 @@ def build_board(rooms_cfg: dict) -> dict:
         e = ch.get("ext", "")
         if e in rooms_by_ext and e not in chan_by_ext:
             chan_by_ext[e] = ch.get("channel", "")
-    # ext -> the FAR leg's channel, so Transfer can redirect the other party.
-    peer_by_ext = ami.peer_channels_by_ext(channels)
+    # ext -> the FAR party's channel, so Transfer redirects the outside/answered
+    # leg (not a sibling ringing handset in a ring-group) — needs the room set.
+    peer_by_ext = ami.peer_channels_by_ext(channels, rooms_by_ext)
 
     def _mwi(ext: str) -> bool:
         if mwi_store is None:
@@ -722,6 +723,11 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
                 sess.pop(k, None)
             if target == src:
                 flash("Pick a different room to transfer to")
+                return
+            if not room.get("registered"):
+                # A redirect to an offline room would just drop the caller; refuse
+                # it the same way ring/page already gate on registration.
+                flash(f"{room['label']} is offline")
                 return
             ok = False
             try:

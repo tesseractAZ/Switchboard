@@ -152,6 +152,28 @@ def test_transfer_mode_transitions() -> None:
     check("transfer: esc cancels", sess["mode"] == "normal" and "transfer_peer" not in sess)
 
 
+def test_transfer_offline_target_refused() -> None:
+    # ext 13 offline, ext 19 on a call. Arm transfer on 19, then pick the offline
+    # room: it must be refused (a redirect there would just drop the caller), the
+    # same way ring/page gate on registration — no AMI call.
+    rooms = [
+        {"ext": "13", "label": "Garage", "registered": False, "device_state": "Unavailable",
+         "call_state": "", "peer": "", "channel": "", "peer_channel": ""},
+        {"ext": "19", "label": "Cordless", "registered": True, "device_state": "In use",
+         "call_state": "Talking", "peer": "Outside", "channel": "PJSIP/19-0001",
+         "peer_channel": "PJSIP/trunk-0002"},
+    ]
+    board = _board(rooms)
+    sess = {"sel": 1, "mode": "normal"}          # Cordless (on call)
+    console.apply_key(sess, "t", board, lambda m: None)
+    check("transfer: armed on on-call room", sess["mode"] == "transfer")
+    sess["sel"] = 0                               # Garage (offline)
+    console.apply_key(sess, "enter", board, lambda m: None)
+    check("transfer: offline target refused",
+          "offline" in sess.get("msg", "").lower() and sess["mode"] == "normal"
+          and "transfer_peer" not in sess)
+
+
 def test_fmt12() -> None:
     check("fmt12: 07:05 -> 7:05 AM", console.fmt12("07:05") == "7:05 AM")
     check("fmt12: 19:30 -> 7:30 PM", console.fmt12("19:30") == "7:30 PM")
@@ -523,6 +545,7 @@ def main() -> None:
     test_connect_mode_transitions()
     test_render_transfer_mode()
     test_transfer_mode_transitions()
+    test_transfer_offline_target_refused()
     test_fmt12()
     test_render_wakeups()
     test_cancel_wakeup_key()

@@ -17,6 +17,14 @@ One-touch operator call transfer from the GUI dashboard and the TUI console.
   only ever land on a known room's `_X.` pattern — never the trunk's outbound
   `_9.` pattern (no transferring a call out to the PSTN). The channel name is
   CRLF-rejected before it reaches the manager socket, as with hang-up.
+- **Picks the right party in a ring group.** When an inbound trunk call rings
+  more than one room (e.g. cordless **and** iPhone), the call is one bridge with
+  the outside leg plus a ringing leg per room. Transfer now always hands off the
+  *outside* leg (preferring the trunk/answered leg, skipping a same-ext sibling)
+  so it can never accidentally redirect a sibling ringing handset instead of the
+  caller — and the redirected leg matches the "↔ Outside" label on the card.
+- **Refuses a transfer to an offline room** (both UIs and the API), so a redirect
+  can't silently drop the caller onto an unregistered extension.
 - This complements the per-device transfer methods already available: analog
   FXS phones use the DTMF feature codes (`##`/`*2`) from v0.9.6, and SIP phones
   (cordless, iPhone) use their own native Transfer button (SIP REFER).

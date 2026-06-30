@@ -665,6 +665,37 @@ def test_peer_channels_by_ext() -> None:
           p2.get("11") == "PJSIP/12-1" and p2.get("13") == "PJSIP/14-1")
 
 
+def test_peer_channels_prefers_outside_and_answered() -> None:
+    rooms = {"19": "Cordless", "20": "iPhone", "11": "Kitchen", "12": "Office", "13": "Den"}
+    # Ring-group inbound: one trunk leg + a ringing leg per room, all one Linkedid.
+    # Every room must transfer the OUTSIDE caller, regardless of channel-list order
+    # (the bug took peers[0], which could be a sibling ringing handset).
+    ring_group = [
+        {"ext": "19", "channel": "PJSIP/19-a", "linkedid": "g1", "state": "Ringing"},
+        {"ext": "20", "channel": "PJSIP/20-b", "linkedid": "g1", "state": "Ringing"},
+        {"ext": "trunk", "channel": "PJSIP/trunk-c", "linkedid": "g1", "state": "Up"},
+    ]
+    rg = ami.peer_channels_by_ext(ring_group, rooms)
+    check("peer: ring-group room 19 -> the outside (trunk) leg", rg.get("19") == "PJSIP/trunk-c")
+    check("peer: ring-group room 20 -> the outside (trunk) leg", rg.get("20") == "PJSIP/trunk-c")
+    # A same-ext duplicate sibling (transient mid-transfer) is never the peer.
+    sibling = [
+        {"ext": "19", "channel": "PJSIP/19-a", "linkedid": "s1", "state": "Up"},
+        {"ext": "19", "channel": "PJSIP/19-b", "linkedid": "s1", "state": "Ringing"},
+        {"ext": "trunk", "channel": "PJSIP/trunk-c", "linkedid": "s1", "state": "Up"},
+    ]
+    sb = ami.peer_channels_by_ext(sibling, rooms)
+    check("peer: room never maps to its own sibling leg", sb.get("19") == "PJSIP/trunk-c")
+    # No outside leg: prefer the ANSWERED (Up) peer over a still-ringing one.
+    answered = [
+        {"ext": "11", "channel": "PJSIP/11-a", "linkedid": "u1", "state": "Up"},
+        {"ext": "12", "channel": "PJSIP/12-b", "linkedid": "u1", "state": "Up"},
+        {"ext": "13", "channel": "PJSIP/13-c", "linkedid": "u1", "state": "Ringing"},
+    ]
+    an = ami.peer_channels_by_ext(answered, rooms)
+    check("peer: prefers the answered leg over a ringing one", an.get("11") == "PJSIP/12-b")
+
+
 def main() -> None:
     test_endpoints()
     test_actions_complete()
@@ -692,6 +723,7 @@ def main() -> None:
     test_transfer_channel_guard()
     test_transfer_channel_redirect()
     test_peer_channels_by_ext()
+    test_peer_channels_prefers_outside_and_answered()
     test_page_all_guard()
     test_set_mwi_guard()
     test_no_calls()

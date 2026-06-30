@@ -296,7 +296,7 @@ def api_status() -> JSONResponse:
     # ext -> active channel name, so the "Hang up" button can target it; and
     # ext -> the FAR leg's channel, so "Transfer" can redirect the other party.
     chan_by_ext = channels_by_ext(channels)
-    peer_by_ext = peer_channels_by_ext(channels)
+    peer_by_ext = peer_channels_by_ext(channels, rooms_by_ext)
 
     # Which rooms have a "you have a message / call the operator" stutter-tone
     # flag set (persistent UI source of truth; the badge mirrors it).
@@ -465,6 +465,20 @@ async def api_transfer(request: Request) -> JSONResponse:
     allowed = configured_room_exts(load_options())
     if target not in allowed:
         return JSONResponse({"ok": False, "error": "bad target"}, status_code=400)
+    # Refuse a transfer to a room that's offline — a redirect there would just drop
+    # the caller. This keeps the accepted set aligned with the UI's registered-only
+    # target list. Fail-open: if the status read itself errors we proceed, so a
+    # transient AMI hiccup can't block a transfer to a room that's actually up.
+    try:
+        endpoints, contacts, _channels = get_status_bundle()
+        target_reg = {
+            ep["name"]: is_registered(ep["state"], contacts.get(ep["name"], {}).get("status", ""))
+            for ep in endpoints
+        }
+        if target_reg.get(target) is False:
+            return JSONResponse({"ok": False, "error": "target offline"}, status_code=409)
+    except (AMIError, OSError):
+        pass
     try:
         ok = transfer_channel(channel, target, allowed)
     except (AMIError, OSError) as exc:
@@ -961,9 +975,11 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     const opts = roomDirectory
       .filter(d => d.ext !== ext && d.registered)
       .map(d => d.ext + ' — ' + d.label);
-    // Accept "12" or a pasted "12 — Office" line: take the leading digit run.
+    // Accept "12" or a pasted "12 — Office" line: take the LEADING digit run only,
+    // so a free-typed label like "Room 11" yields "" (a no-op) rather than a stray
+    // digit that could misdial to a valid-but-wrong room.
     const raw = (prompt('Transfer call to which room?\n' + opts.join('\n'), '') || '');
-    const target = (raw.match(/[0-9]+/) || [''])[0];
+    const target = (raw.match(/^\\s*([0-9]+)/) || ['', ''])[1];
     if (!target) return;
     btn.disabled = true;
     // postJSON throws on a non-ok response (bad target / Redirect failed).

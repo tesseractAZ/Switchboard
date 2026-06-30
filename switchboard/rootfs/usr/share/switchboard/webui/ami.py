@@ -753,14 +753,36 @@ def transfer_channel(channel: str, target_ext: str, allowed_exts) -> bool:
     )
 
 
-def peer_channels_by_ext(channels: list[dict]) -> dict[str, str]:
-    """``{room ext -> the OTHER leg's channel name}`` for active calls, so the
+def peer_channels_by_ext(channels: list[dict], rooms_by_ext: dict | None = None) -> dict[str, str]:
+    """``{room ext -> the OTHER party's channel name}`` for active calls, so the
     operator can blind-transfer the far party of a room's call elsewhere.
 
-    Legs are grouped into a call by ``Linkedid``; a room's peer is the channel in
-    the same call that isn't its own. With more than two legs (an operator/3-way),
-    the first other leg is used.
+    Legs are grouped into a call by ``Linkedid``. Picking the *right* far leg
+    matters once a call has more than two legs: an inbound trunk call that rings a
+    group (cordless + iPhone) is ONE Linkedid carrying the trunk leg PLUS a ringing
+    leg per room, so "the first other leg" (CoreShowChannels order is arbitrary)
+    could be a sibling ringing handset instead of the outside caller. Among a
+    room's peers we therefore prefer (1) the outside/trunk leg, then (2) an
+    answered (``Up``) leg, then (3) the longest-running leg. A leg sharing the
+    room's OWN ext (a transient duplicate mid-transfer) is skipped, so a room is
+    never mapped to its own sibling. ``rooms_by_ext`` tells a room leg from an
+    outside one; without it we still prefer the literal ``trunk`` leg. This mirrors
+    :func:`summarize_calls`' peer selection, so the channel we redirect matches the
+    "↔ Outside" / "↔ Office" label shown on the card.
     """
+    rooms = set(rooms_by_ext or ())
+
+    def _is_outside(o: dict) -> bool:
+        oext = o.get("ext", "")
+        return oext == "trunk" or (bool(rooms) and bool(oext) and oext not in rooms)
+
+    def _rank(o: dict) -> tuple:
+        return (
+            0 if _is_outside(o) else 1,                          # outside party first
+            0 if "up" in (o.get("state") or "").lower() else 1,  # then an answered leg
+            -_dur_secs(o.get("duration", "")),                   # then the longest leg
+        )
+
     by_link: dict[str, list[dict]] = {}
     for ch in channels:
         key = ch.get("linkedid") or ch.get("channel") or ""
@@ -771,9 +793,13 @@ def peer_channels_by_ext(channels: list[dict]) -> dict[str, str]:
         if not ext:
             continue
         key = ch.get("linkedid") or ch.get("channel") or ""
-        peers = [o for o in by_link.get(key, []) if o.get("channel") != ch.get("channel")]
-        if peers and peers[0].get("channel"):
-            out[ext] = peers[0]["channel"]
+        peers = [
+            o for o in by_link.get(key, [])
+            if o.get("channel") and o.get("channel") != ch.get("channel")
+            and o.get("ext") != ext  # never the room's own (sibling) leg
+        ]
+        if peers:
+            out[ext] = min(peers, key=_rank)["channel"]
     return out
 
 
