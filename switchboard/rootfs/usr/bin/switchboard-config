@@ -973,6 +973,19 @@ def ensure_state_dir() -> None:
         # The init oneshot is root, so this normally succeeds; warn (don't crash)
         # if something is off — the rest of the config still renders.
         log(f"WARNING: could not prepare asterisk-writable state dir: {exc}")
+    # Surface a silent setup failure LOUDLY: if the dir isn't group-writable, the
+    # asterisk-user wake-up AGI + MWI-clear will EACCES again exactly as before, and
+    # the only other signal would be a single buried WARNING. Rare (init is root,
+    # /data is always mounted, and this re-runs idempotently every boot), but worth
+    # an ERROR line so it can't masquerade as a healthy boot.
+    try:
+        mode = STATE_DIR.stat().st_mode
+        if not (STATE_DIR.is_dir() and (mode & 0o020)):
+            log(f"ERROR: /data/state not group-writable (mode {oct(mode)}); dial-42 "
+                "wake-up + dial-0 MWI-clear may fail with permission denied")
+    except OSError:
+        log("ERROR: /data/state missing after setup; dial-42 wake-up + dial-0 "
+            "MWI-clear may fail with permission denied")
 
 
 def write_operator_runtime(opts: dict) -> None:

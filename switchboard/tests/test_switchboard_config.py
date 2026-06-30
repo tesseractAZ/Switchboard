@@ -503,6 +503,25 @@ def test_state_dir_setup() -> None:
         sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
 
 
+def test_state_dir_setup_failure_is_graceful() -> None:
+    # If the state dir can't be created (here: its parent is a FILE), ensure_state_dir
+    # must degrade without raising — the add-on still boots; it just logs loudly.
+    import tempfile
+    from pathlib import Path as _P
+    root = _P(tempfile.mkdtemp())
+    blocker = root / "data"
+    blocker.write_text("not a directory")  # mkdir(STATE_DIR) under a file -> OSError
+    orig_data, orig_state = sbc.DATA_DIR, sbc.STATE_DIR
+    sbc.DATA_DIR, sbc.STATE_DIR = blocker, blocker / "state"
+    try:
+        sbc.ensure_state_dir()
+        check("state: setup failure degrades without raising", True)
+    except Exception:
+        check("state: setup failure degrades without raising", False)
+    finally:
+        sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
+
+
 def sbc_open_store_path() -> str:
     """Read the wake-up store's source (it isn't importable here without a /data) —
     proves the default PATH moved to /data/state."""
@@ -512,6 +531,7 @@ def sbc_open_store_path() -> str:
 
 if __name__ == "__main__":
     test_state_dir_setup()
+    test_state_dir_setup_failure_is_graceful()
     test_hostile_inputs()
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
