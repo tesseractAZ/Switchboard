@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.2
+
+Fix the Lights section being unreadable in dark mode.
+
+- The room cards, the lights **area cards**, and the wake-up time input all paint
+  their background from `var(--card)`, but the dark-mode override set `--card` only
+  on `.card` — so the lights cards (`.areacard`) stayed **white**, with the page's
+  light text on top → unreadable. Moved `--card` onto `body` in the dark block so
+  every card-like surface inherits the dark value.
+- Added a regression test asserting dark mode sets `--card` at a scope the lights
+  cards inherit.
+
 ## 0.10.1
 
 Fix the dashboard (GUI) going blank — a JavaScript syntax error blanked the whole

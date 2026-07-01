@@ -705,8 +705,11 @@ INDEX_HTML = """<!doctype html>
   .banner { background: #fde7e7; color: #b42318; padding: .6rem .8rem;
             border-radius: 8px; margin-bottom: 1rem; font-size: .85rem; }
   @media (prefers-color-scheme: dark) {
-    body { --bg:#111418; color:#e6e6e6; }
-    .card { --card:#1b1f24; }
+    /* Set --card on body so EVERY card-like surface inherits it — the room cards
+       (.card), the lights area cards (.areacard), and the wake-up time input all
+       paint from var(--card). Scoping it to .card alone left the lights section
+       white with light text on it (unreadable) in dark mode. */
+    body { --bg:#111418; color:#e6e6e6; --card:#1b1f24; }
     :root { --bd:#2a2f36; --btn:#262b31; --btnh:#2f353c; }
   }
 </style>
