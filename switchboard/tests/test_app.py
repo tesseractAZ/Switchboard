@@ -229,6 +229,18 @@ def test_wakeup_ui_formatting() -> None:
     check("ui: cancel hook retained", "data-cancel=" in html)
 
 
+def test_announce_serve_guard() -> None:
+    # The LAN-exempt /announce route only serves strictly-named *.wav from the
+    # announce dir — no path traversal, no other extension, lowercase only.
+    check("announce: dir constant", app.ANNOUNCE_DIR == "/run/switchboard/announce")
+    rx = app._ANNOUNCE_NAME
+    check("announce: valid name matches", bool(rx.match("a12345.wav")))
+    check("announce: rejects traversal / other ext",
+          not rx.match("../etc/passwd") and not rx.match("a.mp3") and not rx.match("a.wav/x"))
+    check("announce: rejects empty / uppercase / dotfile",
+          not rx.match("") and not rx.match("A.wav") and not rx.match(".wav"))
+
+
 def test_dark_mode_covers_light_cards() -> None:
     # The room cards (.card), the lights area cards (.areacard) and the wake-up time
     # input all paint their background from var(--card). In dark mode, --card MUST be
@@ -303,6 +315,7 @@ def main() -> None:
     test_card_action_buttons_labeled()
     test_wakeup_ui_formatting()
     test_dark_mode_covers_light_cards()
+    test_announce_serve_guard()
     test_index_html_js_parses()
     test_route_handlers_defined()
     test_client_guard()

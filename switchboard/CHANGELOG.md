@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0
+
+Phone->speaker announce now plays on the **ecobee** speakers, bracketed by a
+station/airport-style **chime**.
+
+- **Chime + message + chime, as one seamless clip.** Dial 46, record your message;
+  the add-on builds a single WAV — a bell "attention please" chime, your spoken
+  message, then the chime again — and plays it via `media_player.play_media`. One
+  file means no cross-file timing races on AirPlay.
+- **Targets the ecobees** by default (`media_player.hallway_thermostat`,
+  `media_player.guest_hallway_thermostat`) — configurable via `announce_players`.
+- The combined WAV is served to the media players over the LAN by the webui on a
+  single **`/announce/<name>.wav`** route, exempt from the ingress guard but
+  strictly name-validated (no path traversal, `*.wav` only, ephemeral files).
+- New `webui/announce_audio.py` (stdlib sine-synth chime + espeak-ng message +
+  WAV combiner); `/run/switchboard/announce` staged asterisk-writable.
+
 ## 0.11.2
 
 Dial-a-status menu now **loops back to the menu** after each answer instead of

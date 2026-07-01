@@ -1068,8 +1068,6 @@ def write_operator_runtime(opts: dict) -> None:
     """
     if not (opts.get("operator") or {}).get("enabled", True):
         return
-    asr_dir = RUN_DIR / "asr"
-    asr_dir.mkdir(parents=True, exist_ok=True)
 
     synonyms: dict[str, list[str]] = {}
     for entry in (opts.get("operator_synonyms") or []):
@@ -1088,8 +1086,6 @@ def write_operator_runtime(opts: dict) -> None:
     op_path.write_text(json.dumps(payload))
     try:
         import shutil
-        shutil.chown(asr_dir, user="asterisk", group="asterisk")
-        os.chmod(asr_dir, 0o750)
         shutil.chown(op_path, user="asterisk", group="asterisk")
         os.chmod(op_path, 0o640)
     except (PermissionError, LookupError, KeyError, OSError) as exc:
@@ -1097,6 +1093,26 @@ def write_operator_runtime(opts: dict) -> None:
         # succeeds; warn (don't crash) if the asterisk user isn't present yet.
         log(f"WARNING: could not set asterisk ownership on operator runtime: {exc}")
     log(f"operator: staged {len(payload['rooms'])} room(s) for voice recognition")
+
+
+def ensure_voice_dirs() -> None:
+    """Create the asterisk-writable ASR record dir + announcement-audio dir under
+    /run (tmpfs). These are needed by the wake-up, status, automation AND announce
+    AGIs — all toggleable INDEPENDENTLY of the voice operator — so they must exist
+    regardless of ``operator.enabled`` (they used to live in write_operator_runtime,
+    which early-returns when the operator is off, silently breaking dial-46/45)."""
+    import shutil
+    asr_dir = RUN_DIR / "asr"
+    announce_dir = RUN_DIR / "announce"
+    try:
+        asr_dir.mkdir(parents=True, exist_ok=True)
+        announce_dir.mkdir(parents=True, exist_ok=True)
+        shutil.chown(asr_dir, user="asterisk", group="asterisk")
+        os.chmod(asr_dir, 0o750)
+        shutil.chown(announce_dir, user="asterisk", group="asterisk")
+        os.chmod(announce_dir, 0o755)
+    except (PermissionError, LookupError, KeyError, OSError) as exc:
+        log(f"WARNING: could not prepare asterisk voice dirs: {exc}")
 
 
 _EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
@@ -1160,6 +1176,7 @@ def main() -> None:
     # talking clock and console clock read local time.
     tz = apply_timezone(resolve_timezone(opts))
     (RUN_DIR / "tz").write_text(tz + "\n")
+    ensure_voice_dirs()          # ASR + announce dirs (needed even if operator off)
     write_operator_runtime(opts)
     write_features_runtime(opts)
 

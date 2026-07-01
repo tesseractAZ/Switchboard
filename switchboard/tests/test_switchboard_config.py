@@ -533,6 +533,24 @@ def test_features_staging() -> None:
         sbc.RUN_DIR = orig
 
 
+def test_voice_dirs_independent_of_operator() -> None:
+    # The ASR record dir + announce-audio dir must be created regardless of the
+    # operator toggle — dial-45 (status) and dial-46 (announce) record + write there
+    # even when operator.enabled is false. (Regression: they used to live in the
+    # operator-gated write_operator_runtime.)
+    import tempfile
+    from pathlib import Path as _P
+    run = _P(tempfile.mkdtemp())
+    orig = sbc.RUN_DIR
+    sbc.RUN_DIR = run
+    try:
+        sbc.ensure_voice_dirs()
+        check("voice-dirs: asr record dir created", (run / "asr").is_dir())
+        check("voice-dirs: announce audio dir created", (run / "announce").is_dir())
+    finally:
+        sbc.RUN_DIR = orig
+
+
 def test_disabled_feature_frees_ext() -> None:
     # A disabled clock no longer reserves its ext, so another feature may reuse it.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])
@@ -613,6 +631,7 @@ if __name__ == "__main__":
     test_status_announce_dialplan()
     test_status_announce_collisions()
     test_features_staging()
+    test_voice_dirs_independent_of_operator()
     test_disabled_feature_frees_ext()
     test_state_dir_setup()
     test_state_dir_setup_failure_is_graceful()

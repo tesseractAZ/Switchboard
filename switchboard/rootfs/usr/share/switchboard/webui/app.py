@@ -35,10 +35,10 @@ sys.path.insert(0, "/usr/share/switchboard/wakeup")
 # this file still succeeds and ``app`` is None.
 try:
     from fastapi import FastAPI, Request  # noqa: E402
-    from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse  # noqa: E402
     _HAVE_FASTAPI = True
 except ImportError:  # pragma: no cover - exercised only on the test box
-    FastAPI = Request = HTMLResponse = JSONResponse = None  # type: ignore
+    FastAPI = Request = FileResponse = HTMLResponse = JSONResponse = None  # type: ignore
     _HAVE_FASTAPI = False
 
 from ami import (  # noqa: E402
@@ -253,12 +253,34 @@ def wakeups_list(rooms_by_ext: dict) -> list[dict]:
     return out
 
 
+ANNOUNCE_DIR = "/run/switchboard/announce"
+_ANNOUNCE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\.wav$")
+
+
 @app.middleware("http")
 async def restrict_to_ingress(request: Request, call_next):
+    # The announcement audio is fetched over the LAN by the media players (an
+    # AirPlay speaker, not the Supervisor ingress client), so exempt just that GET
+    # route from the ingress client-IP guard. It only ever serves an ephemeral,
+    # name-validated *.wav from ANNOUNCE_DIR — see serve_announcement.
+    if request.method == "GET" and (request.url.path or "").startswith("/announce/"):
+        return await call_next(request)
     client = request.client.host if request.client else ""
     if not _client_allowed(client):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     return await call_next(request)
+
+
+@app.get("/announce/{name}")
+def serve_announcement(name: str):
+    """Serve a generated announcement WAV to a LAN media player (play_media). Name
+    is strictly validated (no path traversal); only files under ANNOUNCE_DIR."""
+    if not _ANNOUNCE_NAME.match(name or ""):
+        return JSONResponse({"error": "bad name"}, status_code=400)
+    path = os.path.join(ANNOUNCE_DIR, name)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="audio/wav")
 
 
 # --------------------------------------------------------------------------- #
