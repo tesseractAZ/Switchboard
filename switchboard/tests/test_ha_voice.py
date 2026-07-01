@@ -79,6 +79,22 @@ def test_status_match() -> None:
     check("digit: 9 -> ''", status_match.from_digit("9") == "")
 
 
+def test_format_calendar() -> None:
+    check("cal: timed event",
+          ha_reports.format_calendar([{"summary": "Dentist", "start": {"dateTime": "2026-07-01T09:00:00-07:00"}}]) ==
+          "Your next event is Dentist at 9:00 AM.")
+    check("cal: PM time",
+          ha_reports.format_calendar([{"summary": "Meeting", "start": {"dateTime": "2026-07-01T14:30:00-07:00"}}]) ==
+          "Your next event is Meeting at 2:30 PM.")
+    check("cal: all-day omits time",
+          ha_reports.format_calendar([{"summary": "Holiday", "start": {"date": "2026-07-01"}}]) ==
+          "Your next event is Holiday.")
+    check("cal: skips empty summary",
+          ha_reports.format_calendar([{"summary": ""}, {"summary": "Real", "start": {}}]) ==
+          "Your next event is Real.")
+    check("cal: empty -> ''", ha_reports.format_calendar([]) == "")
+
+
 def test_ha_client_guards() -> None:
     check("ha: valid entity id", ha_client.is_entity_id("sensor.foo_bar_1"))
     check("ha: rejects malformed id", not ha_client.is_entity_id("Sensor.Foo") and not ha_client.is_entity_id("nope"))
@@ -93,6 +109,7 @@ def main() -> None:
     test_format_power()
     test_format_house()
     test_status_match()
+    test_format_calendar()
     test_ha_client_guards()
     print()
     if _failures:

@@ -229,3 +229,20 @@ def ha_location():
         return d.get("latitude"), d.get("longitude"), (d.get("unit_system") or {}).get("temperature")
     except (ValueError, TypeError):
         return None, None, None
+
+
+def get_calendar_events(entity_id: str, start_iso: str, end_iso: str) -> list:
+    """Events in [start,end) for a calendar.* entity, or [] on any error. Used by
+    smart wake-up to read the next event; graceful when no calendar is configured."""
+    if not is_entity_id(entity_id):
+        return []
+    from urllib.parse import quote
+    path = f"/calendars/{entity_id}?start={quote(start_iso)}&end={quote(end_iso)}"
+    status, text = _request("GET", path)
+    if status != 200 or not text:
+        return []
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, list) else []
+    except (ValueError, TypeError):
+        return []

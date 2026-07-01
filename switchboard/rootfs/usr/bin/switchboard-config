@@ -446,6 +446,9 @@ def render_wakeup_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
         " same = n,SayUnixTime(,,IMp)",
+        # Smart wake-up: fire the configured scene + speak weather / next calendar
+        # event (all no-ops if unconfigured or HA is unreachable — the AGI degrades).
+        " same = n,AGI(switchboard-wakeup-deliver.agi)",
         " same = n,Wait(1)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
         " same = n,SayUnixTime(,,IMp)",
@@ -481,6 +484,38 @@ def render_automation_context() -> list[str]:
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-automation.agi)",
+        " same = n,Hangup()",
+        "",
+    ]
+
+
+def render_status_context() -> list[str]:
+    """The [status] context: the dial-a-status voice menu AGI (say power / weather
+    / house, or press 1/2/3, and hear live Home Assistant state spoken back)."""
+    return [
+        ";; ----- Dial-a-status voice menu -----",
+        "[status]",
+        "exten = s,1,NoOp(Status menu)",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,AGI(switchboard-status.agi)",
+        " same = n,Hangup()",
+        "",
+    ]
+
+
+def render_announce_context() -> list[str]:
+    """The [announce] context: record a short message and play it out to the
+    configured Home Assistant media players (via the announce AGI)."""
+    return [
+        ";; ----- Phone -> HA speaker announce -----",
+        "[announce]",
+        "exten = s,1,NoOp(Announce)",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,AGI(switchboard-announce.agi)",
         " same = n,Hangup()",
         "",
     ]
@@ -647,6 +682,40 @@ def render_extensions(opts: dict) -> str:
             ]
             reserved.add(automation_ext)
 
+    # Dial-a-status voice menu — a phone dialing this hears a menu and can ask for
+    # live power / weather / house status. Literal ext; skipped on collision.
+    status_on = bool(opts.get("status_enabled", True))
+    status_ext = str(opts.get("status_ext", "45") or "45").strip()
+    if status_on and exts:
+        if not re.fullmatch(r"[0-9]{2,6}", status_ext):
+            log(f"status: invalid status_ext {status_ext!r}; dial code disabled")
+        elif status_ext in reserved:
+            log(f"status: status_ext {status_ext} collides with a reserved/room ext; dial code disabled")
+        else:
+            parts += [
+                f"exten = {status_ext},1,NoOp(Status menu)",
+                " same = n,Goto(status,s,1)",
+                "",
+            ]
+            reserved.add(status_ext)
+
+    # Phone -> HA speaker announce — dialing this records a short message and plays
+    # it out to the configured media players. Literal ext; skipped on collision.
+    announce_on = bool(opts.get("announce_enabled", True))
+    announce_ext = str(opts.get("announce_ext", "46") or "46").strip()
+    if announce_on and exts:
+        if not re.fullmatch(r"[0-9]{2,6}", announce_ext):
+            log(f"announce: invalid announce_ext {announce_ext!r}; dial code disabled")
+        elif announce_ext in reserved:
+            log(f"announce: announce_ext {announce_ext} collides with a reserved/room ext; dial code disabled")
+        else:
+            parts += [
+                f"exten = {announce_ext},1,NoOp(Announce)",
+                " same = n,Goto(announce,s,1)",
+                "",
+            ]
+            reserved.add(announce_ext)
+
     if exts:
         joined = "|".join(exts)
         parts += [
@@ -681,6 +750,12 @@ def render_extensions(opts: dict) -> str:
     # code collided — the operator routes a spoken "automation" Goto(automation,s,1).
     if automation_on and exts:
         parts += render_automation_context()
+
+    # Dial-a-status menu + phone->speaker announce contexts.
+    if status_on and exts:
+        parts += render_status_context()
+    if announce_on and exts:
+        parts += render_announce_context()
 
     # Inbound from the trunk gets its OWN [from-trunk] context. (Outbound rules are
     # emitted up in [rooms] via render_outbound_rules — they must not live here, or
@@ -1019,6 +1094,46 @@ def write_operator_runtime(opts: dict) -> None:
     log(f"operator: staged {len(payload['rooms'])} room(s) for voice recognition")
 
 
+_EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+
+
+def _clean_eid(val: str) -> str:
+    """A well-formed entity_id or '' (drops anything that could be injected into a
+    HA service call downstream)."""
+    s = str(val or "").strip()
+    return s if _EID_RE.match(s) else ""
+
+
+def write_features_runtime(opts: dict) -> None:
+    """Stage the HA-integrated voice-feature settings (smart wake-up + announce)
+    for the AGIs, which run as the asterisk user and CANNOT read root-only
+    /data/options.json. Written to /run/switchboard/features.json (tmpfs,
+    asterisk-readable). Entity ids are validated here as defence in depth."""
+    players = [e for e in (_clean_eid(p) for p in (opts.get("announce_players") or [])) if e]
+    payload = {
+        "wakeup": {
+            "scene": _clean_eid(opts.get("wakeup_scene", "")),
+            "weather": bool(opts.get("wakeup_weather", True)),
+            "calendar": _clean_eid(opts.get("wakeup_calendar", "")),
+        },
+        "announce": {
+            "players": players,
+            "tts_engine": _clean_eid(opts.get("announce_tts_engine", "tts.piper")) or "tts.piper",
+        },
+    }
+    fp = RUN_DIR / "features.json"
+    fp.write_text(json.dumps(payload))
+    try:
+        import shutil
+        shutil.chown(fp, user="asterisk", group="asterisk")
+        os.chmod(fp, 0o640)
+    except (PermissionError, LookupError, KeyError, OSError) as exc:
+        log(f"WARNING: could not set asterisk ownership on features runtime: {exc}")
+    w = payload["wakeup"]
+    log(f"features: wake-up(scene={'set' if w['scene'] else 'none'}, weather={w['weather']}, "
+        f"calendar={'set' if w['calendar'] else 'none'}), announce({len(players)} player(s))")
+
+
 def main() -> None:
     opts = load_options()
     # Validate/sanitize/dedupe rooms once; both renderers consume the cleaned list.
@@ -1036,6 +1151,7 @@ def main() -> None:
     tz = apply_timezone(resolve_timezone(opts))
     (RUN_DIR / "tz").write_text(tz + "\n")
     write_operator_runtime(opts)
+    write_features_runtime(opts)
 
     ami_user = "switchboard"
     ami_secret = gen_secret()

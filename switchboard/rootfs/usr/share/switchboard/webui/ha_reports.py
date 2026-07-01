@@ -9,6 +9,9 @@ has something to say.
 
 from __future__ import annotations
 
+import datetime
+import re
+
 import ha_client
 import weather
 
@@ -127,3 +130,37 @@ def weather_report() -> str:
     lat, lon, _unit = ha_client.ha_location()
     line = weather.speak_weather(weather.fetch_forecast(lat, lon))
     return line or "Weather is unavailable right now."
+
+
+# --------------------------------------------------------------------------- #
+# Calendar (smart wake-up: next event) — optional; '' when no calendar / none due
+# --------------------------------------------------------------------------- #
+def format_calendar(events: list) -> str:
+    """Pure: 'Your next event is <summary> at <h:mm AM/PM>.' from HA calendar
+    events (first with a summary), or '' if none/malformed. All-day events omit
+    the time."""
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        summary = str(ev.get("summary", "") or "").strip()
+        if not summary:
+            continue
+        start = ev.get("start") if isinstance(ev.get("start"), dict) else {}
+        when = ""
+        dt = (start or {}).get("dateTime")
+        if isinstance(dt, str):
+            m = re.search(r"T(\d{2}):(\d{2})", dt)
+            if m:
+                h = int(m.group(1))
+                ap = "AM" if h < 12 else "PM"
+                h = h % 12 or 12
+                when = f" at {h}:{m.group(2)} {ap}"
+        return f"Your next event is {summary}{when}."
+    return ""
+
+
+def calendar_report(entity_id: str) -> str:
+    now = datetime.datetime.now().astimezone()
+    end = now + datetime.timedelta(hours=18)
+    events = ha_client.get_calendar_events(entity_id, now.isoformat(), end.isoformat())
+    return format_calendar(events)
