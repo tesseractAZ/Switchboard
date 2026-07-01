@@ -39,7 +39,10 @@ STATE_DIR = DATA_DIR / "state"
 
 # Codecs we know how to emit. slin16 = wideband linear (handy for IP/HD).
 KNOWN_CODECS = ("ulaw", "alaw", "g722", "opus", "g729", "gsm", "slin16")
-DEFAULT_CODECS = ("ulaw", "alaw", "g722", "opus")
+# u-law only by default — G.711 µ-law is the baseline every analog FXS port, the
+# cordless, the softphone, AND the PSTN trunk speak, so pinning it means no call
+# ever transcodes. Extra codecs remain selectable via the `codecs` option.
+DEFAULT_CODECS = ("ulaw",)
 
 
 def log(msg: str) -> None:

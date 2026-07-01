@@ -144,8 +144,7 @@ def test_outbound_rules_live_in_rooms_context() -> None:
 def test_trunk_codec_pinned_to_ulaw() -> None:
     # The outside line is the PSTN (always narrowband). The trunk endpoint must
     # advertise ulaw ONLY (disallow=all) so the provider can't negotiate a
-    # wideband codec and force a transcode against the analog FXS phones. The
-    # HD codecs stay on the room template for internal SIP-to-SIP calls.
+    # wideband codec and force a transcode against the analog FXS phones.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
              "username": "100000_pi", "secret": "x", "dial_prefix": "9"}
@@ -155,8 +154,22 @@ def test_trunk_codec_pinned_to_ulaw() -> None:
           "disallow = all" in ep and "allow = ulaw" in ep)
     check("trunk endpoint advertises no wideband/alaw codec",
           not any(c in ep for c in ("g722", "opus", "alaw")))
-    check("room endpoints keep HD codecs (g722/opus) for SIP-to-SIP",
-          "g722" in pj and "opus" in pj)
+
+
+def test_default_codecs_are_ulaw_only() -> None:
+    # The system defaults to u-law ONLY: an empty/absent/all-invalid codecs option
+    # yields allow=!all,ulaw, and the whole rendered config offers no other codec —
+    # so no call (room-to-room, cordless, softphone, trunk) ever transcodes.
+    check("default codec_allow is ulaw-only", sbc.codec_allow({}) == "!all,ulaw")
+    check("empty codecs list falls back to ulaw-only", sbc.codec_allow({"codecs": []}) == "!all,ulaw")
+    check("all-invalid codecs fall back to ulaw-only", sbc.codec_allow({"codecs": ["bogus"]}) == "!all,ulaw")
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
+    check("default room config advertises no wideband/alaw codec",
+          not any(c in pj for c in ("g722", "opus", "alaw", "g729")))
+    # An explicit override still works (the capability isn't removed, just off).
+    check("explicit override re-enables a codec",
+          "g722" in sbc.codec_allow({"codecs": ["ulaw", "g722"]}))
 
 
 def test_trunk_aor_not_qualified() -> None:
@@ -537,6 +550,7 @@ if __name__ == "__main__":
     test_outbound_toll_fraud_blocks()
     test_outbound_rules_live_in_rooms_context()
     test_trunk_codec_pinned_to_ulaw()
+    test_default_codecs_are_ulaw_only()
     test_trunk_aor_not_qualified()
     test_trunk_inbound_routing()
     test_features_conf_transfer()
