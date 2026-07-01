@@ -533,6 +533,26 @@ def test_features_staging() -> None:
         sbc.RUN_DIR = orig
 
 
+def test_write_perms_tight() -> None:
+    # Generated configs carry secrets (pjsip.conf SIP passwords, manager.conf AMI
+    # secret) — write() must create them 0640 with NO world access, from the first
+    # byte (os.open with mode, not write_text-then-chmod).
+    import stat
+    import tempfile
+    from pathlib import Path as _P
+    d = _P(tempfile.mkdtemp())
+    p = d / "sub" / "secret.conf"
+    sbc.write(p, "secret = hunter2\n")
+    mode = p.stat().st_mode
+    check("write: content lands", p.read_text() == "secret = hunter2\n")
+    check("write: no world access", (mode & stat.S_IRWXO) == 0)
+    check("write: mode is 0640", (mode & 0o777) == 0o640)
+    # Rewrite over an existing file keeps the tight mode.
+    p.chmod(0o666)
+    sbc.write(p, "secret = again\n")
+    check("write: rewrite re-pins 0640", (p.stat().st_mode & 0o777) == 0o640)
+
+
 def test_voice_dirs_independent_of_operator() -> None:
     # The ASR record dir + announce-audio dir must be created regardless of the
     # operator toggle — dial-45 (status) and dial-46 (announce) record + write there
@@ -631,6 +651,7 @@ if __name__ == "__main__":
     test_status_announce_dialplan()
     test_status_announce_collisions()
     test_features_staging()
+    test_write_perms_tight()
     test_voice_dirs_independent_of_operator()
     test_disabled_feature_frees_ext()
     test_state_dir_setup()
