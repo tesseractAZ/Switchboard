@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.1
+
+Announce UX + a console boot-crash fix, from testing the new voice features.
+
+- **Phone→speaker announce now retries and is more patient.** A test call recorded
+  empty (`transcribe heard=''`) because the caller paused after the tone and the
+  3-second silence detector ended the recording before they spoke — and the AGI was
+  single-shot. It now gives **two tries** with a clearer prompt ("After the tone,
+  say your announcement") and a longer, more forgiving window (12 s, 4 s silence).
+- **Operator console no longer crashes on boot with an empty `CONSOLE_PORT`.**
+  `int('')` raised `ValueError` (s6 restarted it, so it recovered) — now falls back
+  to 2300 cleanly.
+
 ## 0.11.0
 
 Three Home-Assistant-integrated voice features — pick up any phone and talk to

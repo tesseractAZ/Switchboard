@@ -33,10 +33,19 @@ def main() -> None:
         sp.say_or("No speakers are set up for announcements. Goodbye.")
         return
 
-    sp.say_or("Record your announcement after the tone.", sp.PROMPT_BEEP)
-    text = sp.listen("announce", 0, record_ms=10000, silence_s=3)
+    # Two tries, patient recording (a longer window + 4s silence) so a brief pause
+    # after the tone doesn't cut the caller off before they start speaking.
+    text = ""
+    for attempt in range(2):
+        if attempt == 0:
+            sp.say_or("After the tone, say your announcement.", sp.PROMPT_BEEP)
+        else:
+            sp.say_or("I didn't catch that. After the tone, say your announcement.", sp.PROMPT_BEEP)
+        text = sp.listen("announce", attempt, record_ms=12000, silence_s=4)
+        if text:
+            break
     if not text:
-        sp.say_or("I didn't catch that. Goodbye.")
+        sp.say_or("Sorry, I didn't catch an announcement. Goodbye.")
         return
 
     ok = False
