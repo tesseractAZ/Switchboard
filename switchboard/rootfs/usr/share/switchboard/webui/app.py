@@ -649,7 +649,7 @@ INDEX_HTML = """<!doctype html>
   h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
   .sub { color: #888; font-size: .85rem; margin-bottom: 1rem; }
   .grid { display: grid; gap: .6rem;
-          grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+          grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
   .card { background: var(--card, #fff); border-radius: 12px; padding: .8rem .9rem;
           box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; flex-direction: column; }
   .card .ext { font-size: .75rem; color: #999; }
@@ -666,10 +666,12 @@ INDEX_HTML = """<!doctype html>
              background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
   .ringbtn:hover:not(:disabled) { background: var(--btnh, #e8eaed); }
   .ringbtn:disabled { opacity: .5; cursor: default; }
-  /* Per-card action row: small buttons sharing a line under the status pill. */
-  .actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; }
-  .actions .ringbtn { margin-top: 0; width: auto; flex: 1 1 auto; min-width: 0; padding: .35rem .4rem; }
-  .actions .iconbtn { flex: 0 0 auto; width: auto; }
+  /* Per-card action row: a tidy 2-up grid so every button is the same width and
+     the row never wraps unevenly. Each button is fully labelled (no bare icons);
+     an over-long label ellipsises rather than blowing out the column. */
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem; margin-top: .6rem; }
+  .actions .ringbtn { margin-top: 0; width: auto; padding: .35rem .4rem;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mwibadge { font-size: .9rem; line-height: 1; margin-left: .35rem; }
   .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
   .wakerow { display: flex; gap: .35rem; margin-top: .45rem; }
@@ -850,19 +852,20 @@ async function refresh() {
 
       // Hang up: only meaningful when this room has an active call leg.
       const hangBtn = active
-        ? '<button class="ringbtn iconbtn" data-hangup="' + ex + '" title="Hang up">📵</button>' : '';
+        ? '<button class="ringbtn" data-hangup="' + ex + '" title="Hang up">📵 Hang up</button>' : '';
 
       // Transfer: only when there's a far party to hand off (peer_channel set).
       // Sends the OTHER party to a room you pick, dropping this leg out.
       const xferBtn = (active && r.peer_channel)
-        ? '<button class="ringbtn iconbtn" data-transfer="' + ex + '" title="Transfer call">↪</button>' : '';
+        ? '<button class="ringbtn" data-transfer="' + ex + '" title="Transfer call">↪ Transfer</button>' : '';
 
-      // Message-waiting (stutter dial tone): toggle on/off, badge when set.
+      // Message-waiting (stutter dial tone): toggle on/off, badge when set. Labelled
+      // so it doesn't read as a stray icon — "Message" sets it, "Clear" removes it.
       const mwiState = r.mwi ? 'off' : 'on';
-      const mwiTitle = r.mwi ? 'Clear message-waiting' : 'Set message-waiting';
-      const mwiBtn = '<button class="ringbtn iconbtn" data-mwi="' + ex +
+      const mwiTitle = r.mwi ? 'Clear message-waiting' : 'Set message-waiting (stutter tone)';
+      const mwiBtn = '<button class="ringbtn" data-mwi="' + ex +
                      '" data-state="' + mwiState + '" title="' + mwiTitle + '">' +
-                     (r.mwi ? '✉ on' : '✉') + '</button>';
+                     (r.mwi ? '✉ Clear' : '✉ Message') + '</button>';
       const mwiBadge = r.mwi ? '<span class="mwibadge" title="message waiting">✉️</span>' : '';
 
       // Per-room wake-up setter: a small time input + Set. fill the input with
