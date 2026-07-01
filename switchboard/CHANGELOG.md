@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.9
+
+Default the whole system to **G.711 µ-law only** — no transcoding, anywhere.
+
+- The shipped `codecs` default is now just `ulaw` (was `ulaw, alaw, g722, opus`),
+  and the generator's fallback matches — so every room endpoint renders
+  `allow = !all,ulaw`. Combined with the already-µ-law-only trunk, every call
+  (analog FXS port, cordless, softphone, and the PSTN trunk) negotiates G.711
+  µ-law with no transcode, regardless of what codec order a phone advertises —
+  enforcement is server-side at the Asterisk endpoints.
+- Extra codecs are not removed, just off by default: set the `codecs` option
+  (e.g. `["ulaw", "g722"]`) to re-enable wideband for internal SIP-to-SIP calls.
+
 ## 0.9.8
 
 Fix the voice **wake-up** (dial 42) and the dial-0 **MWI auto-clear**, which both
