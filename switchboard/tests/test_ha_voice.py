@@ -77,6 +77,12 @@ def test_status_match() -> None:
     check("digit: 1 -> power", status_match.from_digit("1") == "power")
     check("digit: 3 -> house", status_match.from_digit("3") == "house")
     check("digit: 9 -> ''", status_match.from_digit("9") == "")
+    check("bye: goodbye", status_match.is_goodbye("goodbye"))
+    check("bye: no", status_match.is_goodbye("no thanks"))
+    check("bye: done", status_match.is_goodbye("i'm done"))
+    check("bye: hang up", status_match.is_goodbye("hang up"))
+    check("bye: 'power' is not goodbye", not status_match.is_goodbye("power"))
+    check("bye: empty is not goodbye", not status_match.is_goodbye(""))
 
 
 def test_format_calendar() -> None:
