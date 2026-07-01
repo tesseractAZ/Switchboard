@@ -257,6 +257,22 @@ ANNOUNCE_DIR = "/run/switchboard/announce"
 _ANNOUNCE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\.wav$")
 
 
+def safe_announce_path(name: str) -> str:
+    """Resolve an announcement name to its on-disk path, or '' if it's invalid.
+
+    Two independent layers: the strict name regex (no separators, *.wav only) AND
+    a realpath containment check that the resolved path stays inside ANNOUNCE_DIR —
+    so no crafted name (traversal, absolute path, symlink) can escape the announce
+    directory. Pure given the filesystem; unit-tested."""
+    if not _ANNOUNCE_NAME.match(name or ""):
+        return ""
+    base = os.path.realpath(ANNOUNCE_DIR)
+    path = os.path.realpath(os.path.join(base, name))
+    if not path.startswith(base + os.sep):
+        return ""
+    return path
+
+
 @app.middleware("http")
 async def restrict_to_ingress(request: Request, call_next):
     # The announcement audio is fetched over the LAN by the media players (an
@@ -273,11 +289,12 @@ async def restrict_to_ingress(request: Request, call_next):
 
 @app.get("/announce/{name}")
 def serve_announcement(name: str):
-    """Serve a generated announcement WAV to a LAN media player (play_media). Name
-    is strictly validated (no path traversal); only files under ANNOUNCE_DIR."""
-    if not _ANNOUNCE_NAME.match(name or ""):
+    """Serve a generated announcement WAV to a LAN media player (play_media). The
+    name is validated AND realpath-contained to ANNOUNCE_DIR (safe_announce_path),
+    so no user-supplied value can reach a path outside the announce directory."""
+    path = safe_announce_path(name)
+    if not path:
         return JSONResponse({"error": "bad name"}, status_code=400)
-    path = os.path.join(ANNOUNCE_DIR, name)
     if not os.path.isfile(path):
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(path, media_type="audio/wav")

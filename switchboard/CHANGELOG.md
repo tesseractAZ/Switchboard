@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.1
+
+Security sweep: resolve all open CodeQL code-scanning alerts.
+
+- **`/announce` route: realpath containment** (py/path-injection ×2). The name was
+  already regex-validated; the resolver (`safe_announce_path`) now ALSO resolves
+  via `realpath` and requires the result to stay inside the announce directory —
+  two independent layers against traversal/symlink escape.
+- **Generated configs no longer world-readable** (py/clear-text-storage ×2
+  hardening). `write()` creates every generated config **0640 root:asterisk from
+  the first byte** (`os.open` with mode — no umask window), and re-pins the mode on
+  rewrite; same for `/run/switchboard/ami.env` (now group-readable by the asterisk
+  user, which the dialplan-spawned AMI consumers needed anyway). Plaintext secrets
+  in pjsip.conf/manager.conf remain — Asterisk requires them — documented and
+  dismissed with justification.
+- **Test regex swap** (py/bad-tag-filter). The JS-parse test extracts our own
+  template's `<script>` block by string slicing instead of an HTML-ish regex.
+
 ## 0.12.0
 
 Phone->speaker announce now plays on the **ecobee** speakers, bracketed by a

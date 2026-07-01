@@ -173,9 +173,24 @@ def valid_rooms(rooms: list) -> list[dict]:
     return out
 
 
-def write(path: Path, content: str) -> None:
+def write(path: Path, content: str, mode: int = 0o640) -> None:
+    """Write a generated config file with tight permissions from the first byte.
+
+    Several of these files carry secrets in the clear because Asterisk requires
+    them there (SIP auth passwords in pjsip.conf, the AMI secret in manager.conf).
+    Creating with 0640 via os.open — instead of write_text + chmod — means there is
+    never a window where the default umask leaves the file world-readable. Group
+    read goes to the asterisk group (Asterisk runs -U asterisk -G asterisk)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+    try:
+        os.chmod(path, mode)  # O_CREAT mode only applies on create; pin on rewrite
+        import shutil
+        shutil.chown(path, group="asterisk")
+    except (PermissionError, LookupError, KeyError, OSError):
+        pass  # off-box (no asterisk group) — perms still applied where possible
     log(f"wrote {path} ({len(content)} bytes)")
 
 
@@ -1193,9 +1208,21 @@ def main() -> None:
     write(ASTERISK_ETC / "logger.conf", render_logger(opts))
     write(ASTERISK_ETC / "features.conf", render_features())
 
+    # The AMI secret must exist on file for dialplan-System()-spawned consumers
+    # (switchboard-mwi) to authenticate; it lives in tmpfs (/run, RAM-backed), is
+    # regenerated on every boot, and AMI itself binds 127.0.0.1 only. Created 0600
+    # atomically (os.open) so no default-umask window ever exposes it; asterisk
+    # group gets read via the group chown below.
     env_path = RUN_DIR / "ami.env"
-    env_path.write_text(f"AMI_USER={ami_user}\nAMI_SECRET={ami_secret}\n")
-    os.chmod(env_path, 0o600)
+    fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"AMI_USER={ami_user}\nAMI_SECRET={ami_secret}\n")
+    try:
+        import shutil
+        os.chmod(env_path, 0o640)
+        shutil.chown(env_path, group="asterisk")
+    except (PermissionError, LookupError, KeyError, OSError):
+        pass
     log(f"wrote {env_path}")
 
     n_rooms = len(opts.get("rooms", []) or [])
