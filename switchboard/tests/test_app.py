@@ -230,15 +230,20 @@ def test_wakeup_ui_formatting() -> None:
 
 
 def test_announce_serve_guard() -> None:
-    # The LAN-exempt /announce route only serves strictly-named *.wav from the
-    # announce dir — no path traversal, no other extension, lowercase only.
+    # The LAN-exempt /announce route resolves names via safe_announce_path: strict
+    # *.wav name regex AND realpath containment to the announce dir — so no
+    # user-supplied value (traversal, absolute path, other extension) escapes it.
     check("announce: dir constant", app.ANNOUNCE_DIR == "/run/switchboard/announce")
-    rx = app._ANNOUNCE_NAME
-    check("announce: valid name matches", bool(rx.match("a12345.wav")))
-    check("announce: rejects traversal / other ext",
-          not rx.match("../etc/passwd") and not rx.match("a.mp3") and not rx.match("a.wav/x"))
-    check("announce: rejects empty / uppercase / dotfile",
-          not rx.match("") and not rx.match("A.wav") and not rx.match(".wav"))
+    good = app.safe_announce_path("a12345.wav")
+    check("announce: valid name resolves under the announce dir",
+          good.startswith(app.ANNOUNCE_DIR + "/") and good.endswith("/a12345.wav"))
+    for bad in ("../etc/passwd", "..%2fetc%2fpasswd", "a.mp3", "a.wav/x",
+                "/etc/passwd", "", "A.wav", ".wav", "a..wav", "a" * 70 + ".wav"):
+        if app.safe_announce_path(bad):
+            check(f"announce: rejects {bad!r}", False)
+            break
+    else:
+        check("announce: rejects traversal/absolute/ext/case/overlong names", True)
 
 
 def test_dark_mode_covers_light_cards() -> None:
@@ -262,20 +267,24 @@ def test_index_html_js_parses() -> None:
     # string literal, is a syntax error that kills the ENTIRE inline <script> and
     # blanks the GUI. (This actually shipped: the transfer prompt used '...\n'.)
     # py_compile can't see it, so parse the rendered JS with node as a guard.
-    import re
     import shutil
     import subprocess
     import tempfile
-    m = re.search(r"<script>(.*?)</script>", app.INDEX_HTML, re.S)
-    check("ui: inline <script> block found", bool(m))
-    if not m:
+    # Plain string slicing (not an HTML-filter regex): we're extracting our OWN
+    # template's single lowercase <script> block, not sanitizing untrusted HTML.
+    html = app.INDEX_HTML
+    start = html.find("<script>")
+    end = html.find("</script>", start)
+    found = start != -1 and end != -1
+    check("ui: inline <script> block found", found)
+    if not found:
         return
     node = shutil.which("node")
     if not node:
         print("SKIP ui: dashboard JS parses (node not on PATH)")
         return
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
-        fh.write(m.group(1))
+        fh.write(html[start + len("<script>"):end])
         js_path = fh.name
     proc = subprocess.run([node, "--check", js_path], capture_output=True, text=True)
     check("ui: dashboard JS parses (no syntax error in the served <script>)",
