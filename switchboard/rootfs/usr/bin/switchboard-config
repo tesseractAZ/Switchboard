@@ -1070,6 +1070,11 @@ def write_operator_runtime(opts: dict) -> None:
         return
     asr_dir = RUN_DIR / "asr"
     asr_dir.mkdir(parents=True, exist_ok=True)
+    # Announcement audio: the asterisk-user announce AGI writes the combined WAV
+    # here; the (root) webui serves it over the LAN for the media players. 0755 so
+    # the webui can read it whatever user it runs as.
+    announce_dir = RUN_DIR / "announce"
+    announce_dir.mkdir(parents=True, exist_ok=True)
 
     synonyms: dict[str, list[str]] = {}
     for entry in (opts.get("operator_synonyms") or []):
@@ -1090,6 +1095,8 @@ def write_operator_runtime(opts: dict) -> None:
         import shutil
         shutil.chown(asr_dir, user="asterisk", group="asterisk")
         os.chmod(asr_dir, 0o750)
+        shutil.chown(announce_dir, user="asterisk", group="asterisk")
+        os.chmod(announce_dir, 0o755)
         shutil.chown(op_path, user="asterisk", group="asterisk")
         os.chmod(op_path, 0o640)
     except (PermissionError, LookupError, KeyError, OSError) as exc:
