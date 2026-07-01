@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.4
+
+Make the wake-up UI clearer and less busy.
+
+- **Wake-up list rows redesigned.** Each pending wake-up is now a clean card row:
+  **room name** on the left, the **time + when it rings** (`6:00 AM · tomorrow`) on
+  the right, then Cancel — instead of the old cramped `⏰ Name … 6:00 AM Cancel`
+  with a big empty gap. The "when" (today / tomorrow / weekday) is new, so it's
+  obvious when the call actually fires.
+- **Card wake-up box is labelled.** The per-room time field gets a ⏰ prefix and a
+  tooltip so it reads as "set a wake-up", not a stray empty box.
+- **Friendlier empty state** that points to both ways to set one (the ⏰ box on a
+  card, or dialing 42).
+
 ## 0.10.3
 
 Tidy up the per-room cards on the dashboard.

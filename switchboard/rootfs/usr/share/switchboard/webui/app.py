@@ -674,10 +674,19 @@ INDEX_HTML = """<!doctype html>
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mwibadge { font-size: .9rem; line-height: 1; margin-left: .35rem; }
   .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
-  .wakerow { display: flex; gap: .35rem; margin-top: .45rem; }
+  .wakerow { display: flex; gap: .35rem; margin-top: .45rem; align-items: center; }
+  .wakerow .wklab { font-size: .9rem; flex: 0 0 auto; opacity: .8; }
   .wakerow input[type=time] { flex: 1 1 auto; min-width: 0; font: inherit; font-size: .75rem;
              padding: .3rem .4rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
              background: var(--card, #fff); color: inherit; }
+  /* Wake-up list: one clean "Room — time · when [Cancel]" row per pending call. */
+  .wakelist { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
+  .wakeitem { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;
+              background: var(--card, #fff); border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .wakeitem .wkname { font-weight: 600; }
+  .wakeitem .wkwhen { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .wakeitem .wkday { color: #888; font-weight: 500; font-size: .85em; margin-left: .25rem; }
+  .wakeitem .wkcancel { width: auto; margin: 0; padding: .2rem .6rem; flex: 0 0 auto; }
   .toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
   .toolbar .ringbtn { width: auto; margin-top: 0; padding: .45rem .8rem; font-size: .82rem; }
   .lightgrid { display: grid; gap: .6rem;
@@ -762,6 +771,17 @@ function fmt12(hhmm) {
   let h = +m[1]; const ap = h < 12 ? 'AM' : 'PM';
   h = h % 12 || 12;
   return h + ':' + m[2] + ' ' + ap;
+}
+// "today" / "tomorrow" / a weekday for a wake-up's next-occurrence epoch, so the
+// list says WHEN it will actually ring, not just a bare clock time.
+function wakeDay(epoch) {
+  if (!epoch) return '';
+  const d = new Date(epoch * 1000), now = new Date();
+  const day = new Date(now); day.setHours(0,0,0,0);
+  const diff = Math.round((new Date(d).setHours(0,0,0,0) - day.getTime()) / 86400000);
+  if (diff <= 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  return d.toLocaleDateString([], {weekday: 'short'});
 }
 // The HH:MM of a room's pending wake-up (for prefilling its <input type=time>),
 // or '' when none is set.
@@ -871,9 +891,11 @@ async function refresh() {
       // Per-room wake-up setter: a small time input + Set. fill the input with
       // any pending time so it round-trips.
       const wkVal = esc(pendingHHMM(data.wakeups, r.ext));
+      // Clock prefix so the time box reads as "set a wake-up", not a stray field.
       const wakeRow = '<div class="wakerow">' +
-        '<input type="time" data-waketime="' + ex + '" value="' + wkVal + '">' +
-        '<button class="ringbtn iconbtn" data-wakeset="' + ex + '" title="Set wake-up">⏰ Set</button></div>';
+        '<span class="wklab" title="Set a wake-up for this room">⏰</span>' +
+        '<input type="time" data-waketime="' + ex + '" value="' + wkVal + '" title="Wake-up time">' +
+        '<button class="ringbtn" data-wakeset="' + ex + '" title="Set wake-up">Set</button></div>';
 
       return '<div class="card"><div class="ext">ext ' + ex + mwiBadge + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
@@ -900,14 +922,18 @@ async function refresh() {
     const wakeEl = document.getElementById('wakeups');
     const wk = data.wakeups || [];
     if (!wk.length) {
-      wakeEl.innerHTML = '<div class="muted">None set — dial 42 and say a time.</div>';
+      wakeEl.innerHTML = '<div class="muted">No wake-ups set. Use the ⏰ time box on a room card, ' +
+        'or dial 42 from a phone and say a time.</div>';
     } else {
-      wakeEl.innerHTML = '<ul class="calllist">' + wk.map(w =>
-        '<li><span class="detail">⏰ ' + esc(w.label) + '</span>' +
-        '<span class="meta">' + esc(fmt12(w.hhmm)) +
-        ' <button class="ringbtn" style="width:auto;margin:0 0 0 .6rem;padding:.15rem .5rem;" ' +
-        'data-cancel="' + esc(w.ext) + '">Cancel</button></span></li>'
-      ).join('') + '</ul>';
+      wakeEl.innerHTML = '<ul class="wakelist">' + wk.map(w => {
+        const day = wakeDay(w.target_epoch);
+        return '<li class="wakeitem">' +
+          '<span class="wkname">' + esc(w.label) + '</span>' +
+          '<span class="wkwhen">' + esc(fmt12(w.hhmm)) +
+          (day ? ' <span class="wkday">' + esc(day) + '</span>' : '') + '</span>' +
+          '<button class="ringbtn wkcancel" data-cancel="' + esc(w.ext) + '">Cancel</button>' +
+        '</li>';
+      }).join('') + '</ul>';
     }
   } catch (e) {
     document.getElementById('sub').textContent = 'Status unavailable';
