@@ -203,6 +203,21 @@ def test_index_html_controls() -> None:
     check("ui: esc() still used", "function esc(" in html)
 
 
+def test_dark_mode_covers_light_cards() -> None:
+    # The room cards (.card), the lights area cards (.areacard) and the wake-up time
+    # input all paint their background from var(--card). In dark mode, --card MUST be
+    # set at a scope they ALL inherit (body) — scoping it to .card alone leaves the
+    # lights section white with light text on it (unreadable), which is what shipped.
+    import re
+    html = app.INDEX_HTML
+    check("ui: lights area cards paint from --card", ".areacard" in html and "var(--card" in html)
+    dark = html[html.index("prefers-color-scheme: dark"):]
+    check("ui: dark mode sets --card on body (so lights cards darken too)",
+          bool(re.search(r"body\s*\{[^}]*--card\s*:", dark)))
+    check("ui: dark mode does NOT scope --card to .card only",
+          not re.search(r"\.card\s*\{\s*--card\s*:", dark))
+
+
 def test_index_html_js_parses() -> None:
     # The dashboard JS is embedded in a (regular, non-raw) Python string, so a bare
     # `\n` in the SOURCE emits a real newline into the browser — which, inside a JS
@@ -259,6 +274,7 @@ def main() -> None:
     test_channels_by_ext()
     test_build_lights_payload()
     test_index_html_controls()
+    test_dark_mode_covers_light_cards()
     test_index_html_js_parses()
     test_route_handlers_defined()
     test_client_guard()
