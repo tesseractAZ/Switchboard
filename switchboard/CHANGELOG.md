@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.0
+
+Remove HD/Opus support entirely — Switchboard is now **G.711 µ-law only**, and the
+codec is no longer configurable.
+
+- **Removed the `codecs` option** (config + schema). Every endpoint — rooms and the
+  trunk — is hard-pinned to `allow = ulaw` in the generated `pjsip.conf`, so no
+  call can negotiate anything but G.711 µ-law and nothing ever transcodes.
+- **Dropped the Opus codec** from the image build (no `asterisk-opus` package) and
+  removed the `codec_allow` / `KNOWN_CODECS` / `DEFAULT_CODECS` machinery from the
+  generator. Simpler and one-codec-clean, as intended.
+- The per-call codec indicator on the dashboard/console stays — it now simply
+  always reads "µ-law", a live confirmation that the pin is working.
+- Docs updated (§9). Note: a phone must still *offer* G.711 µ-law (PCMU); a device
+  configured to offer only a non-µ-law codec would have no common codec.
+
 ## 0.9.9
 
 Default the whole system to **G.711 µ-law only** — no transcoding, anywhere.
