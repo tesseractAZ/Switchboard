@@ -1,0 +1,66 @@
+#!/usr/bin/python3
+"""Switchboard phone -> HA speaker announce — AGI.
+
+Dial the announce code: record a short message, transcribe it (whisper is accurate
+on this narrowband line), and play it out to the configured Home Assistant media
+players via the local TTS engine (tts.speak). The configured players + engine come
+from the staged /run/switchboard/features.json (asterisk-readable).
+
+Channel-safe: any failure degrades to a spoken apology and hang-up.
+"""
+
+from __future__ import annotations
+
+import sys
+
+sys.path.insert(0, "/usr/share/switchboard/operator")
+sys.path.insert(0, "/usr/share/switchboard/webui")
+import agi_speech as sp  # noqa: E402
+
+try:
+    import ha_client  # noqa: E402
+except Exception:  # noqa: BLE001
+    ha_client = None
+
+
+def main() -> None:
+    sp.read_env()
+    ann = (sp.load_features() or {}).get("announce", {}) or {}
+    players = [p for p in (ann.get("players") or []) if isinstance(p, str)]
+    engine = ann.get("tts_engine") or "tts.piper"
+
+    if ha_client is None or not players:
+        sp.say_or("No speakers are set up for announcements. Goodbye.")
+        return
+
+    sp.say_or("Record your announcement after the tone.", sp.PROMPT_BEEP)
+    text = sp.listen("announce", 0, record_ms=10000, silence_s=3)
+    if not text:
+        sp.say_or("I didn't catch that. Goodbye.")
+        return
+
+    ok = False
+    try:
+        ok = ha_client.call_service("tts", "speak", {
+            "entity_id": engine,
+            "media_player_entity_id": players,
+            "message": text,
+        })
+    except Exception as exc:  # noqa: BLE001
+        sp.log("announce", f"tts.speak failed: {exc}")
+
+    if ok:
+        sp.say_or(f"Announcing: {text}. Goodbye.")
+    else:
+        sp.say_or("Sorry, I couldn't reach the speakers. Goodbye.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[announce] fatal: {exc}\n")
+        try:
+            sp.say_or("Sorry, announcements are unavailable right now. Goodbye.")
+        except Exception:
+            pass

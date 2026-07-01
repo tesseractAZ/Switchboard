@@ -476,6 +476,72 @@ def test_modules_conf() -> None:
           "load = app_confbridge.so" in m and "load = app_page.so" in m)
 
 
+def test_status_announce_dialplan() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
+    check("status: dial 45 -> [status] AGI",
+          "exten = 45,1,NoOp(Status menu)" in e and "Goto(status,s,1)" in e
+          and _context_of(e, "AGI(switchboard-status.agi)") == "status")
+    check("announce: dial 46 -> [announce] AGI",
+          "exten = 46,1,NoOp(Announce)" in e and "Goto(announce,s,1)" in e
+          and _context_of(e, "AGI(switchboard-announce.agi)") == "announce")
+    check("smart wake-up delivery AGI wired into [wakeup-deliver]",
+          _context_of(e, "AGI(switchboard-wakeup-deliver.agi)") == "wakeup-deliver")
+
+
+def test_status_announce_collisions() -> None:
+    # A room ext equal to status_ext (default 45) drops the dial code but keeps
+    # the context (the operator/other routes still reach it).
+    rooms = sbc.valid_rooms([{"ext": "45", "name": "Room45", "secret": "s1"}])
+    e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
+    check("status: room-ext collision drops dial code, keeps context",
+          "exten = 45,1,NoOp(Status menu)" not in e and "[status]" in e)
+    # announce_ext colliding with the clock code (41) is likewise dropped.
+    e2 = sbc.render_extensions({"rooms": sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}]),
+                               "announce_ext": "41", "operator": {"enabled": True}, "trunk": {}})
+    check("announce: clock-code collision drops dial code, keeps context",
+          "exten = 41,1,NoOp(Announce)" not in e2 and "[announce]" in e2)
+
+
+def test_features_staging() -> None:
+    # write_features_runtime stages an asterisk-readable features.json for the AGIs,
+    # validating entity ids (a bad player id is dropped).
+    import json as _json
+    import tempfile
+    from pathlib import Path as _P
+    run = _P(tempfile.mkdtemp())
+    orig = sbc.RUN_DIR
+    sbc.RUN_DIR = run
+    try:
+        sbc.write_features_runtime({
+            "wakeup_scene": "scene.wake_up", "wakeup_weather": True, "wakeup_calendar": "calendar.family",
+            "announce_players": ["media_player.homepod", "bad id!", "light.not_a_speaker", "media_player.garage"],
+            "announce_tts_engine": "tts.piper",
+        })
+        data = _json.loads((run / "features.json").read_text())
+        check("features: wake-up scene/weather/calendar staged",
+              data["wakeup"] == {"scene": "scene.wake_up", "weather": True, "calendar": "calendar.family"})
+        check("features: announce players validated (malformed + wrong-domain dropped)",
+              data["announce"]["players"] == ["media_player.homepod", "media_player.garage"])
+        check("features: tts engine staged", data["announce"]["tts_engine"] == "tts.piper")
+        # A wrong-domain scene (e.g. a mistyped homeassistant.restart) is dropped.
+        sbc.write_features_runtime({"wakeup_scene": "homeassistant.restart",
+                                    "announce_players": [], "announce_tts_engine": "tts.piper"})
+        check("features: wrong-domain scene dropped",
+              _json.loads((run / "features.json").read_text())["wakeup"]["scene"] == "")
+    finally:
+        sbc.RUN_DIR = orig
+
+
+def test_disabled_feature_frees_ext() -> None:
+    # A disabled clock no longer reserves its ext, so another feature may reuse it.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])
+    e = sbc.render_extensions({"rooms": rooms, "clock_enabled": False, "status_ext": "41",
+                               "operator": {"enabled": True}, "trunk": {}})
+    check("reserve: disabled clock frees its ext for another feature",
+          "exten = 41,1,NoOp(Status menu)" in e)
+
+
 def test_state_dir_setup() -> None:
     # /data/state must be created (asterisk-owned, so the dial-42 wake-up AGI and
     # the dialplan MWI-clear can write their stores) and a pre-existing
@@ -544,6 +610,10 @@ def sbc_open_store_path() -> str:
 
 
 if __name__ == "__main__":
+    test_status_announce_dialplan()
+    test_status_announce_collisions()
+    test_features_staging()
+    test_disabled_feature_frees_ext()
     test_state_dir_setup()
     test_state_dir_setup_failure_is_graceful()
     test_hostile_inputs()

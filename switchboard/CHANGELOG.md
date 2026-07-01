@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.11.0
+
+Three Home-Assistant-integrated voice features — pick up any phone and talk to
+your house.
+
+- **Dial-a-status voice menu (dial 45).** *"Status menu. Say power, weather, or
+  house."* — then hear live state spoken back: **power** (grid up/down, home
+  battery %, hours of runway, solar coverage — from your EcoFlow), **weather**
+  (fetched from the National Weather Service for the home's coordinates; no HA
+  weather entity required), or **house** (thermostat temps + how many lights are
+  on). Rotary-safe (voice, whisper.cpp STT).
+- **Smart wake-up.** Your dial-42 wake-up now also fires a configurable HA
+  **scene** (`wakeup_scene`), reads today's **weather**, and — if you add a
+  calendar to HA — your **next event** (`wakeup_calendar`). All optional and
+  degrade gracefully; the greeting + time always play.
+- **Phone → HA speakers (dial 46).** Record a short message and it plays out to
+  your chosen media players (HomePod, Family Room Soundbar, Garage, …) via your
+  local Piper TTS — an intercom from any handset to the whole house.
+
+New config: `status_ext`/`announce_ext` (dial codes 45/46, collision-checked like
+the others), `announce_players` + `announce_tts_engine`, and `wakeup_scene` /
+`wakeup_weather` / `wakeup_calendar`. Feature settings are staged to an
+asterisk-readable `/run/switchboard/features.json` (the AGIs run as the asterisk
+user and can't read root-only `/data/options.json`). `ha_client` gains generic
+`get_state` / `call_service` (allow-listed domains) / calendar / location helpers;
+new `weather.py` (NWS), `ha_reports.py` (spoken read-outs), and a shared
+`agi_speech.py` for the voice flows.
+
 ## 0.10.4
 
 Make the wake-up UI clearer and less busy.
