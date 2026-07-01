@@ -945,7 +945,12 @@ def serve_session(sock: socket.socket, board: Board, stop: threading.Event, log)
 
 
 def main() -> None:
-    port = int(os.environ.get("CONSOLE_PORT", "2300"))
+    # `or "2300"` (not just a default) so an EMPTY CONSOLE_PORT env — which crashed
+    # the console with int('') on boot until s6 restarted it — falls back cleanly.
+    try:
+        port = int(os.environ.get("CONSOLE_PORT") or "2300")
+    except ValueError:
+        port = 2300
     host = os.environ.get("CONSOLE_HOST", "0.0.0.0")
 
     def log(msg):
