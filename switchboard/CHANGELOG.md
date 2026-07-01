@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.2
+
+Dial-a-status menu now **loops back to the menu** after each answer instead of
+hanging up.
+
+- After speaking power / weather / house, it asks *"Anything else? Say power,
+  weather, house, or goodbye"* and keeps going until you say **goodbye** (or the
+  line goes quiet) — no more redialing for a second status. Capped at 8 queries
+  as a safety stop.
+
 ## 0.11.1
 
 Announce UX + a console boot-crash fix, from testing the new voice features.

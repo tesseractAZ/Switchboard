@@ -27,7 +27,8 @@ try:
 except Exception:  # noqa: BLE001
     status_match = None
 
-MAX_ATTEMPTS = 2
+MAX_ATTEMPTS = 2      # retries per menu prompt before giving up
+MAX_QUERIES = 8       # loop cap (belt-and-suspenders against a stuck line)
 
 
 def speak_status(cat: str) -> None:
@@ -41,10 +42,26 @@ def speak_status(cat: str) -> None:
             report = ha_reports.house_report()
     except Exception as exc:  # noqa: BLE001
         sp.log("status", f"report {cat} failed: {exc}")
-    if report:
-        sp.say_or(report + " Goodbye.")
-    else:
-        sp.say_or("Sorry, that status is unavailable right now. Goodbye.")
+    sp.say_or(report or "Sorry, that status is unavailable right now.")
+
+
+def ask_menu(first: bool) -> str:
+    """Prompt the menu, listen, and return 'power'|'weather'|'house', 'bye' (caller
+    wants to end), or '' (no match after the retries)."""
+    for attempt in range(MAX_ATTEMPTS):
+        if first and attempt == 0:
+            sp.say_or("Status menu. Say power, weather, or house. Or say goodbye.", sp.PROMPT_BEEP)
+        elif attempt == 0:
+            sp.say_or("Anything else? Say power, weather, house, or goodbye.", sp.PROMPT_BEEP)
+        else:
+            sp.say_or("I didn't catch that. Say power, weather, house, or goodbye.", sp.PROMPT_BEEP)
+        text = sp.listen("status", attempt)
+        if status_match.is_goodbye(text):
+            return "bye"
+        cat = status_match.match(text)
+        if cat:
+            return cat
+    return ""
 
 
 def main() -> None:
@@ -52,16 +69,18 @@ def main() -> None:
     if ha_reports is None or status_match is None:
         sp.say_or("Sorry, status is unavailable right now. Goodbye.")
         return
-    for attempt in range(MAX_ATTEMPTS):
-        if attempt == 0:
-            sp.say_or("Status menu. Say power, weather, or house.", sp.PROMPT_BEEP)
-        else:
-            sp.say_or("I didn't catch that. Say power, weather, or house.", sp.PROMPT_BEEP)
-        cat = status_match.match(sp.listen("status", attempt))
-        if cat:
-            speak_status(cat)
+    # Loop back to the menu after each answer instead of hanging up — the caller
+    # keeps asking until they say goodbye (or the line goes quiet).
+    for i in range(MAX_QUERIES):
+        cat = ask_menu(first=(i == 0))
+        if cat == "bye":
+            sp.say_or("Goodbye.")
             return
-    sp.say_or("Sorry, I didn't get that. Goodbye.")
+        if cat == "":
+            sp.say_or("Okay, goodbye.")
+            return
+        speak_status(cat)
+    sp.say_or("Goodbye.")
 
 
 if __name__ == "__main__":

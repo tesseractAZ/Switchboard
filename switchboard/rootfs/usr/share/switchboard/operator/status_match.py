@@ -22,6 +22,19 @@ _CATS = {
 _DIGIT_WORDS = {"one": "power", "two": "weather", "three": "house"}
 _DIGIT_KEYS = {"1": "power", "2": "weather", "3": "house"}
 
+# Words that end the menu loop ("anything else? ... no / goodbye / done").
+_GOODBYE = {"goodbye", "bye", "no", "nope", "done", "exit", "quit", "cancel",
+            "nothing", "stop", "finished", "thanks"}
+
+
+def is_goodbye(text: str) -> bool:
+    """True if the caller is asking to end (so the status menu can stop looping)."""
+    words = normalize(text)
+    if set(words) & _GOODBYE:
+        return True
+    t = " ".join(words)
+    return "hang up" in t or "thats all" in t
+
 
 def normalize(text: str) -> list:
     return [w for w in re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split() if w]
