@@ -216,6 +216,19 @@ def test_card_action_buttons_labeled() -> None:
     check("ui: action row is an even 2-col grid", "grid-template-columns: 1fr 1fr" in html)
 
 
+def test_wakeup_ui_formatting() -> None:
+    # Wake-ups read clearly: each pending call is a clean ".wakeitem" row with a
+    # today/tomorrow "when", the empty state points to how to set one, and each
+    # card's time box is clock-labelled so it isn't a stray unlabelled field.
+    html = app.INDEX_HTML
+    check("ui: wake-up list uses the clean .wakeitem rows", ".wakeitem" in html and "wakelist" in html)
+    check("ui: wake-up shows when it rings (today/tomorrow)",
+          "function wakeDay(" in html and "wkday" in html)
+    check("ui: card wake-up box is clock-labelled", "wklab" in html and "data-waketime=" in html)
+    check("ui: empty state explains how to set a wake-up", "No wake-ups set" in html)
+    check("ui: cancel hook retained", "data-cancel=" in html)
+
+
 def test_dark_mode_covers_light_cards() -> None:
     # The room cards (.card), the lights area cards (.areacard) and the wake-up time
     # input all paint their background from var(--card). In dark mode, --card MUST be
@@ -288,6 +301,7 @@ def main() -> None:
     test_build_lights_payload()
     test_index_html_controls()
     test_card_action_buttons_labeled()
+    test_wakeup_ui_formatting()
     test_dark_mode_covers_light_cards()
     test_index_html_js_parses()
     test_route_handlers_defined()
