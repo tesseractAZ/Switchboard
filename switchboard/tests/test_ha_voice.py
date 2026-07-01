@@ -104,6 +104,22 @@ def test_ha_client_guards() -> None:
     check("ha: get_state rejects malformed id (no I/O)", ha_client.get_state("bad id") is None)
 
 
+def test_negative_cache() -> None:
+    # With no candidate host reachable (no HA_BASE_URL / SUPERVISOR_TOKEN), a failed
+    # _request negative-caches so back-to-back calls during an outage short-circuit
+    # instead of each re-paying the connect-timeout penalty.
+    import os
+    os.environ.pop("HA_BASE_URL", None)
+    os.environ.pop("HA_TOKEN", None)
+    os.environ.pop("SUPERVISOR_TOKEN", None)
+    ha_client._cached = None
+    ha_client._dead_until = 0.0
+    check("neg-cache: unreachable -> (None, None)", ha_client._request("GET", "/") == (None, None))
+    check("neg-cache: sets a back-off window", ha_client._dead_until > 0)
+    check("neg-cache: short-circuits while dead", ha_client._request("GET", "/states") == (None, None))
+    ha_client._dead_until = 0.0  # don't leak state into other checks
+
+
 def main() -> None:
     test_speak_weather()
     test_format_power()
@@ -111,6 +127,7 @@ def main() -> None:
     test_status_match()
     test_format_calendar()
     test_ha_client_guards()
+    test_negative_cache()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")

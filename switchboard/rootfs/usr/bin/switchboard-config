@@ -639,9 +639,14 @@ def render_extensions(opts: dict) -> str:
             ]
 
     # The set of literal dial codes already claimed, so each new feature code is
-    # checked against rooms, '0' (operator), the clock/wakeup codes, AND any
-    # earlier feature code — never silently shadowing or being shadowed.
-    reserved = set(exts) | {"0", clock_ext, wakeup_ext}
+    # checked against rooms, '0' (operator), the ENABLED clock/wakeup codes, AND any
+    # earlier feature code — never silently shadowing or being shadowed. A disabled
+    # clock/wakeup doesn't reserve its ext, so another feature may reuse it.
+    reserved = set(exts) | {"0"}
+    if clock_on:
+        reserved.add(clock_ext)
+    if wakeup_on:
+        reserved.add(wakeup_ext)
 
     # Page intercom — a phone dialing this pages the whole house duplex (Page's
     # 'd' flag = everyone can talk back). Literal extension; skipped on collision.
@@ -1097,11 +1102,16 @@ def write_operator_runtime(opts: dict) -> None:
 _EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
-def _clean_eid(val: str) -> str:
-    """A well-formed entity_id or '' (drops anything that could be injected into a
-    HA service call downstream)."""
+def _clean_eid(val: str, domains: tuple = ()) -> str:
+    """A well-formed entity_id — optionally restricted to the given domain(s) — or
+    '' (drops anything malformed / wrong-domain before it's staged for an AGI, so a
+    mistyped `homeassistant.restart` or `shell_command.x` can never reach HA)."""
     s = str(val or "").strip()
-    return s if _EID_RE.match(s) else ""
+    if not _EID_RE.match(s):
+        return ""
+    if domains and s.split(".", 1)[0] not in domains:
+        return ""
+    return s
 
 
 def write_features_runtime(opts: dict) -> None:
@@ -1109,16 +1119,16 @@ def write_features_runtime(opts: dict) -> None:
     for the AGIs, which run as the asterisk user and CANNOT read root-only
     /data/options.json. Written to /run/switchboard/features.json (tmpfs,
     asterisk-readable). Entity ids are validated here as defence in depth."""
-    players = [e for e in (_clean_eid(p) for p in (opts.get("announce_players") or [])) if e]
+    players = [e for e in (_clean_eid(p, ("media_player",)) for p in (opts.get("announce_players") or [])) if e]
     payload = {
         "wakeup": {
-            "scene": _clean_eid(opts.get("wakeup_scene", "")),
+            "scene": _clean_eid(opts.get("wakeup_scene", ""), ("scene",)),
             "weather": bool(opts.get("wakeup_weather", True)),
-            "calendar": _clean_eid(opts.get("wakeup_calendar", "")),
+            "calendar": _clean_eid(opts.get("wakeup_calendar", ""), ("calendar",)),
         },
         "announce": {
             "players": players,
-            "tts_engine": _clean_eid(opts.get("announce_tts_engine", "tts.piper")) or "tts.piper",
+            "tts_engine": _clean_eid(opts.get("announce_tts_engine", "tts.piper"), ("tts",)) or "tts.piper",
         },
     }
     fp = RUN_DIR / "features.json"

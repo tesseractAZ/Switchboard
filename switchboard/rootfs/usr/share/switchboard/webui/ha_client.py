@@ -22,10 +22,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
 TIMEOUT = float(os.environ.get("HA_TIMEOUT", "5") or "5")
+# When HA is unreachable, short-circuit further calls for this long instead of
+# re-paying the (per-candidate × TIMEOUT) penalty on every call — otherwise a
+# flow that makes several reads while HA is down (e.g. the smart wake-up: scene +
+# weather + calendar) stacks a ~30s silent tail. Recovers automatically after TTL.
+NEG_TTL = float(os.environ.get("HA_NEG_TTL", "20") or "20")
 
 # Only ever toggle a real light entity; never interpolate arbitrary text into a
 # service call (defence-in-depth even though we also send it as a JSON body).
@@ -64,12 +70,17 @@ def _candidates():
 
 
 _cached = None  # the first base that answered — skip dead hosts on later calls
+_dead_until = 0.0  # if >now and nothing cached, every candidate was just failing
 
 
 def _request(method: str, path: str, body=None):
     """One HA Core API call. Returns (status:int, text:str) or (None, None) when
-    no candidate host could be reached. Caches the first base that connects."""
-    global _cached
+    no candidate host could be reached. Caches the first base that connects, and
+    negative-caches a total failure for NEG_TTL so back-to-back calls during an HA
+    outage don't each re-pay the full connect-timeout penalty."""
+    global _cached, _dead_until
+    if not _cached and time.time() < _dead_until:
+        return None, None
     cands = [_cached] if _cached else list(_candidates())
     for cand in cands:
         if not cand:
@@ -85,15 +96,18 @@ def _request(method: str, path: str, body=None):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 _cached = cand
+                _dead_until = 0.0
                 return resp.status, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:  # reached HA, it complained (auth/404/template error)
             _cached = cand
+            _dead_until = 0.0
             try:
                 return exc.code, exc.read().decode("utf-8", "replace")
             except Exception:
                 return exc.code, ""
         except Exception:
             continue  # connection/DNS error — try the next candidate
+    _dead_until = time.time() + NEG_TTL  # all candidates unreachable — back off briefly
     return None, None
 
 

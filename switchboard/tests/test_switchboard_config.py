@@ -515,17 +515,31 @@ def test_features_staging() -> None:
     try:
         sbc.write_features_runtime({
             "wakeup_scene": "scene.wake_up", "wakeup_weather": True, "wakeup_calendar": "calendar.family",
-            "announce_players": ["media_player.homepod", "bad id!", "media_player.garage"],
+            "announce_players": ["media_player.homepod", "bad id!", "light.not_a_speaker", "media_player.garage"],
             "announce_tts_engine": "tts.piper",
         })
         data = _json.loads((run / "features.json").read_text())
         check("features: wake-up scene/weather/calendar staged",
               data["wakeup"] == {"scene": "scene.wake_up", "weather": True, "calendar": "calendar.family"})
-        check("features: announce players validated (bad id dropped)",
+        check("features: announce players validated (malformed + wrong-domain dropped)",
               data["announce"]["players"] == ["media_player.homepod", "media_player.garage"])
         check("features: tts engine staged", data["announce"]["tts_engine"] == "tts.piper")
+        # A wrong-domain scene (e.g. a mistyped homeassistant.restart) is dropped.
+        sbc.write_features_runtime({"wakeup_scene": "homeassistant.restart",
+                                    "announce_players": [], "announce_tts_engine": "tts.piper"})
+        check("features: wrong-domain scene dropped",
+              _json.loads((run / "features.json").read_text())["wakeup"]["scene"] == "")
     finally:
         sbc.RUN_DIR = orig
+
+
+def test_disabled_feature_frees_ext() -> None:
+    # A disabled clock no longer reserves its ext, so another feature may reuse it.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])
+    e = sbc.render_extensions({"rooms": rooms, "clock_enabled": False, "status_ext": "41",
+                               "operator": {"enabled": True}, "trunk": {}})
+    check("reserve: disabled clock frees its ext for another feature",
+          "exten = 41,1,NoOp(Status menu)" in e)
 
 
 def test_state_dir_setup() -> None:
@@ -599,6 +613,7 @@ if __name__ == "__main__":
     test_status_announce_dialplan()
     test_status_announce_collisions()
     test_features_staging()
+    test_disabled_feature_frees_ext()
     test_state_dir_setup()
     test_state_dir_setup_failure_is_graceful()
     test_hostile_inputs()
