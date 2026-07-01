@@ -28,11 +28,7 @@ is ready to grow an outside line via a SIP trunk.
 log_level: info          # trace|debug|info|notice|warning|error|critical
 rtp_start: 10000         # first UDP port for RTP media
 rtp_end: 10200           # last UDP port for RTP media (~2 per concurrent call)
-codecs:                  # preference order offered to endpoints (see §8)
-  - ulaw                 #   G.711 µ-law — best for analog, no transcode
-  - alaw                 #   G.711 a-law
-  - g722                 #   wideband (HD) for IP endpoints
-  - opus                 #   Opus (HD) for IP endpoints / softphones
+# Audio is G.711 µ-law only, end to end — not configurable (see §9).
 console_enabled: true    # telnet operator console on the LAN (see §7)
 console_port: 2300       # TCP port for the telnet operator console
 console_bind: "0.0.0.0"  # 127.0.0.1 to restrict the telnet console to the host
@@ -108,10 +104,9 @@ Each FXS port becomes one SIP **user** that registers to this add-on.
    - **SIP Transport**: UDP
    - **NAT Traversal**: No (everything is on the LAN)
 2. **Profiles → Profile 1 → Audio Settings**
-   - **Preferred Vocoder**: **PCMU (G.711 µ-law) first.** The handsets are
-     narrowband, so PCMU is the right primary and avoids transcoding. You may
-     add G.722 / Opus lower in the list for completeness, but it won't add
-     fidelity from an analog set (see §8).
+   - **Preferred Vocoder**: **PCMU (G.711 µ-law).** Switchboard only offers µ-law,
+     so PCMU must be in the gateway's list; anything else it advertises is simply
+     never selected (see §9).
    - **Disable** silence suppression / VAD for the cleanest analog audio and to
      keep antique sets' tones intact.
 
@@ -188,7 +183,7 @@ room-to-room.
 | No / one-way audio | `direct_media = no` (default) and `rtp_start..rtp_end` not blocked by a host firewall. Host networking is required (set by the add-on). |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
-| Opus not negotiated | The prebuilt Opus module may be absent on your arch (the build logs a NOTE). G.722 still gives wideband; G.711 still works. |
+| Call fails with no common codec | A phone is configured to offer *only* a non-µ-law codec. Switchboard is µ-law only (§9) — make sure G.711 µ-law (PCMU) is enabled on the device. |
 
 **Useful Asterisk CLI**:
 
@@ -264,24 +259,22 @@ Restart Home Assistant; **Switchboard TUI** appears in the sidebar.
 
 ---
 
-## 9. Codecs and "HD voice" on analog phones — the honest version
+## 9. Codecs — G.711 µ-law only, on purpose
 
-The GXW4216 **V2** genuinely supports wideband codecs (**G.722, Opus**) on its
-SIP side. But "HD" is bounded by the audio *source*:
+Switchboard uses **G.711 µ-law only**, everywhere — every endpoint (rooms and the
+trunk) is pinned to `allow = ulaw`. There is no codec option; it isn't
+configurable, and no HD/Opus module is even installed. This is deliberate:
 
 - **Antique analog handsets are narrowband by physics** — the carbon/electret
   element and the 2-wire loop top out around 300–3400 Hz. Wrapping that in Opus
   or G.722 carries no extra fidelity; the analog transducer is the ceiling.
-- **G.711 µ-law is the right primary** for analog room-to-room: no transcoding,
-  lowest latency, and it cleanly carries dial tone / ringback / fax tones.
-- **Opus / G.722 pay off between *IP* endpoints** — softphones, IP phones, a
-  future HD intercom — or to save bandwidth on a remote SIP leg.
+- **µ-law is the baseline every leg speaks** — the analog FXS ports, the cordless,
+  the softphone, and the PSTN trunk. Pinning one codec means **no call ever
+  transcodes**: lowest latency, and dial tone / ringback / fax tones pass cleanly.
 
-Switchboard's default `codecs` list reflects this: ulaw first (analog), then
-alaw, g722, opus (so HD endpoints can still negotiate up). Reorder or trim the
-list to taste. If you add IP/softphone extensions later, putting `opus` first
-for *those* devices is where you'll actually hear the difference.
-
-> Transcoding note: if an ATA offers Opus and the far end is G.711, Asterisk
-> transcodes (CPU + latency). For analog-to-analog, keeping both ends on G.711
-> is best — which is exactly what the default preference does.
+Because enforcement is server-side at the Asterisk endpoints, a phone's own codec
+order doesn't matter — the negotiation can only ever land on µ-law. Just make sure
+each device still *offers* G.711 µ-law (PCMU); a device configured to offer only a
+non-µ-law codec would have no common codec and the call would fail. The dashboard
+and operator console show the negotiated codec per active call, so you can confirm
+it reads "µ-law".

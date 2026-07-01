@@ -1,11 +1,11 @@
 ---
 name: Switchboard
-version: "0.9.9"
+version: "0.10.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
-  Room-to-room calling now, SIP trunk outside-line ready. G.711 u-law only
-  (no transcoding); extra codecs can be re-enabled via the codecs option.
+  Room-to-room calling now, SIP trunk outside-line ready. G.711 u-law only,
+  end to end (no HD/Opus, no transcoding).
 url: https://github.com/tesseractAZ/Switchboard/tree/main/switchboard
 codenotary: epaschal@outlook.com
 arch:
@@ -34,8 +34,6 @@ options:
   log_level: info
   rtp_start: 10000
   rtp_end: 10200
-  codecs:
-    - ulaw
   operator:
     enabled: true
   operator_synonyms: []
@@ -79,8 +77,6 @@ schema:
   log_level: list(trace|debug|info|notice|warning|error|critical)
   rtp_start: int(1024,65535)
   rtp_end: int(1024,65535)
-  codecs:
-    - list(ulaw|alaw|g722|opus|g729|gsm|slin16)
   operator:
     enabled: bool?
   operator_synonyms:

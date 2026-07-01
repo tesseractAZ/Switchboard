@@ -46,12 +46,9 @@ RUN apk add --no-cache \
         "jinja2==3.1.*" \
     && rm -rf /var/cache/apk/*
 
-# Optional extras, best-effort: music-on-hold sounds and the Opus codec. Package
-# availability varies by Alpine release, so a miss must not fail the build.
-RUN apk add --no-cache asterisk-sounds-moh 2>/dev/null || true; \
-    apk add --no-cache asterisk-opus 2>/dev/null \
-      || apk add --no-cache asterisk-codec-opus 2>/dev/null \
-      || echo "NOTE: no prebuilt Opus codec package; Opus disabled at runtime"
+# Optional extra, best-effort: music-on-hold sounds. (No Opus/HD codec package —
+# Switchboard is G.711 µ-law only, so there is nothing to negotiate up to.)
+RUN apk add --no-cache asterisk-sounds-moh 2>/dev/null || true
 
 # espeak-ng: tiny offline text-to-speech, used by the home-automation voice
 # operator to SPEAK dynamic strings (light names, on/off state, the room/light
