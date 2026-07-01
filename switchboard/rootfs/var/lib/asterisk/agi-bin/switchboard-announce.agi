@@ -2,16 +2,20 @@
 """Switchboard phone -> HA speaker announce — AGI.
 
 Dial the announce code: record a short message, transcribe it (whisper is accurate
-on this narrowband line), and play it out to the configured Home Assistant media
-players via the local TTS engine (tts.speak). The configured players + engine come
-from the staged /run/switchboard/features.json (asterisk-readable).
+on this narrowband line), then build ONE WAV = station chime + the spoken message
++ chime, and play it out to the configured media players (the ecobee speakers) via
+media_player.play_media. The combined file plays seamlessly — an airport/station
+"attention please" chime bracketing your message. Configured players come from the
+staged /run/switchboard/features.json.
 
 Channel-safe: any failure degrades to a spoken apology and hang-up.
 """
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 
 sys.path.insert(0, "/usr/share/switchboard/operator")
 sys.path.insert(0, "/usr/share/switchboard/webui")
@@ -21,20 +25,30 @@ try:
     import ha_client  # noqa: E402
 except Exception:  # noqa: BLE001
     ha_client = None
+try:
+    import announce_audio  # noqa: E402
+except Exception:  # noqa: BLE001
+    announce_audio = None
+
+ANNOUNCE_DIR = "/run/switchboard/announce"
+WEBUI_PORT = os.environ.get("INGRESS_PORT") or "8099"
 
 
-def main() -> None:
-    sp.read_env()
-    ann = (sp.load_features() or {}).get("announce", {}) or {}
-    players = [p for p in (ann.get("players") or []) if isinstance(p, str)]
-    engine = ann.get("tts_engine") or "tts.piper"
+def _cleanup_old(max_age: int = 300) -> None:
+    try:
+        now = time.time()
+        for f in os.listdir(ANNOUNCE_DIR):
+            p = os.path.join(ANNOUNCE_DIR, f)
+            try:
+                if now - os.path.getmtime(p) > max_age:
+                    os.unlink(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
-    if ha_client is None or not players:
-        sp.say_or("No speakers are set up for announcements. Goodbye.")
-        return
 
-    # Two tries, patient recording (a longer window + 4s silence) so a brief pause
-    # after the tone doesn't cut the caller off before they start speaking.
+def _record() -> str:
     text = ""
     for attempt in range(2):
         if attempt == 0:
@@ -44,22 +58,44 @@ def main() -> None:
         text = sp.listen("announce", attempt, record_ms=12000, silence_s=4)
         if text:
             break
+    return text
+
+
+def main() -> None:
+    sp.read_env()
+    ann = (sp.load_features() or {}).get("announce", {}) or {}
+    players = [p for p in (ann.get("players") or []) if isinstance(p, str)]
+    if ha_client is None or announce_audio is None or not players:
+        sp.say_or("No speakers are set up for announcements. Goodbye.")
+        return
+
+    text = _record()
     if not text:
         sp.say_or("Sorry, I didn't catch an announcement. Goodbye.")
         return
 
+    # Build the chime + message + chime WAV and hand a LAN URL to the media players.
+    _cleanup_old()
+    name = f"a{os.getpid()}{int(time.time()) % 100000}.wav"
+    out = os.path.join(ANNOUNCE_DIR, name)
+    ip = announce_audio.lan_ip()
+    if not announce_audio.build_announcement(text, out) or not ip:
+        sp.say_or("Sorry, I couldn't prepare the announcement. Goodbye.")
+        return
+    url = f"http://{ip}:{WEBUI_PORT}/announce/{name}"
+
     ok = False
     try:
-        ok = ha_client.call_service("tts", "speak", {
-            "entity_id": engine,
-            "media_player_entity_id": players,
-            "message": text,
+        ok = ha_client.call_service("media_player", "play_media", {
+            "entity_id": players,
+            "media_content_id": url,
+            "media_content_type": "music",
         })
     except Exception as exc:  # noqa: BLE001
-        sp.log("announce", f"tts.speak failed: {exc}")
+        sp.log("announce", f"play_media failed: {exc}")
 
     if ok:
-        sp.say_or(f"Announcing: {text}. Goodbye.")
+        sp.say_or(f"Announcing on the speakers: {text}. Goodbye.")
     else:
         sp.say_or("Sorry, I couldn't reach the speakers. Goodbye.")
 

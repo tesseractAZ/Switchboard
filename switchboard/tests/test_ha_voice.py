@@ -110,6 +110,31 @@ def test_ha_client_guards() -> None:
     check("ha: get_state rejects malformed id (no I/O)", ha_client.get_state("bad id") is None)
 
 
+def test_announce_audio() -> None:
+    import array
+    import os
+    import tempfile
+    import wave
+
+    import announce_audio
+    rate = 8000  # small rate keeps the synth fast
+    chime = announce_audio.synth_chime(rate)
+    check("chime: non-empty int16 samples",
+          isinstance(chime, array.array) and chime.typecode == "h" and len(chime) > 0)
+    check("chime: samples in int16 range", all(-32768 <= x <= 32767 for x in chime[::40]))
+    speech = array.array("h", [1200, -1200] * 4000)  # fake 8000-sample speech
+    tmp = os.path.join(tempfile.mkdtemp(), "ann.wav")
+    announce_audio.write_combined(tmp, speech, rate)
+    with wave.open(tmp, "rb") as w:
+        check("combined: mono 16-bit at the chosen rate",
+              w.getnchannels() == 1 and w.getsampwidth() == 2 and w.getframerate() == rate)
+        frames = w.getnframes()
+    gap = int(0.45 * rate)
+    check("combined: length = 2 chimes + speech + 2 gaps",
+          frames == 2 * len(chime) + len(speech) + 2 * gap)
+    check("lan_ip: returns a string", isinstance(announce_audio.lan_ip(), str))
+
+
 def test_negative_cache() -> None:
     # With no candidate host reachable (no HA_BASE_URL / SUPERVISOR_TOKEN), a failed
     # _request negative-caches so back-to-back calls during an outage short-circuit
@@ -133,6 +158,7 @@ def main() -> None:
     test_status_match()
     test_format_calendar()
     test_ha_client_guards()
+    test_announce_audio()
     test_negative_cache()
     print()
     if _failures:
