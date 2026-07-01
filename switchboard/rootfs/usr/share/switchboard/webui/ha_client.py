@@ -164,3 +164,68 @@ def set_light(entity_id: str, turn_on: bool) -> bool:
     service = "turn_on" if turn_on else "turn_off"
     status, _ = _request("POST", f"/services/light/{service}", {"entity_id": entity_id})
     return status in (200, 201)
+
+
+# --------------------------------------------------------------------------- #
+# Generic reads + service calls (used by the dial-a-status menu, smart wake-up,
+# and phone->speaker announce). Kept narrow: only well-formed entity ids, and
+# services only on a small allow-list of domains — a voice flow can never reach
+# an arbitrary domain (shell_command, notify, homeassistant, ...).
+# --------------------------------------------------------------------------- #
+_EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+_ALLOWED_SERVICE_DOMAINS = frozenset({"light", "scene", "media_player", "tts", "climate"})
+
+
+def is_entity_id(entity_id: str) -> bool:
+    return bool(_EID_RE.match(entity_id or ""))
+
+
+def get_state(entity_id: str):
+    """Full state dict {state, attributes, ...} for any entity, or None when the
+    id is malformed / the entity is missing / HA is unreachable."""
+    if not is_entity_id(entity_id):
+        return None
+    status, text = _request("GET", f"/states/{entity_id}")
+    if status != 200 or not text:
+        return None
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def get_states() -> list:
+    """Every entity state [{entity_id, state, attributes}], or [] if unreachable."""
+    status, text = _request("GET", "/states")
+    if status != 200 or not text:
+        return []
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def call_service(domain: str, service: str, data: dict | None = None) -> bool:
+    """Call a HA service, restricted to the allow-listed domains. Returns True
+    only if HA accepted it. `data` is passed through as the service payload."""
+    if domain not in _ALLOWED_SERVICE_DOMAINS:
+        return False
+    if not re.fullmatch(r"[a-z_]+", service or ""):
+        return False
+    status, _ = _request("POST", f"/services/{domain}/{service}", data or {})
+    return status in (200, 201)
+
+
+def ha_location():
+    """(latitude, longitude, temp_unit) from /config, or (None, None, None) — used
+    to fetch weather from NWS for the home's coordinates."""
+    status, text = _request("GET", "/config")
+    if status != 200 or not text:
+        return None, None, None
+    try:
+        d = json.loads(text) or {}
+        return d.get("latitude"), d.get("longitude"), (d.get("unit_system") or {}).get("temperature")
+    except (ValueError, TypeError):
+        return None, None, None
