@@ -156,20 +156,21 @@ def test_trunk_codec_pinned_to_ulaw() -> None:
           not any(c in ep for c in ("g722", "opus", "alaw")))
 
 
-def test_default_codecs_are_ulaw_only() -> None:
-    # The system defaults to u-law ONLY: an empty/absent/all-invalid codecs option
-    # yields allow=!all,ulaw, and the whole rendered config offers no other codec —
-    # so no call (room-to-room, cordless, softphone, trunk) ever transcodes.
-    check("default codec_allow is ulaw-only", sbc.codec_allow({}) == "!all,ulaw")
-    check("empty codecs list falls back to ulaw-only", sbc.codec_allow({"codecs": []}) == "!all,ulaw")
-    check("all-invalid codecs fall back to ulaw-only", sbc.codec_allow({"codecs": ["bogus"]}) == "!all,ulaw")
+def test_rooms_are_ulaw_only() -> None:
+    # µ-law only is HARD-CODED (no `codecs` option): the room-endpoint template must
+    # render disallow=all + allow=ulaw, and NO wideband/alaw/opus codec appears
+    # anywhere in the generated config — so no call ever transcodes.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
-    check("default room config advertises no wideband/alaw codec",
-          not any(c in pj for c in ("g722", "opus", "alaw", "g729")))
-    # An explicit override still works (the capability isn't removed, just off).
-    check("explicit override re-enables a codec",
-          "g722" in sbc.codec_allow({"codecs": ["ulaw", "g722"]}))
+    tmpl = pj[pj.index("[room-endpoint](!)"):pj.index("direct_media")]
+    check("room endpoint disallows all then allows ulaw",
+          "disallow = all" in tmpl and "allow = ulaw" in tmpl)
+    check("generated config offers no wideband/alaw/opus codec anywhere",
+          not any(c in pj for c in ("g722", "opus", "alaw", "g729", "gsm", "slin16")))
+    # The codec is not configurable — a stray `codecs` option is simply ignored.
+    pj2 = sbc.render_pjsip({"rooms": rooms, "trunk": {}, "codecs": ["opus", "g722"]})
+    check("a leftover codecs option cannot re-enable HD codecs",
+          "opus" not in pj2 and "g722" not in pj2 and "allow = ulaw" in pj2)
 
 
 def test_trunk_aor_not_qualified() -> None:
@@ -550,7 +551,7 @@ if __name__ == "__main__":
     test_outbound_toll_fraud_blocks()
     test_outbound_rules_live_in_rooms_context()
     test_trunk_codec_pinned_to_ulaw()
-    test_default_codecs_are_ulaw_only()
+    test_rooms_are_ulaw_only()
     test_trunk_aor_not_qualified()
     test_trunk_inbound_routing()
     test_features_conf_transfer()
