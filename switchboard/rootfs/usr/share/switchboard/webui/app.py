@@ -978,7 +978,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     // Accept "12" or a pasted "12 — Office" line: take the LEADING digit run only,
     // so a free-typed label like "Room 11" yields "" (a no-op) rather than a stray
     // digit that could misdial to a valid-but-wrong room.
-    const raw = (prompt('Transfer call to which room?\n' + opts.join('\n'), '') || '');
+    const raw = (prompt('Transfer call to which room?\\n' + opts.join('\\n'), '') || '');
     const target = (raw.match(/^\\s*([0-9]+)/) || ['', ''])[1];
     if (!target) return;
     btn.disabled = true;

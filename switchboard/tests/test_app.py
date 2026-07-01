@@ -203,6 +203,34 @@ def test_index_html_controls() -> None:
     check("ui: esc() still used", "function esc(" in html)
 
 
+def test_index_html_js_parses() -> None:
+    # The dashboard JS is embedded in a (regular, non-raw) Python string, so a bare
+    # `\n` in the SOURCE emits a real newline into the browser — which, inside a JS
+    # string literal, is a syntax error that kills the ENTIRE inline <script> and
+    # blanks the GUI. (This actually shipped: the transfer prompt used '...\n'.)
+    # py_compile can't see it, so parse the rendered JS with node as a guard.
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    m = re.search(r"<script>(.*?)</script>", app.INDEX_HTML, re.S)
+    check("ui: inline <script> block found", bool(m))
+    if not m:
+        return
+    node = shutil.which("node")
+    if not node:
+        print("SKIP ui: dashboard JS parses (node not on PATH)")
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(m.group(1))
+        js_path = fh.name
+    proc = subprocess.run([node, "--check", js_path], capture_output=True, text=True)
+    check("ui: dashboard JS parses (no syntax error in the served <script>)",
+          proc.returncode == 0)
+    if proc.returncode != 0:
+        print("   " + (proc.stderr or "").strip().splitlines()[0] if proc.stderr else "")
+
+
 def test_route_handlers_defined() -> None:
     # The route functions are defined as plain module-level callables even under
     # the stub app, so the wiring is at least syntactically present/importable.
@@ -231,6 +259,7 @@ def main() -> None:
     test_channels_by_ext()
     test_build_lights_payload()
     test_index_html_controls()
+    test_index_html_js_parses()
     test_route_handlers_defined()
     test_client_guard()
     print()

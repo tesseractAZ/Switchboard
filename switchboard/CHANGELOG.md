@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.1
+
+Fix the dashboard (GUI) going blank — a JavaScript syntax error blanked the whole
+page.
+
+- The transfer prompt was written `prompt('Transfer call to which room?\n' + ...)`
+  in the Python source. The dashboard JS lives in a regular (non-raw) Python
+  string, so that `\n` became a **real newline inside a single-quoted JS string
+  literal** — a syntax error that aborted the entire inline `<script>`, so nothing
+  rendered. Escaped it to `\\n` so the browser gets a proper `\n`. (Latent since
+  the transfer button landed in 0.9.7; surfaced the first time the GUI was opened.)
+- Added a regression test that parses the rendered dashboard `<script>` with
+  `node --check`, so a bare newline in an embedded-JS string can't ship again.
+
 ## 0.10.0
 
 Remove HD/Opus support entirely — Switchboard is now **G.711 µ-law only**, and the
