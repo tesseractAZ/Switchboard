@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+"""Switchboard dial-a-status — voice menu AGI.
+
+Dial the status code: greet, present a menu ("say power, weather, or house"),
+listen, resolve the choice with the pure status_match matcher, then fetch and
+speak the live Home Assistant state (power / weather / house) via ha_reports.
+
+Rotary-safe (voice, no DTMF needed) and channel-safe: the top-level handler
+swallows every exception so the channel never wedges, and any HA/TTS failure
+degrades to a canned spoken apology.
+"""
+
+from __future__ import annotations
+
+import sys
+
+sys.path.insert(0, "/usr/share/switchboard/operator")
+sys.path.insert(0, "/usr/share/switchboard/webui")
+import agi_speech as sp  # noqa: E402
+
+try:
+    import ha_reports  # noqa: E402
+except Exception:  # noqa: BLE001
+    ha_reports = None
+try:
+    import status_match  # noqa: E402
+except Exception:  # noqa: BLE001
+    status_match = None
+
+MAX_ATTEMPTS = 2
+
+
+def speak_status(cat: str) -> None:
+    report = ""
+    try:
+        if cat == "power":
+            report = ha_reports.power_report()
+        elif cat == "weather":
+            report = ha_reports.weather_report()
+        else:
+            report = ha_reports.house_report()
+    except Exception as exc:  # noqa: BLE001
+        sp.log("status", f"report {cat} failed: {exc}")
+    if report:
+        sp.say_or(report + " Goodbye.")
+    else:
+        sp.say_or("Sorry, that status is unavailable right now. Goodbye.")
+
+
+def main() -> None:
+    sp.read_env()
+    if ha_reports is None or status_match is None:
+        sp.say_or("Sorry, status is unavailable right now. Goodbye.")
+        return
+    for attempt in range(MAX_ATTEMPTS):
+        if attempt == 0:
+            sp.say_or("Status menu. Say power, weather, or house.", sp.PROMPT_BEEP)
+        else:
+            sp.say_or("I didn't catch that. Say power, weather, or house.", sp.PROMPT_BEEP)
+        cat = status_match.match(sp.listen("status", attempt))
+        if cat:
+            speak_status(cat)
+            return
+    sp.say_or("Sorry, I didn't get that. Goodbye.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[status] fatal: {exc}\n")
+        try:
+            sp.say_or("Sorry, status is unavailable right now. Goodbye.")
+        except Exception:
+            pass

@@ -22,10 +22,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
 TIMEOUT = float(os.environ.get("HA_TIMEOUT", "5") or "5")
+# When HA is unreachable, short-circuit further calls for this long instead of
+# re-paying the (per-candidate × TIMEOUT) penalty on every call — otherwise a
+# flow that makes several reads while HA is down (e.g. the smart wake-up: scene +
+# weather + calendar) stacks a ~30s silent tail. Recovers automatically after TTL.
+NEG_TTL = float(os.environ.get("HA_NEG_TTL", "20") or "20")
 
 # Only ever toggle a real light entity; never interpolate arbitrary text into a
 # service call (defence-in-depth even though we also send it as a JSON body).
@@ -64,12 +70,17 @@ def _candidates():
 
 
 _cached = None  # the first base that answered — skip dead hosts on later calls
+_dead_until = 0.0  # if >now and nothing cached, every candidate was just failing
 
 
 def _request(method: str, path: str, body=None):
     """One HA Core API call. Returns (status:int, text:str) or (None, None) when
-    no candidate host could be reached. Caches the first base that connects."""
-    global _cached
+    no candidate host could be reached. Caches the first base that connects, and
+    negative-caches a total failure for NEG_TTL so back-to-back calls during an HA
+    outage don't each re-pay the full connect-timeout penalty."""
+    global _cached, _dead_until
+    if not _cached and time.time() < _dead_until:
+        return None, None
     cands = [_cached] if _cached else list(_candidates())
     for cand in cands:
         if not cand:
@@ -85,15 +96,18 @@ def _request(method: str, path: str, body=None):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 _cached = cand
+                _dead_until = 0.0
                 return resp.status, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:  # reached HA, it complained (auth/404/template error)
             _cached = cand
+            _dead_until = 0.0
             try:
                 return exc.code, exc.read().decode("utf-8", "replace")
             except Exception:
                 return exc.code, ""
         except Exception:
             continue  # connection/DNS error — try the next candidate
+    _dead_until = time.time() + NEG_TTL  # all candidates unreachable — back off briefly
     return None, None
 
 
@@ -164,3 +178,85 @@ def set_light(entity_id: str, turn_on: bool) -> bool:
     service = "turn_on" if turn_on else "turn_off"
     status, _ = _request("POST", f"/services/light/{service}", {"entity_id": entity_id})
     return status in (200, 201)
+
+
+# --------------------------------------------------------------------------- #
+# Generic reads + service calls (used by the dial-a-status menu, smart wake-up,
+# and phone->speaker announce). Kept narrow: only well-formed entity ids, and
+# services only on a small allow-list of domains — a voice flow can never reach
+# an arbitrary domain (shell_command, notify, homeassistant, ...).
+# --------------------------------------------------------------------------- #
+_EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+_ALLOWED_SERVICE_DOMAINS = frozenset({"light", "scene", "media_player", "tts", "climate"})
+
+
+def is_entity_id(entity_id: str) -> bool:
+    return bool(_EID_RE.match(entity_id or ""))
+
+
+def get_state(entity_id: str):
+    """Full state dict {state, attributes, ...} for any entity, or None when the
+    id is malformed / the entity is missing / HA is unreachable."""
+    if not is_entity_id(entity_id):
+        return None
+    status, text = _request("GET", f"/states/{entity_id}")
+    if status != 200 or not text:
+        return None
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def get_states() -> list:
+    """Every entity state [{entity_id, state, attributes}], or [] if unreachable."""
+    status, text = _request("GET", "/states")
+    if status != 200 or not text:
+        return []
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def call_service(domain: str, service: str, data: dict | None = None) -> bool:
+    """Call a HA service, restricted to the allow-listed domains. Returns True
+    only if HA accepted it. `data` is passed through as the service payload."""
+    if domain not in _ALLOWED_SERVICE_DOMAINS:
+        return False
+    if not re.fullmatch(r"[a-z_]+", service or ""):
+        return False
+    status, _ = _request("POST", f"/services/{domain}/{service}", data or {})
+    return status in (200, 201)
+
+
+def ha_location():
+    """(latitude, longitude, temp_unit) from /config, or (None, None, None) — used
+    to fetch weather from NWS for the home's coordinates."""
+    status, text = _request("GET", "/config")
+    if status != 200 or not text:
+        return None, None, None
+    try:
+        d = json.loads(text) or {}
+        return d.get("latitude"), d.get("longitude"), (d.get("unit_system") or {}).get("temperature")
+    except (ValueError, TypeError):
+        return None, None, None
+
+
+def get_calendar_events(entity_id: str, start_iso: str, end_iso: str) -> list:
+    """Events in [start,end) for a calendar.* entity, or [] on any error. Used by
+    smart wake-up to read the next event; graceful when no calendar is configured."""
+    if not is_entity_id(entity_id):
+        return []
+    from urllib.parse import quote
+    path = f"/calendars/{entity_id}?start={quote(start_iso)}&end={quote(end_iso)}"
+    status, text = _request("GET", path)
+    if status != 200 or not text:
+        return []
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, list) else []
+    except (ValueError, TypeError):
+        return []

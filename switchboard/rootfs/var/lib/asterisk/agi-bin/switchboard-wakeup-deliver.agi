@@ -1,0 +1,62 @@
+#!/usr/bin/python3
+"""Switchboard smart wake-up delivery — AGI.
+
+Runs inside [wakeup-deliver] when a scheduled wake-up rings a room. It adds the
+"smart" extras on top of the plain greeting + time (which the dialplan always
+plays): fire the configured HA scene, then speak today's weather and, optionally,
+the next calendar event. Every part is a no-op if unconfigured or HA is
+unreachable, and nothing here wedges the channel — the wake-up still delivers.
+"""
+
+from __future__ import annotations
+
+import sys
+
+sys.path.insert(0, "/usr/share/switchboard/operator")
+sys.path.insert(0, "/usr/share/switchboard/webui")
+import agi_speech as sp  # noqa: E402
+
+try:
+    import ha_client  # noqa: E402
+except Exception:  # noqa: BLE001
+    ha_client = None
+try:
+    import ha_reports  # noqa: E402
+except Exception:  # noqa: BLE001
+    ha_reports = None
+
+
+def main() -> None:
+    sp.read_env()
+    wk = (sp.load_features() or {}).get("wakeup", {}) or {}
+
+    scene = wk.get("scene", "")
+    if scene and ha_client:
+        try:
+            ha_client.call_service("scene", "turn_on", {"entity_id": scene})
+        except Exception as exc:  # noqa: BLE001
+            sp.log("wakeup-deliver", f"scene failed: {exc}")
+
+    if wk.get("weather", True) and ha_reports:
+        try:
+            w = ha_reports.weather_report()
+            if w and "unavailable" not in w.lower():
+                sp.say("Today's weather. " + w)
+        except Exception as exc:  # noqa: BLE001
+            sp.log("wakeup-deliver", f"weather failed: {exc}")
+
+    cal = wk.get("calendar", "")
+    if cal and ha_reports:
+        try:
+            c = ha_reports.calendar_report(cal)
+            if c:
+                sp.say(c)
+        except Exception as exc:  # noqa: BLE001
+            sp.log("wakeup-deliver", f"calendar failed: {exc}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[wakeup-deliver] fatal: {exc}\n")
