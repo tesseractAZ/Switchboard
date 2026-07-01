@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.3
+
+Tidy up the per-room cards on the dashboard.
+
+- **Even button grid.** The action buttons were a wrapping flex row, so in narrow
+  cards they stacked onto uneven lines (Test ring full-width, Connect + a lone icon
+  wrapping, etc.). They're now a clean 2-column grid — every button the same width,
+  aligned, with over-long labels ellipsised instead of blowing out the column.
+- **No more mystery icons.** The bare-emoji buttons are fully labelled: `📵 Hang up`,
+  `↪ Transfer`, and the message-waiting toggle reads `✉ Message` / `✉ Clear` (was a
+  lone `✉`).
+- **Roomier cards.** Bumped the card min-width 180→215px so the labelled controls
+  fit and the grid shows fewer, wider cards per row.
+
 ## 0.10.2
 
 Fix the Lights section being unreadable in dark mode.

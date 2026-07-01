@@ -203,6 +203,19 @@ def test_index_html_controls() -> None:
     check("ui: esc() still used", "function esc(" in html)
 
 
+def test_card_action_buttons_labeled() -> None:
+    # Every per-card action button carries a text label (not a bare emoji), and the
+    # action row is an even 2-column grid — so the controls read clearly instead of
+    # wrapping into an uneven, cluttered stack of mystery icons.
+    html = app.INDEX_HTML
+    check("ui: hang-up button labelled", "📵 Hang up" in html)
+    check("ui: transfer button labelled", "↪ Transfer" in html)
+    check("ui: message-waiting button labelled (set + clear)",
+          "✉ Message" in html and "✉ Clear" in html)
+    check("ui: MWI is no longer a bare envelope", "'✉ on' : '✉'" not in html)
+    check("ui: action row is an even 2-col grid", "grid-template-columns: 1fr 1fr" in html)
+
+
 def test_dark_mode_covers_light_cards() -> None:
     # The room cards (.card), the lights area cards (.areacard) and the wake-up time
     # input all paint their background from var(--card). In dark mode, --card MUST be
@@ -274,6 +287,7 @@ def main() -> None:
     test_channels_by_ext()
     test_build_lights_payload()
     test_index_html_controls()
+    test_card_action_buttons_labeled()
     test_dark_mode_covers_light_cards()
     test_index_html_js_parses()
     test_route_handlers_defined()
