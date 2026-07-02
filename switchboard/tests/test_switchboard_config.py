@@ -7,6 +7,7 @@ Run with plain Python (no pytest needed):
 Exercises the input-validation / config-injection defenses so a regression that
 re-opens an injection or drops a guard fails loudly.
 """
+import re
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -193,7 +194,9 @@ def test_trunk_aor_not_qualified() -> None:
 def test_trunk_inbound_routing() -> None:
     # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
     # empty rings the whole house; an ext that isn't a room is ignored (rings
-    # all) so a typo never silently drops inbound calls.
+    # all) so a typo never silently drops inbound calls. The inbound Dial carries
+    # 'r' only (see test_inbound_dial_has_no_transfer_flags) — NOT device-state
+    # gated: gating would risk dropping a momentarily-unreachable primary handset.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
     base = {"enabled": True, "provider_host": "sip.x.com", "username": "u",
@@ -202,17 +205,17 @@ def test_trunk_inbound_routing() -> None:
     one = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "19"}})
     ft = one[one.index("[from-trunk]"):]
     check("inbound_ext=19 rings only PJSIP/19",
-          "Dial(PJSIP/19,30,rtT)" in ft and "PJSIP/11" not in ft)
+          "Dial(PJSIP/19,30,r)" in ft and "PJSIP/11" not in ft)
 
     allr = sbc.render_extensions({"rooms": rooms, "trunk": base})
     fta = allr[allr.index("[from-trunk]"):]
     check("no inbound_ext rings every room",
-          "Dial(PJSIP/11&PJSIP/19,30,rtT)" in fta)
+          "Dial(PJSIP/11&PJSIP/19,30,r)" in fta)
 
     bad = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "99"}})
     ftb = bad[bad.index("[from-trunk]"):]
     check("inbound_ext not a room -> rings every room (no silent drop)",
-          "Dial(PJSIP/11&PJSIP/19,30,rtT)" in ftb and "Dial(PJSIP/99," not in ftb)
+          "Dial(PJSIP/11&PJSIP/19,30,r)" in ftb and "Dial(PJSIP/99," not in ftb)
 
     # --- group ring: inbound_ext accepts a comma-separated list ----------------
     rooms3 = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
@@ -221,33 +224,66 @@ def test_trunk_inbound_routing() -> None:
     grp = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,20"}})
     ftg = grp[grp.index("[from-trunk]"):]
     check("inbound_ext='19,20' rings the group PJSIP/19&PJSIP/20",
-          "Dial(PJSIP/19&PJSIP/20,30,rtT)" in ftg and "PJSIP/11" not in ftg)
+          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftg and "PJSIP/11" not in ftg)
 
     grpws = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": " 19 , 20 "}})
     ftws = grpws[grpws.index("[from-trunk]"):]
     check("inbound_ext list tolerates surrounding whitespace",
-          "Dial(PJSIP/19&PJSIP/20,30,rtT)" in ftws)
+          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftws)
 
     part = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,99"}})
     ftp = part[part.index("[from-trunk]"):]
     check("inbound_ext='19,99' drops the non-room and rings only PJSIP/19",
-          "Dial(PJSIP/19,30,rtT)" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
+          "Dial(PJSIP/19,30,r)" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
 
     allbad = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "98,99"}})
     ftab = allbad[allbad.index("[from-trunk]"):]
     check("fully-invalid inbound_ext list rings every room",
-          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,rtT)" in ftab and "PJSIP/98" not in ftab)
+          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,r)" in ftab and "PJSIP/98" not in ftab)
 
     dup = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "20,19,20"}})
     ftd = dup[dup.index("[from-trunk]"):]
     check("inbound_ext list de-dups and preserves order",
-          "Dial(PJSIP/20&PJSIP/19,30,rtT)" in ftd)
+          "Dial(PJSIP/20&PJSIP/19,30,r)" in ftd)
+
+
+def test_inbound_dial_has_no_transfer_flags() -> None:
+    # THE inbound-call bug: Dial(...,rtT) on the trunk armed the in-call DTMF
+    # transfer codes for BOTH parties. 'T' let the outside PSTN caller invoke our
+    # feature codes (toll-fraud / dialplan-injection), and 't' let the answering
+    # cordless accidentally ## the caller into the operator mid-call. Inbound
+    # Dials must carry 'r' only; SIP phones still transfer via REFER (their
+    # Transfer button), which is independent of these flags.
+    rooms3 = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                              {"ext": "19", "name": "Cordless", "secret": "s2"},
+                              {"ext": "20", "name": "iPhone", "secret": "s3"}])
+    base = {"enabled": True, "provider_host": "sip.x.com", "username": "u",
+            "secret": "s", "dial_prefix": "9"}
+    e = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,20"}})
+    ft = e[e.index("[from-trunk]"):]
+    inbound_dials = re.findall(r"Dial\([^)]*\)", ft)
+    check("[from-trunk] actually has Dial()s", len(inbound_dials) >= 1)
+    check("no inbound Dial arms the DTMF transfer flags (t/T)",
+          all(d.endswith(",r)") for d in inbound_dials))
+    check("no inbound Dial uses the old rtT flags", ",rtT)" not in ft and ",rT)" not in ft)
+
+    # Outbound trunk Dial keeps 'T' (our caller may transfer) but drops 't' so
+    # the far-end PSTN callee can't invoke our feature codes.
+    out = [ln for ln in e.splitlines() if "@trunk" in ln and "Dial(" in ln]
+    check("outbound trunk Dial exists", len(out) == 1)
+    check("outbound trunk Dial is rT (caller may transfer, PSTN callee may not)",
+          out and out[0].rstrip().endswith(",60,rT)"))
+
+    # Room-to-room and operator Dials are internal on both ends -> keep 'tT'.
+    check("room-to-room Dial keeps tT (both ends internal)",
+          "Dial(PJSIP/${EXTEN},30,rtT)" in e)
 
 
 def test_features_conf_transfer() -> None:
     # Analog (FXS) phones have no transfer button, so features.conf gives them
-    # in-call DTMF transfer codes (the Dial t/T flags arm them). SIP phones use
-    # their own Transfer button (REFER) and need no config.
+    # in-call DTMF transfer codes. The Dial t/T flags that arm these are set
+    # per-Dial by trust (see test_inbound_dial_has_no_transfer_flags), never for
+    # a PSTN party. SIP phones use their own Transfer button (REFER) regardless.
     feat = sbc.render_features()
     check("features: blind transfer code present", "blindxfer => ##" in feat)
     check("features: attended transfer code present", "atxfer => *2" in feat)
@@ -466,14 +502,20 @@ def test_feature_code_collisions() -> None:
 
 
 def test_modules_conf() -> None:
-    # res_mwi_external (MWIUpdate) refuses to load alongside app_voicemail, so
-    # the generated modules.conf must noload the voicemail apps and load the
-    # external-MWI + intercom modules — else MWIUpdate is never registered.
+    # The generated modules.conf autoloads everything, then explicitly loads the
+    # feature modules (so a missing one is obvious in the log) and NOLOADS the
+    # local-sound-card channel drivers: with no ALSA hardware in the container
+    # they spam ~50 'cannot find card 0' error lines at every startup, and this
+    # PBX only ever does PJSIP/RTP.
     m = sbc.render_modules({})
     check("modules: autoload on", "autoload = yes" in m)
     check("modules: res_pjsip_notify loaded (MWI NOTIFY)", "load = res_pjsip_notify.so" in m)
     check("modules: confbridge + page loaded",
           "load = app_confbridge.so" in m and "load = app_page.so" in m)
+    check("modules: chan_alsa noloaded (kills startup ALSA error spam)",
+          "noload = chan_alsa.so" in m)
+    check("modules: chan_console noloaded (no local sound card)",
+          "noload = chan_console.so" in m)
 
 
 def test_status_announce_dialplan() -> None:

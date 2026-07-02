@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.12.2
+
+Inbound trunk calls no longer connect oddly on the cordless, plus a startup
+log-noise fix surfaced while reviewing the logs.
+
+- **Inbound calls: no more accidental transfer-to-operator (the reported bug).**
+  An incoming call rang the cordless, connected, then mid-call the caller was put
+  on hold and blind-transferred to the operator ("goodbye", hang up). Cause: the
+  inbound `Dial()` carried the `t`/`T` flags, which arm Asterisk's in-call DTMF
+  transfer codes (`##`/`*2`) for **both** parties — so the answering phone could
+  accidentally `##` the caller away, and, worse, the **outside caller** (`T`)
+  could invoke feature codes and reach the internal dialplan (a toll-fraud /
+  dialplan-injection path). The inbound `Dial()` now uses `r` only. SIP phones
+  still transfer intentionally via their own Transfer button (SIP REFER, which is
+  independent of these flags).
+- **Feature-code flags are now scoped by trust, never armed for a PSTN party.**
+  Room-to-room and operator Dials keep `tT` (both ends internal); the **outbound**
+  trunk Dial drops `t` (the far PSTN callee can't invoke our codes) but keeps `T`
+  (our caller still may transfer).
+- **Silenced ~50 ALSA errors per startup.** With no sound card in the container,
+  the ALSA/console channel drivers spammed `cannot find card 0` / `Unknown PCM
+  sysdefault` at every boot. `modules.conf` now `noload`s `chan_alsa.so` /
+  `chan_console.so` — this PBX is PJSIP/RTP only.
+
+Note: the offline iPhone (ext 20) still logs one harmless `invalid URI … No route
+to destination` per inbound call for its own leg while the reachable phones ring;
+it clears once that softphone registers. An earlier cut of this release gated the
+ring group on `DEVICE_STATE` to suppress that line, but adversarial review found
+it could also drop a *registered* WiFi cordless from a call after a single missed
+`qualify` keep-alive — so the gate was removed in favor of the harmless log line.
+
 ## 0.12.1
 
 Security sweep: resolve all open CodeQL code-scanning alerts.
