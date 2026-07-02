@@ -7,11 +7,9 @@ description: >-
   Room-to-room calling now, SIP trunk outside-line ready. G.711 u-law only,
   end to end (no HD/Opus, no transcoding).
 url: https://github.com/tesseractAZ/Switchboard/tree/main/switchboard
-codenotary: maintainer@example.invalid
 arch:
   - amd64
   - aarch64
-  - armv7
 init: false
 host_network: true
 apparmor: true
