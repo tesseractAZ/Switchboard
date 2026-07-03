@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.5
+
+Dial-43 lights: saying "list" now actually lists the rooms/lights.
+
+- **Command words are now in the recognizer's bias.** Whisper was primed with
+  only the area/light names, so a spoken "list" had no prior and came back as a
+  sound-alike ('Left', 'Lift' — observed live) that matched nothing and burned
+  the caller's retries. Every stage's bias now includes its command words
+  ("list", "cancel"; the action stage — which had **no** bias — gets
+  "turn on turn off cancel").
+- **Fuzzy intent fallback fixed for 'list'.** The 0.8 similarity cutoff
+  rejected the docstring's own example ("lest" scores exactly 0.75). Intents
+  that *act* on the house (on/off/cancel) keep the strict 0.8; the benign
+  'list' (speaks options, re-prompts, never acts) accepts 0.75, catching the
+  live mishears lift/lisp/lest. A lone "left" also maps to list ('left' vs
+  'list' is only 0.5 — too far for any sane ratio) — single word only, so
+  "left hallway" stays matchable as a real area/light name, and "lamp" is
+  untouched (real light names must stay selectable).
+
 ## 0.12.4
 
 Operator polish for outside callers, from a packet-level audit of the inbound
