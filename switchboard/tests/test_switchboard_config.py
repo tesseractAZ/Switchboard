@@ -481,10 +481,14 @@ def test_operator_mwi_clear() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "12", "name": "Office", "secret": "s2"}])
     on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
-    # The clear is backgrounded ('&') and placed AFTER Answer() so a wedged AMI
-    # can never delay the answered caller (it would block up to the AMI timeout).
+    # The clear is backgrounded ('&'), placed AFTER Answer() so a wedged AMI can
+    # never delay the answered caller, and GATED on the caller being a room ext:
+    # an outside caller reaches the operator via transfer, and clearing MWI for
+    # an external number just errors and queues a pointless replay.
     check("operator: clears the caller's MWI on dialing 0 (backgrounded)",
           "System(/usr/bin/switchboard-mwi clear ${CALLERID(num)} &)" in on)
+    check("operator: MWI-clear gated on the caller being a room ext",
+          'ExecIf($["${CALLERID(num)}" : "^(11|12)$"]?System(/usr/bin/switchboard-mwi clear' in on)
     lines = on.splitlines()
     answer_i = next(i for i, l in enumerate(lines) if l.strip() == "same = n,Answer()")
     clear_i = next(i for i, l in enumerate(lines) if "switchboard-mwi clear" in l)
