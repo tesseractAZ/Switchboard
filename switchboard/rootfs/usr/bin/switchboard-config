@@ -389,8 +389,13 @@ def render_operator_context(joined: str, automation_on: bool = False,
         # the instant they dial 0. Clear it AFTER Answer() and background it (`&`)
         # so a wedged AMI can never delay the answered caller up to the AMI
         # timeout — a moment-later clear is identical UX with zero ring latency.
+        # Room-callers ONLY: an OUTSIDE caller reaches the operator too (via a
+        # transfer from the answering phone), and their CALLERID is the external
+        # number — clearing MWI for it just errors and queues a pointless replay
+        # ("Asterisk MWI update failed (replay later)" in the log). Gate on the
+        # same room allow-list the operator Dial uses.
         lines += [
-            " same = n,System(/usr/bin/switchboard-mwi clear ${CALLERID(num)} &)",
+            f' same = n,ExecIf($["${{CALLERID(num)}}" : "^({joined})$"]?System(/usr/bin/switchboard-mwi clear ${{CALLERID(num)}} &))',
         ]
     lines += [
         " same = n,Set(CHANNEL(language)=en)",

@@ -29,8 +29,14 @@ import sys
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
-RECORD_MS = 7000          # hard cap on a single utterance
-SILENCE_S = 3             # stop recording after this much trailing silence
+# The operator's callers include OUTSIDE lines (an inbound trunk call the
+# answering phone transferred to 0) — people unfamiliar with the flow, on a
+# cell audio path with real latency. Give them more grace than the room
+# features: s=4 tolerates a slow start (the same silence window also ends the
+# recording, so a prompt speaker still finishes almost as fast), 10 s caps a
+# wordy one.
+RECORD_MS = 10000         # hard cap on a single utterance
+SILENCE_S = 4             # stop recording after this much (also leading) silence
 
 
 def read_env() -> dict:
@@ -96,6 +102,16 @@ def recognize(attempt: int) -> tuple[str, str]:
     agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     stream("switchboard/sw-onemoment")  # cover STT latency (no dead air)
     wav = rec + ".wav"
+    # Diagnostic breadcrumb: the WAV is deleted after transcription, so its size
+    # is the only after-the-fact evidence of what RECORD captured. A silent
+    # recording that hit the s=<SILENCE_S> leading-silence cutoff is ~64 kB/s of
+    # near-silence for SILENCE_S seconds — instantly distinguishable in the log
+    # from "spoke but STT missed it" (longer file) or "RECORD failed" (missing).
+    try:
+        size = os.path.getsize(wav)
+    except OSError:
+        size = -1
+    sys.stderr.write(f"[operator] rec attempt={attempt} bytes={size}\n")
     try:
         result = _stt(["--mode", "rooms"], wav)
         if result == "automation":

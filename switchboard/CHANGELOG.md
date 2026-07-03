@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.4
+
+Operator polish for outside callers, from a packet-level audit of the inbound
+call path (which came back healthy end-to-end: continuous 50 pkt/s caller
+audio through answer → hold → transfer → operator, speech recognized and
+connected on every attempt).
+
+- **Operator listens with more patience.** The recording window is now 10 s
+  with a 4 s silence cutoff (was 7 s / 3 s). An outside caller who hesitates
+  after the beep — cell latency, unfamiliar flow — no longer gets cut off
+  before speaking (a too-early cutoff transcribes as silence and reads as
+  "extension not found").
+- **Recording diagnostics.** The operator logs each recording's byte size
+  (`[operator] rec attempt=N bytes=B`) before transcription; the WAV itself is
+  deleted after STT, so this breadcrumb is what distinguishes "caller said
+  nothing" from "audio never arrived" after the fact.
+- **MWI-clear is gated on room callers.** Dial-0 from an outside line (via
+  transfer) ran an MWI clear against the external caller ID — a guaranteed
+  failure plus a queued replay. It now runs only when the caller is a
+  configured room ext.
+
 ## 0.12.3
 
 Inbound calls failed outright ("Channel not available") — fixed by keeping the
