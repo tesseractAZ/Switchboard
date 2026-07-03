@@ -191,6 +191,25 @@ def test_trunk_aor_not_qualified() -> None:
     check("room AORs still qualify (trunk-only change)", "qualify_frequency = 60" in pj)
 
 
+def test_trunk_registration_keepalive() -> None:
+    # The re-REGISTER is the ONLY outbound traffic holding the router's UDP NAT
+    # pinhole open (trunk qualify is deliberately off — VoIP.ms drops OPTIONS).
+    # Asterisk's default expiration (3600s) leaves the pinhole closed ~55min of
+    # every hour: VoIP.ms's reachability pings get dropped, it flags the account
+    # "Unreachable", and INBOUND calls insta-fail ("Channel not available") with
+    # the INVITE never reaching us. expiration=120 keeps the pinhole warm.
+    rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9",
+             "registns": True}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    reg = pj[pj.index("[trunk-reg]"):]
+    check("trunk registration present when registns on", "type = registration" in reg)
+    check("trunk re-REGISTER every 120s (NAT keepalive, NOT the 3600s default)",
+          "expiration = 120" in reg)
+    check("trunk registration keeps retry_interval", "retry_interval = 60" in reg)
+
+
 def test_trunk_inbound_routing() -> None:
     # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
     # empty rings the whole house; an ext that isn't a room is ignored (rings
@@ -705,7 +724,9 @@ if __name__ == "__main__":
     test_trunk_codec_pinned_to_ulaw()
     test_rooms_are_ulaw_only()
     test_trunk_aor_not_qualified()
+    test_trunk_registration_keepalive()
     test_trunk_inbound_routing()
+    test_inbound_dial_has_no_transfer_flags()
     test_features_conf_transfer()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()

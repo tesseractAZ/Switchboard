@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.3
+
+Inbound calls failed outright ("Channel not available") — fixed by keeping the
+router's NAT pinhole open.
+
+- **Trunk re-REGISTER every 120s instead of the 3600s Asterisk default.** The
+  VoIP.ms CDR showed inbound calls dying at the provider with `Status is
+  'Channel not available' / Failover due to 'Unreachable' status` — the INVITE
+  never reached Asterisk (nothing in our logs). Cause: the REGISTER is the only
+  outbound traffic that holds the router's UDP NAT pinhole open (trunk qualify
+  is deliberately off because VoIP.ms drops OPTIONS), and an hourly REGISTER
+  leaves the pinhole closed ~55 minutes of every hour, so the provider's
+  reachability pings get dropped and it marks the line dead. Especially bitten
+  after a power-event router restart clears the NAT table. `expiration = 120`
+  (VoIP.ms's own NAT guidance and their accepted minimum) keeps the path warm
+  and the provider's reachability view fresh.
+
 ## 0.12.2
 
 Inbound trunk calls no longer connect oddly on the cordless, plus a startup

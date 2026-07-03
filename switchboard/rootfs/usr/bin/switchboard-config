@@ -306,7 +306,8 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
         # so Dial(...@trunk) fails with 503 "Service Unavailable" even while the
         # registration (and thus inbound) stays perfectly healthy. 0 disables the
         # health check so the contact is always usable for outbound; inbound
-        # liveness is covered by the periodic re-REGISTER instead.
+        # liveness + the NAT keepalive are covered by the short re-REGISTER
+        # cadence instead (see expiration in [trunk-reg]).
         "qualify_frequency = 0",
         "",
         "[trunk]",
@@ -343,6 +344,17 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
             f"server_uri = sip:{host}:{port}",
             f"client_uri = sip:{user}@{from_domain}",
             "retry_interval = 60",
+            # Re-REGISTER every ~2 minutes, NOT the Asterisk default 3600s. The
+            # REGISTER is the ONLY outbound traffic that holds the router's UDP
+            # NAT pinhole open (the trunk AOR deliberately has qualify off, see
+            # [trunk-aor]). With hourly registers the pinhole idles out, the
+            # provider's reachability OPTIONS pings to us get dropped, VoIP.ms
+            # flags the sub-account "Unreachable", and INBOUND calls insta-fail
+            # with "Channel not available / Failover due to 'Unreachable'"
+            # WITHOUT the INVITE ever reaching us (nothing in our logs; the
+            # evidence lives in the VoIP.ms CDR call_logs). 120s is VoIP.ms's
+            # own NAT guidance and their accepted minimum.
+            "expiration = 120",
             "",
         ]
     return lines
