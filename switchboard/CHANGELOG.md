@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.7
+
+Talking clock (dial 41): fuller military phrasing.
+
+- **"&lt;hour&gt; &lt;minute&gt; hours, and &lt;n&gt; seconds", with "hundred" on the hour.**
+  14:32:05 → "fourteen thirty-two hours, and five seconds"; 14:00:05 → "fourteen
+  **hundred** hours, and five seconds"; 09:05:30 → "oh nine oh five hours, and
+  thirty seconds". A :00 minute is spoken "hundred"; the seconds are now a plain
+  cardinal ("five", "thirty", "zero") set off by the "hours, and" prompt so they
+  no longer blend into the hour/minute groups.
+- The words that don't exist in Asterisk's core-sounds ("hours"/"and"/"seconds")
+  are two short espeak prompts (`sw-hours-and`, `sw-seconds`) in the same voice
+  as the other synthesized prompts; the number digits keep the professional
+  recorded voice. `clock_speak` and its 400-case test sweep were updated to the
+  new phrasing.
+
 ## 0.12.6
 
 Fancier talking clock (dial 41): 24-hour time, with seconds, on a loop.

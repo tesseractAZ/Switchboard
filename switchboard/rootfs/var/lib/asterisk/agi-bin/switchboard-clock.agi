@@ -46,9 +46,9 @@ def main() -> None:
         return
     now = time.localtime()  # system-local tz, same source SayUnixTime uses
     for action in clock_speak.time_actions(now.tm_hour, now.tm_min, now.tm_sec):
-        if action[0] == "oh":
-            resp = agi('STREAM FILE digits/oh ""')
-        else:
+        if action[0] == "stream":
+            resp = agi(f'STREAM FILE {action[1]} ""')
+        else:  # ("num", n)
             resp = agi(f'SAY NUMBER {action[1]} ""')
         # Caller hung up mid-readout: Asterisk closes stdin (empty response) or a
         # command returns result=-1. Stop rather than spin on a dead channel.
