@@ -354,10 +354,21 @@ def test_talking_clock() -> None:
              {"ext": "12", "name": "Office", "secret": "s2"}]
     on = sbc.render_extensions({"rooms": rooms, "clock_enabled": True, "clock_ext": "41", "trunk": {}})
     check("clock: extension present", "exten = 41,1,NoOp(Talking clock)" in on)
-    check("clock: 'at the tone' style with a pip",
-          "SayUnixTime(,,IMp)" in on
-          and "Playback(switchboard/sw-at-the-tone)" in on
-          and "Playback(switchboard/sw-tone)" in on)
+    # Slice just the clock extension (start marker -> next blank line) so these
+    # assertions don't accidentally match the wake-up feature (which legitimately
+    # still uses SayUnixTime).
+    _c0 = on.index("exten = 41,1,NoOp(Talking clock)")
+    _cend = on.index("\n\n", _c0)
+    clk = on[_c0:_cend]
+    check("clock: 'at the sound of the tone' preamble + military-time AGI + pip",
+          "Playback(switchboard/sw-at-sound-tone)" in clk
+          and "AGI(switchboard-clock.agi)" in clk
+          and "Playback(switchboard/sw-tone)" in clk)
+    check("clock: loops until hangup (labelled loop + Goto back to it)",
+          "n(loop),Playback(switchboard/sw-at-sound-tone)" in clk
+          and "Goto(loop)" in clk)
+    check("clock: no longer uses SayUnixTime in the clock block (quirky 24h format)",
+          "SayUnixTime" not in clk)
     # Default-on.
     default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
     check("clock: on by default at ext 41", "exten = 41,1,NoOp(Talking clock)" in default_on)
