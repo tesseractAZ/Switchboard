@@ -93,6 +93,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-operator.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-wakeup.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-automation.agi \
+    && chmod +x /var/lib/asterisk/agi-bin/switchboard-clock.agi \
     && chmod +x /usr/share/switchboard/console/console.py \
     && chmod +x /usr/share/switchboard/console-web/server.py \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \

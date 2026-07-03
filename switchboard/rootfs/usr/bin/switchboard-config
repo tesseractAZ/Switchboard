@@ -641,17 +641,24 @@ def render_extensions(opts: dict) -> str:
         elif clock_ext in exts:
             log(f"clock: clock_ext {clock_ext} collides with a room ext; talking clock disabled")
         else:
-            # SayUnixTime(,,IMp): now, system (local) tz, 12h + minutes + a.m./p.m.
+            # Old-style speaking clock that LOOPS until the caller hangs up:
+            #   "At the sound of the tone, the time will be <HH MM SS>" <tone>
+            # spoken in 24-hour (military) form including seconds. The H:M:S
+            # readout is an AGI (switchboard-clock.agi -> clock_speak) rather
+            # than SayUnixTime, whose 24h format is quirky (M says "o'clock" for
+            # :00 and S support varies). The loop is in the dialplan, so a hangup
+            # simply destroys the channel and ends it (the trailing Hangup is a
+            # belt-and-braces for a clean fall-through that never happens).
             parts += [
                 f"exten = {clock_ext},1,NoOp(Talking clock)",
                 " same = n,Answer()",
                 " same = n,Set(CHANNEL(language)=en)",
                 " same = n,Wait(1)",
-                # Old-style speaking clock: "At the tone, the time will be …" + a pip.
-                " same = n,Playback(switchboard/sw-at-the-tone)",
-                " same = n,SayUnixTime(,,IMp)",
+                " same = n(loop),Playback(switchboard/sw-at-sound-tone)",
+                " same = n,AGI(switchboard-clock.agi)",
                 " same = n,Playback(switchboard/sw-tone)",
-                " same = n,Wait(1)",
+                " same = n,Wait(2)",
+                " same = n,Goto(loop)",
                 " same = n,Hangup()",
                 "",
             ]

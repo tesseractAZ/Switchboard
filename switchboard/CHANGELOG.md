@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.6
+
+Fancier talking clock (dial 41): 24-hour time, with seconds, on a loop.
+
+- **"At the sound of the tone, the time will be &lt;HH MM SS&gt;" &lt;tone&gt;, repeating
+  until you hang up.** The clock now speaks 24-hour ("military") time including
+  seconds and loops, instead of announcing the 12-hour time once and hanging up.
+- **Clean military readout, no `SayUnixTime` quirks.** Each field is spoken as a
+  natural two-digit group — 14:32:05 → "fourteen, thirty-two, oh five"; 09:05:00
+  → "oh nine, oh five, oh oh". The old `SayUnixTime` 24-hour format was avoided
+  because its minute specifier says "o'clock" for :00 and its seconds support is
+  version-dependent. The readout is a small AGI (`switchboard-clock.agi`) over a
+  pure, unit-tested sequencer (`clock_speak.time_actions`) that emits only the
+  digit sound files Asterisk ships (there are no "hours"/"minutes"/"seconds" word
+  files), so the exact spoken sequence for any time is testable without a phone.
+- The loop lives in the dialplan, so hanging up simply ends the call. New espeak
+  preamble prompt `sw-at-sound-tone` (same voice/format as the existing prompts).
+
 ## 0.12.5
 
 Dial-43 lights: saying "list" now actually lists the rooms/lights.

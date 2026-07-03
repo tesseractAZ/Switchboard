@@ -1,0 +1,63 @@
+#!/usr/bin/python3
+"""Switchboard talking clock — speaks the current local time as a 24-hour
+("military") H:M:S readout.
+
+Invoked once per cycle by the [clock] dialplan (dial 41). The dialplan plays the
+"at the sound of the tone, the time will be" preamble before this AGI and the
+tone after it, then loops back until the caller hangs up — so this AGI only has
+to speak the three time fields and get out of the way.
+
+stdlib only, runs as the ``asterisk`` user, talks AGI over stdin/stdout. The
+field-to-speech logic lives in the pure, unit-tested ``clock_speak`` module; this
+file is just the thin AGI I/O around it.
+"""
+from __future__ import annotations
+
+import sys
+import time
+
+sys.path.insert(0, "/usr/share/switchboard/clock")
+try:
+    import clock_speak
+except Exception as exc:  # pragma: no cover - import guard; never wedge the call
+    sys.stderr.write(f"[clock] import failed: {exc}\n")
+    clock_speak = None
+
+
+def read_env() -> None:
+    """Drain the AGI environment block (lines until a blank line). Mandatory —
+    skipping it desyncs every subsequent command/response."""
+    while True:
+        line = sys.stdin.readline()
+        if not line or not line.strip():
+            break
+
+
+def agi(command: str) -> str:
+    """Send one AGI command; return the response line ('' on EOF = hangup)."""
+    sys.stdout.write(command + "\n")
+    sys.stdout.flush()
+    return sys.stdin.readline().strip()
+
+
+def main() -> None:
+    read_env()
+    if clock_speak is None:
+        return
+    now = time.localtime()  # system-local tz, same source SayUnixTime uses
+    for action in clock_speak.time_actions(now.tm_hour, now.tm_min, now.tm_sec):
+        if action[0] == "oh":
+            resp = agi('STREAM FILE digits/oh ""')
+        else:
+            resp = agi(f'SAY NUMBER {action[1]} ""')
+        # Caller hung up mid-readout: Asterisk closes stdin (empty response) or a
+        # command returns result=-1. Stop rather than spin on a dead channel.
+        if not resp or "result=-1" in resp:
+            return
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # never wedge the channel on an unexpected error
+        sys.stderr.write(f"[clock] {exc}\n")
