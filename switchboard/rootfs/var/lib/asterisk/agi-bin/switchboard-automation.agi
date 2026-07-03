@@ -174,7 +174,11 @@ def pick_area(by_area: dict) -> str | None:
     areas and re-prompts; no match retries once then returns None (goodbye)."""
     areas = list(by_area.keys())
     nice_areas = [a if a else "Unassigned" for a in areas]
-    bias = " ".join(nice_areas)
+    # Bias whisper toward the area names AND the command words the prompt
+    # offers. Without "list"/"cancel" in the bias the recognizer has no prior
+    # for them, and a spoken "list" comes back as a sound-alike ('Left'/'Lift'
+    # — observed live) that matches nothing and burns the caller's attempts.
+    bias = " ".join(nice_areas + ["list", "cancel"])
     # attempt only advances on a real mis-match; a 'list' request re-prompts for
     # free (a caller asking to hear the options shouldn't burn a retry).
     attempt = 0
@@ -202,7 +206,8 @@ def pick_light(area: str, lights: list[dict]) -> dict | None:
     """Speak the light prompt for the chosen area, listen, resolve to one light.
     'list' speaks the lights and re-prompts; no match retries once."""
     names = [lt.get("name") or lt.get("entity_id", "") for lt in lights]
-    bias = " ".join(names)
+    # Same as pick_area: the command words must be in the bias to be heard.
+    bias = " ".join(names + ["list", "cancel"])
     # As in pick_area: a 'list' request re-prompts without consuming an attempt.
     attempt = 0
     while attempt < MAX_ATTEMPTS:
@@ -229,7 +234,9 @@ def ask_action() -> str | None:
     """Speak the action prompt, listen, return 'on' | 'off' | None (cancel)."""
     for attempt in range(MAX_ATTEMPTS):
         say_or("Say turn on, turn off, or cancel.", PROMPT_BEEP)
-        text = listen("action", attempt)
+        # The action stage previously listened with NO bias at all — prime the
+        # recognizer with exactly the three commands the prompt just offered.
+        text = listen("action", attempt, bias="turn on turn off cancel")
         if lights_match is None:
             return None
         intent = lights_match.match_intent(text)

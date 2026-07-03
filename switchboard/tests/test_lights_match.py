@@ -149,6 +149,35 @@ def test_intent():
     # fuzzy single-word fallback
     check("intent fuzzy 'cancl' -> cancel", lm.match_intent("cancl") == "cancel")
     check("intent fuzzy 'lst' -> list (dropped vowel)", lm.match_intent("lst") == "list")
+    # Live whisper mishears of a spoken "list" (observed on real calls: the
+    # recognizer, biased toward room/light names, returned these sound-alikes).
+    check("intent fuzzy 'Lift' -> list (live mishear)", lm.match_intent("Lift") == "list")
+    check("intent fuzzy 'lisp' -> list", lm.match_intent("lisp") == "list")
+    check("intent fuzzy 'lest' -> list (the docstring's own example)",
+          lm.match_intent("lest") == "list")
+    check("intent lone 'Left' -> list (known far mishear, single word only)",
+          lm.match_intent("Left") == "list")
+    check("'left hallway' is NOT hijacked to list (stays area/light-matchable)",
+          lm.match_intent("left hallway") is None)
+    check("'lamp' is NOT list (real light name must stay selectable)",
+          lm.match_intent("lamp") is None)
+    # The looser 0.75 ratio applies ONLY to the literal word 'list' — near
+    # misses of the ACTING intents must not fire ('in' is 0.5 to 'on'; 'of' at
+    # 0.8 was already accepted; something like 'awf' must not become off).
+    check("intent 'awf' does not act as off", lm.match_intent("awf") is None)
+    # Regression (review-caught): everyday words score exactly 0.75 vs "what"
+    # ('heat'/'that'/'chat'/'watt') — they must stay None or a light named
+    # "Heat Lamp" is misrouted to 'list' before match_light runs and becomes
+    # unselectable by voice, looping the options list forever.
+    check("intent 'heat' -> None (0.75 vs 'what' must not fire)",
+          lm.match_intent("heat") is None)
+    check("intent 'heat lamp' -> None", lm.match_intent("heat lamp") is None)
+    check("intent 'that' -> None", lm.match_intent("that") is None)
+    check("light 'Heat Lamp' remains selectable by voice",
+          lm.match_light("heat lamp",
+                         [{"entity_id": "light.bathroom_heat_lamp", "name": "Heat Lamp"},
+                          {"entity_id": "light.vanity", "name": "Vanity"}])
+          is not None)
 
 
 def test_automation_gate():

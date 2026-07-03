@@ -187,13 +187,28 @@ def match_intent(text: str) -> str | None:
         for w in words:
             if len(w) < 2:
                 continue
+            # Per-WORD ratio: everything keeps the strict 0.8 except the literal
+            # word "list", which accepts 0.75 — that's what catches the example
+            # above ("lest" scores exactly 0.75) and the live whisper mishears
+            # of a spoken "list" ("lift"/"lisp", also 0.75). The looser ratio
+            # must NOT extend to the rest of the list vocab: at 0.75 vs "what",
+            # everyday words land exactly on the line ("heat"/"that"/"chat"/
+            # "watt" are all 0.75) and a light named "Heat Lamp" would become
+            # unselectable — misrouted to 'list' before match_light ever runs.
+            # on/off/cancel stay strict regardless: they ACT on the house.
             for key, vocab in (("cancel", ("cancel", "stop", "exit", "bye")),
                                ("off", ("off",)),
                                ("on", ("on",)),
                                ("list", ("list", "what", "which"))):
                 for v in vocab:
-                    if difflib.SequenceMatcher(None, w, v).ratio() >= 0.8:
+                    thr = 0.75 if v == "list" else 0.8
+                    if difflib.SequenceMatcher(None, w, v).ratio() >= thr:
                         return key
+        # Known whisper near-miss too far for any sane ratio ('left' vs 'list'
+        # is only 0.5): a LONE such word is treated as the list request. Single
+        # word only — "left hallway" must stay matchable as an area/light name.
+        if len(words) == 1 and words[0] in ("left",):
+            return "list"
     return None
 
 
