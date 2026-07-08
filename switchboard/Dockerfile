@@ -19,8 +19,9 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
         -DGGML_OPENMP=OFF \
         -DWHISPER_BUILD_TESTS=OFF \
         -DWHISPER_BUILD_EXAMPLES=ON \
-    && cmake --build /src/build -j"$(nproc)" --target whisper-cli \
-    && install -D /src/build/bin/whisper-cli /out/usr/bin/whisper-cli \
+    && cmake --build /src/build -j"$(nproc)" --target whisper-cli whisper-server \
+    && install -D /src/build/bin/whisper-cli   /out/usr/bin/whisper-cli \
+    && install -D /src/build/bin/whisper-server /out/usr/bin/whisper-server \
     && mkdir -p /out/usr/share/whisper \
     && wget -qO /out/usr/share/whisper/model.bin \
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin"
@@ -99,6 +100,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \
     && chmod +x /etc/s6-overlay/s6-rc.d/init-switchboard/up \
     && chmod +x /etc/s6-overlay/s6-rc.d/asterisk/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/whisper-server/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/webui/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/console-web/run \

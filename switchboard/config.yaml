@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.13.2"
+version: "0.14.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -35,6 +35,7 @@ options:
   operator:
     enabled: true
   operator_synonyms: []
+  stt_resident: true
   console_enabled: true
   console_port: 2300
   console_bind: "0.0.0.0"
@@ -92,6 +93,7 @@ schema:
     - ext: str
       phrases:
         - str
+  stt_resident: bool?
   console_enabled: bool?
   console_port: port?
   console_bind: str?
