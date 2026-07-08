@@ -311,8 +311,52 @@ def test_client_guard() -> None:
     check("guard: empty rejected", app._client_allowed("") is False)
 
 
+def test_cached_status_bundle() -> None:
+    import time as _t
+    calls = {"n": 0}
+
+    def fake():
+        calls["n"] += 1
+        return (["ep"], {"c": 1}, ["ch"])
+
+    orig = app.get_status_bundle
+    app.get_status_bundle = fake
+    app._status_cache["ts"] = 0.0
+    app._status_cache["value"] = None
+    try:
+        r1 = app.cached_status_bundle()
+        r2 = app.cached_status_bundle()
+        check("cache: two reads within TTL open ONE AMI session",
+              calls["n"] == 1 and r1 == r2 == (["ep"], {"c": 1}, ["ch"]))
+        # Expire the TTL -> refetch.
+        app._status_cache["ts"] = _t.monotonic() - (app._STATUS_TTL + 1.0)
+        app.cached_status_bundle()
+        check("cache: refetches once the TTL expires", calls["n"] == 2)
+        # An AMI error propagates (callers stay fail-open) and is NOT cached.
+        app._status_cache["ts"] = 0.0
+        app._status_cache["value"] = None
+
+        def boom():
+            calls["n"] += 1
+            raise app.AMIError("down")
+
+        app.get_status_bundle = boom
+        raised = False
+        try:
+            app.cached_status_bundle()
+        except app.AMIError:
+            raised = True
+        check("cache: AMIError propagates uncached (never serve stale ok)",
+              raised and app._status_cache["value"] is None)
+    finally:
+        app.get_status_bundle = orig
+        app._status_cache["ts"] = 0.0
+        app._status_cache["value"] = None
+
+
 def main() -> None:
     test_module_loads_without_fastapi()
+    test_cached_status_bundle()
     test_valid_ext()
     test_channel_has_crlf()
     test_is_light_entity()

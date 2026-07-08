@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.13.0
+
+Performance + log/SD-card hygiene, from a deep multi-agent audit. Headline: the
+operator console no longer hammers Asterisk's manager 24/7.
+
+- **The console AMI poller now runs only while a client is connected.** It used
+  to log into the manager, read status, and log off **every 3 seconds around the
+  clock even with nobody watching** — ~28,800 login/logoff cycles a day. That
+  churn filled the Asterisk log ring buffer (real call/error events scrolled out
+  within ~2 minutes) and was constant SD-card write pressure on a Pi already
+  prone to card wear. A `ClientGate` (threading.Condition, no lost-wakeup race)
+  parks the poller with zero AMI traffic when no telnet/ttyd client is attached,
+  and wakes it on connect so the first frame is fresh. Idle console → zero churn.
+- **`logger.conf` writes one channel, not two.** The redundant `messages =>` file
+  duplicated every log line to the SD card (unrotated, read by nobody — the
+  console stream already reaches the add-on log via journald). Dropped.
+- **`cdr_csv` no longer loads.** It appended `Master.csv` to the SD synchronously
+  per call for records nothing reads (VoIP.ms keeps the authoritative CDR).
+- **`/api/status` has a short-TTL single-flight cache.** An open dashboard
+  refreshes every 4s and the transfer pre-check reads the same data; they (and
+  extra browser tabs) now coalesce onto one AMI session instead of each opening
+  their own. Errors propagate uncached, so callers keep their fail-open handling.
+- **Config-generator correctness:** a room/trunk secret containing `;` or
+  leading/trailing whitespace is now rejected loudly (Asterisk would silently
+  truncate it and break registration); a **disabled** clock no longer falsely
+  blocks a wake-up code at the same ext; trunk `from_user`/`from_domain` are
+  charset-validated (falling back to the validated username/host) like the
+  other trunk fields.
+
 ## 0.12.7
 
 Talking clock (dial 41): fuller military phrasing.

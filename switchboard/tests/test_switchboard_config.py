@@ -550,6 +550,65 @@ def test_modules_conf() -> None:
           "noload = chan_alsa.so" in m)
     check("modules: chan_console noloaded (no local sound card)",
           "noload = chan_console.so" in m)
+    check("modules: cdr_csv noloaded (no local CDR consumer; dead per-call SD write)",
+          "noload = cdr_csv.so" in m)
+
+
+def test_logger_single_channel_no_duplicate_file() -> None:
+    # Only the `console` channel: the add-on captures Asterisk's console stream
+    # via journald, so a separate `messages =>` file would write every line a
+    # SECOND time to the SD card (unrotated, read by nobody) — pure card wear.
+    lg = sbc.render_logger({})
+    check("logger: console channel present", "console =>" in lg)
+    check("logger: no duplicate 'messages' file channel", "messages =>" not in lg)
+
+
+def test_secret_semicolon_or_whitespace_rejected() -> None:
+    # A ';' starts a comment mid-line in pjsip.conf (password = a;b -> 'a'), and
+    # leading/trailing whitespace is dropped — either silently truncates the
+    # secret and breaks registration. valid_rooms must drop such rooms loudly.
+    rooms = sbc.valid_rooms([
+        {"ext": "11", "name": "Good", "secret": "Str0ngPass"},
+        {"ext": "12", "name": "Semi", "secret": "pa;ss"},
+        {"ext": "13", "name": "Lead", "secret": " leadingspace"},
+        {"ext": "14", "name": "Trail", "secret": "trailingspace "},
+    ])
+    exts = {r["ext"] for r in rooms}
+    check("secret: clean room kept", "11" in exts)
+    check("secret: ';' secret dropped", "12" not in exts)
+    check("secret: leading-whitespace secret dropped", "13" not in exts)
+    check("secret: trailing-whitespace secret dropped", "14" not in exts)
+
+
+def test_wakeup_does_not_collide_with_disabled_clock() -> None:
+    # A DISABLED clock must not reserve its ext (documented invariant): wakeup at
+    # the same ext as a disabled clock should still render its dial code.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    on = sbc.render_extensions({"rooms": rooms, "trunk": {},
+                                "clock_enabled": False, "clock_ext": "42",
+                                "wakeup_enabled": True, "wakeup_ext": "42"})
+    check("wakeup: renders at ext 42 despite a DISABLED clock also set to 42",
+          "exten = 42,1,NoOp(Wake-up call)" in on and "Talking clock" not in on)
+    # But an ENABLED clock at 42 still blocks the wakeup code (real collision).
+    both = sbc.render_extensions({"rooms": rooms, "trunk": {},
+                                  "clock_enabled": True, "clock_ext": "42",
+                                  "wakeup_enabled": True, "wakeup_ext": "42"})
+    check("wakeup: still blocked by an ENABLED clock at the same ext",
+          "exten = 42,1,NoOp(Wake-up call)" not in both)
+
+
+def test_trunk_from_user_domain_validated() -> None:
+    # from_user/from_domain feed pjsip.conf directives; a bad explicit value must
+    # fall back to the already-validated username/host, never emit unchecked.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "100000_switchboard", "secret": "x", "dial_prefix": "9",
+             "from_user": "bad user;evil", "from_domain": "ok.example.com"}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    tk = pj[pj.index("[trunk]\n"):]
+    check("trunk: injecting from_user falls back to username",
+          "from_user = 100000_switchboard" in tk and "evil" not in tk)
+    check("trunk: valid from_domain is kept", "from_domain = ok.example.com" in tk)
 
 
 def test_status_announce_dialplan() -> None:
@@ -755,5 +814,9 @@ if __name__ == "__main__":
     test_operator_mwi_clear()
     test_feature_code_collisions()
     test_modules_conf()
+    test_logger_single_channel_no_duplicate_file()
+    test_secret_semicolon_or_whitespace_rejected()
+    test_wakeup_does_not_collide_with_disabled_clock()
+    test_trunk_from_user_domain_validated()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
