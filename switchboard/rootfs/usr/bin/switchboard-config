@@ -278,6 +278,15 @@ def render_pjsip(opts: dict) -> str:
 
     if trunk.get("enabled"):
         parts += render_trunk_pjsip(trunk)
+        # Defence-in-depth (anti-toll-fraud): stamp __TRANSFER_CONTEXT on every
+        # room endpoint too, so even a transfer initiated from a compromised /
+        # replayed room registration resolves its target internal-only. set_var
+        # affects ONLY transfer-target resolution, never normal dialplan matching
+        # (a room dialling 9+number directly is unaffected). Inserted right after
+        # the template's `context = rooms`; gated on trunk so non-trunk output
+        # (and test_clean_config_unchanged) stays byte-identical.
+        ti = parts.index("context = rooms")
+        parts.insert(ti + 1, "set_var = __TRANSFER_CONTEXT=internal-xfer")
 
     return "\n".join(parts) + "\n"
 
@@ -363,6 +372,15 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
         # a longer grace while ON HOLD (music flows, but a held leg can idle).
         "rtp_timeout = 60",
         "rtp_timeout_hold = 300",
+        # ANTI-TOLL-FRAUD: stamp __TRANSFER_CONTEXT on the outside-caller channel
+        # at birth (double-underscore = inherited, survives the blind-transfer
+        # masquerade), so any ##/*2 transfer this channel initiates resolves its
+        # target in [internal-xfer] (internal-only), never in [rooms] with its
+        # _9. outbound rule. And reject provider-side SIP REFER on the trunk so a
+        # remote party can't REFER us into an outbound leg. (Room endpoints keep
+        # allow_transfer=yes so the cordless/iPhone Transfer button still works.)
+        "set_var = __TRANSFER_CONTEXT=internal-xfer",
+        "allow_transfer = no",
         "",
         "[trunk-identify]",
         "type = identify",
@@ -399,7 +417,7 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
 # extensions.conf  (dial plan)
 # --------------------------------------------------------------------------- #
 def render_operator_context(joined: str, automation_on: bool = False,
-                            mwi_on: bool = True) -> list[str]:
+                            mwi_on: bool = True, trunk_on: bool = False) -> list[str]:
     """The [operator] context: dial 0 -> AGI voice operator -> validated Dial.
 
     The AGI only *sets* OP_RESULT/OP_TARGET; the dialplan does the Dial, and only
@@ -477,6 +495,13 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,Hangup()",
         "",
     ]
+    if trunk_on:
+        # Anti-toll-fraud: confine any ##/*2 transfer of an operator-connected
+        # call to internal-only by stamping __TRANSFER_CONTEXT on the calling
+        # channel just before 'T' arms on the operator Dial. Gated on trunk_on so
+        # non-trunk output stays byte-identical.
+        i = lines.index(" same = n,Dial(PJSIP/${OP_TARGET},30,rtT)")
+        lines.insert(i, " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)")
     return lines
 
 
@@ -621,12 +646,54 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         "",
         ";; ----- Outbound via SIP trunk (in [rooms] so the phones can dial it) -----",
         f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:{plen}}})",
+        # ANTI-TOLL-FRAUD origin guard (version-independent BACKSTOP): refuse
+        # outbound origination from the TRUNK endpoint itself. If a transferred-in
+        # outside caller's trunk channel ever masqueraded into [rooms] and reached
+        # here, CHANNEL(endpoint)=="trunk" blocks it — WITHOUT relying on
+        # TRANSFER_CONTEXT. (This catches the blind-## / masquerade case; the
+        # attended-*2 path originates a Local channel with an EMPTY endpoint, so
+        # this guard doesn't fire for it — that path is closed by the primary
+        # defence, __TRANSFER_CONTEXT=internal-xfer, which has no _9. to reach.)
+        ' same = n,GotoIf($["${CHANNEL(endpoint)}" = "trunk"]?blocked)',
         f" same = n,{cid}",
+        # Confine any onward ##/*2 transfer OF this outbound call to internal-only.
+        " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",
         # 'rT' not 'rtT': 'T' lets our (internal) caller transfer via ##/*2, but
         # we drop 't' so the far-end PSTN callee can't invoke our feature codes.
         f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rT)",
         " same = n,Hangup()",
+        " same = n(blocked),Congestion(5)",
+        " same = n,Hangup()",
     ]
+
+
+def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
+    """[internal-xfer] — the context that DTMF (##/*2) transfer targets resolve
+    in (via __TRANSFER_CONTEXT). It contains ONLY internal destinations: the
+    literal room extensions and, if enabled, dial-0 -> operator. It deliberately
+    has NO ``_<prefix>.`` outbound rule and NO ``_X.`` catch-all, so an outside
+    caller who was transferred in and keys ``## 9 1 900…`` matches nothing and
+    the transfer fails cleanly — the toll trunk is simply unreachable from a
+    transfer. Emitted only when the trunk is enabled (nothing to protect
+    otherwise; keeps non-trunk output byte-identical)."""
+    lines = [
+        ";; ----- DTMF transfer targets: internal ONLY (anti-toll-fraud) -----",
+        "[internal-xfer]",
+    ]
+    if operator_on:
+        lines += [
+            "exten = 0,1,NoOp(Transfer to operator)",
+            " same = n,Goto(operator,s,1)",
+        ]
+    for e in exts:
+        lines += [
+            f"exten = {e},1,NoOp(Transfer to {e})",
+            " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",  # keep chained xfers confined
+            f" same = n,Dial(PJSIP/{e},30,rtT)",
+            " same = n,Hangup()",
+        ]
+    lines.append("")
+    return lines
 
 
 def render_extensions(opts: dict) -> str:
@@ -799,10 +866,21 @@ def render_extensions(opts: dict) -> str:
 
     if exts:
         joined = "|".join(exts)
+        # When the trunk is live, confine any ##/*2 transfer of a room call to
+        # internal-only (anti-toll-fraud) by stamping __TRANSFER_CONTEXT on the
+        # calling channel just before 'T' arms. The `dial` label moves onto the
+        # Set; with the trunk disabled the line is byte-identical to before.
+        if trunk.get("enabled"):
+            room_dial = [
+                " same = n(dial),Set(__TRANSFER_CONTEXT=internal-xfer)",
+                " same = n,Dial(PJSIP/${EXTEN},30,rtT)",
+            ]
+        else:
+            room_dial = [" same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)"]
         parts += [
             "exten = _X.,1,NoOp(Room call to ${EXTEN})",
             f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
-            " same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)",
+        ] + room_dial + [
             " same = n,Hangup()",
             # Generated congestion tone (no prompt sound file required).
             " same = n(invalid),Congestion(5)",
@@ -815,7 +893,14 @@ def render_extensions(opts: dict) -> str:
             parts += render_outbound_rules(prefix, caller_id)
 
     if operator_on and exts:
-        parts += render_operator_context("|".join(exts), automation_on, mwi_on)
+        parts += render_operator_context("|".join(exts), automation_on, mwi_on,
+                                         trunk_on=bool(trunk.get("enabled")))
+
+    # Internal-only DTMF transfer-target context (anti-toll-fraud). Emitted only
+    # when the trunk is live and rooms exist — the sole case where an outside
+    # caller could be transferred in AND an outbound _9. rule exists to abuse.
+    if trunk.get("enabled") and exts:
+        parts += render_internal_xfer_context(exts, operator_on)
 
     # The [wakeup]/[wakeup-deliver] contexts exist whenever wake-ups are on, even
     # if the dial code collided (the scheduler still delivers into wakeup-deliver).
