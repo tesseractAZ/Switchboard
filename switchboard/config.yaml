@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.14.0"
+version: "0.15.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -55,6 +55,8 @@ options:
   mwi_enabled: true
   status_enabled: true
   status_ext: "45"
+  directory_enabled: true
+  directory_ext: "411"
   announce_enabled: true
   announce_ext: "46"
   announce_players:
@@ -113,6 +115,8 @@ schema:
   mwi_enabled: bool?
   status_enabled: bool?
   status_ext: str?
+  directory_enabled: bool?
+  directory_ext: str?
   announce_enabled: bool?
   announce_ext: str?
   announce_players:

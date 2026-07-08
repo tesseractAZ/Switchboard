@@ -228,6 +228,25 @@ def test_stt_rooms_decision():
     # No match -> '' (empty, so the AGI re-prompts).
     check("stt nonsense -> ''", stt.resolve_rooms_text("zzzzz qqqq", rooms) == "")
     check("stt '' -> ''", stt.resolve_rooms_text("", rooms) == "")
+    # A wake-up request short-circuits to the 'wakeup' token (operator hand-off).
+    check("stt 'wake up call' -> wakeup",
+          stt.resolve_rooms_text("wake up call", rooms) == "wakeup")
+    check("stt 'wake me up' -> wakeup",
+          stt.resolve_rooms_text("wake me up at seven", rooms) == "wakeup")
+    check("stt 'set an alarm' -> wakeup",
+          stt.resolve_rooms_text("set an alarm", rooms) == "wakeup")
+    # ... and a plain room name is NOT mistaken for a wake-up.
+    check("stt 'kitchen' is not a wake-up", stt.resolve_rooms_text("kitchen", rooms) == "11")
+
+
+def test_wakeup_gate():
+    check("wakeup 'wake up call'", matcher.is_wakeup_request("wake up call") is True)
+    check("wakeup 'wakeup'", matcher.is_wakeup_request("wakeup") is True)
+    check("wakeup 'wake me up'", matcher.is_wakeup_request("please wake me up") is True)
+    check("wakeup 'morning call'", matcher.is_wakeup_request("morning call") is True)
+    check("wakeup not a room", matcher.is_wakeup_request("kitchen") is False)
+    check("wakeup not lights", matcher.is_wakeup_request("turn on the lights") is False)
+    check("wakeup empty", matcher.is_wakeup_request("") is False)
 
 
 if __name__ == "__main__":
@@ -238,5 +257,6 @@ if __name__ == "__main__":
     test_intent()
     test_automation_gate()
     test_stt_rooms_decision()
+    test_wakeup_gate()
     print(f"\n{_count - _failures}/{_count} passed")
     raise SystemExit(1 if _failures else 0)

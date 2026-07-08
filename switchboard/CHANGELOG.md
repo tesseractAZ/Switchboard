@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.15.0
+
+Two voice additions: the operator now understands "wake-up call", and a new
+**directory assistance** service at **411** looks up a room by name.
+
+- **Say "wake-up call" to the operator.** Dial 0 and ask for a "wake-up call"
+  (also "wake me up", "morning call", "set an alarm") and the operator hands you
+  straight to the wake-up flow (dial-42) — no need to remember the number. The
+  intent is matched as a whole phrase, so it won't fire on an unrelated sentence
+  that merely contains the word "wake".
+- **Directory assistance at 411.** Dial **411**, say a room name, and you hear
+  its extension and get connected ("Kitchen, extension 11. Connecting you now.").
+  Say **"list"** to hear the whole directory; **"goodbye"** to leave. Recognition
+  reuses the resident whisper-server and the same validated room list as the
+  operator, biased toward your room names for accuracy. The dial code is
+  configurable (`directory_ext`, default `411`) and skips itself if it would
+  collide with a room or another feature's extension.
+- **Safe by construction.** The 411 flow never dials on its own — the AGI only
+  proposes a room ext, and the `[directory]` dialplan re-validates it against the
+  known-room allow-list before connecting, so a mis-recognition can't reach an
+  outside number. When the trunk is on, the connect leg is pinned to the
+  outbound-free `internal-xfer` transfer context (same toll-fraud guard as 0.13.2).
+- **Feature-independent.** The shared rooms map is now staged whenever the
+  operator **or** the directory is enabled, so turning the operator off no longer
+  leaves 411 with an empty directory. The `list` re-prompt is capped so a noisy
+  line can't loop.
+- **Resident STT now covers every voice feature.** The whisper-server RAM gate
+  previously listed only operator/wake-up/automation, so an install running only
+  dial-a-status (45) or announce (46) fell back to the slow per-call `whisper-cli`.
+  The gate now enumerates all six STT consumers (0/42/43/45/46/411) — each keeps
+  the recognizer resident when enabled.
+
 ## 0.14.0
 
 Voice recognition is now resident — the operator, wake-up, and automation flows

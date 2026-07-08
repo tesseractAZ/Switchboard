@@ -715,6 +715,54 @@ def test_transfer_toll_fraud_defense() -> None:
           "TRANSFER_CONTEXT" not in pj_off and "allow_transfer" not in pj_off)
 
 
+def test_operator_wakeup_route() -> None:
+    # Saying "wake up call" to the operator (dial 0) hands off to the wake-up
+    # flow; the route is gated on the wake-up feature being enabled (so the
+    # [wakeup] context it Gotos actually exists).
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+    on = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True},
+                                "wakeup_enabled": True, "trunk": {}})
+    check("operator routes a spoken wake-up to the wake-up flow",
+          'GotoIf($["${OP_RESULT}" = "wakeup"]?wakeup,s,1)' in on)
+    off = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True},
+                                 "wakeup_enabled": False, "trunk": {}})
+    check("operator has NO wake-up route when wake-ups are disabled",
+          '"${OP_RESULT}" = "wakeup"' not in off)
+
+
+def test_directory_dialplan() -> None:
+    # Directory assistance (dial 411): a room-lookup-by-voice context that only
+    # ever Dials a validated room ext.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "16", "name": "Office", "secret": "s2"}])
+    e = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("directory dial code 411 present",
+          "exten = 411,1,NoOp(Directory assistance)" in e and "Goto(directory,s,1)" in e)
+    check("[directory] context runs the AGI",
+          "[directory]" in e and "AGI(switchboard-directory.agi)" in e)
+    dctx = e[e.index("[directory]"):]
+    dctx = dctx[:dctx.index("\n\n")]
+    check("directory only dials a KNOWN room ext (allow-list)",
+          'GotoIf($["${DIR_TARGET}" : "^(11|16)$"]?:bye)' in dctx)
+    check("directory connects only on an explicit connect result",
+          'GotoIf($["${DIR_RESULT}" = "connect"]?:bye)' in dctx and "Dial(PJSIP/${DIR_TARGET}" in dctx)
+    # Disabled -> no dial code, no context.
+    off = sbc.render_extensions({"rooms": rooms, "directory_enabled": False, "trunk": {}})
+    check("directory disabled removes the dial code + context",
+          "Directory assistance" not in off and "[directory]" not in off)
+    # A directory_ext that collides with a room is skipped.
+    coll = sbc.render_extensions({"rooms": rooms, "directory_ext": "11", "trunk": {}})
+    check("directory_ext colliding with a room ext is skipped (no dial code)",
+          "exten = 11,1,NoOp(Directory assistance)" not in coll)
+    # With the trunk live, the connect leg is confined (anti-toll-fraud).
+    et = sbc.render_extensions({"rooms": rooms, "trunk": {"enabled": True,
+                                "provider_host": "h", "username": "u", "secret": "x", "dial_prefix": "9"}})
+    dt = et[et.index("[directory]"):]
+    dt = dt[:dt.index("\n\n")]
+    check("directory connect leg confined to internal-xfer when trunk on",
+          "Set(__TRANSFER_CONTEXT=internal-xfer)" in dt)
+
+
 def test_status_announce_dialplan() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
     e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
@@ -810,6 +858,37 @@ def test_voice_dirs_independent_of_operator() -> None:
         sbc.RUN_DIR = orig
 
 
+def test_rooms_map_staged_for_directory() -> None:
+    # The shared rooms map (operator.json) must be staged when EITHER the operator
+    # OR directory assistance is enabled — dial-411 resolves room names against it,
+    # so operator-off + directory-on must still write it (else "Directory is
+    # unavailable"). Both-off writes nothing. (Regression: it used to gate on
+    # operator.enabled alone.)
+    import json as _json
+    import tempfile
+    from pathlib import Path as _P
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    orig = sbc.RUN_DIR
+    try:
+        # operator OFF, directory ON -> staged
+        run = _P(tempfile.mkdtemp()); sbc.RUN_DIR = run
+        sbc.write_operator_runtime({"rooms": rooms, "operator": {"enabled": False},
+                                    "directory_enabled": True})
+        op = run / "operator.json"
+        check("rooms-map: staged when operator off but directory on", op.is_file())
+        if op.is_file():
+            check("rooms-map: contains the room for the directory to read",
+                  _json.loads(op.read_text())["rooms"] == [{"ext": "11", "name": "Kitchen"}])
+        # both OFF -> not staged
+        run2 = _P(tempfile.mkdtemp()); sbc.RUN_DIR = run2
+        sbc.write_operator_runtime({"rooms": rooms, "operator": {"enabled": False},
+                                    "directory_enabled": False})
+        check("rooms-map: NOT staged when operator and directory both off",
+              not (run2 / "operator.json").exists())
+    finally:
+        sbc.RUN_DIR = orig
+
+
 def test_disabled_feature_frees_ext() -> None:
     # A disabled clock no longer reserves its ext, so another feature may reuse it.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])
@@ -892,6 +971,7 @@ if __name__ == "__main__":
     test_features_staging()
     test_write_perms_tight()
     test_voice_dirs_independent_of_operator()
+    test_rooms_map_staged_for_directory()
     test_disabled_feature_frees_ext()
     test_state_dir_setup()
     test_state_dir_setup_failure_is_graceful()
@@ -924,5 +1004,7 @@ if __name__ == "__main__":
     test_trunk_from_user_domain_validated()
     test_call_audio_qos_rtp_jitter()
     test_transfer_toll_fraud_defense()
+    test_operator_wakeup_route()
+    test_directory_dialplan()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

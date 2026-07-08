@@ -130,6 +130,23 @@ def is_automation(transcript: str) -> bool:
         return any(f" {w} " in low for w in _AUTOMATION_WORDS)
 
 
+# Multi-word first so "wake up call" matches before a bare "wake"/"call" could;
+# all are phrases no room name contains, so a real room never trips this.
+_WAKEUP_PHRASES = (
+    "wake up call", "wakeup call", "wake me up", "wake up", "wakeup",
+    "morning call", "alarm call", "set a wake", "set an alarm", "wake call",
+)
+
+
+def is_wakeup_request(transcript: str) -> bool:
+    """True only when the caller clearly asks the operator for a wake-up/alarm,
+    so it routes into the wake-up flow instead of a room connection. Conservative
+    (whole-phrase, word-boundary) so an ordinary room name never trips it."""
+    low = " " + re.sub(r"[^a-z0-9 ]+", " ", (transcript or "").lower()) + " "
+    low = re.sub(r"\s+", " ", low)
+    return any(f" {w} " in low for w in _WAKEUP_PHRASES)
+
+
 def match(transcript: str, rooms: list[dict], synonyms: dict | None = None,
           threshold: float = 0.6, margin: float = 0.08) -> tuple[str | None, float, str]:
     """Resolve a transcript to an extension. See module docstring."""
