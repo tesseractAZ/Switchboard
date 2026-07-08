@@ -637,6 +637,84 @@ def test_call_audio_qos_rtp_jitter() -> None:
           ft.index("JITTERBUFFER") < ft.index("Dial("))
 
 
+def _lines(text):
+    return [ln.strip() for ln in text.splitlines()]
+
+
+def _set_precedes_dial(lines, dial_needle):
+    """True iff a `Set(__TRANSFER_CONTEXT=internal-xfer)` immediately precedes the
+    first line containing dial_needle (the intervening priority label — bare `n`
+    or `n(dial)` — doesn't matter, only that the Set is the step just before)."""
+    for i, ln in enumerate(lines):
+        if dial_needle in ln:
+            return i > 0 and "Set(__TRANSFER_CONTEXT=internal-xfer)" in lines[i - 1]
+    return False
+
+
+def test_transfer_toll_fraud_defense() -> None:
+    # v0.14.x anti-toll-fraud: an outside caller transferred into a room must not
+    # be able to ## / *2 a 9-number out through the trunk. Three complementary
+    # layers, ALL gated on trunk.enabled so non-trunk output is byte-identical.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "19", "name": "Cordless", "secret": "s2"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "u", "secret": "x", "dial_prefix": "9",
+             "outbound_caller_id": "2025550100"}
+    opts = {"rooms": rooms, "trunk": trunk, "operator": {"enabled": True}}
+    e = sbc.render_extensions(opts)
+    pj = sbc.render_pjsip(opts)
+    el = _lines(e)
+
+    # LAYER A: version-independent origin guard on the outbound rule.
+    check("toll: outbound _9. blocks origination from the trunk endpoint",
+          'GotoIf($["${CHANNEL(endpoint)}" = "trunk"]?blocked)' in e
+          and "same = n(blocked),Congestion(5)" in el)
+
+    # LAYER B1: the internal-only transfer-target context.
+    ix = e[e.index("[internal-xfer]"):]
+    ix = ix[:ix.index("\n\n")]
+    check("toll: [internal-xfer] context emitted", "[internal-xfer]" in e)
+    check("toll: internal-xfer lists literal room exts",
+          "exten = 11,1,NoOp(Transfer to 11)" in ix and "exten = 19,1,NoOp(Transfer to 19)" in ix)
+    check("toll: internal-xfer routes 0 -> operator", "exten = 0,1,NoOp(Transfer to operator)" in ix)
+    check("toll: internal-xfer has NO outbound/wildcard (the whole point)",
+          "_9." not in ix and "_X." not in ix and "@trunk" not in ix
+          and "_9011." not in ix and "_9900." not in ix)
+
+    # LAYER B2/B3/B4: __TRANSFER_CONTEXT stamped everywhere (double-underscore).
+    check("toll: uses inherited __TRANSFER_CONTEXT (survives blind-transfer)",
+          "TRANSFER_CONTEXT=internal-xfer" in e and "__TRANSFER_CONTEXT" in e)
+    check("toll: Set precedes the room Dial", _set_precedes_dial(el, "Dial(PJSIP/${EXTEN},30,rtT)"))
+    check("toll: Set precedes the operator Dial", _set_precedes_dial(el, "Dial(PJSIP/${OP_TARGET},30,rtT)"))
+    check("toll: Set precedes the outbound @trunk Dial", _set_precedes_dial(el, "@trunk,60,rT)"))
+    tk = pj[pj.index("[trunk]\n"):pj.index("[trunk-identify]")]
+    check("toll: trunk endpoint stamps __TRANSFER_CONTEXT at birth (inherited)",
+          "set_var = __TRANSFER_CONTEXT=internal-xfer" in tk)
+    tmpl = pj[pj.index("[room-endpoint](!)"):pj.index("[room-aor]")]
+    check("toll: room-endpoint template also stamps __TRANSFER_CONTEXT (defence-in-depth)",
+          "set_var = __TRANSFER_CONTEXT=internal-xfer" in tmpl)
+
+    # LAYER C: reject provider-side REFER on the trunk only.
+    check("toll: trunk rejects provider REFER (allow_transfer=no)", "allow_transfer = no" in tk)
+    check("toll: room endpoints keep transfer (Transfer button) — allow_transfer NOT no",
+          "allow_transfer = no" not in tmpl)
+
+    # operator-off omits the exten 0 target.
+    e_noop = sbc.render_extensions({"rooms": rooms, "trunk": trunk, "operator": {"enabled": False}})
+    ixn = e_noop[e_noop.index("[internal-xfer]"):]
+    ixn = ixn[:ixn.index("\n\n")]
+    check("toll: operator disabled -> no 'exten = 0' in internal-xfer",
+          "exten = 0,1,NoOp(Transfer to operator)" not in ixn and "exten = 11,1" in ixn)
+
+    # Trunk DISABLED: none of the toll-fraud machinery appears (byte-identity).
+    e_off = sbc.render_extensions({"rooms": rooms, "trunk": {}, "operator": {"enabled": True}})
+    pj_off = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
+    check("toll: trunk disabled -> no internal-xfer / TRANSFER_CONTEXT in dialplan",
+          "internal-xfer" not in e_off and "TRANSFER_CONTEXT" not in e_off)
+    check("toll: trunk disabled -> no set_var/allow_transfer in pjsip",
+          "TRANSFER_CONTEXT" not in pj_off and "allow_transfer" not in pj_off)
+
+
 def test_status_announce_dialplan() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
     e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
@@ -845,5 +923,6 @@ if __name__ == "__main__":
     test_wakeup_does_not_collide_with_disabled_clock()
     test_trunk_from_user_domain_validated()
     test_call_audio_qos_rtp_jitter()
+    test_transfer_toll_fraud_defense()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
