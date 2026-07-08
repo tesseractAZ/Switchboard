@@ -114,6 +114,9 @@ def recognize(attempt: int) -> tuple[str, str]:
     sys.stderr.write(f"[operator] rec attempt={attempt} bytes={size}\n")
     try:
         result = _stt(["--mode", "rooms"], wav)
+        if result == "wakeup":
+            sys.stderr.write("[operator] wake-up intent\n")
+            return "wakeup", ""
         if result == "automation":
             sys.stderr.write("[operator] automation intent\n")
             return "automation", ""
@@ -130,6 +133,9 @@ def main() -> None:
     for attempt in range(MAX_ATTEMPTS):
         stream("switchboard/sw-greeting" if attempt == 0 else "switchboard/sw-didnt-catch")
         kind, ext = recognize(attempt)
+        if kind == "wakeup":
+            set_var("OP_RESULT", "wakeup")
+            return
         if kind == "automation":
             set_var("OP_RESULT", "automation")
             return

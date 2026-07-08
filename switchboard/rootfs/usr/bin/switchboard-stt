@@ -277,6 +277,8 @@ def resolve_rooms_text(text: str, rooms: list, synonyms: dict | None = None,
 
     The automation check is intentionally conservative (lights_match keeps it so)
     so an ordinary room name like "garage"/"office" still resolves to its ext."""
+    if matcher.is_wakeup_request(text):
+        return "wakeup"
     if lights_match is not None and lights_match.is_automation_request(text):
         return "automation"
     ext, _score, _reason = matcher.match(text, rooms, synonyms or {}, threshold)

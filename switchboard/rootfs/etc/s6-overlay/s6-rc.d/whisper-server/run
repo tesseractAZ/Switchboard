@@ -15,12 +15,20 @@ if ! bashio::config.true 'stt_resident'; then
     exec sleep infinity
 fi
 
-# RAM gate: don't hold ~150 MB resident when NO speech feature is enabled (the
-# operator, wake-up, and automation flows are the only STT consumers).
+# RAM gate: don't hold ~150 MB resident when NO speech feature is enabled. EVERY
+# feature that shells out to switchboard-stt is a consumer — operator (dial 0,
+# --mode rooms), wake-up (42, --mode time), automation (43), dial-a-status (45),
+# announce (46) and directory assistance (411), all --mode transcribe. Each
+# toggles independently; miss any one and that feature silently falls back to the
+# slow per-call whisper-cli, which can blow the 25 s AGI timeout. Keep this list
+# in lockstep with the AGIs that call sp.listen / switchboard-stt.
 if ! bashio::config.true 'operator.enabled' \
    && ! bashio::config.true 'wakeup_enabled' \
-   && ! bashio::config.true 'automation_enabled'; then
-    bashio::log.info "No STT feature enabled (operator/wakeup/automation all off); whisper-server idling."
+   && ! bashio::config.true 'automation_enabled' \
+   && ! bashio::config.true 'status_enabled' \
+   && ! bashio::config.true 'announce_enabled' \
+   && ! bashio::config.true 'directory_enabled'; then
+    bashio::log.info "No STT feature enabled (operator/wakeup/automation/status/announce/directory all off); whisper-server idling."
     exec sleep infinity
 fi
 

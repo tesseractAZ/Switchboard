@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+"""Switchboard directory assistance — dial 411, look a room up by voice.
+
+Say a room name -> hear its extension -> get connected. Say "list" to hear the
+whole directory; "goodbye" to leave. On a match this AGI sets DIR_TARGET (a room
+ext) + DIR_RESULT=connect and returns — the [directory] dialplan does the
+validated Dial (this AGI never dials). stdlib only, runs as the asterisk user;
+recognition uses the resident whisper-server via switchboard-stt, and the
+data-shaping/intent logic lives in the pure, unit-tested ``directory`` module.
+"""
+from __future__ import annotations
+
+import json
+import sys
+
+sys.path.insert(0, "/usr/share/switchboard/operator")
+import agi_speech as sp   # noqa: E402  (shared say/listen/stream AGI helpers)
+import match as matcher   # noqa: E402  (shared, unit-tested room matcher)
+import directory as dir_  # noqa: E402  (pure directory helpers)
+
+OPERATOR_JSON = "/run/switchboard/operator.json"
+MAX_ATTEMPTS = 3
+
+
+def load_rooms():
+    """(rooms, synonyms, threshold) from the staged operator.json, or empty."""
+    try:
+        with open(OPERATOR_JSON) as fh:
+            data = json.load(fh)
+        rooms = data.get("rooms") or []
+        synonyms = data.get("synonyms") or {}
+        threshold = float(data.get("threshold", 0.6) or 0.6)
+        return rooms, synonyms, threshold
+    except (OSError, ValueError):
+        return [], {}, 0.6
+
+
+def set_var(name: str, value: str) -> None:
+    sp.agi(f'SET VARIABLE {name} "{value}"')
+
+
+def main() -> None:
+    sp.read_env()
+    rooms, synonyms, threshold = load_rooms()
+    if not rooms:
+        sp.say_or("Directory is unavailable right now. Goodbye.")
+        return
+    # Bias whisper toward the room names + the command words the prompt offers.
+    bias = " ".join(r.get("name", "") for r in rooms) + " list"
+    attempt = 0
+    lists = 0  # a 'list' re-prompt is free, but cap it so a noisy line can't wedge
+    while attempt < MAX_ATTEMPTS:
+        if attempt == 0:
+            sp.say_or("Directory. Say a room name, or say list.", sp.PROMPT_BEEP)
+        else:
+            sp.say_or("I didn't catch that. Say a room name, or say list.", sp.PROMPT_BEEP)
+        text = sp.listen("dir", attempt, bias=bias)
+        if dir_.is_cancel(text):
+            return
+        if dir_.is_list_request(text) and lists < MAX_ATTEMPTS:
+            lists += 1
+            sp.say_or(dir_.directory_text(rooms))
+            continue  # a 'list' request re-prompts without burning an attempt
+        ext, _score, _reason = matcher.match(text, rooms, synonyms, threshold)
+        if ext:
+            name = dir_.name_for(rooms, ext)
+            sp.say_or(dir_.announce_text(name, ext) + " Connecting you now.")
+            set_var("DIR_TARGET", ext)
+            set_var("DIR_RESULT", "connect")
+            return
+        attempt += 1
+    sp.say_or("Sorry, I couldn't find that room. Goodbye.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # never wedge the channel
+        sys.stderr.write(f"[directory] {exc}\n")
