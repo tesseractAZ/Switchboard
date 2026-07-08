@@ -611,6 +611,32 @@ def test_trunk_from_user_domain_validated() -> None:
     check("trunk: valid from_domain is kept", "from_domain = ok.example.com" in tk)
 
 
+def test_call_audio_qos_rtp_jitter() -> None:
+    # v0.13.1 call-audio tuning. QoS marks (help only if the AP honours DSCP, but
+    # zero-risk), an RTP watchdog on the NAT'd trunk, and an adaptive jitter
+    # buffer on the public-internet trunk leg toward the answering handset.
+    rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
+    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9"}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    transport = pj[pj.index("[transport-udp]"):pj.index("[room-endpoint]")]
+    check("qos: SIP signalling marked CS3 on the transport",
+          "tos = cs3" in transport and "cos = 3" in transport)
+    tmpl = pj[pj.index("[room-endpoint](!)"):pj.index("[room-aor]")]
+    check("qos: room RTP audio marked EF", "tos_audio = ef" in tmpl and "cos_audio = 5" in tmpl)
+    tk = pj[pj.index("[trunk]\n"):pj.index("[trunk-identify]")]
+    check("qos: trunk RTP audio marked EF", "tos_audio = ef" in tk)
+    check("rtp: trunk has a 60s RTP watchdog (not 30 -> survives ring-time early media)",
+          "rtp_timeout = 60" in tk and "rtp_timeout_hold = 300" in tk)
+    # Jitter buffer on the inbound trunk channel, set BEFORE the Dial.
+    e = sbc.render_extensions({"rooms": rooms, "trunk": {**trunk, "inbound_ext": "19"}})
+    ft = e[e.index("[from-trunk]"):]
+    check("jitter: adaptive jitterbuffer set on the inbound trunk channel",
+          "Set(JITTERBUFFER(adaptive)=default)" in ft)
+    check("jitter: set BEFORE the Dial (buffers before bridging to the handset)",
+          ft.index("JITTERBUFFER") < ft.index("Dial("))
+
+
 def test_status_announce_dialplan() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
     e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
@@ -818,5 +844,6 @@ if __name__ == "__main__":
     test_secret_semicolon_or_whitespace_rejected()
     test_wakeup_does_not_collide_with_disabled_clock()
     test_trunk_from_user_domain_validated()
+    test_call_audio_qos_rtp_jitter()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

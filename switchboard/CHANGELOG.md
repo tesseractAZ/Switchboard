@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.1
+
+Call-audio tuning, the second batch from the deep audit (the call-path changes,
+kept separate from the v0.13.0 control-plane fixes).
+
+- **Adaptive jitter buffer on the inbound trunk leg.** Audio from VoIP.ms crosses
+  the public internet (jittery); the LAN legs don't. `[from-trunk]` now sets
+  `JITTERBUFFER(adaptive)` on the trunk channel before dialing the handset, so
+  the answering cordless/FXS hears a de-jittered stream instead of choppy audio.
+- **RTP watchdog on the NAT'd trunk.** `rtp_timeout = 60` / `rtp_timeout_hold =
+  300` on the `[trunk]` endpoint tear a channel down if its media stalls
+  (provider drops it, NAT pinhole closes mid-call) instead of hanging forever and
+  leaking the RTP port. 60s (not 30) so one-way early media during the 30s inbound
+  ring can't trip it before answer.
+- **DSCP/QoS marking.** RTP audio marked EF and SIP signalling CS3 on the
+  endpoints/transport, so the Wi-Fi cordless's voice gets WMM priority over bulk
+  LAN traffic. Only helps if the AP honours DSCP (most do); zero-risk otherwise.
+
 ## 0.13.0
 
 Performance + log/SD-card hygiene, from a deep multi-agent audit. Headline: the
