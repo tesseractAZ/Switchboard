@@ -1,0 +1,50 @@
+#!/command/with-contenv bashio
+# Resident whisper.cpp recognizer. Keeps the ~142 MB base.en model loaded in RAM
+# and serves transcription over a loopback HTTP endpoint, so switchboard-stt no
+# longer reloads the whole model from disk on every single utterance (dial-0
+# operator, 42 wake-up, 43 automation). switchboard-stt POSTs the recording here
+# and transparently falls back to the whisper-cli subprocess if this server is
+# down or still loading — so this service is never on the critical path for a
+# call, and nothing depends on it.
+
+# One-flip rollback: stt_resident:false idles this longrun; switchboard-stt then
+# gets connection-refused and reverts to the exact whisper-cli path, no code
+# coordination needed.
+if ! bashio::config.true 'stt_resident'; then
+    bashio::log.info "stt_resident:false — resident recognizer disabled; idling (whisper-cli per call)."
+    exec sleep infinity
+fi
+
+# RAM gate: don't hold ~150 MB resident when NO speech feature is enabled (the
+# operator, wake-up, and automation flows are the only STT consumers).
+if ! bashio::config.true 'operator.enabled' \
+   && ! bashio::config.true 'wakeup_enabled' \
+   && ! bashio::config.true 'automation_enabled'; then
+    bashio::log.info "No STT feature enabled (operator/wakeup/automation all off); whisper-server idling."
+    exec sleep infinity
+fi
+
+MODEL="${SW_WHISPER_MODEL:-/usr/share/whisper/model.bin}"
+if [ ! -f "${MODEL}" ]; then
+    # Never crash-loop s6 — idle so switchboard-stt just uses whisper-cli.
+    bashio::log.warning "whisper model ${MODEL} missing; whisper-server idling (whisper-cli fallback active)."
+    exec sleep infinity
+fi
+
+PORT="${SW_WHISPER_PORT:-8126}"
+THREADS="$(nproc 2>/dev/null || echo 2)"
+[ "${THREADS}" -gt 4 ] 2>/dev/null && THREADS=4   # match the CLI's min(4,cpu)
+
+bashio::log.info "Starting resident whisper-server on 127.0.0.1:${PORT} (model ${MODEL}, ${THREADS} threads) ..."
+# Bind LOOPBACK ONLY — host_network=true means 0.0.0.0 would expose an
+# unauthenticated inference server on the LAN. Run as the unprivileged asterisk
+# uid (only reads a world-readable model + binds a high loopback port). s6
+# auto-restarts on crash; the gap is covered by the whisper-cli fallback.
+exec s6-setuidgid asterisk \
+    /usr/bin/whisper-server \
+        --model "${MODEL}" \
+        --host 127.0.0.1 \
+        --port "${PORT}" \
+        --threads "${THREADS}" \
+        --beam-size 1 \
+        --language en

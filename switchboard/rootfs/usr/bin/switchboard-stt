@@ -17,9 +17,11 @@ is resolved to an extension by the shared, unit-tested matcher.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,22 @@ except Exception:  # noqa: BLE001
 WHISPER_BIN = os.environ.get("SW_WHISPER_BIN", "/usr/bin/whisper-cli")
 WHISPER_MODEL = os.environ.get("SW_WHISPER_MODEL", "/usr/share/whisper/model.bin")
 OPERATOR_JSON = "/run/switchboard/operator.json"
+
+# Resident whisper-server (loopback HTTP). When up, it transcribes without
+# reloading the 142 MB model per call. '0' disables it (pure whisper-cli).
+WHISPER_SERVER = os.environ.get("SW_WHISPER_SERVER", "1") != "0"
+WHISPER_SERVER_HOST = os.environ.get("SW_WHISPER_SERVER_HOST", "127.0.0.1")
+WHISPER_SERVER_PORT = int(os.environ.get("SW_WHISPER_PORT", "8126") or "8126")
+# Split budget so server-timeout + CLI-fallback can NEVER exceed the AGI's ~25s
+# hard kill: a fast CONNECT failure (server down/loading) falls back to the CLI
+# (~instant + 20s); a POST-connect READ hang returns '' instead (the AGI attempt
+# loop re-records) and never stacks a 20s CLI run on top.
+WHISPER_CONNECT_TIMEOUT = float(os.environ.get("SW_WHISPER_CONNECT_TIMEOUT", "2"))
+WHISPER_READ_TIMEOUT = float(os.environ.get("SW_WHISPER_READ_TIMEOUT", "8"))
+
+# transcribe() dispatch sentinels (not transcripts).
+_TRY_CLI = object()   # server unreachable at connect -> use whisper-cli
+_GIVE_UP = object()   # server accepted then hung -> return '' (AGI re-records)
 
 
 def log(msg: str) -> None:
@@ -111,7 +129,92 @@ def to_16k_wav(src_path: str, dst_path: str) -> bool:
 _BRACKET = re.compile(r"\[[^\]]*\]|\([^)]*\)")  # [BLANK_AUDIO], (speaking), etc.
 
 
-def transcribe(wav16: str, prompt: str) -> str:
+def _normalize(raw: str) -> str:
+    """Strip whisper's [BLANK_AUDIO]/(noise) brackets + collapse whitespace.
+
+    Applied to BOTH the server and CLI transcripts so the text feeding the
+    matcher / timeparse / lights_match is byte-identical regardless of path."""
+    return " ".join(_BRACKET.sub(" ", raw or "").split()).strip()
+
+
+def _build_multipart(wav_bytes: bytes, prompt: str) -> tuple[str, bytes]:
+    """A multipart/form-data body for whisper-server's /inference: the ready
+    16 kHz mono WAV plus the same recognition params the CLI uses. Pure (no I/O)
+    so it is unit-testable. Returns (boundary, body)."""
+    boundary = "----swstt7f3a9c2e1b"
+    crlf = b"\r\n"
+    parts = []
+
+    def field(name: str, value: str) -> None:
+        parts.append(b"--" + boundary.encode() + crlf)
+        parts.append(f'Content-Disposition: form-data; name="{name}"'.encode() + crlf + crlf)
+        parts.append(value.encode() + crlf)
+
+    parts.append(b"--" + boundary.encode() + crlf)
+    parts.append(b'Content-Disposition: form-data; name="file"; filename="a.wav"' + crlf)
+    parts.append(b"Content-Type: audio/wav" + crlf + crlf)
+    parts.append(wav_bytes + crlf)
+    field("response_format", "json")
+    field("temperature", "0")
+    field("language", "en")
+    if prompt:
+        field("prompt", prompt)   # whisper-server initial-prompt bias
+    parts.append(b"--" + boundary.encode() + b"--" + crlf)
+    return boundary, b"".join(parts)
+
+
+def _transcribe_server(wav16: str, prompt: str):
+    """POST the WAV to the resident whisper-server. Returns the normalized text
+    (possibly ''), or a sentinel: _TRY_CLI on a CONNECT-phase failure (server
+    down/still loading -> caller falls back to whisper-cli), _GIVE_UP on a
+    POST-connect read hang (return '' so the AGI re-records, no stacked CLI)."""
+    try:
+        with open(wav16, "rb") as fh:
+            wav_bytes = fh.read()
+    except OSError:
+        return _TRY_CLI
+    boundary, body = _build_multipart(wav_bytes, prompt)
+    conn = http.client.HTTPConnection(WHISPER_SERVER_HOST, WHISPER_SERVER_PORT,
+                                      timeout=WHISPER_CONNECT_TIMEOUT)
+    try:
+        conn.connect()  # CONNECT phase: refused/timeout here == server not ready
+    except (OSError, socket.timeout) as exc:
+        log(f"whisper-server unreachable ({exc}); falling back to whisper-cli")
+        conn.close()
+        return _TRY_CLI
+    try:
+        conn.sock.settimeout(WHISPER_READ_TIMEOUT)  # POST-connect: read budget
+        conn.request("POST", "/inference", body=body,
+                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                              "Content-Length": str(len(body))})
+        resp = conn.getresponse()
+        status = resp.status
+        data = resp.read()
+    except (socket.timeout, OSError, http.client.HTTPException) as exc:
+        # Once CONNECTED, NEVER stack a 20s whisper-cli run on top of the time
+        # already spent post-connect — that could blow the AGI's ~25s hard kill.
+        # A hung / reset (ConnectionResetError, RemoteDisconnected) / truncated
+        # (IncompleteRead) server returns '' so the AGI's re-record loop handles
+        # it. The CLI fallback is ONLY for a server unreachable at CONNECT (above,
+        # ~instant, so the CLI keeps its full budget). Measured server inference
+        # ~1-2s « the 8s read budget, so a real slow decode is not this path.
+        log(f"whisper-server post-connect failure ({exc}); returning empty (re-record)")
+        return _GIVE_UP
+    finally:
+        conn.close()
+    if status != 200:
+        log(f"whisper-server HTTP {status}; returning empty (re-record)")
+        return _GIVE_UP
+    try:
+        text = json.loads(data).get("text", "")
+    except (ValueError, AttributeError):
+        text = data.decode("utf-8", "replace")   # non-JSON body: use raw
+    return _normalize(text)
+
+
+def _transcribe_cli(wav16: str, prompt: str) -> str:
+    """The original path: spawn whisper-cli (reloads the model each call). Kept
+    verbatim as the always-available fallback."""
     cmd = [
         WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav16,
         "-l", "en", "-nt", "-bs", "1",
@@ -124,8 +227,20 @@ def transcribe(wav16: str, prompt: str) -> str:
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"whisper failed: {exc}")
         return ""
-    text = _BRACKET.sub(" ", proc.stdout or "")
-    return " ".join(text.split()).strip()
+    return _normalize(proc.stdout)
+
+
+def transcribe(wav16: str, prompt: str) -> str:
+    """Recognize `wav16`. Prefer the resident whisper-server (no per-call model
+    reload); fall back to whisper-cli on a connect-phase miss; return '' (no CLI)
+    on a server hang so the caller's re-record loop handles it within budget."""
+    if WHISPER_SERVER:
+        result = _transcribe_server(wav16, prompt)
+        if result is _GIVE_UP:
+            return ""
+        if result is not _TRY_CLI:
+            return result
+    return _transcribe_cli(wav16, prompt)
 
 
 def _recording_to_text(infile: str, prompt: str) -> str:

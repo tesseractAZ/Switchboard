@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.14.0
+
+Voice recognition is now resident — the operator, wake-up, and automation flows
+respond noticeably faster.
+
+- **whisper stays loaded in RAM instead of reloading per call.** `switchboard-stt`
+  used to spawn `whisper-cli` for every utterance, reloading the ~142 MB `base.en`
+  model from disk each time (seconds of latency on every dial-0 / 42 / 43 step). A
+  new supervised **`whisper-server`** (whisper.cpp's HTTP server) keeps the model
+  resident on loopback `127.0.0.1:8126`; `switchboard-stt` POSTs the recording to
+  it and gets a transcription back without the reload.
+- **Fails safe, always.** If the server is down or still loading at boot,
+  `switchboard-stt` falls back to the unchanged `whisper-cli` path (nothing
+  depends on the server, so a crash-looping recognizer can never gate a call). A
+  post-connect server hang returns empty so the caller's re-record loop handles
+  it — the server-timeout + any fallback is budgeted to stay under the AGI's hard
+  kill, never stacking a slow CLI run on top.
+- **Least privilege + resource-aware.** Binds loopback only (never the LAN),
+  runs as the unprivileged `asterisk` user, and idles (holding no RAM) when the
+  new `stt_resident` option is off or when no speech feature is enabled.
+- **One-flip rollback:** set `stt_resident: false` to idle the server and revert
+  to exactly the old per-call `whisper-cli` behaviour, no other change needed.
+
 ## 0.13.2
 
 Close a toll-fraud path: an outside caller transferred in can no longer dial out.
