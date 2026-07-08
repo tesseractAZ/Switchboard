@@ -216,6 +216,10 @@ def render_pjsip(opts: dict) -> str:
         "type = transport",
         "protocol = udp",
         "bind = 0.0.0.0:5060",
+        # QoS: mark SIP signalling CS3. Only helps if the AP/router maps DSCP to
+        # Wi-Fi WMM (most consumer gear does), and is zero-risk otherwise.
+        "tos = cs3",
+        "cos = 3",
         "",
         ";; ----- Endpoint template shared by all room phones -----",
         "[room-endpoint](!)",
@@ -228,6 +232,10 @@ def render_pjsip(opts: dict) -> str:
         "force_rport = yes",
         "rewrite_contact = yes",      # ATAs on the LAN; trust the source port
         "dtmf_mode = rfc4733",
+        # QoS: mark RTP audio EF so the Wi-Fi cordless's voice gets WMM priority
+        # over bulk LAN traffic (zero-risk if the AP doesn't honour DSCP).
+        "tos_audio = ef",
+        "cos_audio = 5",
         "",
         "[room-aor](!)",
         "type = aor",
@@ -346,6 +354,15 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
         "force_rport = yes",
         "rewrite_contact = yes",
         "dtmf_mode = rfc4733",
+        "tos_audio = ef",             # QoS: EF priority for the PSTN leg's RTP
+        "cos_audio = 5",
+        # RTP watchdog on the NAT'd trunk: if the media stream stalls (provider
+        # drops it, NAT pinhole closes mid-call), tear the channel down instead
+        # of hanging forever and leaking the RTP port. 60s (NOT 30) so one-way
+        # early media during the 30s inbound ring can't trip it before answer;
+        # a longer grace while ON HOLD (music flows, but a held leg can idle).
+        "rtp_timeout = 60",
+        "rtp_timeout_hold = 300",
         "",
         "[trunk-identify]",
         "type = identify",
@@ -869,11 +886,16 @@ def render_extensions(opts: dict) -> str:
         # momentarily-unreachable primary handset from an inbound call.
         parts += [
             ";; ----- Inbound from the trunk -----",
+            # An adaptive jitter buffer on the trunk channel de-jitters the
+            # public-internet RTP from VoIP.ms before it reaches the answering
+            # cordless/FXS handset (the LAN legs are low-jitter and need none).
             "[from-trunk]",
             f"exten = _X.,1,NoOp(Inbound call ${{EXTEN}} -> {where})",
+            " same = n,Set(JITTERBUFFER(adaptive)=default)",
             f" same = n,Dial({dial_target},30,r)",
             " same = n,Hangup()",
             "exten = s,1,NoOp(Inbound call, no DID)",
+            " same = n,Set(JITTERBUFFER(adaptive)=default)",
             f" same = n,Dial({dial_target},30,r)",
             " same = n,Hangup()",
             "",
