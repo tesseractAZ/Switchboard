@@ -417,7 +417,8 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
 # extensions.conf  (dial plan)
 # --------------------------------------------------------------------------- #
 def render_operator_context(joined: str, automation_on: bool = False,
-                            mwi_on: bool = True, trunk_on: bool = False) -> list[str]:
+                            mwi_on: bool = True, trunk_on: bool = False,
+                            wakeup_on: bool = False) -> list[str]:
     """The [operator] context: dial 0 -> AGI voice operator -> validated Dial.
 
     The AGI only *sets* OP_RESULT/OP_TARGET; the dialplan does the Dial, and only
@@ -456,6 +457,13 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,AGI(switchboard-operator.agi)",
         " same = n,NoOp(operator result=${OP_RESULT} target=${OP_TARGET})",
     ]
+    if wakeup_on:
+        # A spoken "wake up call" hands off to the wake-up flow (same context as
+        # dialing the wake-up code). Checked BEFORE connect/bye so it doesn't
+        # disturb the dial path; [wakeup] is emitted under the same wakeup_on.
+        lines += [
+            " same = n,GotoIf($[\"${OP_RESULT}\" = \"wakeup\"]?wakeup,s,1)",
+        ]
     if automation_on:
         # A spoken "automation" enters the lights flow. Checked BEFORE the
         # connect/bye logic so it doesn't disturb the existing dial path.
@@ -579,6 +587,40 @@ def render_automation_context() -> list[str]:
         " same = n,Hangup()",
         "",
     ]
+
+
+def render_directory_context(joined: str, trunk_on: bool = False) -> list[str]:
+    """The [directory] context (dial 411): look a room up by voice — say a name,
+    hear its extension, get connected. The AGI resolves the speech and sets
+    DIR_TARGET/DIR_RESULT; the dialplan does the Dial, and ONLY to a known room
+    ext (the ``joined`` allow-list) even if the AGI misbehaves. When the trunk is
+    live, the connect leg is confined to internal-only transfers (anti-toll-fraud,
+    consistent with [operator])."""
+    lines = [
+        ";; ----- Directory assistance (dial a room up by voice) -----",
+        "[directory]",
+        "exten = s,1,NoOp(Directory assistance)",
+        " same = n,Answer()",
+        " same = n,Set(CHANNEL(language)=en)",
+        " same = n,Wait(1)",
+        " same = n,AGI(switchboard-directory.agi)",
+        " same = n,NoOp(directory result=${DIR_RESULT} target=${DIR_TARGET})",
+        # Proceed only on an explicit connect result to a KNOWN room ext.
+        " same = n,GotoIf($[\"${DIR_RESULT}\" = \"connect\"]?:bye)",
+        f" same = n,GotoIf($[\"${{DIR_TARGET}}\" : \"^({joined})$\"]?:bye)",
+    ]
+    if trunk_on:
+        lines.append(" same = n,Set(__TRANSFER_CONTEXT=internal-xfer)")
+    lines += [
+        # The AGI already spoke "Connecting you now"; go straight to the Dial.
+        " same = n,Dial(PJSIP/${DIR_TARGET},30,rtT)",
+        " same = n,Hangup()",
+        " same = n(bye),Playback(switchboard/sw-goodbye)",
+        " same = n,Playback(switchboard/sw-endtone)",
+        " same = n,Hangup()",
+        "",
+    ]
+    return lines
 
 
 def render_status_context() -> list[str]:
@@ -864,6 +906,25 @@ def render_extensions(opts: dict) -> str:
             ]
             reserved.add(announce_ext)
 
+    # Directory assistance — dial the code, say a room name, hear its extension,
+    # and get connected (411-style, fully internal). Literal ext; skipped on
+    # collision. Default 411 (3 digits) never collides with the 2-digit rooms /
+    # feature codes.
+    directory_on = bool(opts.get("directory_enabled", True))
+    directory_ext = str(opts.get("directory_ext", "411") or "411").strip()
+    if directory_on and exts:
+        if not re.fullmatch(r"[0-9]{2,6}", directory_ext):
+            log(f"directory: invalid directory_ext {directory_ext!r}; dial code disabled")
+        elif directory_ext in reserved:
+            log(f"directory: directory_ext {directory_ext} collides with a reserved/room ext; dial code disabled")
+        else:
+            parts += [
+                f"exten = {directory_ext},1,NoOp(Directory assistance)",
+                " same = n,Goto(directory,s,1)",
+                "",
+            ]
+            reserved.add(directory_ext)
+
     if exts:
         joined = "|".join(exts)
         # When the trunk is live, confine any ##/*2 transfer of a room call to
@@ -894,7 +955,8 @@ def render_extensions(opts: dict) -> str:
 
     if operator_on and exts:
         parts += render_operator_context("|".join(exts), automation_on, mwi_on,
-                                         trunk_on=bool(trunk.get("enabled")))
+                                         trunk_on=bool(trunk.get("enabled")),
+                                         wakeup_on=wakeup_on)
 
     # Internal-only DTMF transfer-target context (anti-toll-fraud). Emitted only
     # when the trunk is live and rooms exist — the sole case where an outside
@@ -922,6 +984,9 @@ def render_extensions(opts: dict) -> str:
         parts += render_status_context()
     if announce_on and exts:
         parts += render_announce_context()
+    # Directory assistance context (voice room lookup + connect).
+    if directory_on and exts:
+        parts += render_directory_context(joined, trunk_on=bool(trunk.get("enabled")))
 
     # Inbound from the trunk gets its OWN [from-trunk] context. (Outbound rules are
     # emitted up in [rooms] via render_outbound_rules — they must not live here, or
@@ -1262,15 +1327,22 @@ def ensure_state_dir() -> None:
 
 
 def write_operator_runtime(opts: dict) -> None:
-    """Stage the voice-operator runtime, when enabled.
+    """Stage the shared voice runtime (rooms map), when a consumer is enabled.
 
-    Creates an ``asterisk``-writable ASR scratch dir under /run (tmpfs: fast, no
-    SD-card wear, auto-cleared) and writes a sanitized rooms map the STT wrapper
-    reads — so the recognizer shares the generator's already-validated room list
-    (single source of truth) instead of re-parsing raw options.json. Synonyms
-    come from the optional ``operator_synonyms`` option.
+    Writes a sanitized rooms map the STT wrapper reads — so the recognizer shares
+    the generator's already-validated room list (single source of truth) instead
+    of re-parsing raw options.json. Synonyms come from the optional
+    ``operator_synonyms`` option.
+
+    Both the voice operator (dial 0) AND directory assistance (dial 411) resolve
+    room names against this file, so it must be staged when EITHER is on — gating
+    it on ``operator.enabled`` alone would leave dial-411 with an empty directory
+    ("Directory is unavailable") whenever the operator is turned off, the same
+    feature-independence trap ``ensure_voice_dirs`` was extracted to avoid.
     """
-    if not (opts.get("operator") or {}).get("enabled", True):
+    operator_on = bool((opts.get("operator") or {}).get("enabled", True))
+    directory_on = bool(opts.get("directory_enabled", True))
+    if not (operator_on or directory_on):
         return
 
     synonyms: dict[str, list[str]] = {}
