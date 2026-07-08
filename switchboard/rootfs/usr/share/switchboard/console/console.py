@@ -330,8 +330,54 @@ class Board:
             self._data = data
 
 
-def poller_loop(board: Board, stop: threading.Event, log) -> None:
+class ClientGate:
+    """Tracks connected console clients so the AMI poller does ZERO work while
+    nobody is watching.
+
+    The operator board only changes in response to calls/registrations, which no
+    one can see unless a telnet/ttyd client is attached — and every poll is a
+    full manager login + logoff, i.e. constant SecurityEvent log churn and
+    SD-card writes on a Pi already prone to card wear. So with no client
+    connected there is no reason to poll AMI at all. A ``threading.Condition``
+    (not a bare ``Event``) closes the lost-wakeup race between the poller's
+    ``count == 0`` check and its wait.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._n = 0
+        self._stopped = False
+
+    def enter(self) -> None:
+        """A client connected — wake the poller so it refreshes for them."""
+        with self._cond:
+            self._n += 1
+            self._cond.notify_all()
+
+    def leave(self) -> None:
+        with self._cond:
+            self._n = max(0, self._n - 1)
+
+    def wake(self) -> None:
+        """Unblock a parked poller at shutdown so its thread exits cleanly."""
+        with self._cond:
+            self._stopped = True
+            self._cond.notify_all()
+
+    def wait_active(self) -> bool:
+        """Block until >=1 client is connected. Returns False iff woken to stop."""
+        with self._cond:
+            while self._n == 0 and not self._stopped:
+                self._cond.wait()
+            return not self._stopped
+
+
+def poller_loop(board: Board, stop: threading.Event, gate: ClientGate, log) -> None:
     while not stop.is_set():
+        # Idle (no telnet/ttyd client) -> park here with NO AMI traffic at all,
+        # instead of logging in/out every POLL_SECONDS around the clock.
+        if not gate.wait_active():
+            break  # woken for shutdown
         try:
             board.set(build_board(load_rooms_cfg()))
         except Exception as exc:  # never let the poller die
@@ -958,7 +1004,8 @@ def main() -> None:
 
     board = Board()
     stop = threading.Event()
-    threading.Thread(target=poller_loop, args=(board, stop, log), daemon=True).start()
+    gate = ClientGate()
+    threading.Thread(target=poller_loop, args=(board, stop, gate, log), daemon=True).start()
 
     # Cap concurrent sessions — this is an unauthenticated LAN listener.
     slots = threading.BoundedSemaphore(MAX_SESSIONS)
@@ -972,11 +1019,13 @@ def main() -> None:
                     pass
                 return
             log(f"client connected from {self.client_address[0]}")
+            gate.enter()  # start (or wake) the AMI poller for as long as we're attached
             try:
                 serve_session(self.request, board, stop, log)
             except Exception as exc:  # never let one session take down the server
                 log(f"session error: {exc}")
             finally:
+                gate.leave()  # last client out -> poller parks, idle AMI churn stops
                 slots.release()
                 log("client disconnected")
 
@@ -989,6 +1038,7 @@ def main() -> None:
     def shutdown(*_):
         log("shutting down")
         stop.set()
+        gate.wake()  # unblock a parked (idle) poller so its thread exits cleanly
         threading.Thread(target=srv.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)

@@ -18,6 +18,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 
 # The AMI client lives in a framework-free sibling module so its wire-format
@@ -56,6 +58,39 @@ from ami import (  # noqa: E402
     summarize_calls,
     transfer_channel,
 )
+
+# Short-TTL cache over the AMI status bundle. An open dashboard refreshes every
+# 4s and the transfer offline-pre-check reads the same data, so without this each
+# of those (and every extra browser tab) opens its OWN AMI session — more manager
+# login/logoff churn. A fresh value within the TTL is served from cache; the two
+# real callers (the ~4s /api/status poll and the occasional transfer pre-check)
+# are sequential, so they coalesce onto one AMI session per TTL window.
+#
+# The lock is held ONLY for the microsecond cache read/write, never across the
+# blocking AMI socket read. api_transfer is an async handler, so holding the lock
+# across a slow/timing-out fetch could stall the whole event loop waiting on a
+# lock a threadpool status poll holds — so we fetch OUTSIDE the lock. A rare
+# concurrent cache-miss just does a redundant fetch (exactly the pre-cache
+# behaviour), which is harmless. Only successful reads are cached; AMIError/
+# OSError propagate uncached so callers keep their fail-open/`ami_ok=False`
+# handling and never see a stale "ok".
+_STATUS_TTL = 2.0
+_status_lock = threading.Lock()
+_status_cache: dict = {"ts": 0.0, "value": None}
+
+
+def cached_status_bundle():
+    with _status_lock:
+        cache = _status_cache
+        if cache["value"] is not None and (time.monotonic() - cache["ts"]) < _STATUS_TTL:
+            return cache["value"]
+    value = get_status_bundle()  # blocking I/O OUTSIDE the lock; may raise (not cached)
+    with _status_lock:
+        _status_cache["ts"] = time.monotonic()
+        _status_cache["value"] = value
+    return value
+
+
 try:
     import store as wakeup_store  # noqa: E402  (wake-up store; absent in dev)
 except ImportError:  # pragma: no cover
@@ -312,9 +347,9 @@ def api_status() -> JSONResponse:
     ami_ok = True
     error = None
     try:
-        # One AMI session for all three reads (endpoints + contacts + channels)
-        # instead of three connect/login/logoff cycles per refresh.
-        endpoints, contacts, channels = get_status_bundle()
+        # One AMI session for all three reads (endpoints + contacts + channels),
+        # coalesced across concurrent refreshes/tabs by a short-TTL cache.
+        endpoints, contacts, channels = cached_status_bundle()
     except (AMIError, OSError) as exc:
         ami_ok = False
         # Return a generic marker to the client; log the detail server-side only.
@@ -509,7 +544,7 @@ async def api_transfer(request: Request) -> JSONResponse:
     # target list. Fail-open: if the status read itself errors we proceed, so a
     # transient AMI hiccup can't block a transfer to a room that's actually up.
     try:
-        endpoints, contacts, _channels = get_status_bundle()
+        endpoints, contacts, _channels = cached_status_bundle()
         target_reg = {
             ep["name"]: is_registered(ep["state"], contacts.get(ep["name"], {}).get("status", ""))
             for ep in endpoints

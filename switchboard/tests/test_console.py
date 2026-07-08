@@ -536,7 +536,90 @@ def test_command_bar_fits_80() -> None:
     check(f"bar: lights view fits 80 cols (widest={widest})", widest <= 80)
 
 
+def test_client_gate() -> None:
+    import threading
+    import time
+    gate = console.ClientGate()
+
+    result = {}
+
+    def waiter(bucket):
+        bucket["active"] = gate.wait_active()
+
+    t = threading.Thread(target=waiter, args=(result,), daemon=True)
+    t.start()
+    time.sleep(0.05)
+    check("gate: waiter blocks while no client is connected",
+          t.is_alive() and "active" not in result)
+    gate.enter()
+    t.join(timeout=1.0)
+    check("gate: enter() releases the waiter (active)", result.get("active") is True)
+
+    # Reference counting: second client keeps it active; one leave still active.
+    gate.enter()  # n=2
+    check("gate: active returns immediately while a client is connected",
+          gate.wait_active() is True)
+    gate.leave()  # n=1
+    check("gate: still active after one of two clients leaves",
+          gate.wait_active() is True)
+    gate.leave()  # n=0 -> parks again
+
+    result2 = {}
+    t2 = threading.Thread(target=waiter, args=(result2,), daemon=True)
+    t2.start()
+    time.sleep(0.05)
+    check("gate: parks again after the last client leaves", t2.is_alive())
+    gate.wake()  # shutdown
+    t2.join(timeout=1.0)
+    check("gate: wake() releases a parked waiter as inactive (shutdown)",
+          result2.get("active") is False)
+
+
+def test_poller_gated_on_clients() -> None:
+    import threading
+    import time
+    calls = {"n": 0}
+
+    def fake_build(cfg):
+        calls["n"] += 1
+        return {"ami_ok": True, "rooms": [], "calls": [], "ts": 0.0}
+
+    orig_build, orig_rooms, orig_poll = (
+        console.build_board, console.load_rooms_cfg, console.POLL_SECONDS)
+    console.build_board = fake_build
+    console.load_rooms_cfg = lambda: []
+    console.POLL_SECONDS = 0.02
+    try:
+        board = console.Board()
+        stop = threading.Event()
+        gate = console.ClientGate()
+        t = threading.Thread(target=console.poller_loop,
+                             args=(board, stop, gate, lambda m: None), daemon=True)
+        t.start()
+        time.sleep(0.1)
+        check("poller: ZERO AMI builds while no client is connected — the churn fix",
+              calls["n"] == 0)
+        gate.enter()
+        time.sleep(0.1)
+        check("poller: builds the board once a client connects", calls["n"] >= 1)
+        gate.leave()
+        n_at_leave = calls["n"]
+        time.sleep(0.1)
+        check("poller: stops building after the last client leaves (<=1 in-flight)",
+              calls["n"] <= n_at_leave + 1)
+        stop.set()
+        gate.wake()
+        t.join(timeout=1.0)
+        check("poller: thread exits cleanly on stop+wake", not t.is_alive())
+    finally:
+        console.build_board = orig_build
+        console.load_rooms_cfg = orig_rooms
+        console.POLL_SECONDS = orig_poll
+
+
 def main() -> None:
+    test_client_gate()
+    test_poller_gated_on_clients()
     test_parse_input()
     test_render()
     test_render_connect_mode()
