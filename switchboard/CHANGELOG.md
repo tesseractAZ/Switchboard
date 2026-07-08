@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.13.2
+
+Close a toll-fraud path: an outside caller transferred in can no longer dial out.
+
+The v0.12.2 fix made the inbound trunk `Dial` `r`-only so an outside caller can't
+invoke feature codes directly. But once a household member transfers that outside
+caller to a room (or the operator), the caller could land on a leg where the
+`##`/`*2` DTMF transfer feature is armed — and a transfer target used to resolve
+in `[rooms]`, which carries the `9`-prefix outbound rule. So a transferred-in
+caller keying `## 9 <number>` could place a call on the trunk (toll fraud). Three
+complementary, defence-in-depth layers now close this, all gated on the trunk
+being enabled (non-trunk installs render byte-identically):
+
+- **Origin guard (version-independent hard stop).** The outbound rule refuses
+  origination from the trunk endpoint itself: `CHANNEL(endpoint) == "trunk"` →
+  Congestion. Doesn't depend on any transfer-context behaviour.
+- **Internal-only transfer context.** A new `[internal-xfer]` context (literal
+  room extensions + `0`→operator, and *no* outbound/`_X.` rule) is where all
+  `##`/`*2` transfer targets resolve, stamped via the inherited
+  `__TRANSFER_CONTEXT` on the trunk endpoint (birth-time) and before every armed
+  Dial. Keying `## 9 <number>` matches nothing and the transfer fails cleanly.
+- **REFER rejection on the trunk.** `allow_transfer = no` on the `[trunk]`
+  endpoint blocks a provider-side SIP REFER. Room endpoints keep transfers, so
+  the cordless/iPhone **Transfer button still works** to rooms/operator.
+
+Legitimate internal transfers are unchanged — room↔room and to-operator `##`/`*2`
+still work; a room dialing `9`+number directly is unaffected (transfer-context
+only governs transfer-target resolution, never normal dialing). What's newly
+blocked is `##`/`*2`-transferring an active call *out to a PSTN number* — never an
+advertised feature, and itself a toll vector.
+
 ## 0.13.1
 
 Call-audio tuning, the second batch from the deep audit (the call-path changes,
