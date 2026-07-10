@@ -889,6 +889,26 @@ def test_rooms_map_staged_for_directory() -> None:
         sbc.RUN_DIR = orig
 
 
+def test_config_hardening_v018() -> None:
+    # D4: room endpoints get an RTP watchdog (mid-call media loss tears down instead
+    # of leaking the port), like the trunk already had.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "goodsecret1"}])
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": {}})
+    check("D4: room-endpoint has rtp_timeout", "rtp_timeout = 120" in pj)
+    check("D4: room-endpoint has rtp_timeout_hold", "rtp_timeout_hold = 300" in pj)
+    # D3: an all-zero ext passes the digit regex but is undialable -> rejected.
+    v = sbc.valid_rooms([{"ext": "00", "name": "Bad", "secret": "s1"},
+                         {"ext": "11", "name": "K", "secret": "s2"}])
+    check("D3: all-zero ext '00' rejected", [r["ext"] for r in v] == ["11"])
+    check("D3: all-zero ext '000' rejected", sbc.valid_rooms([{"ext": "000", "name": "B", "secret": "s"}]) == [])
+    # D2: a trunk secret with ';' or whitespace would be silently truncated -> skip.
+    base = {"enabled": True, "provider_host": "sip.x.com", "username": "u"}
+    check("D2: trunk secret with ';' skips trunk", sbc.render_trunk_pjsip({**base, "secret": "ab;cd"}) == [])
+    check("D2: trunk secret with whitespace skips trunk", sbc.render_trunk_pjsip({**base, "secret": " abc "}) == [])
+    check("D2: good trunk secret still renders",
+          any("[trunk]" in l for l in sbc.render_trunk_pjsip({**base, "secret": "goodsecret"})))
+
+
 def test_disabled_feature_frees_ext() -> None:
     # A disabled clock no longer reserves its ext, so another feature may reuse it.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])
@@ -972,6 +992,7 @@ if __name__ == "__main__":
     test_write_perms_tight()
     test_voice_dirs_independent_of_operator()
     test_rooms_map_staged_for_directory()
+    test_config_hardening_v018()
     test_disabled_feature_frees_ext()
     test_state_dir_setup()
     test_state_dir_setup_failure_is_graceful()

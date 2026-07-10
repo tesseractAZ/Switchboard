@@ -157,6 +157,13 @@ def valid_rooms(rooms: list) -> list[dict]:
         if not re.fullmatch(r"[0-9]{2,6}", ext):
             log(f"skipping room ext={ext!r}: ext must be 2-6 digits")
             continue
+        if set(ext) == {"0"}:
+            # An all-zero ext ("00"/"000") passes the digit check but is undialable:
+            # the [rooms] match rule tests the dialed number against the room
+            # allow-list with Asterisk's regex operator, whose captured "0…" reads
+            # as FALSE, so the call never routes. Reject it loudly.
+            log(f"skipping room ext={ext!r}: an all-zero extension is undialable")
+            continue
         if ext in seen:
             log(f"skipping duplicate room ext={ext!r}")
             continue
@@ -232,6 +239,14 @@ def render_pjsip(opts: dict) -> str:
         "force_rport = yes",
         "rewrite_contact = yes",      # ATAs on the LAN; trust the source port
         "dtmf_mode = rfc4733",
+        # RTP watchdog: if a room's media stalls mid-call (Wi-Fi cordless drops off
+        # the AP, an FXS port wedges) tear the channel down instead of leaving a
+        # dead-air call up forever and leaking the RTP port. µ-law flows
+        # continuously (no VAD/silence-suppression) so a stall is a real fault, not
+        # quiet. 120s (conservative — no early-media concern on internal calls);
+        # a held leg gets the longer hold grace (music-on-hold still counts as RTP).
+        "rtp_timeout = 120",
+        "rtp_timeout_hold = 300",
         # QoS: mark RTP audio EF so the Wi-Fi cordless's voice gets WMM priority
         # over bulk LAN traffic (zero-risk if the AP doesn't honour DSCP).
         "tos_audio = ef",
@@ -306,6 +321,14 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
     # Fail closed on values that could inject extra PJSIP directives/sections.
     if _has_control(sec):
         log("trunk: secret contains control characters — skipping trunk")
+        return []
+    # Same truncation trap the room secrets guard against: a ';' starts a comment
+    # in pjsip.conf and leading/trailing whitespace is dropped, so `password = a;b`
+    # would silently become `password = a` and the trunk would fail to register
+    # with no obvious cause. Reject loudly rather than ship a truncated secret.
+    if sec and (";" in sec or sec != sec.strip()):
+        log("trunk: secret has ';' or leading/trailing whitespace "
+            "(Asterisk would silently truncate it) — skipping trunk")
         return []
     if not re.fullmatch(r"[A-Za-z0-9._:\-]+", host):
         log("trunk: invalid provider_host — skipping trunk")
