@@ -159,6 +159,27 @@ def test_announce_audio() -> None:
     check("lan_ip: returns a string", isinstance(announce_audio.lan_ip(), str))
 
 
+def test_notify() -> None:
+    # A missed wake-up is surfaced as an HA persistent notification (was log-only).
+    captured = {}
+    orig = ha_client._request
+    try:
+        ha_client._request = lambda method, path, body=None: (captured.update(method=method, path=path, body=body) or (200, "[]"))
+        ok = ha_client.notify("msg", "Switchboard: missed wake-up", "switchboard_missed_wakeup_14")
+        check("notify: True on accept", ok is True)
+        check("notify: hits persistent_notification.create",
+              captured["path"] == "/services/persistent_notification/create" and captured["method"] == "POST")
+        check("notify: id sanitized to [a-z0-9_]",
+              captured["body"]["notification_id"] == "switchboard_missed_wakeup_14")
+        # a hostile notification id is sanitized to [a-z0-9_]
+        ha_client.notify("m", "t", "Bad ID! @#$")
+        check("notify: hostile id sanitized", captured["body"]["notification_id"] == "bad_id_____")
+        ha_client._request = lambda *a, **k: (404, "")
+        check("notify: False on non-200", ha_client.notify("m") is False)
+    finally:
+        ha_client._request = orig
+
+
 def test_resolve_entities() -> None:
     # resolve_entities must distinguish 'entity missing' from 'HA unreachable' so a
     # transient outage can't suppress a valid announce (adversarial-review regression).
@@ -208,6 +229,7 @@ def main() -> None:
     test_format_calendar()
     test_ha_client_guards()
     test_announce_audio()
+    test_notify()
     test_resolve_entities()
     test_negative_cache()
     print()
