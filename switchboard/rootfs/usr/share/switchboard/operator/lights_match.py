@@ -219,8 +219,11 @@ def match_intent(text: str) -> str | None:
 # --------------------------------------------------------------------------- #
 _AUTOMATION_WORDS = (
     "automation", "automations", "home automation", "home control",
-    "control", "lights", "light", "lighting", "the lights",
+    "lights", "light", "lighting", "the lights",
 )
+# bare "control" was dropped: it diverted any room whose name merely contains the
+# generic word (a "Control Room") to the lights flow, and a genuine "control the
+# lights" still matches via "lights"/"light" above.
 
 
 def is_automation_request(text: str) -> bool:
@@ -232,13 +235,16 @@ def is_automation_request(text: str) -> bool:
     for w in _AUTOMATION_WORDS:
         if f" {w} " in low:
             return True
-    # Fuzzy single-word: "automaton"/"lite" -> automation/lights, but require a
-    # high ratio so a real room name never trips it.
+    # Fuzzy single-word typo recovery: only against the DISTINCTIVE 'automation'
+    # family. The short words (lights/lighting) were removed as fuzzy targets —
+    # ordinary words sit within 0.82 of them ("flights"->"lights" is 0.92,
+    # "nights"/"rights"/"sights" likewise), which mis-routed a plain room request
+    # to the lights flow. No common English word is that close to "automation".
     words = low.split()
     if 1 <= len(words) <= 2:
         for w in words:
-            for target in ("automation", "lights", "lighting"):
-                if len(w) >= 4 and difflib.SequenceMatcher(None, w, target).ratio() >= 0.82:
+            for target in ("automation", "automations"):
+                if len(w) >= 6 and difflib.SequenceMatcher(None, w, target).ratio() >= 0.82:
                     return True
     return False
 

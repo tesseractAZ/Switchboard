@@ -194,6 +194,15 @@ def test_automation_gate():
     check("auto 'connect me to the office' -> False",
           lm.is_automation_request("connect me to the office") is False)
     check("auto '' -> False", lm.is_automation_request("") is False)
+    # Ordinary words within fuzzy range of the short 'lights'/'lighting' targets
+    # must NOT trip the gate (audit: 'flights'->'lights' was 0.92 and mis-routed).
+    for w in ("flights", "nights", "rights", "sights", "the flights"):
+        check(f"auto {w!r} -> False", lm.is_automation_request(w) is False)
+    # ... but a genuine automation-family typo still recovers.
+    check("auto 'automaton' -> True", lm.is_automation_request("automaton") is True)
+    # bare 'control' no longer diverts a room name.
+    check("auto 'control room' -> False", lm.is_automation_request("control room") is False)
+    check("auto 'control the lights' -> True", lm.is_automation_request("control the lights") is True)
 
     # match.is_automation (operator gate) delegates to the same logic.
     check("match.is_automation 'lights'", matcher.is_automation("lights") is True)

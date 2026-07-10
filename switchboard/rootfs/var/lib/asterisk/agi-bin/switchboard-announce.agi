@@ -69,6 +69,17 @@ def main() -> None:
         sp.say_or("No speakers are set up for announcements. Goodbye.")
         return
 
+    # HA 200s a play_media to a nonexistent entity, so a stale/typo'd speaker id
+    # would make us announce "playing on the speakers" while nothing plays. Drop
+    # any configured speaker that isn't a real HA entity BEFORE recording, and fail
+    # honestly if none remain.
+    players, missing = ha_client.filter_existing(players)
+    if missing:
+        sp.log("announce", f"unknown speaker entities (check announce_players): {missing}")
+    if not players:
+        sp.say_or("Sorry, the announcement speakers are unavailable right now. Goodbye.")
+        return
+
     text = _record()
     if not text:
         sp.say_or("Sorry, I didn't catch an announcement. Goodbye.")

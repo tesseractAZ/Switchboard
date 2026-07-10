@@ -61,6 +61,22 @@ def test_format_house() -> None:
     check("house: one light", ha_reports.format_house([], 1, 5) == "1 light is on.")
     check("house: nothing -> unavailable",
           ha_reports.format_house([], 0, 0) == "House status is unavailable right now.")
+    # Unavailable lights are NOT off: a dead lighting network must not be spoken as
+    # "all lights are off" (audit data-correctness fix).
+    check("house: all lights unavailable != off",
+          ha_reports.format_house([], 0, 3, 3) == "The lights are unavailable right now.")
+    check("house: some unavailable surfaced separately",
+          ha_reports.format_house([], 1, 3, 1) == "1 light is on. 1 light is unavailable.")
+    check("house: two unavailable plural",
+          "2 lights are unavailable" in ha_reports.format_house([], 0, 4, 2))
+
+
+def test_num_rejects_non_finite() -> None:
+    # HA can report nan/inf; float() accepts them and they must not reach speech/math.
+    for junk in ("nan", "inf", "-inf", "NaN", "Infinity"):
+        check(f"_num({junk!r}) -> None", ha_reports._num(junk) is None)
+    check("_num('28') -> 28.0", ha_reports._num("28") == 28.0)
+    check("_num('2.5') -> 2.5", ha_reports._num("2.5") == 2.5)
 
 
 def test_status_match() -> None:
@@ -83,6 +99,14 @@ def test_status_match() -> None:
     check("bye: hang up", status_match.is_goodbye("hang up"))
     check("bye: 'power' is not goodbye", not status_match.is_goodbye("power"))
     check("bye: empty is not goodbye", not status_match.is_goodbye(""))
+    # A polite filler alongside a real request must NOT hang up mid-menu (audit).
+    check("bye: 'power thanks' serves power, not goodbye", not status_match.is_goodbye("power thanks"))
+    check("bye: 'no the weather' serves weather", not status_match.is_goodbye("no the weather"))
+    check("match: 'power thanks' -> power", status_match.match("power thanks") == "power")
+    # An explicit category keyword beats a bare spoken ordinal (audit).
+    check("match: 'the one about the weather' -> weather",
+          status_match.match("the one about the weather") == "weather")
+    check("match: bare 'one' -> power", status_match.match("one") == "power")
 
 
 def test_format_calendar() -> None:
@@ -155,6 +179,7 @@ def main() -> None:
     test_speak_weather()
     test_format_power()
     test_format_house()
+    test_num_rejects_non_finite()
     test_status_match()
     test_format_calendar()
     test_ha_client_guards()
