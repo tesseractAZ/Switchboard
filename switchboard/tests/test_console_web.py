@@ -212,6 +212,11 @@ def test_bridge_write_is_bounded() -> None:
     check("bridge: SEND_TIMEOUT defined + finite positive", "SEND_TIMEOUT = " in src)
     check("bridge: no unbounded settimeout(None) on the bridge", "settimeout(None)" not in src)
     check("bridge: bridge socket bounded by SEND_TIMEOUT", "settimeout(SEND_TIMEOUT)" in src)
+    # The browser socket must NOT be reset to blocking inside _bridge_ws — that
+    # silently un-does the timeout (setblocking(True) == settimeout(None)). Only the
+    # trusted localhost console socket keeps blocking.
+    check("bridge: sock not reset to blocking (would nullify the timeout)",
+          "sock.setblocking(True)" not in src)
 
 
 def main() -> None:

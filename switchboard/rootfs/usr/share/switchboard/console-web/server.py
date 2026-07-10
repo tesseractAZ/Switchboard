@@ -170,7 +170,12 @@ def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
         console.close()
         return
 
-    sock.setblocking(True)
+    # Bound writes to the browser so a peer that stops reading can't park sendall
+    # forever (see SEND_TIMEOUT). This must be a settimeout, NOT setblocking(True):
+    # the latter resets the timeout to None and silently un-does the caller's bound.
+    # recv() only runs after select() reports the socket readable, so the timeout
+    # effectively bounds the write side only.
+    sock.settimeout(SEND_TIMEOUT)
     console.setblocking(True)
     ws_in = leftover  # undecoded client->server frame bytes
     tn_in = b""       # console bytes pending telnet strip
