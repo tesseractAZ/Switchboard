@@ -56,6 +56,15 @@ MAX_SESSIONS = 5
 # input, independently of the console's own idle reclaim.
 IDLE_SECONDS = 900
 
+# Upper bound on a single blocking write to the browser socket. A peer that
+# completes the WS handshake then stops reading fills our send buffer; without a
+# bound, sock.sendall() parks the bridge thread FOREVER — which both leaks one of
+# the MAX_SESSIONS slots (and a console telnet session) and defeats the idle
+# reclaim (never re-reached while parked in sendall). With a finite timeout the
+# stalled write raises socket.timeout (an OSError), send_ws() returns False, and
+# the session is torn down like any other dead peer.
+SEND_TIMEOUT = 30
+
 # Extra origins explicitly allowed for the WS upgrade (comma-separated env).
 _ALLOWED_ORIGINS = [o for o in os.environ.get("CONSOLE_WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
@@ -161,7 +170,12 @@ def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
         console.close()
         return
 
-    sock.setblocking(True)
+    # Bound writes to the browser so a peer that stops reading can't park sendall
+    # forever (see SEND_TIMEOUT). This must be a settimeout, NOT setblocking(True):
+    # the latter resets the timeout to None and silently un-does the caller's bound.
+    # recv() only runs after select() reports the socket readable, so the timeout
+    # effectively bounds the write side only.
+    sock.settimeout(SEND_TIMEOUT)
     console.setblocking(True)
     ws_in = leftover  # undecoded client->server frame bytes
     tn_in = b""       # console bytes pending telnet strip
@@ -344,9 +358,12 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
                 sock.sendall(wsproto.handshake_response(key))
             except OSError:
                 return
-            # No socket read timeout while bridging — select() drives liveness.
+            # Bound blocking writes so a peer that stops reading can't park the
+            # bridge in sendall forever (see SEND_TIMEOUT). Reads are still driven
+            # by select(), which only calls recv() once the socket is readable, so
+            # the timeout effectively only bounds the write side.
             try:
-                sock.settimeout(None)
+                sock.settimeout(SEND_TIMEOUT)
             except OSError:
                 pass
             _bridge_ws(sock, rest)
