@@ -22,18 +22,24 @@ _CATS = {
 _DIGIT_WORDS = {"one": "power", "two": "weather", "three": "house"}
 _DIGIT_KEYS = {"1": "power", "2": "weather", "3": "house"}
 
-# Words that end the menu loop ("anything else? ... no / goodbye / done").
-_GOODBYE = {"goodbye", "bye", "no", "nope", "done", "exit", "quit", "cancel",
-            "nothing", "stop", "finished", "thanks"}
+# Words that unambiguously end the menu loop.
+_GOODBYE_STRONG = {"goodbye", "bye", "done", "exit", "quit", "cancel",
+                   "nothing", "stop", "finished"}
+# Polite fillers that end the loop ONLY when the caller isn't also asking for a
+# category — "power, thanks" / "no, the weather" must still serve the request
+# instead of hanging up on the caller mid-menu.
+_GOODBYE_WEAK = {"no", "nope", "thanks", "thank"}
 
 
 def is_goodbye(text: str) -> bool:
     """True if the caller is asking to end (so the status menu can stop looping)."""
-    words = normalize(text)
-    if set(words) & _GOODBYE:
+    words = set(normalize(text))
+    t = " ".join(normalize(text))
+    if words & _GOODBYE_STRONG or "hang up" in t or "thats all" in t:
         return True
-    t = " ".join(words)
-    return "hang up" in t or "thats all" in t
+    # A bare "no"/"thanks" ends it; a "no" or "thanks" alongside a real request
+    # (which match() resolves) does not.
+    return bool(words & _GOODBYE_WEAK) and not match(text)
 
 
 def normalize(text: str) -> list:
@@ -51,9 +57,6 @@ def match(text: str) -> str:
     if not words:
         return ""
     wset = set(words)
-    for w in words:  # spoken "one/two/three"
-        if w in _DIGIT_WORDS:
-            return _DIGIT_WORDS[w]
     best, best_score = "", 0.0
     for cat, keys in _CATS.items():
         score = 0.0
@@ -67,4 +70,12 @@ def match(text: str) -> str:
                 score = max(score, SequenceMatcher(None, w, k).ratio())
         if score > best_score:
             best, best_score = cat, score
+    # An explicit category keyword ("the one about the weather") beats a bare
+    # spoken ordinal, so resolve exact keyword hits first.
+    if best_score >= 1.0:
+        return best
+    # Otherwise a bare spoken "one/two/three" maps to the menu order.
+    for w in words:
+        if w in _DIGIT_WORDS:
+            return _DIGIT_WORDS[w]
     return best if best_score >= 0.7 else ""

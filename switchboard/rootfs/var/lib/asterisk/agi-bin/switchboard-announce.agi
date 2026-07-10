@@ -84,6 +84,19 @@ def main() -> None:
         return
     url = f"http://{ip}:{WEBUI_PORT}/announce/{name}"
 
+    # Drop stale/typo'd speaker ids so we don't announce "playing on the speakers"
+    # while nothing plays (HA 200s a play to a missing entity) — but only when HA is
+    # confirmed reachable, so a transient Core restart (recording already happened
+    # above) still gets a best-effort play instead of a false "unavailable". Runs
+    # after recording, so it never adds dead air to the top of the call.
+    present, missing, ha_up = ha_client.resolve_entities(players)
+    if missing:
+        sp.log("announce", f"unknown speaker entities (check announce_players): {missing}")
+    if ha_up and not present:
+        sp.say_or("Sorry, the announcement speakers are unavailable right now. Goodbye.")
+        return
+    players = present if ha_up else players
+
     ok = False
     try:
         ok = ha_client.call_service("media_player", "play_media", {

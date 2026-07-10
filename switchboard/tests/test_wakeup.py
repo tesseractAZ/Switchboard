@@ -78,10 +78,25 @@ def test_timeparse():
     # military with a leading filler word
     eq("oh seven hundred", "07:00")
     eq("zero seven thirty", "07:30")
+    # leading disfluency / lead-in must not reject a clearly-spoken time (audit)
+    eq("um seven thirty", "07:30")
+    eq("uh seven thirty", "07:30")
+    eq("so seven thirty", "07:30")
+    eq("okay seven thirty", "07:30")
+    eq("make it seven thirty", "07:30")
+    eq("how about seven thirty", "07:30")
+    eq("around seven", "07:00")
+    eq("um quarter past six", "06:15")
+    # relative "to" must resolve am/pm on the TARGET hour before subtracting (audit):
+    # "quarter to one pm" is 12:45, not 00:45.
+    eq("quarter to one pm", "12:45")
+    eq("quarter to twelve", "11:45")
+    eq("twenty to eight", "07:40")
     # nonsense -> None
     eq("hello there operator", None)
     eq("", None)
     eq("kitchen please", None)
+    eq("um uh so", None)
 
 
 def test_store_set_get():

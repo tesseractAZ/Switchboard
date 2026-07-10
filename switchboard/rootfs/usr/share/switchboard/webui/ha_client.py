@@ -22,9 +22,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
+
+
+def _log(msg: str) -> None:
+    """Surface an HA failure to stderr (add-on log). These paths used to swallow
+    every error silently, so a mis-configured entity or a rejected service call
+    left NO trace anywhere — the caller just no-op'd."""
+    sys.stderr.write(f"[ha_client] {msg}\n")
 
 TIMEOUT = float(os.environ.get("HA_TIMEOUT", "5") or "5")
 # When HA is unreachable, short-circuit further calls for this long instead of
@@ -223,13 +231,53 @@ def get_states() -> list:
 
 def call_service(domain: str, service: str, data: dict | None = None) -> bool:
     """Call a HA service, restricted to the allow-listed domains. Returns True
-    only if HA accepted it. `data` is passed through as the service payload."""
+    only if HA accepted it. `data` is passed through as the service payload.
+
+    NOTE: HA returns 200 even when the target entity does not exist, so a True
+    result means "HA accepted the call", NOT "something actually happened". For a
+    user-supplied entity list (announce speakers, a wake-up scene) pre-check with
+    entity_exists()/filter_existing() to tell a real action from a silent no-op."""
     if domain not in _ALLOWED_SERVICE_DOMAINS:
+        _log(f"refused service on non-allow-listed domain {domain!r}")
         return False
     if not re.fullmatch(r"[a-z_]+", service or ""):
+        _log(f"refused malformed service name {service!r}")
         return False
     status, _ = _request("POST", f"/services/{domain}/{service}", data or {})
-    return status in (200, 201)
+    ok = status in (200, 201)
+    if not ok:
+        _log(f"{domain}.{service} rejected (status={status}) target={(data or {}).get('entity_id')}")
+    return ok
+
+
+def entity_exists(entity_id: str) -> bool:
+    """True if the id resolves to a real HA entity right now (not merely well-formed).
+    None on an HA outage is treated as 'not confirmed' -> False."""
+    return get_state(entity_id) is not None
+
+
+def resolve_entities(entity_ids):
+    """(present, missing, ha_up) for a configured entity list, via ONE get_states().
+
+    HA 200s a service call to a nonexistent entity, so a caller acting on a user-
+    supplied list (announce speakers) must check existence to tell a real action
+    from a silent no-op. But get_state() can't distinguish 'entity missing' from
+    'HA unreachable' — both look absent — so a naive existence filter would drop
+    every speaker during a transient Core restart. This probes reachability once:
+      * HA reachable (states non-empty): existence is meaningful -> real present/missing.
+      * HA unreachable (ha_up False): existence is UNKNOWN; present == the input,
+        missing == [] — the caller should proceed best-effort (attempt the call and
+        let it fail honestly) rather than suppress a valid action on a brief outage.
+    Missing ids are logged when HA is reachable."""
+    states = get_states()
+    if not states:
+        return list(entity_ids or []), [], False
+    present_ids = {s.get("entity_id") for s in states if isinstance(s, dict)}
+    present = [e for e in (entity_ids or []) if e in present_ids]
+    missing = [e for e in (entity_ids or []) if e not in present_ids]
+    if missing:
+        _log(f"configured entities not found in HA (dropped): {missing}")
+    return present, missing, True
 
 
 def ha_location():

@@ -42,6 +42,20 @@ def _ampm(text: str):
     return None
 
 
+def _lead_trim(tokens):
+    """Drop leading disfluency / lead-in words until the first time-bearing token.
+
+    whisper prepends things the fixed strip-list on the core doesn't cover — "um",
+    "uh", "so", "okay", "make it", "how about", "around", "like" — and the word-
+    number branches below require an anchor at tokens[0]. Advance to the first token
+    that is a number word, quarter/half, or contains a digit; if there is no such
+    anchor, leave the tokens as-is (they'll fail to parse -> None, unchanged)."""
+    for i, w in enumerate(tokens):
+        if w in _ONES or w in _TENS or w in ("quarter", "half") or any(c.isdigit() for c in w):
+            return tokens[i:]
+    return tokens
+
+
 def _two_word_number(tokens):
     """Consume a 1-or-2 word cardinal from the front of tokens -> (value, rest).
     Handles "twenty three", "thirty", "seven". Returns (None, tokens) if none."""
@@ -92,6 +106,11 @@ def parse(text: str):
     # Strip the am/pm / time-of-day words now that we've captured intent.
     core = re.sub(r"\b(am|pm|morning|evening|afternoon|night|tonight|at|the|in|please|wake|me|up|call|for|a|set)\b", " ", t)
     core = re.sub(r"\s+", " ", core).strip()
+    # Drop any leading disfluency/lead-in so "um seven thirty" / "make it seven
+    # thirty" parse like "seven thirty" (the word-number branches need an anchor
+    # at the front). The digit-clock/noon/midnight paths read the full text, so
+    # they are already filler-robust and unaffected.
+    core = " ".join(_lead_trim(core.split()))
 
     # Word-boundary match so "afternoon" doesn't trigger "noon". Skip when a
     # relative phrase is present ("half past noon") so it falls through rather
@@ -139,8 +158,15 @@ def parse(text: str):
             hour, _ = _two_word_number(right)
             if mins is not None and hour is not None:
                 if rel == "to":
-                    hour = (hour - 1) % 24
-                    mins = 60 - mins
+                    # "ten to seven" = 10 min before the 7 o'clock target. Resolve
+                    # the TARGET hour with am/pm FIRST (base = HH:00), then subtract
+                    # the minutes — otherwise decrementing 1->0 before am/pm turns
+                    # "quarter to one pm" into 00:45 instead of 12:45.
+                    base = _apply_ampm(hour, 0, ampm)
+                    if base is None:
+                        return None
+                    total = (int(base[:2]) * 60 - (mins % 60)) % (24 * 60)
+                    return f"{total // 60:02d}:{total % 60:02d}"
                 return _apply_ampm(hour, mins % 60, ampm)
 
     # "<hour> hundred"  (e.g. "seven hundred" -> 7:00, "nineteen hundred")
