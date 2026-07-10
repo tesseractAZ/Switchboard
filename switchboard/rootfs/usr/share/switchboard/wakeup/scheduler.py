@@ -20,6 +20,10 @@ sys.path.insert(0, "/usr/share/switchboard/wakeup")
 sys.path.insert(0, "/usr/share/switchboard/webui")
 import store  # noqa: E402
 import ami  # noqa: E402
+try:
+    import ha_client  # noqa: E402  (surface a missed wake-up as an HA notification)
+except Exception:  # noqa: BLE001 — HA integration is optional; never break the loop
+    ha_client = None
 
 POLL = int(os.environ.get("WAKEUP_POLL_SECONDS", "20"))
 RING = int(os.environ.get("WAKEUP_RING_SECONDS", "60"))
@@ -41,7 +45,22 @@ def tick() -> None:
     fired, missed = store.due(now)
     for ext, entry in missed:
         late = int((now - entry.get("target_epoch", now)) / 60)
-        log(f"missed wake-up for ext {ext} ({entry.get('hhmm')}) — {late} min late; skipped")
+        hhmm = entry.get("hhmm")
+        log(f"missed wake-up for ext {ext} ({hhmm}) — {late} min late; skipped")
+        # A missed wake-up used to be log-only (invisible unless you tailed the
+        # add-on log). Surface it in Home Assistant's notifications so the user
+        # actually learns the phone never got its wake-up call.
+        if ha_client is not None:
+            try:
+                ha_client.notify(
+                    f"Extension {ext}'s {hhmm} wake-up call could not be delivered — "
+                    f"the phone stayed busy or offline through its grace window "
+                    f"(gave up {late} minutes late).",
+                    title="Switchboard: missed wake-up",
+                    notification_id=f"switchboard_missed_wakeup_{ext}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not post missed-wake-up notification: {exc}")
     if not fired:
         return
 

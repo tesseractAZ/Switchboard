@@ -280,6 +280,21 @@ def resolve_entities(entity_ids):
     return present, missing, True
 
 
+def notify(message: str, title: str = "Switchboard", notification_id: str = "") -> bool:
+    """Create/replace a Home Assistant persistent notification (the bell menu), so
+    an event that is otherwise log-only — a missed wake-up — is actually surfaced
+    to the user. Deliberately its own path, NOT via call_service's voice-flow
+    domain allow-list. Returns True only if HA accepted it."""
+    data = {"message": str(message)[:500], "title": str(title)[:120]}
+    if notification_id:
+        data["notification_id"] = re.sub(r"[^a-z0-9_]", "_", str(notification_id).lower())[:64]
+    status, _ = _request("POST", "/services/persistent_notification/create", data)
+    ok = status in (200, 201)
+    if not ok:
+        _log(f"persistent_notification.create failed (status={status})")
+    return ok
+
+
 def ha_location():
     """(latitude, longitude, temp_unit) from /config, or (None, None, None) — used
     to fetch weather from NWS for the home's coordinates."""

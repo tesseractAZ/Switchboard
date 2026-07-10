@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.0
+
+Observability and hardening from the audit.
+
+- **A missed wake-up now tells you.** If a wake-up call can't be delivered (the
+  phone stays busy or offline through its whole grace window), it used to be
+  dropped log-only — invisible unless you were tailing the add-on log. It now
+  raises a Home Assistant persistent notification naming the extension and time.
+- **Room phones get an RTP watchdog.** If a call's media stalls mid-call — the
+  Wi-Fi cordless drops off the access point, an analog port wedges — the channel
+  is now torn down instead of leaving a dead-air call up forever and leaking the
+  RTP port (the SIP trunk already had this; the room phones didn't).
+- **Two config traps closed.** A trunk password containing `;` or leading/trailing
+  whitespace (which Asterisk silently truncates, breaking registration with no
+  obvious cause) is now rejected the same way room secrets already were; and an
+  all-zero extension ("00"), which passes the digit check but is undialable, is
+  rejected instead of silently never ringing.
+- **Every voice AGI is belt-and-suspenders executable.** The announce, status, and
+  wake-up-delivery scripts are now in the image's explicit `chmod +x` list too, so
+  a dropped execute bit can't silently disable a feature.
+
 ## 0.17.0
 
 Operator-console (TUI + browser) robustness, from the audit.
