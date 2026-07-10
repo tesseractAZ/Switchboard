@@ -302,18 +302,53 @@ def vis_width(s: str) -> int:
                for c in s)
 
 
+def _truncate_visible(line: str, maxw: int) -> str:
+    """Cut `line` to at most `maxw` visible columns, preserving ANSI SGR codes and
+    East-Asian width, and re-appending a reset if a color was left open. Without
+    this a line wider than the terminal (a long help row, the header, a modal
+    prompt) wraps and garbles the frame on a narrow (e.g. 60-col) terminal."""
+    if maxw <= 0:
+        return ""
+    if vis_width(line) <= maxw:
+        return line
+    out, width, i, n, had_sgr = [], 0, 0, len(line), False
+    while i < n:
+        m = _ANSI_RE.match(line, i)
+        if m:
+            out.append(m.group(0))
+            had_sgr = True
+            i = m.end()
+            continue
+        c = line[i]
+        cw = 0 if unicodedata.combining(c) else (2 if unicodedata.east_asian_width(c) in ("W", "F") else 1)
+        if width + cw > maxw:
+            break
+        out.append(c)
+        width += cw
+        i += 1
+    s = "".join(out)
+    if had_sgr and not s.endswith(RESET):
+        s += RESET
+    return s
+
+
 def center(lines: list[str], w: int, h: int) -> list[str]:
     """Center a rendered block in a w×h terminal — the roster is small, so on a
     big screen it would otherwise sit jammed in the top-left. Indent every line by
     a common left margin and prepend blank lines, but never push content off-screen
-    (no padding once it's as wide/tall as the terminal). Pure; unit-tested."""
+    (no padding once it's as wide/tall as the terminal). Any line still wider than
+    the terminal is truncated, and the whole frame is clamped to h rows, so a
+    narrow/short window degrades gracefully instead of wrapping or scrolling the
+    header off. Pure; unit-tested."""
     if not lines:
         return lines
+    lines = [_truncate_visible(ln, w) for ln in lines]
     content_w = max((vis_width(ln) for ln in lines), default=0)
     left = max(0, (w - content_w) // 2)
     body = [(" " * left) + ln for ln in lines] if left else list(lines)
     top = max(0, (h - len(lines)) // 2)
-    return [""] * top + body
+    out = [""] * top + body
+    return out[:h] if len(out) > h else out
 
 
 class Board:
@@ -956,6 +991,14 @@ def serve_session(sock: socket.socket, board: Board, stop: threading.Event, log)
             except socket.timeout:
                 if time.time() > idle_deadline:
                     break  # idle too long — reclaim the session
+                # A lone trailing ESC can't be told apart from the start of an
+                # escape sequence at parse time, so parse_input leaves it in inbuf.
+                # If no continuation byte arrived within the recv timeout, treat it
+                # as the Esc key — a real terminal's escape-timeout — so a single
+                # Escape cancels a mode instead of dead-keying until the next press.
+                if inbuf == b"\x1b":
+                    inbuf = b""
+                    apply_key(sess, "esc", board, log)
                 draw()
                 continue
             idle_deadline = time.time() + IDLE_SECONDS
