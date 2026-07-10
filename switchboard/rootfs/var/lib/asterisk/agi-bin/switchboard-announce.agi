@@ -69,17 +69,6 @@ def main() -> None:
         sp.say_or("No speakers are set up for announcements. Goodbye.")
         return
 
-    # HA 200s a play_media to a nonexistent entity, so a stale/typo'd speaker id
-    # would make us announce "playing on the speakers" while nothing plays. Drop
-    # any configured speaker that isn't a real HA entity BEFORE recording, and fail
-    # honestly if none remain.
-    players, missing = ha_client.filter_existing(players)
-    if missing:
-        sp.log("announce", f"unknown speaker entities (check announce_players): {missing}")
-    if not players:
-        sp.say_or("Sorry, the announcement speakers are unavailable right now. Goodbye.")
-        return
-
     text = _record()
     if not text:
         sp.say_or("Sorry, I didn't catch an announcement. Goodbye.")
@@ -94,6 +83,19 @@ def main() -> None:
         sp.say_or("Sorry, I couldn't prepare the announcement. Goodbye.")
         return
     url = f"http://{ip}:{WEBUI_PORT}/announce/{name}"
+
+    # Drop stale/typo'd speaker ids so we don't announce "playing on the speakers"
+    # while nothing plays (HA 200s a play to a missing entity) — but only when HA is
+    # confirmed reachable, so a transient Core restart (recording already happened
+    # above) still gets a best-effort play instead of a false "unavailable". Runs
+    # after recording, so it never adds dead air to the top of the call.
+    present, missing, ha_up = ha_client.resolve_entities(players)
+    if missing:
+        sp.log("announce", f"unknown speaker entities (check announce_players): {missing}")
+    if ha_up and not present:
+        sp.say_or("Sorry, the announcement speakers are unavailable right now. Goodbye.")
+        return
+    players = present if ha_up else players
 
     ok = False
     try:

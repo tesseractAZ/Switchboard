@@ -256,17 +256,28 @@ def entity_exists(entity_id: str) -> bool:
     return get_state(entity_id) is not None
 
 
-def filter_existing(entity_ids):
-    """Split entity_ids into (present, missing) by live existence. Callers that act
-    on a user-configured entity list use this so a stale/typo'd id becomes an HONEST
-    failure ('couldn't reach the speakers') instead of a service call that HA 200s
-    while doing nothing. Missing ids are logged."""
-    present, missing = [], []
-    for e in (entity_ids or []):
-        (present if entity_exists(e) else missing).append(e)
+def resolve_entities(entity_ids):
+    """(present, missing, ha_up) for a configured entity list, via ONE get_states().
+
+    HA 200s a service call to a nonexistent entity, so a caller acting on a user-
+    supplied list (announce speakers) must check existence to tell a real action
+    from a silent no-op. But get_state() can't distinguish 'entity missing' from
+    'HA unreachable' — both look absent — so a naive existence filter would drop
+    every speaker during a transient Core restart. This probes reachability once:
+      * HA reachable (states non-empty): existence is meaningful -> real present/missing.
+      * HA unreachable (ha_up False): existence is UNKNOWN; present == the input,
+        missing == [] — the caller should proceed best-effort (attempt the call and
+        let it fail honestly) rather than suppress a valid action on a brief outage.
+    Missing ids are logged when HA is reachable."""
+    states = get_states()
+    if not states:
+        return list(entity_ids or []), [], False
+    present_ids = {s.get("entity_id") for s in states if isinstance(s, dict)}
+    present = [e for e in (entity_ids or []) if e in present_ids]
+    missing = [e for e in (entity_ids or []) if e not in present_ids]
     if missing:
         _log(f"configured entities not found in HA (dropped): {missing}")
-    return present, missing
+    return present, missing, True
 
 
 def ha_location():

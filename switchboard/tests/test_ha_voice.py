@@ -159,6 +159,30 @@ def test_announce_audio() -> None:
     check("lan_ip: returns a string", isinstance(announce_audio.lan_ip(), str))
 
 
+def test_resolve_entities() -> None:
+    # resolve_entities must distinguish 'entity missing' from 'HA unreachable' so a
+    # transient outage can't suppress a valid announce (adversarial-review regression).
+    real = [{"entity_id": "media_player.west_hallway", "state": "idle"},
+            {"entity_id": "media_player.guest_thermostat", "state": "idle"}]
+    orig = ha_client.get_states
+    try:
+        ha_client.get_states = lambda: real  # HA reachable
+        present, missing, up = ha_client.resolve_entities(
+            ["media_player.west_hallway", "media_player.dead_one"])
+        check("resolve: HA up -> real present/missing + ha_up",
+              present == ["media_player.west_hallway"] and missing == ["media_player.dead_one"] and up is True)
+        present, missing, up = ha_client.resolve_entities(["media_player.dead_a", "media_player.dead_b"])
+        check("resolve: HA up + all missing -> present empty (honest fail)",
+              present == [] and len(missing) == 2 and up is True)
+        ha_client.get_states = lambda: []  # HA unreachable
+        keep = ["media_player.west_hallway", "media_player.guest_thermostat"]
+        present, missing, up = ha_client.resolve_entities(keep)
+        check("resolve: HA down -> keep all, ha_up False (no false unavailable)",
+              present == keep and missing == [] and up is False)
+    finally:
+        ha_client.get_states = orig
+
+
 def test_negative_cache() -> None:
     # With no candidate host reachable (no HA_BASE_URL / SUPERVISOR_TOKEN), a failed
     # _request negative-caches so back-to-back calls during an outage short-circuit
@@ -184,6 +208,7 @@ def main() -> None:
     test_format_calendar()
     test_ha_client_guards()
     test_announce_audio()
+    test_resolve_entities()
     test_negative_cache()
     print()
     if _failures:
