@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.0
+
+Operator-console (TUI + browser) robustness, from the audit.
+
+- **The console no longer garbles on a small window.** A line wider than the
+  terminal is truncated to fit (colors preserved) and the whole board is clamped
+  to the terminal height, so a 60-column or short window degrades gracefully
+  instead of wrapping lines and scrolling the header off. Wide terminals are
+  unchanged.
+- **A single Escape now cancels.** Pressing Esc once to back out of connect /
+  transfer / wake-up / lights used to do nothing until the next key — a lone Esc
+  couldn't be told apart from the start of an arrow-key sequence, so it sat
+  buffered. It's now flushed on the next idle tick (a normal terminal's
+  escape-timeout).
+- **A stalled browser tab can't lock everyone out.** A web-terminal peer that
+  completed the WebSocket handshake then stopped reading used to block the bridge
+  in `sendall` forever, leaking one of the five console sessions (and a telnet
+  slot) until the add-on restarted — five such peers locked out all operators.
+  Writes are now bounded and a stuck peer is reclaimed like any dead connection.
+
 ## 0.16.0
 
 Correctness pass from a full-system audit — fixes voice mis-recognitions that

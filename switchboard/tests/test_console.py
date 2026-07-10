@@ -58,6 +58,14 @@ def test_parse_input() -> None:
     # Incomplete trailing IAC is held back in rest.
     ev, rest = console.parse_input(b"x" + bytes([IAC]))
     check("parse: incomplete IAC held in rest", ev == [("key", "x")] and rest == bytes([IAC]))
+    # A lone trailing ESC is held in rest (can't yet tell it from an escape seq) —
+    # serve_session flushes it as the Esc key on the recv-timeout tick so a single
+    # Escape cancels a mode. A full arrow sequence is NOT mistaken for a bare Esc.
+    ev, rest = console.parse_input(b"\x1b")
+    check("parse: lone ESC held in rest for the escape-timeout flush",
+          ev == [] and rest == b"\x1b")
+    ev, rest = console.parse_input(b"\x1b[B")
+    check("parse: full arrow not seen as bare ESC", ev == [("key", "down")] and rest == b"")
 
 
 ROOMS = [
@@ -344,6 +352,31 @@ def test_center() -> None:
     board = _board(ROOMS)
     lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": 120, "h": 40}, 0.0)
     check("center: board indented on a wide screen", lines[0] == "" and any(ln.startswith("   ") for ln in lines if ln.strip()))
+
+
+def test_truncate_and_clamp() -> None:
+    # A line wider than the terminal is truncated to its visible width (no wrap).
+    check("truncate: over-wide line cut to width",
+          console.vis_width(console._truncate_visible("abcdefghij", 5)) == 5)
+    check("truncate: short line untouched", console._truncate_visible("abc", 10) == "abc")
+    check("truncate: zero width -> empty", console._truncate_visible("abc", 0) == "")
+    # ANSI codes are preserved and a reset is re-appended when color was open.
+    colored = console.color(console.GREEN, "Registered")
+    cut = console._truncate_visible(colored, 4)
+    check("truncate: colored line stays <= width", console.vis_width(cut) <= 4)
+    check("truncate: colored line re-resets", cut.endswith(console.RESET))
+    check("truncate: wide emoji not split mid-cell", console.vis_width(console._truncate_visible("🔌abc", 2)) <= 2)
+    # center() never returns a line wider than w, nor more than h rows.
+    board = _board(ROOMS)
+    for (w, h) in [(60, 20), (40, 12), (80, 24)]:
+        lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": w, "h": h}, 0.0)
+        check(f"clamp: no line wider than {w}", all(console.vis_width(ln) <= w for ln in lines))
+        check(f"clamp: no more than {h} rows", len(lines) <= h)
+    # Every mode stays within a narrow terminal.
+    for mode in ("help", "connect", "transfer", "pageconfirm"):
+        lines = console.render(board.get(), {"sel": 0, "mode": mode, "w": 60, "h": 20, "buf": "16"}, 0.0)
+        check(f"clamp: mode {mode} fits 60x20",
+              all(console.vis_width(ln) <= 60 for ln in lines) and len(lines) <= 20)
 
 
 def test_page_confirm_accept() -> None:
@@ -644,6 +677,7 @@ def main() -> None:
     test_help_mode()
     test_vis_width()
     test_center()
+    test_truncate_and_clamp()
     test_page_confirm_accept()
     test_page_confirm_cancel()
     test_mwi_toggle()

@@ -203,7 +203,24 @@ def test_origin_allowed() -> None:
           ws.origin_allowed({"host": H, "origin": f"https://{H}"}) is True)
 
 
+def test_bridge_write_is_bounded() -> None:
+    # A wedged (non-reading) WS peer must not park the bridge in sendall forever.
+    # The bridge socket gets a FINITE send timeout, not settimeout(None) — source
+    # guard (the socket plumbing itself isn't exercised here, same split as above).
+    src = (Path(__file__).resolve().parents[1]
+           / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "server.py").read_text()
+    check("bridge: SEND_TIMEOUT defined + finite positive", "SEND_TIMEOUT = " in src)
+    check("bridge: no unbounded settimeout(None) on the bridge", "settimeout(None)" not in src)
+    check("bridge: bridge socket bounded by SEND_TIMEOUT", "settimeout(SEND_TIMEOUT)" in src)
+    # The browser socket must NOT be reset to blocking inside _bridge_ws — that
+    # silently un-does the timeout (setblocking(True) == settimeout(None)). Only the
+    # trusted localhost console socket keeps blocking.
+    check("bridge: sock not reset to blocking (would nullify the timeout)",
+          "sock.setblocking(True)" not in src)
+
+
 def main() -> None:
+    test_bridge_write_is_bounded()
     test_accept_key()
     test_parse_http_headers()
     test_handshake_response()
