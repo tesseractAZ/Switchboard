@@ -55,20 +55,23 @@ def main() -> None:
         else:
             sp.say_or("I didn't catch that. Say a room name, or say list.", sp.PROMPT_BEEP)
         text = sp.listen("dir", attempt, bias=bias)
-        if dir_.is_cancel(text):
-            return
-        if dir_.is_list_request(text) and lists < MAX_ATTEMPTS:
+        # Fail-safe resolution: a strong room match wins, then cancel, then a
+        # (fuzzy) list request, then a weak room match; a mis-heard "list" reads
+        # the directory instead of dialing a wrong room. Never connects on doubt.
+        action, ext = dir_.resolve(text, lambda t: matcher.match(t, rooms, synonyms, threshold))
+        if action == "list" and lists < MAX_ATTEMPTS:
             lists += 1
             sp.say_or(dir_.directory_text(rooms))
             continue  # a 'list' request re-prompts without burning an attempt
-        ext, _score, _reason = matcher.match(text, rooms, synonyms, threshold)
-        if ext:
+        if action == "cancel":
+            return
+        if action == "connect" and ext:
             name = dir_.name_for(rooms, ext)
             sp.say_or(dir_.announce_text(name, ext) + " Connecting you now.")
             set_var("DIR_TARGET", ext)
             set_var("DIR_RESULT", "connect")
             return
-        attempt += 1
+        attempt += 1  # unresolved, cancel-less, or list past the cap -> burn an attempt
     sp.say_or("Sorry, I couldn't find that room. Goodbye.")
 
 

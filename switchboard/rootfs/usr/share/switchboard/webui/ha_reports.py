@@ -10,6 +10,7 @@ has something to say.
 from __future__ import annotations
 
 import datetime
+import math
 import re
 
 import ha_client
@@ -28,9 +29,13 @@ DEFAULT_POWER = {
 
 def _num(state):
     try:
-        return float(state)
+        v = float(state)
     except (TypeError, ValueError):
         return None
+    # HA can report "nan"/"inf" (a wedged integration); float() accepts them, and a
+    # non-finite value would be spoken verbatim and poison every comparison
+    # (NaN < x is always False). Treat it as "no reading".
+    return v if math.isfinite(v) else None
 
 
 def _cap(s: str) -> str:
@@ -93,19 +98,30 @@ def power_report(entities: dict | None = None) -> str:
 # --------------------------------------------------------------------------- #
 # House (thermostats + how many lights are on)
 # --------------------------------------------------------------------------- #
-def format_house(climates: list, lights_on: int, lights_total: int) -> str:
-    """Pure. climates: [(name, current_temp_or_None, hvac_mode)]; light counts ints."""
+def format_house(climates: list, lights_on: int, lights_total: int, lights_unavailable: int = 0) -> str:
+    """Pure. climates: [(name, current_temp_or_None, hvac_mode)]; light counts ints.
+
+    ``lights_unavailable`` are lights HA can't reach (unavailable/unknown). They are
+    NOT off — reporting them as off would tell the caller "all lights are off" when
+    the lighting network is actually down, so they are excluded from the on/off
+    count and surfaced separately."""
     sentences = []
     for name, temp, _mode in climates or []:
         if temp is not None and name:
             sentences.append(f"The {name} is {int(round(temp))} degrees.")
-    if lights_total:
+    reachable = lights_total - lights_unavailable
+    if lights_total and reachable <= 0:
+        sentences.append("The lights are unavailable right now.")
+    elif lights_total:
         if lights_on == 0:
             sentences.append("All lights are off.")
         elif lights_on == 1:
             sentences.append("1 light is on.")
         else:
             sentences.append(f"{lights_on} lights are on.")
+        if lights_unavailable > 0:
+            n = lights_unavailable
+            sentences.append(f"{n} light{'s' if n != 1 else ''} {'are' if n != 1 else 'is'} unavailable.")
     if not sentences:
         return "House status is unavailable right now."
     return " ".join(sentences)
@@ -120,7 +136,8 @@ def house_report() -> str:
                              _num(a.get("current_temperature")), s.get("state")))
     lights = ha_client.get_lights()
     on = sum(1 for l in lights if str(l.get("state")) == "on")
-    return format_house(climates, on, len(lights))
+    unavail = sum(1 for l in lights if str(l.get("state")).lower() in ("unavailable", "unknown", "none", ""))
+    return format_house(climates, on, len(lights), unavail)
 
 
 # --------------------------------------------------------------------------- #

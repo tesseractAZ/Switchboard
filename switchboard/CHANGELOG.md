@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.16.0
+
+Correctness pass from a full-system audit — fixes voice mis-recognitions that
+could take the wrong action, and a broken announce that failed silently.
+
+- **Announcements (dial 46) no longer fail silently.** The configured speakers
+  were two entity IDs that no longer exist in Home Assistant, and HA returns
+  "success" for a play to a missing entity — so the operator said "announcing on
+  the speakers" while nothing played. The default now points at the real speakers,
+  the announce flow verifies each speaker exists before recording (a stale ID is
+  now an honest "the speakers are unavailable"), and `ha_client` logs every
+  rejected HA call instead of swallowing it.
+- **Directory (411) can't mis-dial a room when it mishears "list".** On a
+  narrowband line whisper hears "list" as *lift* / *least* / *last* / *listing*,
+  which used to clear the fuzzy room threshold and **connect a call to the wrong
+  room**. Resolution now fails safe: an unambiguous room name wins, then cancel,
+  then a (fuzzy) list request reads the directory, then a weak room match — a
+  mis-hear reads the list or re-prompts, never dials. A room literally named
+  "List"/"Cancel" is reachable again too.
+- **Wake-up times parse the way people actually say them.** A leading filler word
+  ("um seven thirty", "make it seven thirty", "around seven") no longer rejects a
+  clearly-spoken time, and "quarter to one p.m." now resolves to 12:45 instead of
+  00:45 (am/pm is applied to the target hour before subtracting).
+- **Dial-a-status (45) tells the truth about the lights.** Lights Home Assistant
+  can't reach are reported as *unavailable*, not silently counted as "off" — so a
+  dead lighting network no longer says "all lights are off". A wedged sensor that
+  reports `nan`/`inf` is treated as "no reading" rather than spoken verbatim.
+- **Voice menus are less trigger-happy.** Asking the operator for a room no longer
+  diverts to the lights flow just because the word sounds a little like "lights"
+  ("flights" ≠ lights), a "Control Room" is no longer swallowed by home-control,
+  and answering the status menu "power, thanks" serves power instead of hanging
+  up. An explicit category ("the one about the weather") beats a bare "one/two".
+
 ## 0.15.0
 
 Two voice additions: the operator now understands "wake-up call", and a new
