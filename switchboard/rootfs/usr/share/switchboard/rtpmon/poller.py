@@ -232,13 +232,15 @@ def poll_once(names: dict) -> tuple:
     return phones, summarize(phones)
 
 
-def warmup_done(settled: bool, summ, polls: int) -> bool:
-    """True once the poller should switch from the startup fast cadence to the
-    steady interval: a phone has registered (reachable) or the warm-up cap elapsed.
-    Latches — it never drops back into warm-up if a phone later de-registers."""
-    if settled:
+def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int) -> bool:
+    """True once the poller should switch from the startup fast cadence to the steady
+    interval: the set of registered phones has STABILIZED (reachable count stopped
+    growing) or the warm-up cap elapsed. Settling on the FIRST reachable phone would
+    freeze stragglers still re-registering after a restart as 'offline' for a whole
+    interval — e.g. one GXW FXS port lagging its siblings. Latches once true."""
+    if settled or polls >= WARMUP_MAX_POLLS:
         return True
-    return bool((summ and summ.get("reachable", 0) > 0) or polls >= WARMUP_MAX_POLLS)
+    return reachable > 0 and reachable <= prev_reachable
 
 
 def run() -> int:
@@ -250,14 +252,17 @@ def run() -> int:
     sys.stderr.write(f"switchboard-rtpmon: idle link-health poller up (every {interval}s)\n")
     settled = False
     polls = 0
+    prev_reachable = -1
     while True:
         names = room_names(_load_options())
         phones, summ = poll_once(names)
+        reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)
             _publish(phones, summ)
         polls += 1
-        settled = warmup_done(settled, summ, polls)
+        settled = warmup_done(settled, prev_reachable, reachable, polls)
+        prev_reachable = reachable
         time.sleep(interval if settled else WARMUP_DELAY)
 
 
