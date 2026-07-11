@@ -927,17 +927,26 @@ def test_rtpqos_telemetry() -> None:
     check("rtpqos: logs the key quality metrics",
           all(k in e for k in ("rxjitter=", "txjitter=", "rxploss=", "txploss=", "rtt=",
                                "rxmes=", "txmes=", "rxcount=")))
-    check("rtpqos: only logs a leg that carried media (rxcount gate)",
-          '$["${RXC}" = "" | "${RXC}" = "0"]?done' in e)
+    check("rtpqos: skips only a leg with NO media in either direction (rx OR tx)",
+          '("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done' in e)
+    check("rtpqos: one-way-audio leg (tx>0, rx=0) is still logged",
+          '"${TXC}" = "0")]?done' in e)  # gate needs BOTH zero, so tx-only survives
+    check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
+          "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
     check("rtpqos: push extension registers the hangup handler on the callee",
           "exten = push,1,Set(CHANNEL(hangup_handler_push)=switchboard-rtpqos,s,1)" in e)
     # EVERY Dial to a peer must carry the callee QoS handler.
     dials = [ln for ln in e.splitlines() if "Dial(PJSIP" in ln]
     check("rtpqos: every Dial carries the callee handler b()",
           dials and all("b(switchboard-rtpqos^push^1)" in d for d in dials))
-    # ...and be preceded by the caller-side handler push.
-    check("rtpqos: caller-side handler pushed (>=1 per Dial site)",
-          e.count("Set(CHANNEL(hangup_handler_push)=switchboard-rtpqos,s,1)") >= len(dials))
+    # ...and the primary call paths push the handler on the caller leg too.
+    check("rtpqos: caller-side handler pushed on primary Dials",
+          e.count("Set(CHANNEL(hangup_handler_push)=switchboard-rtpqos,s,1)") >= 4)
+    # [internal-xfer] must NOT re-push (its legs already carry a handler from the
+    # original call's b()); pushing again would double-log a transferred call.
+    ix = e[e.index("[internal-xfer]"):e.index("[internal-xfer]") + 900]
+    check("rtpqos: internal-xfer does not double-push",
+          "Set(CHANNEL(hangup_handler_push)" not in ix and "b(switchboard-rtpqos^push^1)" in ix)
     # Non-trunk installs still get the telemetry (it's unconditional).
     e2 = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
     check("rtpqos: present on non-trunk installs too", "[switchboard-rtpqos]" in e2)

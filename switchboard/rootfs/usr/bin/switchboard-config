@@ -757,7 +757,9 @@ def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
         lines += [
             f"exten = {e},1,NoOp(Transfer to {e})",
             " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",  # keep chained xfers confined
-            QOS_PUSH,
+            # No caller-side QOS_PUSH here: a leg redirected into [internal-xfer]
+            # already carries a hangup handler from its original call's Dial b(), so
+            # pushing again would stack and double-log. The callee still gets b().
             f" same = n,Dial(PJSIP/{e},30,rtT{QOS_B})",
             " same = n,Hangup()",
         ]
@@ -791,12 +793,17 @@ def render_rtpqos_context() -> list:
         ";; ----- Per-call RTP quality telemetry (logged on hangup) -----",
         "[switchboard-rtpqos]",
         "exten = s,1,NoOp(RTP QoS on hangup)",
-        # Only log a leg that actually carried media (rxcount>0) — skips ring-no-answer.
         f" same = n,Set(RXC={_q('rxcount')})",
-        ' same = n,GotoIf($["${RXC}" = "" | "${RXC}" = "0"]?done)',
-        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${CALLERID(num)} "
+        f" same = n,Set(TXC={_q('txcount')})",
+        # Skip only a leg that carried NO media in EITHER direction (ring-no-answer).
+        # A one-way-audio leg (tx>0 but rx=0 — the asymmetric-NAT fault) IS logged —
+        # that's exactly the call-quality problem this telemetry exists to catch.
+        ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done)',
+        # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);
+        # FILTER to phone chars so it can't forge log fields or inject a line.
+        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${FILTER(0-9+*#,${CALLERID(num)})} "
         "codec=${CHANNEL(audioreadformat)} billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
-        f"rxcount=${{RXC}} txcount={_q('txcount')} "
+        f"rxcount=${{RXC}} txcount=${{TXC}} "
         f"rxploss={_q('rxploss')} txploss={_q('txploss')} "
         f"rxjitter={_q('rxjitter')} txjitter={_q('txjitter')} rtt={_q('rtt')} "
         f"rxmes={_q('rxmes')} txmes={_q('txmes')})",
