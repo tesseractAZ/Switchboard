@@ -784,7 +784,7 @@ def rtpqos_h(tag: str) -> list:
     logger while the RTP instance is still alive. Runs on the channel that executed
     the context — the initiating phone (or the inbound trunk)."""
     return [f"exten = h,1,NoOp(rtpqos {tag})",
-            " same = n,Gosub(switchboard-rtpqos,s,1)"]
+            f" same = n,Gosub(switchboard-rtpqos,s,1({tag}))"]
 
 
 def _q(field: str) -> str:
@@ -792,6 +792,24 @@ def _q(field: str) -> str:
 
 
 def render_rtpqos_context() -> list:
+    # Push each hung-up leg to switchboard-callqos: the HA sensor + poor-call
+    # notification + the durable JSONL ledger. ${ARG1} is the originating context
+    # ("rooms"/"operator"/"directory"/"from-trunk"), passed by rtpqos_h's Gosub.
+    # Backgrounded (&) so the h-exten returns immediately; TrySystem so a script
+    # error can NEVER wedge the hangup. Every ${...} is double-quoted so an empty
+    # / absent RTCP field lands as an empty arg (argparse-safe) and can't split.
+    def q(field):
+        return '"' + _q(field) + '"'
+    callqos = (
+        " same = n,TrySystem(/usr/bin/switchboard-callqos --source dialplan"
+        ' --tag "${ARG1}" --chan "${CHANNEL(name)}"'
+        ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
+        ' --codec "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
+        ' --hcause "${HANGUPCAUSE}" --rxcount "${RXC}" --txcount "${TXC}"'
+        f' --rxploss {q("rxploss")} --txploss {q("txploss")}'
+        f' --rxjitter {q("rxjitter")} --txjitter {q("txjitter")} --rtt {q("rtt")}'
+        f' --rxmes {q("rxmes")} --txmes {q("txmes")} &)'
+    )
     return [
         "",
         ";; ----- Per-call RTP quality telemetry (logged from each context's h-exten) -----",
@@ -809,7 +827,8 @@ def render_rtpqos_context() -> list:
         f"rxcount=${{RXC}} txcount=${{TXC}} "
         f"rxploss={_q('rxploss')} txploss={_q('txploss')} "
         f"rxjitter={_q('rxjitter')} txjitter={_q('txjitter')} rtt={_q('rtt')} "
-        f"rxmes={_q('rxmes')} txmes={_q('txmes')})",
+        f"rxmes={_q('rxmes')} txmes={_q('txmes')} tag=${{ARG1}})",
+        callqos,
         " same = n(done),Return()",
     ]
 
@@ -1502,6 +1521,12 @@ def write_features_runtime(opts: dict) -> None:
         "announce": {
             "players": players,
             "tts_engine": _clean_eid(opts.get("announce_tts_engine", "tts.piper"), ("tts",)) or "tts.piper",
+        },
+        # switchboard-callqos runs from the dialplan h-extension AS the asterisk
+        # user, so it reads the poor-call alert opt-out here (root-only
+        # /data/options.json is unreadable to it — the whole reason this file exists).
+        "callqos": {
+            "alerts": bool(opts.get("call_quality_alerts", True)),
         },
     }
     fp = RUN_DIR / "features.json"

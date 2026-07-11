@@ -256,6 +256,29 @@ def entity_exists(entity_id: str) -> bool:
     return get_state(entity_id) is not None
 
 
+def set_state(entity_id: str, state, attributes: dict | None = None) -> bool:
+    """Push an entity state into HA via the Core API (POST /states/<id>).
+
+    This creates/updates a 'pushed' entity — it appears in the UI and is captured
+    by the Recorder (so you can GRAPH it), but it is not backed by an integration,
+    so it clears on an HA restart until the next push repopulates it. That is fine
+    for call-quality telemetry, where the latest value plus history is all we want.
+
+    Returns True on 200/201. HA rejects a non-finite / oversized state, so callers
+    should pass a plain number or short string (state is capped at 255 chars)."""
+    if not is_entity_id(entity_id):
+        _log(f"set_state refused malformed entity id {entity_id!r}")
+        return False
+    body = {"state": str(state)[:255]}
+    if attributes:
+        body["attributes"] = attributes
+    status, _ = _request("POST", f"/states/{entity_id}", body)
+    ok = status in (200, 201)
+    if not ok:
+        _log(f"set_state {entity_id} failed (status={status})")
+    return ok
+
+
 def resolve_entities(entity_ids):
     """(present, missing, ha_up) for a configured entity list, via ONE get_states().
 

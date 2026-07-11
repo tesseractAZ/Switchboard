@@ -1,0 +1,360 @@
+#!/usr/bin/python3
+"""Switchboard per-call quality sink — turns raw RTP numbers into a durable record,
+a Home Assistant sensor, and a proactive "that call was rough" notification.
+
+Two producers feed this one script:
+
+  * the dialplan ``[switchboard-rtpqos]`` h-extension (source=dialplan) — fires on
+    hangup with the EXACT final ``CHANNEL(rtcp,*)`` stats for the leg that DIALED
+    (the initiating phone / inbound trunk). Authoritative.
+  * the ``switchboard-rtpmon`` AMI poller (source=poll) — supplies the far/answering
+    leg (the one that never ran a context, so has no h-extension) and is allowed to
+    be a few seconds stale. Cumulative RTP counters are monotonic, so a near-hangup
+    snapshot is a faithful summary.
+
+Keeping the quality logic HERE (not in the dialplan or the poller) means one place
+to test and tune. Everything is wrapped so this can NEVER take down a call leg: the
+dialplan invokes us backgrounded via TrySystem, and we always exit 0.
+
+Outputs:
+  * /data/state/callqos.jsonl  — append-only, last MAX_RECORDS legs (readers dedupe
+    by channel, preferring source=dialplan). The "record everything" ledger.
+  * sensor.switchboard_last_call (dialplan source only) — numeric worst-leg MES so
+    HA's Recorder graphs the trend; all metrics ride along as attributes.
+  * a persistent notification (bell menu) when a call scores poorly — keyed by
+    channel so a dialplan+poll double-report can't double-notify.
+
+Usage (all metric flags optional; missing/"unknown"/"unavailable" -> null):
+    switchboard-callqos --source dialplan --tag rooms --chan PJSIP/12-00000000 \
+        --cid 12 --codec ulaw --billsec 25 --hcause 16 \
+        --rxcount 1265 --txcount 1265 --rxploss 0 --txploss 0 \
+        --rxjitter 0.019875 --txjitter 0 --rtt 0.001724 --rxmes 88.06 --txmes 88.06 \
+        --maxrtt 0.03 --stdevrtt 0.004 --rxmaxjitter 0.04 --rxoctet 202400 --txoctet 202400
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import time
+
+try:
+    import fcntl  # POSIX only; the add-on runs on Linux
+except ImportError:  # pragma: no cover
+    fcntl = None
+
+# ha_client (HA push) lives with the webui; import it lazily/defensively so a
+# broken import can never propagate out of a hangup handler.
+sys.path.insert(0, "/usr/share/switchboard/webui")
+
+# /data/state is the setgid, group-writable dir both the asterisk-user dialplan
+# and the root poller can write (see switchboard-config ensure_state_dir).
+PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
+# Asterisk-readable runtime staged by switchboard-config (root-only options.json is
+# not readable by the asterisk user the dialplan runs us as).
+FEATURES = os.environ.get("SWITCHBOARD_FEATURES", "/run/switchboard/features.json")
+MAX_RECORDS = 300
+
+# "no RTCP" sentinels the CHANNEL(rtcp,*) function can emit, plus the empty string.
+_NULLISH = {"", "unknown", "unavailable", "(null)", "nan"}
+
+# Signed non-finite spellings that argparse would mistake for an option (leading
+# dash) and abort on. Unsigned "nan"/"inf" parse fine (no dash) and _num() nulls
+# them anyway; only the dash-prefixed forms need pre-blanking. Covers glibc and
+# the MSVC-style spellings for good measure.
+_BADTOK = {"-nan", "-inf", "-nan(ind)", "-inf(inf)", "-1.#ind", "-1.#inf", "-1.#qnan"}
+
+
+# --------------------------------------------------------------------------- #
+# Parsing — tolerate empty / sentinel / malformed without ever raising.
+# --------------------------------------------------------------------------- #
+def _num(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.lower() in _NULLISH:
+        return None
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return None
+    # Guard against inf/nan poisoning the sensor / arithmetic.
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _int(v):
+    f = _num(v)
+    return int(f) if f is not None else None
+
+
+def _pct(loss, count):
+    """Packet loss as a percentage; None if the counter is missing/zero."""
+    if loss is None or count is None or count <= 0:
+        return None
+    return round(100.0 * loss / count, 3)
+
+
+def _ms(sec):
+    """CHANNEL(rtcp,*) reports jitter/rtt in SECONDS; present as milliseconds."""
+    return None if sec is None else round(sec * 1000.0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# Quality classification — the one knob worth tuning. Given the initiating leg
+# sees BOTH directions (rxmes = audio it heard, txmes = audio the far end heard),
+# we score on the WORSE direction and the WORSE loss, so a one-way problem (the
+# real-world failure mode — e.g. the MES-59 WiFi-cordless call) can't hide behind
+# a healthy reverse path.
+# --------------------------------------------------------------------------- #
+def classify(worst_mes, worst_loss_pct, rtt_ms):
+    """Return (label, notify: bool, reasons: list[str]).
+
+    Thresholds are deliberately conservative so a notification means "worth a
+    look", not "spam on every WiFi hiccup". Tune the numbers here to taste:
+      - MES ~88 ≈ MOS 4.4 (toll quality); 70 ≈ MOS 3.5; 60 ≈ MOS 3.0 (fair).
+      - loss under ~1% is inaudible on G.711; 3%+ is audible clipping.
+      - RTT under ~150 ms is unnoticed; 400 ms+ makes conversation stilted.
+    """
+    reasons = []
+    if worst_mes is not None and worst_mes < 70:
+        reasons.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
+    if worst_loss_pct is not None and worst_loss_pct > 3.0:
+        reasons.append(f"loss {worst_loss_pct:.1f}%")
+    if rtt_ms is not None and rtt_ms > 400:
+        reasons.append(f"RTT {rtt_ms:.0f}ms")
+
+    if worst_mes is None:
+        label = "unknown"
+    elif worst_mes >= 85 and (worst_loss_pct or 0) < 0.5:
+        label = "excellent"
+    elif worst_mes >= 78 and (worst_loss_pct or 0) < 1.5:
+        label = "good"
+    elif worst_mes >= 65 and (worst_loss_pct or 0) < 4.0:
+        label = "fair"
+    else:
+        label = "poor"
+
+    return label, bool(reasons), reasons
+
+
+# --------------------------------------------------------------------------- #
+# Derive the full metric set from the raw args.
+# --------------------------------------------------------------------------- #
+def build_record(a) -> dict:
+    rxcount, txcount = _int(a.rxcount), _int(a.txcount)
+    rxploss, txploss = _int(a.rxploss), _int(a.txploss)
+    rxmes, txmes = _num(a.rxmes), _num(a.txmes)
+    rtt_ms = _ms(_num(a.rtt))
+    loss_rx = _pct(rxploss, rxcount)
+    loss_tx = _pct(txploss, txcount)
+
+    mes_vals = [m for m in (rxmes, txmes) if m is not None]
+    worst_mes = min(mes_vals) if mes_vals else None
+    loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
+    worst_loss = max(loss_vals) if loss_vals else None
+
+    label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms)
+
+    # One-way audio: one direction carried real traffic while the other was fully
+    # dead. Worst-direction MES scoring alone MISSES this — the dead side reports
+    # no MES, so min() ignores it and a dead-receive call scores "excellent". This
+    # IS the failure the feature must catch, so flag it explicitly. A count of 0 OR
+    # absent is "dead"; require ~1s (>50 pkts) on the live side so a tiny call-setup
+    # blip isn't a false alarm. (Continuous G.711 RTP flows even in silence, so a
+    # multi-second call with a 0-packet direction is genuinely one-way.)
+    rx_dead = not (rxcount and rxcount > 0)
+    tx_dead = not (txcount and txcount > 0)
+    one_way = (rxcount and rxcount > 50 and tx_dead) or (txcount and txcount > 50 and rx_dead)
+    if one_way:
+        reasons = [f"one-way audio ({'receive' if rx_dead else 'transmit'} dead)"] + reasons
+        label, notify = "poor", True
+
+    rec = {
+        "ts": int(time.time()),
+        "source": a.source,
+        "tag": a.tag or "",
+        "chan": a.chan or "",
+        "ext": (a.cid or "").strip(),
+        "codec": (a.codec or "").strip(),
+        "dur": _int(a.billsec),
+        "hcause": _int(a.hcause),
+        "rxcount": rxcount, "txcount": txcount,
+        "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
+        "jitter_rx_ms": _ms(_num(a.rxjitter)), "jitter_tx_ms": _ms(_num(a.txjitter)),
+        "rtt_ms": rtt_ms,
+        # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
+        # bumpy stream that a healthy AVERAGE would mask.
+        "rtt_max_ms": _ms(_num(a.maxrtt)), "rtt_stdev_ms": _ms(_num(a.stdevrtt)),
+        "jitter_rx_max_ms": _ms(_num(a.rxmaxjitter)),
+        "rx_octets": _int(a.rxoctet), "tx_octets": _int(a.txoctet),
+        "mes_rx": round(rxmes, 1) if rxmes is not None else None,
+        "mes_tx": round(txmes, 1) if txmes is not None else None,
+        "mes_worst": round(worst_mes, 1) if worst_mes is not None else None,
+        "mos_worst": round(worst_mes / 20.0, 2) if worst_mes is not None else None,
+        "quality": label,
+        "notify": notify,
+        "reasons": reasons,
+    }
+    return rec
+
+
+# --------------------------------------------------------------------------- #
+# Durable ledger — append, cap to MAX_RECORDS, atomic + flock (same idiom as
+# mwi_store, so the root poller and asterisk-user dialplan can both write).
+# --------------------------------------------------------------------------- #
+def append_record(rec: dict) -> None:
+    d = os.path.dirname(PATH) or "."
+    os.makedirs(d, exist_ok=True)
+    lock_path = PATH + ".lock"
+    fh = None
+    try:
+        if fcntl is not None:
+            fh = open(lock_path, "a+")
+            try:
+                os.chmod(lock_path, 0o664)
+            except OSError:
+                pass
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        lines = []
+        try:
+            with open(PATH) as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        except OSError:
+            lines = []
+        lines.append(json.dumps(rec, separators=(",", ":")))
+        lines = lines[-MAX_RECORDS:]
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".callqos-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, PATH)
+            try:
+                os.chmod(PATH, 0o664)
+            except OSError:
+                pass
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    finally:
+        if fh is not None:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
+
+# --------------------------------------------------------------------------- #
+# Home Assistant push — best-effort; a down HA must not matter.
+# --------------------------------------------------------------------------- #
+def _alerts_enabled() -> bool:
+    """The poor-call NOTIFICATION honors the `call_quality_alerts` add-on option
+    (default on). The sensor + JSONL ledger are passive and always run.
+
+    Read it from /run/switchboard/features.json — NOT /data/options.json. The
+    dialplan runs us as the asterisk user, which cannot read root-only
+    /data/options.json; switchboard-config stages the flag into the
+    asterisk-readable features.json each config run for exactly this reason.
+    Unreadable / missing / malformed -> default on (fail toward informed)."""
+    try:
+        with open(FEATURES) as f:
+            return bool(json.load(f).get("callqos", {}).get("alerts", True))
+    except Exception:
+        return True
+
+
+def push_ha(rec: dict) -> None:
+    try:
+        import ha_client  # noqa: E402
+    except Exception:
+        return
+
+    # Only the authoritative dialplan leg drives the headline sensor, so the
+    # poller's slightly-stale far-leg snapshot can't flicker it.
+    if rec["source"] == "dialplan" and rec["mes_worst"] is not None:
+        attrs = {
+            "friendly_name": "Switchboard last call quality",
+            "unit_of_measurement": "MES",
+            "icon": "mdi:phone-check" if rec["quality"] in ("excellent", "good") else "mdi:phone-alert",
+            "quality": rec["quality"],
+            "mos": rec["mos_worst"],
+            "extension": rec["ext"],
+            "leg": rec["tag"],
+            "codec": rec["codec"],
+            "duration_s": rec["dur"],
+            "loss_rx_pct": rec["loss_rx_pct"],
+            "loss_tx_pct": rec["loss_tx_pct"],
+            "jitter_rx_ms": rec["jitter_rx_ms"],
+            "jitter_tx_ms": rec["jitter_tx_ms"],
+            "rtt_ms": rec["rtt_ms"],
+            "rtt_max_ms": rec["rtt_max_ms"],
+            "mes_rx": rec["mes_rx"],
+            "mes_tx": rec["mes_tx"],
+        }
+        try:
+            ha_client.set_state("sensor.switchboard_last_call", rec["mes_worst"], attrs)
+        except Exception:
+            pass
+
+    # Proactive alert on a rough call. notification_id keyed by channel => a
+    # dialplan+poll double-report of the same leg REPLACES, never duplicates.
+    if rec["notify"] and _alerts_enabled():
+        who = rec["ext"] or "a phone"
+        leg = f" ({rec['tag']})" if rec["tag"] else ""
+        body = (
+            f"Call quality was {rec['quality']} on {who}{leg}: "
+            + ", ".join(rec["reasons"])
+            + f". Duration {rec['dur']}s, codec {rec['codec'] or '?'}."
+        )
+        nid = "switchboard_callqos_" + (rec["chan"] or who).replace("/", "_")
+        try:
+            ha_client.notify(body, title="Switchboard call quality", notification_id=nid)
+        except Exception:
+            pass
+
+
+def _parse_args(argv):
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--source", default="dialplan")
+    p.add_argument("--tag", default="")
+    p.add_argument("--chan", default="")
+    p.add_argument("--cid", default="")
+    p.add_argument("--codec", default="")
+    p.add_argument("--billsec", default="")
+    p.add_argument("--hcause", default="")
+    for f in ("rxcount", "txcount", "rxploss", "txploss", "rxjitter", "txjitter",
+              "rtt", "rxmes", "txmes", "maxrtt", "stdevrtt", "rxmaxjitter",
+              "rxoctet", "txoctet"):
+        p.add_argument(f"--{f}", default="")
+    # A leading-dash non-finite value (glibc prints 0.0/0.0 as "-nan", and "-inf"
+    # is likewise possible for a metric computed on zero RTCP samples) looks like
+    # an unknown OPTION to argparse, which then errors on the flag before it as
+    # "expected one argument" and raises SystemExit — dropping the whole record for
+    # exactly the degraded/one-way leg this feature exists to surface. Blank those
+    # tokens first so the flag binds "" and _num() maps it to None as intended.
+    argv = ["" if str(t).lower() in _BADTOK else t for t in argv]
+    # Never choke on an unexpected token from the dialplan.
+    args, _unknown = p.parse_known_args(argv)
+    return args
+
+
+def main(argv=None) -> int:
+    try:
+        a = _parse_args(argv if argv is not None else sys.argv[1:])
+        rec = build_record(a)
+        append_record(rec)
+        push_ha(rec)
+    except (Exception, SystemExit):
+        # A hangup handler must never fail loudly. Swallow and move on.
+        # (SystemExit too: argparse.error() raises it, and it is BaseException,
+        # not Exception — the _BADTOK sanitizer prevents it, this is the net.)
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

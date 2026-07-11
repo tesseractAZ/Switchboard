@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.21.0
+
+Turn the per-call `[rtpqos]` log line into **visible, proactive telemetry** in Home
+Assistant — you no longer have to grep the add-on log to know how a call went.
+
+Each phone-originated call's `h`-extension now also pushes its numbers to a new
+`switchboard-callqos` sink (backgrounded via `TrySystem`, so it can never delay or
+wedge a hangup):
+
+- **`sensor.switchboard_last_call`** — the worst-direction Media Experience Score
+  (numeric, so HA's Recorder graphs the trend), with codec, duration, per-leg
+  loss/jitter/RTT/MES carried as attributes.
+- **A persistent notification** (the bell menu) when a call scores poorly — MES
+  below ~70 (≈ MOS 3.5), over 3% loss, or 400 ms+ round-trip — naming the reason
+  and extension. Keyed by channel so it can't spam; gate it with the new
+  **`call_quality_alerts`** option (default on).
+- **`/data/state/callqos.jsonl`** — a durable, capped ledger of the last 300 legs
+  (readers dedupe by channel), so the raw record is always there for analysis.
+
+Quality is scored on the *worse* direction and *worse* loss, so a partial one-way
+problem (e.g. a WiFi-cordless call that read MES 59 in only the receive direction)
+can't hide behind a healthy reverse path — and a *total* one-way call (one direction
+carrying real traffic while the other is dead) is detected explicitly and flagged
+poor, since a dead direction reports no MES for the worst-of scoring to catch. The
+context also passes its originating tag (`rooms`/`operator`/`directory`/`from-trunk`)
+through the `h`-extension Gosub, so every record and log line attributes the leg.
+
+The `call_quality_alerts` opt-out is honored through the asterisk-readable
+`features.json` (the dialplan runs the sink as the asterisk user, which can't read
+root-only `options.json`), and non-finite RTCP values (`-nan`/`-inf`) are neutralized
+before argument parsing so a degraded leg is still recorded rather than dropped.
+
 ## 0.20.0
 
 Make the per-call RTP quality logging from 0.19.0 actually work.
