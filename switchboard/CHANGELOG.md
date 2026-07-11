@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.21.1
+
+Fix poor-call notifications silently not firing. Live-verified v0.21.0 on a real
+degraded call (a cordless call that scored MES 59 — the telemetry caught it): the
+`[rtpqos]` log line, the JSONL ledger, and `sensor.switchboard_last_call` all
+populated correctly, but the persistent notification never appeared.
+
+Root cause: the sink does two HA calls on hangup — set the sensor, then create the
+notification. The dialplan backgrounds it with `&`, but Asterisk destroys the call
+channel the instant it hangs up, and that cut the process off *after* the sensor
+push but *before* the notification. The sink now **detaches into its own session**
+(`--detach` → `fork`+`setsid`) so channel teardown can't kill it mid-push. Verified
+the notify path itself is correct (it fires cleanly when run to completion).
+
 ## 0.21.0
 
 Turn the per-call `[rtpqos]` log line into **visible, proactive telemetry** in Home

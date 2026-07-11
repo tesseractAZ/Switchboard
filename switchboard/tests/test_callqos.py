@@ -233,6 +233,39 @@ def test_alerts_option_read_from_features() -> None:
         cq.FEATURES = orig
 
 
+def test_detach_gating() -> None:
+    # The dialplan passes --detach so the sink forks into its own session (survives
+    # channel teardown). Unit tests call main() WITHOUT it, so they must never fork.
+    # Spy on the PARENT branch: fork returns a pid, os._exit raises a sentinel so we
+    # stop at the parent path without running setsid/stdio-redirect on the runner.
+    class _Forked(Exception):
+        pass
+    calls = {"fork": 0}
+    saved = (cq.os.fork, cq.os._exit)
+    cq.os.fork = lambda: (calls.__setitem__("fork", calls["fork"] + 1), 4321)[1]
+    cq.os._exit = lambda code: (_ for _ in ()).throw(_Forked())
+    d = tempfile.mkdtemp()
+    cq.PATH, origp = os.path.join(d, "cq.jsonl"), cq.PATH
+    try:
+        # No --detach -> no fork; record still written inline.
+        cq.main(["--source", "dialplan", "--chan", "PJSIP/nd-1", "--rxcount", "5", "--txcount", "5"])
+        check("detach: main() without --detach never forks", calls["fork"] == 0)
+        check("detach: inline run still records", os.path.exists(cq.PATH))
+        # --detach -> _detach() forks; the parent branch hits os._exit (our sentinel),
+        # which propagates out of main() (it is raised before main's try).
+        raised = False
+        try:
+            cq.main(["--detach", "--source", "dialplan", "--chan", "PJSIP/nd-2",
+                     "--rxcount", "5", "--txcount", "5"])
+        except _Forked:
+            raised = True
+        check("detach: --detach forks and the parent exits immediately",
+              calls["fork"] == 1 and raised)
+    finally:
+        cq.os.fork, cq.os._exit = saved
+        cq.PATH = origp
+
+
 def test_main_never_raises() -> None:
     # A hangup handler must never fail loudly, even on garbage input.
     d = tempfile.mkdtemp()
@@ -255,6 +288,7 @@ if __name__ == "__main__":
     test_one_way_audio()
     test_argv_sanitizes_nonfinite()
     test_alerts_option_read_from_features()
+    test_detach_gating()
     test_main_never_raises()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

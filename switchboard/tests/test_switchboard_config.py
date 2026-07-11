@@ -962,7 +962,7 @@ def test_rtpqos_telemetry() -> None:
     # ${...} double-quoted so an empty/absent RTCP field is an argparse-safe empty
     # arg (and can't word-split or inject).
     check("rtpqos: pushes each leg to switchboard-callqos, backgrounded via TrySystem",
-          "TrySystem(/usr/bin/switchboard-callqos --source dialplan" in e and " &)" in e)
+          "TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan" in e and " &)" in e)
     check("rtpqos: sink is passed the context tag + quoted rtcp fields",
           '--tag "${ARG1}"' in e and '--rxmes "${CHANNEL(rtcp,rxmes)}"' in e
           and '--cid "${FILTER(0-9+*#,${CALLERID(num)})}"' in e)

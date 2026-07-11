@@ -801,7 +801,9 @@ def render_rtpqos_context() -> list:
     def q(field):
         return '"' + _q(field) + '"'
     callqos = (
-        " same = n,TrySystem(/usr/bin/switchboard-callqos --source dialplan"
+        # --detach: the sink forks into its own session so channel teardown on
+        # hangup can't kill it after the sensor push but before the notification.
+        " same = n,TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan"
         ' --tag "${ARG1}" --chan "${CHANNEL(name)}"'
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         ' --codec "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
