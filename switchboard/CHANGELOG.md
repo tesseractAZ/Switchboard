@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.23.1
+
+Fix the link-health poller showing every phone `offline` for a full interval after a
+restart. The first poll can run while the phones are still re-registering with
+Asterisk (they re-REGISTER a few seconds after it boots), so it published an
+all-offline snapshot that then sat there until the next 300 s cycle — verified live:
+right after the v0.23.0 deploy all 10 phones read `offline` even though they came
+back reachable seconds later.
+
+The poller now runs a short **warm-up cadence** (every 15 s, up to ~2 min) at startup
+until a phone actually registers, then settles to the steady interval — so the
+sensors reflect reality within seconds of a restart instead of minutes. A genuinely
+all-down fleet still settles at the cap.
+
 ## 0.23.0
 
 Make a de-registered phone **visible** in link-health instead of vanishing. The

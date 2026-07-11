@@ -48,6 +48,14 @@ STATE_PATH = os.environ.get("SWITCHBOARD_LINKHEALTH", "/data/state/linkhealth.js
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 MAX_RECORDS = 2000
 
+# Startup warm-up: right after an add-on restart the poller can run its first cycle
+# while the phones are still re-registering with Asterisk — publishing a misleading
+# "all offline" snapshot that would then sit there for a whole interval. So poll on a
+# short cadence until a phone actually registers (or a bounded cap elapses), then
+# settle to the steady interval.
+WARMUP_DELAY = 15          # seconds between warm-up polls
+WARMUP_MAX_POLLS = 8       # ~2 min cap, so a genuinely all-down fleet still settles
+
 
 def rtt_ms(raw) -> float | None:
     """A ContactList RoundtripUsec (microseconds, as a string) -> milliseconds.
@@ -224,6 +232,15 @@ def poll_once(names: dict) -> tuple:
     return phones, summarize(phones)
 
 
+def warmup_done(settled: bool, summ, polls: int) -> bool:
+    """True once the poller should switch from the startup fast cadence to the
+    steady interval: a phone has registered (reachable) or the warm-up cap elapsed.
+    Latches — it never drops back into warm-up if a phone later de-registers."""
+    if settled:
+        return True
+    return bool((summ and summ.get("reachable", 0) > 0) or polls >= WARMUP_MAX_POLLS)
+
+
 def run() -> int:
     try:
         interval = int(os.environ.get("LINK_HEALTH_INTERVAL", "300") or "300")
@@ -231,18 +248,17 @@ def run() -> int:
         interval = 300
     interval = max(30, interval)  # floor: never hammer AMI
     sys.stderr.write(f"switchboard-rtpmon: idle link-health poller up (every {interval}s)\n")
-    got_first = False
+    settled = False
+    polls = 0
     while True:
         names = room_names(_load_options())
         phones, summ = poll_once(names)
         if phones is not None:
             _append_history(phones)
             _publish(phones, summ)
-            got_first = True
-        # Poll promptly at startup; until the first successful read (Asterisk/AMI
-        # may still be coming up), retry on a short cadence rather than idling the
-        # full interval and leaving the sensors blank for minutes.
-        time.sleep(interval if got_first else 15)
+        polls += 1
+        settled = warmup_done(settled, summ, polls)
+        time.sleep(interval if settled else WARMUP_DELAY)
 
 
 if __name__ == "__main__":
