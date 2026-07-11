@@ -504,7 +504,8 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,GotoIf($[\"${DS}\" = \"UNAVAILABLE\" | \"${DS}\" = \"INVALID\"]?unavail)",
         " same = n,GotoIf($[\"${DS}\" != \"NOT_INUSE\"]?busy)",
         " same = n(connect),Playback(switchboard/sw-connecting)",
-        " same = n,Dial(PJSIP/${OP_TARGET},30,rtT)",
+        QOS_PUSH,
+        f" same = n,Dial(PJSIP/${{OP_TARGET}},30,rtT{QOS_B})",
         # Dial fell through (didn't answer): tell the caller WHY rather than a
         # bland goodbye. ${DIALSTATUS} = BUSY | NOANSWER | CHANUNAVAIL | CONGESTION.
         " same = n,Verbose(0,Operator dial ${OP_TARGET} -> ${DIALSTATUS})",
@@ -531,7 +532,7 @@ def render_operator_context(joined: str, automation_on: bool = False,
         # call to internal-only by stamping __TRANSFER_CONTEXT on the calling
         # channel just before 'T' arms on the operator Dial. Gated on trunk_on so
         # non-trunk output stays byte-identical.
-        i = lines.index(" same = n,Dial(PJSIP/${OP_TARGET},30,rtT)")
+        i = lines.index(f" same = n,Dial(PJSIP/${{OP_TARGET}},30,rtT{QOS_B})")
         lines.insert(i, " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)")
     return lines
 
@@ -636,7 +637,8 @@ def render_directory_context(joined: str, trunk_on: bool = False) -> list[str]:
         lines.append(" same = n,Set(__TRANSFER_CONTEXT=internal-xfer)")
     lines += [
         # The AGI already spoke "Connecting you now"; go straight to the Dial.
-        " same = n,Dial(PJSIP/${DIR_TARGET},30,rtT)",
+        QOS_PUSH,
+        f" same = n,Dial(PJSIP/${{DIR_TARGET}},30,rtT{QOS_B})",
         " same = n,Hangup()",
         " same = n(bye),Playback(switchboard/sw-goodbye)",
         " same = n,Playback(switchboard/sw-endtone)",
@@ -723,9 +725,10 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         f" same = n,{cid}",
         # Confine any onward ##/*2 transfer OF this outbound call to internal-only.
         " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",
+        QOS_PUSH,
         # 'rT' not 'rtT': 'T' lets our (internal) caller transfer via ##/*2, but
         # we drop 't' so the far-end PSTN callee can't invoke our feature codes.
-        f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rT)",
+        f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rT{QOS_B})",
         " same = n,Hangup()",
         " same = n(blocked),Congestion(5)",
         " same = n,Hangup()",
@@ -754,11 +757,61 @@ def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
         lines += [
             f"exten = {e},1,NoOp(Transfer to {e})",
             " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",  # keep chained xfers confined
-            f" same = n,Dial(PJSIP/{e},30,rtT)",
+            # No caller-side QOS_PUSH here: a leg redirected into [internal-xfer]
+            # already carries a hangup handler from its original call's Dial b(), so
+            # pushing again would stack and double-log. The callee still gets b().
+            f" same = n,Dial(PJSIP/{e},30,rtT{QOS_B})",
             " same = n,Hangup()",
         ]
     lines.append("")
     return lines
+
+
+# --------------------------------------------------------------------------- #
+# Per-call RTP quality telemetry.
+#
+# A hangup handler pushed onto BOTH legs of every connected call — the caller via
+# QOS_PUSH set just before each Dial (fires no matter what context the channel is
+# in at hangup), the callee via each Dial's ``b()`` pre-bridge gosub — logs one
+# ``[rtpqos]`` line per leg with the numbers you tune call quality on: rx/tx packet
+# counts + loss, jitter and round-trip (seconds), the negotiated codec, duration,
+# and Asterisk's Media Experience Score (rxmes/txmes, a 0-100 MOS-like metric).
+# Reads at hangup, when the RTP stats are final; skips a leg that carried no media.
+# --------------------------------------------------------------------------- #
+QOS_HANDLER = "switchboard-rtpqos,s,1"        # Set(CHANNEL(hangup_handler_push)=...) form
+QOS_PUSH = f" same = n,Set(CHANNEL(hangup_handler_push)={QOS_HANDLER})"
+QOS_B = "b(switchboard-rtpqos^push^1)"        # append to a Dial's flags -> registers it on the callee
+
+
+def _q(field: str) -> str:
+    return "${CHANNEL(rtpqos,audio," + field + ")}"
+
+
+def render_rtpqos_context() -> list:
+    return [
+        "",
+        ";; ----- Per-call RTP quality telemetry (logged on hangup) -----",
+        "[switchboard-rtpqos]",
+        "exten = s,1,NoOp(RTP QoS on hangup)",
+        f" same = n,Set(RXC={_q('rxcount')})",
+        f" same = n,Set(TXC={_q('txcount')})",
+        # Skip only a leg that carried NO media in EITHER direction (ring-no-answer).
+        # A one-way-audio leg (tx>0 but rx=0 — the asymmetric-NAT fault) IS logged —
+        # that's exactly the call-quality problem this telemetry exists to catch.
+        ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done)',
+        # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);
+        # FILTER to phone chars so it can't forge log fields or inject a line.
+        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${FILTER(0-9+*#,${CALLERID(num)})} "
+        "codec=${CHANNEL(audioreadformat)} billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
+        f"rxcount=${{RXC}} txcount=${{TXC}} "
+        f"rxploss={_q('rxploss')} txploss={_q('txploss')} "
+        f"rxjitter={_q('rxjitter')} txjitter={_q('txjitter')} rtt={_q('rtt')} "
+        f"rxmes={_q('rxmes')} txmes={_q('txmes')})",
+        " same = n(done),Return()",
+        # Pushed onto the callee via each Dial's b() so its leg logs too.
+        f"exten = push,1,Set(CHANNEL(hangup_handler_push)={QOS_HANDLER})",
+        " same = n,Return()",
+    ]
 
 
 def render_extensions(opts: dict) -> str:
@@ -957,10 +1010,12 @@ def render_extensions(opts: dict) -> str:
         if trunk.get("enabled"):
             room_dial = [
                 " same = n(dial),Set(__TRANSFER_CONTEXT=internal-xfer)",
-                " same = n,Dial(PJSIP/${EXTEN},30,rtT)",
+                QOS_PUSH,
+                f" same = n,Dial(PJSIP/${{EXTEN}},30,rtT{QOS_B})",
             ]
         else:
-            room_dial = [" same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)"]
+            room_dial = [f" same = n(dial),Set(CHANNEL(hangup_handler_push)={QOS_HANDLER})",
+                         f" same = n,Dial(PJSIP/${{EXTEN}},30,rtT{QOS_B})"]
         parts += [
             "exten = _X.,1,NoOp(Room call to ${EXTEN})",
             f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
@@ -1065,15 +1120,18 @@ def render_extensions(opts: dict) -> str:
             "[from-trunk]",
             f"exten = _X.,1,NoOp(Inbound call ${{EXTEN}} -> {where})",
             " same = n,Set(JITTERBUFFER(adaptive)=default)",
-            f" same = n,Dial({dial_target},30,r)",
+            QOS_PUSH,
+            f" same = n,Dial({dial_target},30,r{QOS_B})",
             " same = n,Hangup()",
             "exten = s,1,NoOp(Inbound call, no DID)",
             " same = n,Set(JITTERBUFFER(adaptive)=default)",
-            f" same = n,Dial({dial_target},30,r)",
+            QOS_PUSH,
+            f" same = n,Dial({dial_target},30,r{QOS_B})",
             " same = n,Hangup()",
             "",
         ]
 
+    parts += render_rtpqos_context()
     return "\n".join(parts) + "\n"
 
 

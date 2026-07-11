@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.19.0
+
+Per-call RTP quality telemetry — the numbers to tune call quality precisely.
+
+- **Every call now logs a `[rtpqos]` line per leg when it ends** with the metrics
+  that actually characterize audio quality: received/transmitted packet counts and
+  packet loss, jitter and round-trip time, the negotiated codec, the call duration,
+  the hangup cause, and Asterisk's **Media Experience Score** (rxmes/txmes, a
+  0–100 MOS-like rating). Grep the add-on log for `[rtpqos]` to see, for any call,
+  exactly what each end experienced.
+- **Both legs are captured.** A hangup handler is registered on the caller (before
+  each Dial) and on the callee (via each Dial's pre-bridge gosub), so a room-to-room
+  call reports both phones, an outbound call reports both your phone and the trunk
+  leg, and an inbound call reports the provider leg and the answering handset.
+- **No noise on calls that never connect** — a leg that carried no media (a
+  ring-no-answer) is skipped.
+
+The telemetry is read-only and off the call's critical path (it runs during
+teardown), so it can't affect a call in progress; the existing toll-fraud transfer
+guards are unchanged (verified: the added handler is a Dial *option argument*, not
+a flag, so inbound legs remain `r`-only).
+
 ## 0.18.0
 
 Observability and hardening from the audit.
