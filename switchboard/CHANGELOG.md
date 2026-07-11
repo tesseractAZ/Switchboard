@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.20.0
+
+Make the per-call RTP quality logging from 0.19.0 actually work.
+
+0.19.0 wired the telemetry but it silently logged nothing — diagnosed live over the
+Asterisk CLI:
+
+- It used `CHANNEL(rtpqos,audio,…)` (the old chan_sip accessor), which returns
+  "unavailable" on chan_pjsip. The correct accessor is **`CHANNEL(rtcp,…)`**.
+- It read the stats in a hangup *handler*, which runs *after* Asterisk has already
+  torn down the RTP instance. The read now happens in the context's **`h` (hangup)
+  extension**, while the RTP is still alive.
+
+So every phone-originated call now really does log a `[rtpqos]` line — grep the
+add-on log for it — with jitter, packet loss, round-trip, codec, duration, hangup
+cause, and the **Media Experience Score** (rxmes/txmes, ~88 ≈ MOS 4.3). Verified on
+live room-to-room calls (0 loss, ~2 ms RTT, MES ~88). Trunk legs are skipped because
+VoIP.ms sends no RTCP — nothing to measure there.
+
+This also simplified the dialplan: the 0.19.0 per-Dial `b()` handler and caller-side
+pushes are gone (they were the broken path), so the Dials are back to their plain,
+already-reviewed flags — the toll-fraud `r`-only inbound / `rT` outbound posture is
+byte-for-byte what it was before 0.19.0.
+
 ## 0.19.0
 
 Per-call RTP quality telemetry — the numbers to tune call quality precisely.
