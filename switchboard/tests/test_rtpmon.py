@@ -159,6 +159,22 @@ def test_publish_routing() -> None:
         sys.modules.pop("ha_client", None)
 
 
+def test_warmup_done() -> None:
+    # Right after a restart the phones are still re-registering; the poller must NOT
+    # lock in an all-offline snapshot for a whole interval. It stays in the fast
+    # warm-up cadence until a phone registers or the cap elapses.
+    check("warmup: AMI down (no summary), under cap -> keep warming",
+          pm.warmup_done(False, None, 1) is False)
+    check("warmup: all-offline under cap -> keep warming",
+          pm.warmup_done(False, {"reachable": 0}, 3) is False)
+    check("warmup: a reachable phone -> settle to interval",
+          pm.warmup_done(False, {"reachable": 3}, 1) is True)
+    check("warmup: cap reached with nothing up -> settle anyway (genuinely-down fleet)",
+          pm.warmup_done(False, {"reachable": 0}, pm.WARMUP_MAX_POLLS) is True)
+    check("warmup: latches — never drops back into warm-up if a phone later leaves",
+          pm.warmup_done(True, {"reachable": 0}, 1) is True)
+
+
 def test_history_append_caps() -> None:
     d = tempfile.mkdtemp()
     pm.STATE_PATH, orig = os.path.join(d, "lh.jsonl"), pm.STATE_PATH
@@ -184,6 +200,7 @@ if __name__ == "__main__":
     test_room_names()
     test_poll_once_ami_down()
     test_publish_routing()
+    test_warmup_done()
     test_history_append_caps()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
