@@ -160,19 +160,23 @@ def test_publish_routing() -> None:
 
 
 def test_warmup_done() -> None:
-    # Right after a restart the phones are still re-registering; the poller must NOT
-    # lock in an all-offline snapshot for a whole interval. It stays in the fast
-    # warm-up cadence until a phone registers or the cap elapses.
-    check("warmup: AMI down (no summary), under cap -> keep warming",
-          pm.warmup_done(False, None, 1) is False)
-    check("warmup: all-offline under cap -> keep warming",
-          pm.warmup_done(False, {"reachable": 0}, 3) is False)
-    check("warmup: a reachable phone -> settle to interval",
-          pm.warmup_done(False, {"reachable": 3}, 1) is True)
+    # Right after a restart the phones re-register over a few seconds; the poller must
+    # keep the fast warm-up cadence until the registered count STABILIZES, so a
+    # straggler port isn't frozen 'offline' for a whole interval — and it must not
+    # publish an all-offline snapshot that persists.
+    # (settled, prev_reachable, reachable, polls)
+    check("warmup: AMI down (0 reachable), under cap -> keep warming",
+          pm.warmup_done(False, -1, 0, 1) is False)
+    check("warmup: count still GROWING (7 then 8) -> keep warming (straggler incoming)",
+          pm.warmup_done(False, 7, 8, 3) is False)
+    check("warmup: count STABILIZED (8 == 8) -> settle",
+          pm.warmup_done(False, 8, 8, 4) is True)
+    check("warmup: first poll (prev=-1) with some up -> keep warming (not yet stable)",
+          pm.warmup_done(False, -1, 7, 1) is False)
     check("warmup: cap reached with nothing up -> settle anyway (genuinely-down fleet)",
-          pm.warmup_done(False, {"reachable": 0}, pm.WARMUP_MAX_POLLS) is True)
+          pm.warmup_done(False, 0, 0, pm.WARMUP_MAX_POLLS) is True)
     check("warmup: latches — never drops back into warm-up if a phone later leaves",
-          pm.warmup_done(True, {"reachable": 0}, 1) is True)
+          pm.warmup_done(True, 8, 0, 1) is True)
 
 
 def test_history_append_caps() -> None:

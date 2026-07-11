@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.23.2
+
+Refine the v0.23.1 warm-up so a *straggler* phone isn't frozen `offline` after a
+restart. v0.23.1 settled to the steady interval as soon as the FIRST phone
+registered — but the GXW's eight FXS ports re-register over a short window, so a port
+that registered a beat late (seen live: ext 17 read `offline` while its siblings were
+already up) got stuck offline until the next 300 s poll.
+
+The poller now settles only once the registered count **stabilizes** (stops growing
+across a poll), or the ~2 min cap elapses — so all re-registering phones are counted
+before it drops to the steady cadence. Genuinely-offline phones (a de-registered
+cordless, an unregistered softphone) still settle correctly at the plateau.
+
 ## 0.23.1
 
 Fix the link-health poller showing every phone `offline` for a full interval after a
