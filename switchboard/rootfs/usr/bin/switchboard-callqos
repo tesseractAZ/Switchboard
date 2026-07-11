@@ -342,9 +342,42 @@ def _parse_args(argv):
     return args
 
 
-def main(argv=None) -> int:
+def _detach() -> None:
+    """Fork into a new session so channel teardown on hangup can't kill us mid-push.
+
+    The dialplan backgrounds us with `&`, but Asterisk destroys the call channel
+    the instant it hangs up, and that can signal our (still-running) process group
+    before our multi-step HA push finishes — which is exactly why a poor call set
+    the sensor (first HTTP call) but not the notification (second). setsid() moves
+    us out of the channel's process group so we outlive it. Best-effort: no fork ->
+    just run inline. Gated on `--detach` so unit tests (which call main() directly)
+    never fork the test runner out from under themselves."""
     try:
-        a = _parse_args(argv if argv is not None else sys.argv[1:])
+        if os.fork() > 0:
+            os._exit(0)  # parent returns at once -> TrySystem/& unblocks immediately
+    except OSError:
+        return
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    try:  # drop the channel's stdio so we hold nothing from it
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            try:
+                os.dup2(null, fd)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def main(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    if "--detach" in argv:
+        _detach()  # only the detached child returns here
+    try:
+        a = _parse_args(argv)
         rec = build_record(a)
         append_record(rec)
         push_ha(rec)
