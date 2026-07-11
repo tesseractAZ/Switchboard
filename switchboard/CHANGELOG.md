@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.23.0
+
+Make a de-registered phone **visible** in link-health instead of vanishing. The
+v0.22.0 poller keyed off live contacts only, so a phone that dropped its
+registration — notably the WiFi cordless, which de-registers when idle — simply
+disappeared from the sensors (the one phone you'd most want to watch).
+
+The poller now builds its roster from Asterisk's **configured endpoints**
+(`PJSIPShowEndpoints`) and cross-references registrations, so every configured
+phone always has a sensor:
+
+- `sensor.switchboard_link_<ext>` reads its **RTT** when reachable, or a
+  non-numeric state when not: **`offline`** (configured but de-registered) or
+  `unavailable` (registered but its qualify is failing / just dropped). Each sensor
+  also carries a `reachable` attribute — trigger an HA automation on
+  `reachable: false` to catch a phone the moment it stops answering (a dropped
+  cordless flips within ~2 qualify cycles), whichever non-numeric label it lands in.
+- `sensor.switchboard_link_health` gains an `offline` / `offline_exts` split
+  alongside reachable/unreachable.
+
+Still read-only and off the call path; the SIP trunk stays filtered out.
+
 ## 0.22.0
 
 Add an **idle link-health poller** (`switchboard-rtpmon`) so a degrading link — the

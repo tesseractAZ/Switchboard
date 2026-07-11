@@ -29,14 +29,24 @@ def check(name: str, cond: bool) -> None:
         _failures += 1
 
 
-# Contacts exactly as ami.contacts_from_blocks returns them (rtt = RoundtripUsec µs).
+# Contacts as ami.contacts_from_blocks returns them (rtt = RoundtripUsec µs). Only
+# REGISTERED phones have a contact — note ext 19 (the cordless) has none here.
 CONTACTS = {
-    "11": {"status": "Avail", "uri": "sip:11@x", "rtt": "1831"},
-    "19": {"status": "Avail", "uri": "sip:19@x", "rtt": "8158"},      # WiFi cordless
-    "17": {"status": "Unavail", "uri": "sip:17@x", "rtt": ""},        # offline
+    "11": {"status": "Avail", "uri": "sip:11@x", "rtt": "1831"},     # healthy wired
+    "12": {"status": "Avail", "uri": "sip:12@x", "rtt": "8158"},     # reachable, high RTT (worst)
+    "17": {"status": "Unavail", "uri": "sip:17@x", "rtt": ""},       # registered, qualify failing
     "trunk-aor": {"status": "NonQual", "uri": "sip:trunk", "rtt": "nan"},
 }
-NAMES = {"11": "Kitchen", "19": "Cordless", "17": "Study"}
+# The CONFIGURED roster (PJSIPShowEndpoints). ext 19 (cordless) is configured but has
+# NO contact -> de-registered -> must surface as 'offline', not vanish. 'trunk' filtered.
+ENDPOINTS = [
+    {"name": "11", "state": "Not in use", "channels": ""},
+    {"name": "12", "state": "Not in use", "channels": ""},
+    {"name": "17", "state": "Unavailable", "channels": ""},
+    {"name": "19", "state": "Unavailable", "channels": ""},   # de-registered cordless
+    {"name": "trunk", "state": "Unavailable", "channels": ""},
+]
+NAMES = {"11": "Kitchen", "12": "Living Room", "17": "Garage", "19": "Cordless"}
 
 
 def test_rtt_ms() -> None:
@@ -55,26 +65,29 @@ def test_is_reachable() -> None:
 
 
 def test_build_phone_health() -> None:
-    rows = pm.build_phone_health(CONTACTS, NAMES)
+    rows = pm.build_phone_health(ENDPOINTS, CONTACTS, NAMES)
     by = {r["ext"]: r for r in rows}
-    check("build: cordless RTT parsed to ms", by["19"]["rtt_ms"] == 8.16 and by["19"]["reachable"])
-    check("build: wired phone reachable low RTT", by["11"]["rtt_ms"] == 1.83)
-    check("build: offline phone -> not reachable, rtt None",
-          by["17"]["reachable"] is False and by["17"]["rtt_ms"] is None)
-    # The SIP trunk (a qualify-off, NonQual static AOR keyed 'trunk-aor') is NOT a
-    # phone link — it must be filtered out entirely (else it pins the rollup down
-    # forever and mints an invalid hyphenated entity id).
-    check("build: SIP trunk filtered out (non-digit AOR)", "trunk-aor" not in by)
+    check("build: healthy wired phone reachable, low RTT",
+          by["11"]["reachable"] and by["11"]["rtt_ms"] == 1.83)
+    check("build: high-RTT phone still reachable", by["12"]["rtt_ms"] == 8.16 and by["12"]["reachable"])
+    check("build: registered-but-qualify-failing -> not reachable, still registered",
+          by["17"]["reachable"] is False and by["17"]["registered"] is True and by["17"]["rtt_ms"] is None)
+    # THE point of v0.23.0: a configured phone with no contact is OFFLINE, not absent.
+    check("build: de-registered cordless present as offline (not vanished)",
+          "19" in by and by["19"]["registered"] is False and by["19"]["reachable"] is False)
+    check("build: offline phone status is Unregistered", by["19"]["status"] == "Unregistered")
+    check("build: SIP trunk filtered out", "trunk" not in by and "trunk-aor" not in by)
     check("build: names applied", by["19"]["name"] == "Cordless" and by["11"]["name"] == "Kitchen")
 
 
 def test_summarize() -> None:
-    s = pm.summarize(pm.build_phone_health(CONTACTS, NAMES))
-    check("summary: 2 reachable (11,19)", s["reachable"] == 2)
-    check("summary: 1 unreachable (17; trunk excluded)", s["unreachable"] == 1)
-    check("summary: worst RTT is the cordless", s["worst_rtt_ms"] == 8.16 and s["worst_ext"] == "19")
-    check("summary: unreachable exts = just the offline phone", set(s["unreachable_exts"]) == {"17"})
-    check("summary: trunk never counted", "trunk-aor" not in s["unreachable_exts"])
+    s = pm.summarize(pm.build_phone_health(ENDPOINTS, CONTACTS, NAMES))
+    check("summary: 2 reachable (11,12)", s["reachable"] == 2)
+    check("summary: 2 unreachable (17 failing + 19 offline)", s["unreachable"] == 2)
+    check("summary: 1 offline = the de-registered cordless", s["offline"] == 1 and s["offline_exts"] == ["19"])
+    check("summary: worst RTT is the high-RTT phone", s["worst_rtt_ms"] == 8.16 and s["worst_ext"] == "12")
+    check("summary: trunk never counted",
+          "trunk" not in s["unreachable_exts"] and "trunk-aor" not in s["unreachable_exts"])
 
 
 def test_room_names() -> None:
@@ -86,7 +99,7 @@ def test_room_names() -> None:
 def test_poll_once_ami_down() -> None:
     class _Down:
         @staticmethod
-        def get_contacts():
+        def get_status_bundle():
             raise RuntimeError("AMI down")
     sys.modules["ami"] = _Down
     try:
@@ -95,19 +108,21 @@ def test_poll_once_ami_down() -> None:
 
         class _Empty:
             @staticmethod
-            def get_contacts():
-                return {}
+            def get_status_bundle():
+                return ([], {}, [])
         sys.modules["ami"] = _Empty
         phones, summ = pm.poll_once(NAMES)
-        check("poll: empty contacts -> skip cycle", phones is None)
+        check("poll: empty roster -> skip cycle (don't blank sensors)", phones is None)
 
         class _Ok:
             @staticmethod
-            def get_contacts():
-                return CONTACTS
+            def get_status_bundle():
+                return (ENDPOINTS, CONTACTS, [])
         sys.modules["ami"] = _Ok
         phones, summ = pm.poll_once(NAMES)
-        check("poll: contacts -> phones + summary", phones is not None and summ["worst_ext"] == "19")
+        check("poll: roster+contacts -> phones + summary", phones is not None and summ["worst_ext"] == "12")
+        check("poll: de-registered cordless included as offline",
+              any(p["ext"] == "19" and not p["registered"] for p in phones))
     finally:
         sys.modules.pop("ami", None)
 
@@ -122,23 +137,24 @@ def test_publish_routing() -> None:
             return True
     sys.modules["ha_client"] = _Fake
     try:
-        phones = pm.build_phone_health(CONTACTS, NAMES)
+        phones = pm.build_phone_health(ENDPOINTS, CONTACTS, NAMES)
         pm._publish(phones, pm.summarize(phones))
-        ids = {eid for eid, _, _ in sets}
-        check("publish: per-phone sensor for the cordless", "sensor.switchboard_link_19" in ids)
-        check("publish: rollup sensor emitted", "sensor.switchboard_link_health" in ids)
-        check("publish: no sensor for the filtered trunk", "sensor.switchboard_link_trunk-aor" not in ids)
+        by = {eid: state for eid, state, _ in sets}
+        check("publish: reachable phone -> numeric RTT state", by["sensor.switchboard_link_12"] == 8.16)
+        check("publish: de-registered cordless -> 'offline' state (visible, alertable)",
+              by.get("sensor.switchboard_link_19") == "offline")
+        check("publish: registered-but-failing phone -> 'unavailable'",
+              by.get("sensor.switchboard_link_17") == "unavailable")
+        check("publish: rollup sensor emitted", "sensor.switchboard_link_health" in by)
+        health_attrs = next(a for e, s, a in sets if e == "sensor.switchboard_link_health")
+        check("publish: rollup carries offline detail", health_attrs["offline_exts"] == ["19"])
+        check("publish: no sensor for the filtered trunk",
+              "sensor.switchboard_link_trunk-aor" not in by and "sensor.switchboard_link_trunk" not in by)
         # Every published id must be a valid HA entity id (ha_client.is_entity_id
         # rejects hyphens -> the trunk-aor bug). Guard it here since the fake
         # set_state doesn't apply the real regex.
         check("publish: every entity id is HA-valid (no hyphens)",
-              all(re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", e) for e in ids))
-        cord = next(s for e, s, _ in sets if e == "sensor.switchboard_link_19")
-        check("publish: cordless state is its RTT in ms", cord == 8.16)
-        off = next((s for e, s, _ in sets if e == "sensor.switchboard_link_17"), None)
-        check("publish: offline phone state is 'unavailable'", off == "unavailable")
-        health = next(s for e, s, _ in sets if e == "sensor.switchboard_link_health")
-        check("publish: health rollup state is the worst RTT", health == 8.16)
+              all(re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", e) for e in by))
     finally:
         sys.modules.pop("ha_client", None)
 
@@ -150,11 +166,12 @@ def test_history_append_caps() -> None:
     pm.MAX_RECORDS = 5
     try:
         for _ in range(8):
-            pm._append_history(pm.build_phone_health(CONTACTS, NAMES))
+            pm._append_history(pm.build_phone_health(ENDPOINTS, CONTACTS, NAMES))
         lines = [l for l in open(pm.STATE_PATH).read().splitlines() if l.strip()]
         check("history: capped to MAX_RECORDS", len(lines) == 5)
         rec = json.loads(lines[-1])
-        check("history: records per-phone rtt", rec["phones"]["19"]["rtt_ms"] == 8.16)
+        check("history: records per-phone rtt", rec["phones"]["12"]["rtt_ms"] == 8.16)
+        check("history: records the offline cordless", rec["phones"]["19"]["registered"] is False)
     finally:
         pm.STATE_PATH, pm.MAX_RECORDS = orig, origmax
 
