@@ -4,15 +4,21 @@ getting congested) is visible on a Home Assistant trend graph without waiting fo
 someone to place a call.
 
 Complements the per-call telemetry (switchboard-callqos), which can only measure a
-link while a call is up. Here we poll Asterisk's own PJSIP qualify (an OPTIONS
-keepalive it already sends every ~30-60 s) via AMI ``PJSIPShowContacts`` — the same
-read the dashboard uses — and publish:
+link while a call is up. Here we poll Asterisk's PJSIP endpoints + qualify (the
+OPTIONS keepalive it already sends every ~30-60 s) via AMI — the same read the
+dashboard uses — and publish:
 
   * ``sensor.switchboard_link_<ext>`` — that phone's qualify RTT in ms (graphable),
-    with status + name as attributes. "unavailable" state when the phone is offline.
+    with status + name as attributes. ``offline`` when a configured phone is
+    de-registered (e.g. the WiFi cordless asleep), ``unavailable`` when registered
+    but its qualify is failing.
   * ``sensor.switchboard_link_health`` — a rollup: worst reachable RTT as state,
-    the reachable/unreachable split + per-phone detail as attributes.
+    the reachable / unreachable / offline split + per-phone detail as attributes.
   * ``/data/state/linkhealth.jsonl`` — a capped history for offline analysis.
+
+The roster is the set of CONFIGURED endpoints (PJSIPShowEndpoints), not just live
+contacts, so a phone that drops its registration shows as ``offline`` — an
+alertable state — instead of silently vanishing.
 
 Why this and not ``pjsip show channelstats`` for a call's far leg: on this system
 that command returns "not valid"/empty rows for bridged calls, and the initiating
@@ -74,37 +80,52 @@ def room_names(opts: dict) -> dict:
     return out
 
 
-def build_phone_health(contacts: dict, names: dict) -> list:
-    """One row per contacted endpoint: {ext, name, status, rtt_ms, reachable}.
+def build_phone_health(endpoints: list, contacts: dict, names: dict) -> list:
+    """One row per CONFIGURED phone: {ext, name, status, rtt_ms, reachable, registered}.
 
-    Keyed by the AOR/endpoint id (== the room ext). Contacts are the source of
-    truth for "which phones exist right now" — a phone with no contact isn't
-    registered, so it simply doesn't appear (distinct from reachable-but-slow)."""
+    The roster is the set of configured PJSIP endpoints (from PJSIPShowEndpoints),
+    NOT just the live contacts — so a phone that has DE-REGISTERED (e.g. the WiFi
+    cordless dropping off Wi-Fi when idle) shows as ``offline`` instead of silently
+    vanishing. Registration + RTT come from the contact (absent contact == not
+    registered). The SIP trunk (a static, qualify-off "trunk" endpoint) is excluded
+    by the digit-only filter — it isn't a phone link and its hyphenated AOR isn't a
+    valid HA entity id."""
     rows = []
-    for ext, c in sorted((contacts or {}).items()):
-        # Only real phone extensions (digit AORs, per valid_rooms' ^[0-9]{2,6}$).
-        # The SIP trunk registers as a static, qualify-off AOR ("trunk-aor") that is
-        # NonQual by design — it is NOT a phone link to health-check. Including it
-        # would pin the rollup to "unreachable" forever and mint an invalid HA entity
-        # id (the hyphen). Skipping it keeps the rollup honestly "all healthy" and
-        # keeps the trunk out of the per-phone sensors + history.
-        if not str(ext).isdigit():
+    seen = set()
+    for ep in (endpoints or []):
+        ext = str(ep.get("name", "")).strip()
+        if not ext.isdigit() or ext in seen:  # digit-only == real phone; dedupe
             continue
-        st = c.get("status", "Unknown")
+        seen.add(ext)
+        c = (contacts or {}).get(ext)
+        registered = bool(c)
+        if registered:
+            status = c.get("status", "Unknown")
+            rtt = rtt_ms(c.get("rtt"))
+            reachable = is_reachable(status)
+        else:
+            status = "Unregistered"  # configured but no contact -> offline
+            rtt = None
+            reachable = False
         rows.append({
             "ext": ext,
             "name": names.get(ext, ext),
-            "status": st,
-            "rtt_ms": rtt_ms(c.get("rtt")),
-            "reachable": is_reachable(st),
+            "status": status,
+            "rtt_ms": rtt,
+            "reachable": reachable,
+            "registered": registered,
         })
-    return rows
+    return sorted(rows, key=lambda r: r["ext"])
 
 
 def summarize(phones: list) -> dict:
-    """Rollup for the summary sensor: reachable/unreachable split + worst RTT."""
+    """Rollup for the summary sensor: reachable/unreachable/offline split + worst RTT.
+    'offline' (configured but de-registered) is called out separately from merely
+    'unreachable' (registered but its qualify is failing) — a dropped cordless is
+    the actionable case."""
     reachable = [p for p in phones if p["reachable"]]
     unreachable = [p for p in phones if not p["reachable"]]
+    offline = [p for p in phones if not p["registered"]]
     rtts = [(p["rtt_ms"], p) for p in reachable if p["rtt_ms"] is not None]
     worst = max(rtts, key=lambda t: t[0]) if rtts else None
     return {
@@ -112,6 +133,8 @@ def summarize(phones: list) -> dict:
         "reachable": len(reachable),
         "unreachable": len(unreachable),
         "unreachable_exts": [p["ext"] for p in unreachable],
+        "offline": len(offline),
+        "offline_exts": [p["ext"] for p in offline],
         "worst_rtt_ms": worst[0] if worst else None,
         "worst_ext": worst[1]["ext"] if worst else None,
     }
@@ -129,7 +152,8 @@ def _load_options() -> dict:
 def _append_history(phones: list) -> None:
     rec = {"ts": int(time.time()),
            "phones": {p["ext"]: {"rtt_ms": p["rtt_ms"], "reachable": p["reachable"],
-                                 "status": p["status"]} for p in phones}}
+                                 "registered": p["registered"], "status": p["status"]}
+                      for p in phones}}
     try:
         d = os.path.dirname(STATE_PATH) or "."
         os.makedirs(d, exist_ok=True)
@@ -153,13 +177,19 @@ def _publish(phones: list, summ: dict) -> None:
         return
     for p in phones:
         eid = f"sensor.switchboard_link_{p['ext']}"
-        state = p["rtt_ms"] if (p["reachable"] and p["rtt_ms"] is not None) else "unavailable"
+        if not p["registered"]:
+            state = "offline"           # configured but de-registered (e.g. cordless asleep)
+        elif p["reachable"] and p["rtt_ms"] is not None:
+            state = p["rtt_ms"]         # graphable RTT
+        else:
+            state = "unavailable"       # registered but qualify failing
+        numeric = not isinstance(state, str)
         attrs = {
             "friendly_name": f"Switchboard link — {p['name']} ({p['ext']})",
-            "unit_of_measurement": "ms" if state != "unavailable" else None,
+            "unit_of_measurement": "ms" if numeric else None,
             "icon": "mdi:phone-in-talk" if p["reachable"] else "mdi:phone-off",
             "status": p["status"], "extension": p["ext"], "name": p["name"],
-            "reachable": p["reachable"],
+            "reachable": p["reachable"], "registered": p["registered"],
         }
         try:
             ha_client.set_state(eid, state, {k: v for k, v in attrs.items() if v is not None})
@@ -174,6 +204,7 @@ def _publish(phones: list, summ: dict) -> None:
              "icon": "mdi:lan-connect" if not summ["unreachable"] else "mdi:lan-disconnect",
              "reachable": summ["reachable"], "unreachable": summ["unreachable"],
              "unreachable_exts": summ["unreachable_exts"],
+             "offline": summ["offline"], "offline_exts": summ["offline_exts"],
              "worst_ext": summ["worst_ext"], "total_phones": summ["total"]})
     except Exception:
         pass
@@ -184,12 +215,12 @@ def poll_once(names: dict) -> tuple:
     down this cycle (caller just skips — no publish, no crash)."""
     import ami
     try:
-        contacts = ami.get_contacts()
+        endpoints, contacts, _channels = ami.get_status_bundle()
     except Exception:
         return None, None
-    if not contacts:
-        return None, None
-    phones = build_phone_health(contacts, names)
+    if not endpoints:
+        return None, None  # AMI up but no roster -> skip (don't blank the sensors)
+    phones = build_phone_health(endpoints, contacts, names)
     return phones, summarize(phones)
 
 
