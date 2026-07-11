@@ -25,12 +25,6 @@ def check(name: str, cond: bool) -> None:
         _failures += 1
 
 
-# Every Dial now carries a per-call RTP-QoS hangup handler on the callee via this
-# b() option (see render_rtpqos_context). It's an option ARGUMENT, so Asterisk does
-# NOT parse the letters inside it (e.g. the 't' in "rtpqos") as Dial flags.
-QB = "b(switchboard-rtpqos^push^1)"
-
-
 def _bare_dial_flags(dial_line: str) -> str:
     """The actual Dial FLAG letters (3rd arg), with any (...) option-arguments
     stripped — so the toll-fraud flag checks see 'r', not the 't' inside the
@@ -39,6 +33,19 @@ def _bare_dial_flags(dial_line: str) -> str:
     inner = dial_line[dial_line.index("Dial(") + 5: dial_line.rindex(")")]
     opts = inner.split(",")[-1]
     return re.sub(r"\([^)]*\)", "", opts)
+
+
+def _ctx_body(conf: str, name: str) -> str:
+    """The lines of the [name] context (until the next [context] header)."""
+    out, inside = [], False
+    for line in conf.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            inside = (s == f"[{name}]")
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
 
 
 def _context_of(conf: str, needle: str):
@@ -240,17 +247,17 @@ def test_trunk_inbound_routing() -> None:
     one = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "19"}})
     ft = one[one.index("[from-trunk]"):]
     check("inbound_ext=19 rings only PJSIP/19",
-          "Dial(PJSIP/19,30,r" + QB + ")" in ft and "PJSIP/11" not in ft)
+          "Dial(PJSIP/19,30,r)" in ft and "PJSIP/11" not in ft)
 
     allr = sbc.render_extensions({"rooms": rooms, "trunk": base})
     fta = allr[allr.index("[from-trunk]"):]
     check("no inbound_ext rings every room",
-          "Dial(PJSIP/11&PJSIP/19,30,r" + QB + ")" in fta)
+          "Dial(PJSIP/11&PJSIP/19,30,r)" in fta)
 
     bad = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "99"}})
     ftb = bad[bad.index("[from-trunk]"):]
     check("inbound_ext not a room -> rings every room (no silent drop)",
-          "Dial(PJSIP/11&PJSIP/19,30,r" + QB + ")" in ftb and "Dial(PJSIP/99," not in ftb)
+          "Dial(PJSIP/11&PJSIP/19,30,r)" in ftb and "Dial(PJSIP/99," not in ftb)
 
     # --- group ring: inbound_ext accepts a comma-separated list ----------------
     rooms3 = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
@@ -259,27 +266,27 @@ def test_trunk_inbound_routing() -> None:
     grp = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,20"}})
     ftg = grp[grp.index("[from-trunk]"):]
     check("inbound_ext='19,20' rings the group PJSIP/19&PJSIP/20",
-          "Dial(PJSIP/19&PJSIP/20,30,r" + QB + ")" in ftg and "PJSIP/11" not in ftg)
+          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftg and "PJSIP/11" not in ftg)
 
     grpws = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": " 19 , 20 "}})
     ftws = grpws[grpws.index("[from-trunk]"):]
     check("inbound_ext list tolerates surrounding whitespace",
-          "Dial(PJSIP/19&PJSIP/20,30,r" + QB + ")" in ftws)
+          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftws)
 
     part = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,99"}})
     ftp = part[part.index("[from-trunk]"):]
     check("inbound_ext='19,99' drops the non-room and rings only PJSIP/19",
-          "Dial(PJSIP/19,30,r" + QB + ")" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
+          "Dial(PJSIP/19,30,r)" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
 
     allbad = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "98,99"}})
     ftab = allbad[allbad.index("[from-trunk]"):]
     check("fully-invalid inbound_ext list rings every room",
-          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,r" + QB + ")" in ftab and "PJSIP/98" not in ftab)
+          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,r)" in ftab and "PJSIP/98" not in ftab)
 
     dup = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "20,19,20"}})
     ftd = dup[dup.index("[from-trunk]"):]
     check("inbound_ext list de-dups and preserves order",
-          "Dial(PJSIP/20&PJSIP/19,30,r" + QB + ")" in ftd)
+          "Dial(PJSIP/20&PJSIP/19,30,r)" in ftd)
 
 
 def test_inbound_dial_has_no_transfer_flags() -> None:
@@ -304,7 +311,7 @@ def test_inbound_dial_has_no_transfer_flags() -> None:
     for d in inbound_dials:
         fl = _bare_dial_flags(d)
         check(f"inbound Dial flags {fl!r} have no t/T", "t" not in fl and "T" not in fl and "r" in fl)
-    check("no inbound Dial uses the old rtT flags", ",rtT" + QB not in ft and ",rT" + QB not in ft)
+    check("no inbound Dial uses the transfer-arming rtT/rT flags", ",rtT)" not in ft and ",rT)" not in ft)
 
     # Outbound trunk Dial keeps 'T' (our caller may transfer) but drops 't' so
     # the far-end PSTN callee can't invoke our feature codes.
@@ -315,7 +322,7 @@ def test_inbound_dial_has_no_transfer_flags() -> None:
 
     # Room-to-room and operator Dials are internal on both ends -> keep 'tT'.
     check("room-to-room Dial keeps tT (both ends internal)",
-          "Dial(PJSIP/${EXTEN},30,rtT" + QB + ")" in e)
+          "Dial(PJSIP/${EXTEN},30,rtT)" in e)
 
 
 def test_features_conf_transfer() -> None:
@@ -349,7 +356,7 @@ def test_operator_voice_dialplan() -> None:
           "[operator]" in on and "AGI(switchboard-operator.agi)" in on)
     check("operator only dials a known room ext (allow-list)",
           'GotoIf($["${OP_TARGET}" : "^(11|12)$"]?:bye)' in on)
-    check("operator connects via the room endpoint", "Dial(PJSIP/${OP_TARGET},30,rtT" + QB + ")" in on)
+    check("operator connects via the room endpoint", "Dial(PJSIP/${OP_TARGET},30,rtT)" in on)
     check("operator speaks busy/no-answer/unavailable status (not a bland goodbye)",
           'GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)' in on
           and "Playback(switchboard/sw-busy)" in on
@@ -914,9 +921,9 @@ def test_rooms_map_staged_for_directory() -> None:
 
 
 def test_rtpqos_telemetry() -> None:
-    # Every connected call logs a per-leg [rtpqos] line on hangup for laser call-
-    # quality tuning: a [switchboard-rtpqos] hangup-handler subroutine + the b()
-    # callee push on every Dial + the caller push before every Dial.
+    # Per-call RTP quality is logged from each context's `h` (hangup) extension,
+    # where the RTP instance is still alive — reading CHANNEL(rtcp,...) (the
+    # chan_pjsip accessor; the old CHANNEL(rtpqos,audio,...) returns "unavailable").
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"},
                              {"ext": "19", "name": "C", "secret": "s2"}])
     opts = {"rooms": rooms, "operator": {"enabled": True}, "directory_enabled": True,
@@ -924,29 +931,26 @@ def test_rtpqos_telemetry() -> None:
                       "secret": "s", "dial_prefix": "9", "inbound_ext": "19"}}
     e = sbc.render_extensions(opts)
     check("rtpqos: [switchboard-rtpqos] context emitted", "[switchboard-rtpqos]" in e)
+    check("rtpqos: uses the chan_pjsip CHANNEL(rtcp,...) accessor, not the old rtpqos one",
+          "${CHANNEL(rtcp,rxjitter)}" in e and "rtpqos,audio" not in e)
     check("rtpqos: logs the key quality metrics",
           all(k in e for k in ("rxjitter=", "txjitter=", "rxploss=", "txploss=", "rtt=",
-                               "rxmes=", "txmes=", "rxcount=")))
-    check("rtpqos: skips only a leg with NO media in either direction (rx OR tx)",
+                               "rxmes=", "txmes=", "rxcount=", "txcount=")))
+    check("rtpqos: skips a leg with NO RTCP stats (no media / no-RTCP trunk); logs one-way legs",
           '("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done' in e)
-    check("rtpqos: one-way-audio leg (tx>0, rx=0) is still logged",
-          '"${TXC}" = "0")]?done' in e)  # gate needs BOTH zero, so tx-only survives
     check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
           "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
-    check("rtpqos: push extension registers the hangup handler on the callee",
-          "exten = push,1,Set(CHANNEL(hangup_handler_push)=switchboard-rtpqos,s,1)" in e)
-    # EVERY Dial to a peer must carry the callee QoS handler.
+    # It is read in an h-extension (not a hangup handler — the RTP is gone by then),
+    # in every context a call can hang up in.
+    for ctx in ("rooms", "operator", "directory", "from-trunk"):
+        body = _ctx_body(e, ctx)
+        check(f"rtpqos: [{ctx}] has an h-extension that Gosubs the logger",
+              "exten = h,1" in body and "Gosub(switchboard-rtpqos,s,1)" in body)
+    # The Dials must be CLEAN — no b()/hangup-handler machinery (that approach read
+    # too late and never logged); the h-extension replaces it.
     dials = [ln for ln in e.splitlines() if "Dial(PJSIP" in ln]
-    check("rtpqos: every Dial carries the callee handler b()",
-          dials and all("b(switchboard-rtpqos^push^1)" in d for d in dials))
-    # ...and the primary call paths push the handler on the caller leg too.
-    check("rtpqos: caller-side handler pushed on primary Dials",
-          e.count("Set(CHANNEL(hangup_handler_push)=switchboard-rtpqos,s,1)") >= 4)
-    # [internal-xfer] must NOT re-push (its legs already carry a handler from the
-    # original call's b()); pushing again would double-log a transferred call.
-    ix = e[e.index("[internal-xfer]"):e.index("[internal-xfer]") + 900]
-    check("rtpqos: internal-xfer does not double-push",
-          "Set(CHANNEL(hangup_handler_push)" not in ix and "b(switchboard-rtpqos^push^1)" in ix)
+    check("rtpqos: Dials carry no b()/hangup-handler cruft",
+          dials and not any("rtpqos^push" in d or "hangup_handler" in d for d in dials))
     # Non-trunk installs still get the telemetry (it's unconditional).
     e2 = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
     check("rtpqos: present on non-trunk installs too", "[switchboard-rtpqos]" in e2)
