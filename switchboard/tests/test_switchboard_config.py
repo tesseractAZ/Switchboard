@@ -842,6 +842,15 @@ def test_features_staging() -> None:
         check("features: announce players validated (malformed + wrong-domain dropped)",
               data["announce"]["players"] == ["media_player.homepod", "media_player.garage"])
         check("features: tts engine staged", data["announce"]["tts_engine"] == "tts.piper")
+        # call_quality_alerts is staged HERE (not read from root-only options.json)
+        # so the dialplan's switchboard-callqos — running as the asterisk user — can
+        # honor the poor-call alert opt-out. Defaults on when unset.
+        check("features: callqos alerts default on when unset",
+              data.get("callqos", {}).get("alerts") is True)
+        sbc.write_features_runtime({"call_quality_alerts": False,
+                                    "announce_players": [], "announce_tts_engine": "tts.piper"})
+        check("features: call_quality_alerts=false staged for the asterisk-user dialplan",
+              _json.loads((run / "features.json").read_text())["callqos"]["alerts"] is False)
         # A wrong-domain scene (e.g. a mistyped homeassistant.restart) is dropped.
         sbc.write_features_runtime({"wakeup_scene": "homeassistant.restart",
                                     "announce_players": [], "announce_tts_engine": "tts.piper"})
@@ -941,11 +950,23 @@ def test_rtpqos_telemetry() -> None:
     check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
           "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
     # It is read in an h-extension (not a hangup handler — the RTP is gone by then),
-    # in every context a call can hang up in.
+    # in every context a call can hang up in. The Gosub passes the originating
+    # context as ARG1 so the sink/log can attribute the leg.
     for ctx in ("rooms", "operator", "directory", "from-trunk"):
         body = _ctx_body(e, ctx)
-        check(f"rtpqos: [{ctx}] has an h-extension that Gosubs the logger",
-              "exten = h,1" in body and "Gosub(switchboard-rtpqos,s,1)" in body)
+        check(f"rtpqos: [{ctx}] h-extension Gosubs the logger with its context tag",
+              "exten = h,1" in body and f"Gosub(switchboard-rtpqos,s,1({ctx}))" in body)
+    # v0.21.0: the telemetry context ALSO pushes each leg to switchboard-callqos
+    # (HA sensor + poor-call notification + durable JSONL ledger). Backgrounded via
+    # TrySystem so a script error can never delay or wedge the hangup, with every
+    # ${...} double-quoted so an empty/absent RTCP field is an argparse-safe empty
+    # arg (and can't word-split or inject).
+    check("rtpqos: pushes each leg to switchboard-callqos, backgrounded via TrySystem",
+          "TrySystem(/usr/bin/switchboard-callqos --source dialplan" in e and " &)" in e)
+    check("rtpqos: sink is passed the context tag + quoted rtcp fields",
+          '--tag "${ARG1}"' in e and '--rxmes "${CHANNEL(rtcp,rxmes)}"' in e
+          and '--cid "${FILTER(0-9+*#,${CALLERID(num)})}"' in e)
+    check("rtpqos: human log line carries the context tag too", "tag=${ARG1}" in e)
     # The Dials must be CLEAN — no b()/hangup-handler machinery (that approach read
     # too late and never logged); the h-extension replaces it.
     dials = [ln for ln in e.splitlines() if "Dial(PJSIP" in ln]
