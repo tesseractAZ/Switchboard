@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.22.0
+
+Add an **idle link-health poller** (`switchboard-rtpmon`) so a degrading link — the
+WiFi cordless especially — is visible on a Home Assistant trend graph *between*
+calls, not only while one is up. (Live testing showed the cordless swing from MOS
+1.4 to 4.3 on back-to-back calls; this catches that variation continuously.)
+
+Every `link_health_interval` seconds (default 300) it reads Asterisk's own PJSIP
+qualify — the OPTIONS keepalive it already sends each phone — over AMI, and publishes:
+
+- **`sensor.switchboard_link_<ext>`** per phone — qualify RTT in ms (graphable),
+  `unavailable` when the phone is offline, with status/name as attributes.
+- **`sensor.switchboard_link_health`** — a rollup: worst reachable RTT as state, the
+  reachable/unreachable split + which extensions are down as attributes.
+- **`/data/state/linkhealth.jsonl`** — a capped history for offline analysis.
+
+Read-only and off the call path: an AMI hiccup just skips that cycle. Gate with
+`link_health_enabled` (default on). This replaces the originally-planned
+channelstats-based "both-legs" capture, which proved unusable on this system
+(`pjsip show channelstats` returns no valid rows for bridged calls) — and was
+redundant anyway, since each call's initiating record already carries both
+directions.
+
 ## 0.21.1
 
 Fix poor-call notifications silently not firing. Live-verified v0.21.0 on a real

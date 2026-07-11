@@ -1,0 +1,23 @@
+#!/command/with-contenv bashio
+# Idle link-health poller — logs each phone's PJSIP qualify RTT + reachability to
+# Home Assistant sensors, so a degrading link (notably the WiFi cordless) shows on
+# a trend graph BETWEEN calls, not only during them.
+if ! bashio::config.true 'link_health_enabled'; then
+    bashio::log.info "Idle link-health poller disabled (link_health_enabled: false); idling."
+    exec sleep infinity
+fi
+
+bashio::log.info "Starting Switchboard idle link-health poller ..."
+
+# AMI creds (same source as the wake-up scheduler) — the poller reads PJSIP
+# contacts over the manager interface.
+if [ -f /run/switchboard/ami.env ]; then
+    # shellcheck disable=SC1091
+    source /run/switchboard/ami.env
+    export AMI_USER AMI_SECRET
+fi
+
+LHI="$(bashio::config 'link_health_interval')"
+export LINK_HEALTH_INTERVAL="${LHI:-300}"
+
+exec python3 /usr/share/switchboard/rtpmon/poller.py
