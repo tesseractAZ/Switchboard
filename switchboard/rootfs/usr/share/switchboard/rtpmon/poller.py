@@ -148,6 +148,73 @@ def summarize(phones: list) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Fleet-outage availability alert.
+#
+# The link-health poller RECORDED an ~11h outage where all 8 wired GXW FXS ports
+# (a single gateway) lost registration together — but nothing ALERTED, because the
+# WiFi cordless and the inbound DID (which routes to the cordless) kept working, so
+# it went unnoticed. This fires ONE persistent notification when a large fraction of
+# the fleet is unreachable at once (a shared gateway dropping, not one handset
+# asleep), and a recovery notice when it clears. A consecutive-cycle gate rejects
+# the single-sample "all Unregistered" collector blips that AMI occasionally emits.
+# --------------------------------------------------------------------------- #
+OUTAGE_MIN_PORTS = 3       # at least this many phones down ...
+OUTAGE_MIN_CYCLES = 2      # ... for this many consecutive cycles before alerting
+
+
+def is_mass_outage(summ: dict) -> bool:
+    """A fleet-level outage: at least half the phones (and >= OUTAGE_MIN_PORTS)
+    unreachable at once — i.e. a shared gateway dropped, not one handset asleep or a
+    lone unconfigured port. One cordless napping (+ an empty port) never qualifies."""
+    total = summ.get("total", 0) if summ else 0
+    down = summ.get("unreachable", 0) if summ else 0
+    return total > 0 and down >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
+
+
+def outage_transition(summ: dict, st: dict) -> str:
+    """Pure state machine for the availability alert. `st` carries
+    {'cycles', 'alerted'} across calls. Returns 'down' (fire the outage alert, once,
+    after OUTAGE_MIN_CYCLES consecutive mass-outage cycles), 'up' (fire recovery,
+    once, when it clears after having alerted), or '' (nothing to do)."""
+    if is_mass_outage(summ):
+        st["cycles"] = st.get("cycles", 0) + 1
+        if st["cycles"] >= OUTAGE_MIN_CYCLES and not st.get("alerted"):
+            st["alerted"] = True
+            return "down"
+        return ""
+    st["cycles"] = 0
+    if st.get("alerted"):
+        st["alerted"] = False
+        return "up"
+    return ""
+
+
+def _notify_outage(event: str, summ: dict) -> None:
+    try:
+        import ha_client
+    except Exception:
+        return
+    # Same notification_id both ways so the recovery REPLACES the outage in the bell
+    # menu (no stale "unreachable" left behind).
+    nid = "switchboard_link_outage"
+    if event == "down":
+        exts = ", ".join(summ.get("unreachable_exts", []))
+        msg = (f"{summ['unreachable']} of {summ['total']} phones are unreachable "
+               f"(exts {exts}). If these are the wired gateway ports, the GXW gateway "
+               f"likely dropped its SIP registrations — check the gateway's power/uplink.")
+        try:
+            ha_client.notify(msg, title="Switchboard: phones unreachable", notification_id=nid)
+        except Exception:
+            pass
+    elif event == "up":
+        try:
+            ha_client.notify(f"Phones recovered — {summ['reachable']} of {summ['total']} reachable.",
+                             title="Switchboard: phones recovered", notification_id=nid)
+        except Exception:
+            pass
+
+
 def _load_options() -> dict:
     try:
         with open(OPTIONS_PATH) as f:
@@ -253,13 +320,21 @@ def run() -> int:
     settled = False
     polls = 0
     prev_reachable = -1
+    outage_st = {"cycles": 0, "alerted": False}
     while True:
-        names = room_names(_load_options())
+        opts = _load_options()
+        names = room_names(opts)
         phones, summ = poll_once(names)
         reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)
             _publish(phones, summ)
+            # Fleet-outage alert. Advance the state machine every cycle (so the
+            # consecutive-cycle gate and one-shot latch stay correct even when
+            # alerts are muted); only the notification itself honors the opt-out.
+            event = outage_transition(summ, outage_st)
+            if event and opts.get("link_health_alerts", True):
+                _notify_outage(event, summ)
         polls += 1
         settled = warmup_done(settled, prev_reachable, reachable, polls)
         prev_reachable = reachable
