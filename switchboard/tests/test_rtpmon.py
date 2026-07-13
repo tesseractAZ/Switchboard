@@ -196,6 +196,61 @@ def test_history_append_caps() -> None:
         pm.STATE_PATH, pm.MAX_RECORDS = orig, origmax
 
 
+def test_is_mass_outage() -> None:
+    # The real outage: 8 of 10 phones down (GXW dropped) -> mass outage.
+    check("outage: 8/10 down is a fleet outage",
+          pm.is_mass_outage({"total": 10, "unreachable": 8}) is True)
+    # One handset asleep (+ one empty port) is NOT an outage.
+    check("outage: 1/10 down (one port) is not an outage",
+          pm.is_mass_outage({"total": 10, "unreachable": 1}) is False)
+    check("outage: 2/10 down (cordless asleep + empty port) is not an outage",
+          pm.is_mass_outage({"total": 10, "unreachable": 2}) is False)
+    # Small fleet still needs the absolute floor (>= OUTAGE_MIN_PORTS).
+    check("outage: 2/4 down < min-ports floor -> not an outage",
+          pm.is_mass_outage({"total": 4, "unreachable": 2}) is False)
+    check("outage: 3/4 down clears both thresholds", pm.is_mass_outage({"total": 4, "unreachable": 3}) is True)
+    check("outage: empty summary is not an outage", pm.is_mass_outage({}) is False)
+
+
+def test_outage_transition() -> None:
+    st = {"cycles": 0, "alerted": False}
+    big = {"total": 10, "unreachable": 8, "unreachable_exts": list("11 12 13 14 15 16 17 18".split()), "reachable": 2}
+    ok = {"total": 10, "unreachable": 1, "reachable": 9}
+    # First mass-outage cycle: gated (no page on a single sample).
+    check("transition: 1st outage cycle stays silent", pm.outage_transition(big, st) == "" and st["cycles"] == 1)
+    # Second consecutive: fire ONCE.
+    check("transition: 2nd consecutive cycle fires 'down'", pm.outage_transition(big, st) == "down")
+    # Still down: don't re-page.
+    check("transition: sustained outage does not re-page", pm.outage_transition(big, st) == "")
+    # Recovery: fire 'up' once, then silent.
+    check("transition: recovery fires 'up' once", pm.outage_transition(ok, st) == "up")
+    check("transition: after recovery, steady state silent", pm.outage_transition(ok, st) == "")
+    # A single-sample blip (one bad cycle then recovery) must NOT page.
+    st2 = {"cycles": 0, "alerted": False}
+    check("transition: single-cycle blip then ok never pages",
+          pm.outage_transition(big, st2) == "" and pm.outage_transition(ok, st2) == "")
+
+
+def test_outage_notify_routing() -> None:
+    calls = []
+
+    class _Fake:
+        @staticmethod
+        def notify(msg, title="", notification_id=""):
+            calls.append((title, notification_id, msg)); return True
+    sys.modules["ha_client"] = _Fake
+    try:
+        summ = {"total": 10, "unreachable": 8, "reachable": 2, "unreachable_exts": ["11", "12"]}
+        pm._notify_outage("down", summ)
+        pm._notify_outage("up", summ)
+        check("notify: down + up both fire", len(calls) == 2)
+        check("notify: same notification_id so recovery replaces outage",
+              calls[0][1] == calls[1][1] == "switchboard_link_outage")
+        check("notify: outage message names the gateway", "GXW" in calls[0][2] or "gateway" in calls[0][2])
+    finally:
+        sys.modules.pop("ha_client", None)
+
+
 if __name__ == "__main__":
     test_rtt_ms()
     test_is_reachable()
@@ -206,5 +261,8 @@ if __name__ == "__main__":
     test_publish_routing()
     test_warmup_done()
     test_history_append_caps()
+    test_is_mass_outage()
+    test_outage_transition()
+    test_outage_notify_routing()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.24.0
+
+Findings from a 24h health + call-quality review (multi-agent, adversarially
+verified against the live callqos/linkhealth ledgers).
+
+**Fleet-outage availability alert (the real gap).** The link-health poller had
+*recorded* an ~11h overnight window where all 8 wired GXW FXS ports lost SIP
+registration together (the gateway's SIP stack wedged — the same-subnet WiFi
+cordless stayed up, and the inbound DID routes to it, so nothing looked wrong) —
+but nothing *alerted*. The poller now fires one persistent notification when a
+large fraction of the fleet is unreachable at once (a shared gateway dropping, not
+one handset asleep), and a recovery notice when it clears. A two-consecutive-cycle
+gate rejects the single-sample "all Unregistered" collector blips. Gate with the
+new `link_health_alerts` option (default on).
+
+**Fewer false poor-call alerts.** The 24h ledger showed half the "poor" pushes were
+telemetry artifacts, not real audio:
+
+- Asterisk reports `MES=0.0` for a direction it couldn't score yet (a short / setup
+  leg with no RTCP) — that sentinel was fed straight into the worst-of score and
+  flagged "poor" (e.g. a 4s operator greeting). `MES=0` is now treated as no-data.
+- A *collapsed* MES (<40 ≈ MOS 2.0) alongside ~0% loss, only-packetization jitter,
+  and a low RTT is a re-INVITE/transfer glitch, not real audio (that MOS is
+  physically impossible without heavy loss/jitter). Such a reading is dropped from
+  the score. Genuine degradation — which always brings real loss and/or jitter — is
+  kept, and one-way audio is still caught by packet counts. The raw `mes_rx`/`mes_tx`
+  stay in the ledger verbatim.
+
+The review also confirmed the wired path is already at the latency/jitter floor
+(G.711 u-law, VAD off, RTP marked DSCP 46/EF, ~2.5ms LAN RTT), so no gateway audio
+settings were changed; the only real call degradation is the WiFi cordless, which
+is an access-point/RF matter, not a PBX one.
+
 ## 0.23.2
 
 Refine the v0.23.1 warm-up so a *straggler* phone isn't frozen `offline` after a
