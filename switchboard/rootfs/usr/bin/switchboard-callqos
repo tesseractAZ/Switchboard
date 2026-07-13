@@ -152,8 +152,29 @@ def build_record(a) -> dict:
     rtt_ms = _ms(_num(a.rtt))
     loss_rx = _pct(rxploss, rxcount)
     loss_tx = _pct(txploss, txcount)
+    jit_rx = _ms(_num(a.rxjitter))
+    jit_tx = _ms(_num(a.txjitter))
 
-    mes_vals = [m for m in (rxmes, txmes) if m is not None]
+    # A per-direction MES only drives the score if it is trustworthy. Asterisk
+    # reports 0.0 for a direction it could not score (short call / RTCP not yet
+    # converged) — never a genuine 0 MOS — and a COLLAPSED MES (<40 ≈ MOS 2.0)
+    # alongside ~0% loss, only-packetization jitter, and a low RTT is a
+    # re-INVITE/transfer glitch, not real audio (that MOS physically requires heavy
+    # loss/jitter). Either way, drop the reading from the worst-of aggregation so it
+    # can't fire a false "poor"; genuine degradation always brings real loss and/or
+    # jitter (kept) and one-way audio is caught separately by packet counts below.
+    # The RAW mes_rx/mes_tx are still recorded verbatim for transparency.
+    def _credible(mes, loss, jit):
+        if mes is None or mes == 0:
+            return None
+        incoherent = (mes < 40
+                      and (loss is None or loss < 0.5)
+                      and (jit is None or jit < 40)
+                      and (rtt_ms is None or rtt_ms < 80))
+        return None if incoherent else mes
+
+    mes_vals = [m for m in (_credible(rxmes, loss_rx, jit_rx),
+                            _credible(txmes, loss_tx, jit_tx)) if m is not None]
     worst_mes = min(mes_vals) if mes_vals else None
     loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
     worst_loss = max(loss_vals) if loss_vals else None
@@ -185,7 +206,7 @@ def build_record(a) -> dict:
         "hcause": _int(a.hcause),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
-        "jitter_rx_ms": _ms(_num(a.rxjitter)), "jitter_tx_ms": _ms(_num(a.txjitter)),
+        "jitter_rx_ms": jit_rx, "jitter_tx_ms": jit_tx,
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
         # bumpy stream that a healthy AVERAGE would mask.

@@ -189,6 +189,50 @@ def test_one_way_audio() -> None:
           not any("one-way" in r for r in rec["reasons"]))
 
 
+def test_mes_zero_is_no_data() -> None:
+    # Asterisk returns MES=0.0 for a direction it couldn't score (short call / no
+    # RTCP). A real 4s/6s call must NOT be scored "poor" off that sentinel.
+    # #21: a 4s operator setup leg, both MES 0 -> unknown (no data), not poor.
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/19-1",
+                                cid="19", billsec="4", codec="slin",
+                                rxcount="227", txcount="135", rxmes="0", txmes="0"))
+    check("mes0: both-zero MES -> unknown, not poor",
+          rec["mes_worst"] is None and rec["quality"] == "unknown" and not rec["notify"])
+    # #18: a 6s call, tx MES 0 (unmeasured) but rx MES 88 -> excellent, not poor.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/x-2",
+                                cid="2025550100", billsec="6",
+                                rxcount="248", txcount="332", rxmes="88.1", txmes="0"))
+    check("mes0: one-zero MES falls back to the measured direction",
+          rec["mes_worst"] == 88.1 and rec["quality"] == "excellent" and not rec["notify"])
+
+
+def test_incoherent_low_mes_filtered() -> None:
+    # #3: wired Kitchen leg, MES 27.6 but 0% loss, 1.57ms rtt, only-packetization
+    # jitter -> a re-INVITE/transfer glitch, physically impossible as real audio.
+    # The collapsed reading must not drive "poor".
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-3",
+                                cid="12", billsec="38", rxcount="1907", txcount="1870",
+                                rxploss="0", txploss="41", rxjitter="0.019875",
+                                txjitter="0", rtt="0.00157", rxmes="27.6", txmes="88.1"))
+    check("incoherent: MES 27 w/ clean transport dropped -> not poor",
+          rec["mes_worst"] == 88.1 and rec["quality"] != "poor")
+    check("incoherent: raw mes_rx still recorded verbatim", rec["mes_rx"] == 27.6)
+    # A genuinely-lossy low MES (real loss present) MUST still flag.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/19-4",
+                                cid="19", billsec="30", rxcount="1500", txcount="1500",
+                                rxploss="90", txploss="0", rxjitter="0.02", txjitter="0",
+                                rtt="0.02", rxmes="20", txmes="88"))
+    check("incoherent: low MES WITH real loss is kept (still poor)",
+          rec["quality"] == "poor" and rec["notify"])
+    # A real WiFi dip (MES 59 with ~1% loss) is coherent -> kept, still poor.
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/19-5",
+                                cid="19", billsec="53", rxcount="2634", txcount="2088",
+                                rxploss="28", txploss="11", rxjitter="0.02", txjitter="0.013",
+                                rtt="0.037", rxmes="59.2", txmes="73.2"))
+    check("incoherent: real MES-59 WiFi dip (loss>0.5%) kept -> poor",
+          rec["mes_worst"] == 59.2 and rec["quality"] == "poor")
+
+
 def test_argv_sanitizes_nonfinite() -> None:
     # glibc can print 0.0/0.0 as "-nan"; the dialplan then passes --rtt "-nan".
     # argparse would treat "-nan" as an unknown option and SystemExit, dropping the
@@ -286,6 +330,8 @@ if __name__ == "__main__":
     test_ledger_append_and_cap()
     test_ha_routing()
     test_one_way_audio()
+    test_mes_zero_is_no_data()
+    test_incoherent_low_mes_filtered()
     test_argv_sanitizes_nonfinite()
     test_alerts_option_read_from_features()
     test_detach_gating()
