@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.25.0
+
+Make the cordless a home-wide announcer and give it a distinctive outside-line ring.
+
+**Announce endpoint (`POST /api/announce/{ext}`).** Speaks a message OUT a room
+handset: render TTS (`{"text": ...}` via espeak, or `{"url": ...}` fetching a WAV,
+e.g. `tts.piper`) to an 8 kHz clip Asterisk `Playback` can read, then originate an
+auto-answer call so it plays on the speaker. This is the SIP equivalent of a
+`media_player` — a companion HA custom-component exposes it as
+`media_player.cordless_speaker`, so any HA TTS/automation (and the ecoflow-panel's
+audible alerts) can announce to the cordless exactly like the ecobee speakers. The
+endpoint is Supervisor/loopback-only, or reachable over the LAN with the new
+`announce_token` (so the Core-container component can trigger it); it can only play
+a local clip to a configured ext, never place an outside call.
+
+**Room directory (`GET /phonebook.xml`).** Serves the configured rooms as Grandstream
+GS-Phonebook XML for the WP826's Remote Phonebook, so the cordless shows room NAMES
+on caller-ID and dials by name.
+
+**Distinctive ring for outside calls.** Inbound trunk calls tag the INVITE to the
+answering handset with a Bellcore `Alert-Info` (via a `b()` pre-dial subroutine), so
+the WP826 cordless rings differently for an outside call than a room-to-room call.
+Analog handsets ignore the header; the inbound leg stays `r`-only (no re-armed
+DTMF-transfer toll-fraud path).
+
+New `announce_asterisk.py` (dependency-free 8 kHz resample; no ffmpeg/audioop).
+Adversarial review before ship fixed: the async handler now offloads its blocking
+render/originate off the single event loop (no webui freeze); the URL fetch refuses
+redirects and blocks loopback/link-local/reserved hosts (SSRF); clip names are uuid
+(no same-second collision); the token is read per-request. Suite: 1489 checks, 0 failures.
+
 ## 0.24.0
 
 Findings from a 24h health + call-quality review (multi-agent, adversarially

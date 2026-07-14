@@ -1135,6 +1135,18 @@ def render_extensions(opts: dict) -> str:
         # lapsed" (both read UNAVAILABLE), so gating would risk dropping a
         # momentarily-unreachable primary handset from an inbound call.
         parts += [
+            # Distinctive ring for OUTSIDE calls: a pre-dial subroutine tags the
+            # INVITE to the answering handset with a Bellcore Alert-Info, so the
+            # WP826 cordless plays a different ring cadence for an inbound trunk call
+            # than for a room-to-room call. Analog FXS handsets ignore the header
+            # (their ring cadence is fixed at the gateway) — harmless. b(...) is a
+            # pre-dial GoSub option, NOT a t/T DTMF-transfer flag, so it doesn't
+            # re-open the inbound toll-fraud path the r-only flags deliberately close.
+            ";; ----- Distinctive-ring pre-dial for outside calls -----",
+            "[sw-alert]",
+            "exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=Bellcore-dr2)",
+            " same = n,Return()",
+            "",
             ";; ----- Inbound from the trunk -----",
             # An adaptive jitter buffer on the trunk channel de-jitters the
             # public-internet RTP from VoIP.ms before it reaches the answering
@@ -1142,11 +1154,11 @@ def render_extensions(opts: dict) -> str:
             "[from-trunk]",
             f"exten = _X.,1,NoOp(Inbound call ${{EXTEN}} -> {where})",
             " same = n,Set(JITTERBUFFER(adaptive)=default)",
-            f" same = n,Dial({dial_target},30,r)",
+            f" same = n,Dial({dial_target},30,rb(sw-alert^s^1))",
             " same = n,Hangup()",
             "exten = s,1,NoOp(Inbound call, no DID)",
             " same = n,Set(JITTERBUFFER(adaptive)=default)",
-            f" same = n,Dial({dial_target},30,r)",
+            f" same = n,Dial({dial_target},30,rb(sw-alert^s^1))",
             " same = n,Hangup()",
         ] + rtpqos_h("from-trunk") + [
             "",
