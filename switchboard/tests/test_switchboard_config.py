@@ -247,17 +247,17 @@ def test_trunk_inbound_routing() -> None:
     one = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "19"}})
     ft = one[one.index("[from-trunk]"):]
     check("inbound_ext=19 rings only PJSIP/19",
-          "Dial(PJSIP/19,30,r)" in ft and "PJSIP/11" not in ft)
+          "Dial(PJSIP/19,30,r" in ft and "PJSIP/11" not in ft)
 
     allr = sbc.render_extensions({"rooms": rooms, "trunk": base})
     fta = allr[allr.index("[from-trunk]"):]
     check("no inbound_ext rings every room",
-          "Dial(PJSIP/11&PJSIP/19,30,r)" in fta)
+          "Dial(PJSIP/11&PJSIP/19,30,r" in fta)
 
     bad = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "inbound_ext": "99"}})
     ftb = bad[bad.index("[from-trunk]"):]
     check("inbound_ext not a room -> rings every room (no silent drop)",
-          "Dial(PJSIP/11&PJSIP/19,30,r)" in ftb and "Dial(PJSIP/99," not in ftb)
+          "Dial(PJSIP/11&PJSIP/19,30,r" in ftb and "Dial(PJSIP/99," not in ftb)
 
     # --- group ring: inbound_ext accepts a comma-separated list ----------------
     rooms3 = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
@@ -266,27 +266,27 @@ def test_trunk_inbound_routing() -> None:
     grp = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,20"}})
     ftg = grp[grp.index("[from-trunk]"):]
     check("inbound_ext='19,20' rings the group PJSIP/19&PJSIP/20",
-          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftg and "PJSIP/11" not in ftg)
+          "Dial(PJSIP/19&PJSIP/20,30,r" in ftg and "PJSIP/11" not in ftg)
 
     grpws = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": " 19 , 20 "}})
     ftws = grpws[grpws.index("[from-trunk]"):]
     check("inbound_ext list tolerates surrounding whitespace",
-          "Dial(PJSIP/19&PJSIP/20,30,r)" in ftws)
+          "Dial(PJSIP/19&PJSIP/20,30,r" in ftws)
 
     part = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "19,99"}})
     ftp = part[part.index("[from-trunk]"):]
     check("inbound_ext='19,99' drops the non-room and rings only PJSIP/19",
-          "Dial(PJSIP/19,30,r)" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
+          "Dial(PJSIP/19,30,r" in ftp and "PJSIP/99" not in ftp and "PJSIP/11" not in ftp)
 
     allbad = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "98,99"}})
     ftab = allbad[allbad.index("[from-trunk]"):]
     check("fully-invalid inbound_ext list rings every room",
-          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,r)" in ftab and "PJSIP/98" not in ftab)
+          "Dial(PJSIP/11&PJSIP/19&PJSIP/20,30,r" in ftab and "PJSIP/98" not in ftab)
 
     dup = sbc.render_extensions({"rooms": rooms3, "trunk": {**base, "inbound_ext": "20,19,20"}})
     ftd = dup[dup.index("[from-trunk]"):]
     check("inbound_ext list de-dups and preserves order",
-          "Dial(PJSIP/20&PJSIP/19,30,r)" in ftd)
+          "Dial(PJSIP/20&PJSIP/19,30,r" in ftd)
 
 
 def test_inbound_dial_has_no_transfer_flags() -> None:
@@ -977,6 +977,28 @@ def test_rtpqos_telemetry() -> None:
     check("rtpqos: present on non-trunk installs too", "[switchboard-rtpqos]" in e2)
 
 
+def test_distinctive_ring_outside_calls() -> None:
+    # v0.25.0: inbound trunk calls tag the INVITE to the answering handset with a
+    # Bellcore Alert-Info via a b() pre-dial subroutine, so the WP826 cordless rings
+    # differently for an outside call. The [sw-alert] context sets the header; the
+    # inbound Dials carry b(sw-alert^s^1); analog room-to-room Dials do NOT.
+    rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2222222222"}])
+    e = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True},
+                              "trunk": {"enabled": True, "provider_host": "sip.x.com",
+                                        "username": "u", "secret": "goodsecret", "inbound_ext": "19"}})
+    check("distinctive: [sw-alert] context emitted", "[sw-alert]" in e)
+    check("distinctive: sets a Bellcore Alert-Info header",
+          "Set(PJSIP_HEADER(add,Alert-Info)=Bellcore-dr2)" in e)
+    trunk = _ctx_body(e, "from-trunk")
+    check("distinctive: inbound Dials carry the b() pre-dial subroutine",
+          "b(sw-alert^s^1)" in trunk and trunk.count("b(sw-alert^s^1)") >= 1)
+    check("distinctive: header set does NOT re-arm t/T on the inbound leg (toll-fraud)",
+          "b(sw-alert^s^1)" in trunk and not re.search(r"Dial\([^)]*,30,r[tT]", trunk))
+    # Room-to-room (rooms context) must NOT get the outside-call distinctive ring.
+    check("distinctive: room-to-room Dials are NOT tagged with sw-alert",
+          "b(sw-alert^s^1)" not in _ctx_body(e, "rooms"))
+
+
 def test_config_hardening_v018() -> None:
     # D4: room endpoints get an RTP watchdog (mid-call media loss tears down instead
     # of leaking the port), like the trunk already had.
@@ -1094,6 +1116,7 @@ if __name__ == "__main__":
     test_trunk_aor_not_qualified()
     test_trunk_registration_keepalive()
     test_trunk_inbound_routing()
+    test_distinctive_ring_outside_calls()
     test_inbound_dial_has_no_transfer_flags()
     test_features_conf_transfer()
     test_clean_config_unchanged()

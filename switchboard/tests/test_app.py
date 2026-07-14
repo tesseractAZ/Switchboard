@@ -354,6 +354,39 @@ def test_cached_status_bundle() -> None:
         app._status_cache["value"] = None
 
 
+def test_phonebook_xml() -> None:
+    # The WP826 Remote-Phonebook source: one Contact per configured room, name ->
+    # FirstName, ext -> phonenumber. Bad exts skipped; markup-bearing names escaped.
+    rooms = [{"ext": "11", "name": "Family & Room"}, {"ext": "bad", "name": "x"},
+             {"ext": "19", "name": "Cordless"}]
+    xml = app.build_phonebook_xml(rooms)
+    check("phonebook: valid XML declaration + AddressBook root",
+          xml.startswith('<?xml') and "<AddressBook>" in xml and "</AddressBook>" in xml)
+    check("phonebook: one Contact per VALID room (bad ext skipped)", xml.count("<Contact>") == 2)
+    check("phonebook: name with & is XML-escaped (no raw ampersand)",
+          "Family &amp; Room" in xml and "Family & Room" not in xml)
+    check("phonebook: ext becomes the phonenumber", "<phonenumber>19</phonenumber>" in xml)
+    check("phonebook: empty roster still yields a well-formed doc",
+          "<AddressBook>" in app.build_phonebook_xml([]))
+
+
+def test_announce_helpers() -> None:
+    # The generated clip name must satisfy the strict announce-name regex AND
+    # round-trip through safe_announce_path (so it can't escape the announce dir).
+    name = app._announce_name("19")
+    check("announce: generated name matches the *.wav name regex",
+          app._ANNOUNCE_NAME.match(name) is not None)
+    check("announce: generated name resolves safely under the announce dir",
+          app.safe_announce_path(name) != "")
+    # Collision-free: two names for the same ext in the same instant must differ.
+    check("announce: names are unique per invocation (uuid, not pid+second)",
+          app._announce_name("19") != app._announce_name("19"))
+    check("announce: text cap is a sane bound", app.ANNOUNCE_MAX_TEXT == 500)
+    # LAN announce is OFF by default (no token configured) — read per-request, so a
+    # token edit applies without a process restart.
+    check("announce: token empty by default (LAN announce disabled)", app._announce_token() == "")
+
+
 def main() -> None:
     test_module_loads_without_fastapi()
     test_cached_status_bundle()
@@ -372,6 +405,8 @@ def main() -> None:
     test_index_html_js_parses()
     test_route_handlers_defined()
     test_client_guard()
+    test_phonebook_xml()
+    test_announce_helpers()
     print()
     if _failures:
         print(f"{_failures} FAILURE(S)")
