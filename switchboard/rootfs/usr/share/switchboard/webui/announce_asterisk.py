@@ -122,6 +122,44 @@ def _resample_to_8k(samples: "array.array", in_rate: int,
     return out
 
 
+def _ffmpeg_to_8k_wav(raw: bytes) -> "bytes | None":
+    """Transcode arbitrary audio bytes to 8 kHz mono 16-bit PCM WAV via ffmpeg (reads
+    stdin, writes WAV to stdout — no temp files), or None if ffmpeg is absent/fails.
+    Used when the fetched clip isn't a plain WAV (HA's tts_proxy serves MP3)."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+             "-ar", str(TARGET_RATE), "-ac", "1", "-acodec", "pcm_s16le", "-f", "wav", "pipe:1"],
+            input=raw, capture_output=True, timeout=20,
+        )
+        if proc.returncode == 0 and proc.stdout[:4] == b"RIFF":
+            return proc.stdout
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return None
+
+
+def _decode_audio_to_mono16(raw: bytes) -> tuple["array.array | None", int]:
+    """Decode fetched audio bytes to (mono int16 samples, rate). Tries a plain WAV
+    first; if that fails (the bytes are MP3/OGG/etc. — HA's tts_proxy serves MP3),
+    falls back to ffmpeg, which yields an 8 kHz mono WAV. (None, rate) on failure."""
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as w:
+            samples, rate = _read_wav_mono16(w)
+        if samples is not None:
+            return samples, rate
+    except (wave.Error, EOFError, OSError):
+        pass
+    wav = _ffmpeg_to_8k_wav(raw)
+    if wav is None:
+        return None, TARGET_RATE
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as w:
+            return _read_wav_mono16(w)
+    except (wave.Error, EOFError, OSError):
+        return None, TARGET_RATE
+
+
 def _read_wav_mono16(reader) -> tuple["array.array | None", int]:
     """Read a wave reader into a mono int16 sample array + its sample rate.
 
@@ -196,19 +234,17 @@ def render_url_to_8k(url: str, out_path: str,
     host = urllib.parse.urlsplit(url).hostname or ""
     if not host or not _host_is_safe(host):
         return False
-    speech: "array.array | None" = None
-    in_rate = TARGET_RATE
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Switchboard/announce"})
         # _OPENER refuses redirects (no 3xx pivot to an internal host).
         with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310 (scheme + host checked)
             raw = resp.read(max_bytes + 1)
-        if len(raw) > max_bytes:
-            return False
-        with wave.open(io.BytesIO(raw), "rb") as w:
-            speech, in_rate = _read_wav_mono16(w)
-    except (OSError, ValueError, wave.Error):
+    except (OSError, ValueError):
         return False
+    if len(raw) > max_bytes:
+        return False
+    # WAV directly, else ffmpeg (HA's tts_proxy serves MP3).
+    speech, in_rate = _decode_audio_to_mono16(raw)
     if speech is None:
         return False
     speech8k = _resample_to_8k(speech, in_rate, TARGET_RATE)
