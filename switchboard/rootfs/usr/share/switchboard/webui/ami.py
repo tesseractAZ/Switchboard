@@ -546,6 +546,49 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
     )
 
 
+def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: int = 30) -> bool:
+    """Originate an ANNOUNCEMENT to one ext: Asterisk calls the phone and, on
+    answer, plays ``sound`` (a rendered TTS clip) straight out the handset.
+
+    Paired with the phone configured to AUTO-ANSWER calls from ``caller_num``
+    (Grandstream "Auto Answer Numbers"), so an alert speaks on the speaker with
+    nobody lifting the handset — the SIP equivalent of a media_player announcement,
+    which is what lets HA / the ecoflow-panel target the cordless like an ecobee.
+
+    Like ring_extension this runs a fixed Playback (never Dial), so it can only
+    play a LOCAL file to a KNOWN endpoint — never an outside call — even though the
+    AMI account holds originate privilege. The caller MUST have validated ext; we
+    additionally reject a sound/caller_num that could smuggle extra AMI headers
+    (CR/LF) or a non-digit caller number. Returns True if Asterisk queued it."""
+    if not _EXT_RE.fullmatch(ext or ""):
+        return False
+    if any(c in (sound or "") for c in "\r\n"):  # no AMI header injection via the path
+        return False
+    cnum = caller_num if (caller_num or "").isdigit() else "8000"
+    action_id = _next_action_id()
+    try:
+        blocks = _ami_command(
+            [
+                "Action: Originate",
+                f"Channel: PJSIP/{ext}",
+                "Application: Playback",
+                f"Data: {sound}",
+                f"CallerID: Switchboard Announce <{cnum}>",
+                f"Timeout: {int(timeout_s * 1000)}",
+                "Async: true",
+            ],
+            single_response=True,
+            action_id=action_id,
+        )
+    except (OSError, AMIError) as exc:
+        logging.warning("announce_to_ext: originate to %s failed: %s", ext, exc)
+        return False
+    return any(
+        b.get("actionid") == action_id and b.get("response", "").lower() == "success"
+        for b in blocks
+    )
+
+
 def connect_extensions(a: str, b: str, allowed_exts, caller_id: str = "Operator <0>") -> bool:
     """Patch a call between two CONFIGURED room phones (operator "connect").
 

@@ -14,13 +14,16 @@ works unmodified behind Home Assistant Ingress, whatever path it is mounted on.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 # The AMI client lives in a framework-free sibling module so its wire-format
 # parsing can be unit-tested without FastAPI. Ensure this directory is importable
@@ -37,14 +40,21 @@ sys.path.insert(0, "/usr/share/switchboard/wakeup")
 # this file still succeeds and ``app`` is None.
 try:
     from fastapi import FastAPI, Request  # noqa: E402
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse  # noqa: E402
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response  # noqa: E402
     _HAVE_FASTAPI = True
 except ImportError:  # pragma: no cover - exercised only on the test box
-    FastAPI = Request = FileResponse = HTMLResponse = JSONResponse = None  # type: ignore
+    FastAPI = Request = FileResponse = HTMLResponse = JSONResponse = Response = None  # type: ignore
     _HAVE_FASTAPI = False
+
+# 8 kHz Playback audio for the announce-to-handset endpoint; absent on the dev box.
+try:
+    import announce_asterisk  # noqa: E402
+except ImportError:  # pragma: no cover
+    announce_asterisk = None  # type: ignore
 
 from ami import (  # noqa: E402
     AMIError,
+    announce_to_ext,
     codecs_for_channels,
     connect_extensions,
     get_endpoints,
@@ -290,6 +300,17 @@ def wakeups_list(rooms_by_ext: dict) -> list[dict]:
 
 ANNOUNCE_DIR = "/run/switchboard/announce"
 _ANNOUNCE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\.wav$")
+ANNOUNCE_MAX_TEXT = 500  # cap the espeak render length (defence against a huge run)
+
+
+def _announce_token() -> str:
+    """The shared secret that lets the HA media_player custom-component (which runs
+    in the Core container, OFF the Supervisor/loopback path) trigger POST
+    /api/announce over the LAN. Empty => LAN announce disabled (Supervisor/loopback
+    only). Read per-request (like every other option) so a token edit takes effect
+    without waiting on a process restart; only consulted on the announce path, so it
+    costs nothing on other routes."""
+    return str((load_options() or {}).get("announce_token") or "").strip()
 
 
 def safe_announce_path(name: str) -> str:
@@ -310,12 +331,24 @@ def safe_announce_path(name: str) -> str:
 
 @app.middleware("http")
 async def restrict_to_ingress(request: Request, call_next):
-    # The announcement audio is fetched over the LAN by the media players (an
-    # AirPlay speaker, not the Supervisor ingress client), so exempt just that GET
-    # route from the ingress client-IP guard. It only ever serves an ephemeral,
-    # name-validated *.wav from ANNOUNCE_DIR — see serve_announcement.
-    if request.method == "GET" and (request.url.path or "").startswith("/announce/"):
+    path = request.url.path or ""
+    # Two read-only GETs are fetched over the LAN by dumb devices (not the
+    # Supervisor ingress client), so exempt just those from the client-IP guard:
+    #   * /announce/<name>.wav — a media player fetching an ephemeral, name-validated
+    #     announcement WAV (see serve_announcement).
+    #   * /phonebook.xml — the WP826 cordless fetching its Remote Phonebook (it can't
+    #     ride Ingress); read-only, low-sensitivity (internal ext directory).
+    if request.method == "GET" and (path.startswith("/announce/") or path == "/phonebook.xml"):
         return await call_next(request)
+    # The HA media_player custom-component triggers announcements over the LAN from
+    # the Core container — allow POST /api/announce ONLY when it carries the shared
+    # announce token (read per-request, so only this path pays for the options read).
+    # Disabled unless a token is configured; the endpoint itself can still only play
+    # a local clip to a known ext (never an outside call).
+    if request.method == "POST" and path.startswith("/api/announce/"):
+        tok = _announce_token()
+        if tok and request.headers.get("x-announce-token") == tok:
+            return await call_next(request)
     client = request.client.host if request.client else ""
     if not _client_allowed(client):
         return JSONResponse({"error": "forbidden"}, status_code=403)
@@ -333,6 +366,124 @@ def serve_announcement(name: str):
     if not os.path.isfile(path):
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(path, media_type="audio/wav")
+
+
+def _announce_name(ext: str) -> str:
+    """A safe, UNIQUE *.wav filename for a per-ext announcement clip. A uuid4 hex
+    (not pid+second, which collide on two announces to the same ext within one
+    wall-clock second — the second render would overwrite the WAV the first is about
+    to Play). ann-<ext>-<32hex>.wav is ~45 chars of [a-z0-9-], so it satisfies
+    _ANNOUNCE_NAME and round-trips through safe_announce_path."""
+    return f"ann-{ext}-{uuid.uuid4().hex}.wav"
+
+
+def _cleanup_announce_dir(max_age: int = 300) -> None:
+    """Prune announcement WAVs older than max_age seconds. Best-effort; never raises
+    into a request, so the ephemeral tmpfs clips don't accumulate."""
+    try:
+        os.makedirs(ANNOUNCE_DIR, exist_ok=True)
+        now = time.time()
+        for f in os.listdir(ANNOUNCE_DIR):
+            p = os.path.join(ANNOUNCE_DIR, f)
+            try:
+                if now - os.path.getmtime(p) > max_age:
+                    os.unlink(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+@app.post("/api/announce/{ext}")
+async def api_announce(ext: str, request: Request) -> JSONResponse:
+    """Speak an announcement OUT one room handset — the SIP "media player" that lets
+    HA / the ecoflow-panel announce to the cordless like an ecobee.
+
+    Body: {"text": "<message>"} OR {"url": "<http(s) WAV>"}. text is rendered offline
+    with espeak-ng; url fetches a WAV (no ffmpeg in the image -> WAV only, e.g.
+    tts.piper). Either way we produce an 8 kHz mono 16-bit PCM WAV (what Asterisk
+    Playback reads) under ANNOUNCE_DIR, then Originate a Playback to the ext via
+    ami.announce_to_ext — paired with the phone auto-answering calls from CID 8000.
+    The ext is validated against the configured rooms (which include the cordless)
+    AND the digit regex, so this can only play a local clip to a known endpoint,
+    never place an outside call. Reachable from Supervisor/loopback, or over the LAN
+    with the X-Announce-Token header (see the middleware)."""
+    opts = load_options()
+    if ext not in configured_room_exts(opts) or not valid_ext(ext):
+        return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
+    if announce_asterisk is None:
+        return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503)
+    body = await _json_body(request)
+    text = str(body.get("text") or "").strip()
+    url = str(body.get("url") or "").strip()
+    if not text and not url:
+        return JSONResponse({"ok": False, "error": "text or url required"}, status_code=400)
+    if text and len(text) > ANNOUNCE_MAX_TEXT:
+        return JSONResponse({"ok": False, "error": "text too long"}, status_code=400)
+
+    # This is an async handler on a single-worker uvicorn loop, so every blocking
+    # step — espeak (up to 20s), the URL fetch (up to 15s), the pure-Python resample,
+    # the AMI originate, and the dir cleanup — is offloaded with asyncio.to_thread;
+    # otherwise a single render would freeze the whole webui (the 4s /api/status
+    # poll, hangup, transfer) for its full duration.
+    await asyncio.to_thread(_cleanup_announce_dir)
+    path = safe_announce_path(_announce_name(ext))
+    if not path:
+        return JSONResponse({"ok": False, "error": "internal"}, status_code=500)
+    try:
+        if text:
+            built = await asyncio.to_thread(announce_asterisk.build_announcement_8k, text, path)
+        elif url.startswith("http://") or url.startswith("https://"):
+            built = await asyncio.to_thread(announce_asterisk.render_url_to_8k, url, path)
+        else:
+            return JSONResponse({"ok": False, "error": "bad url"}, status_code=400)
+    except Exception as exc:  # a render hiccup must not 500 the handler
+        print(f"[switchboard-webui] announce build {ext} failed: {exc}", flush=True)
+        built = False
+    if not built:
+        return JSONResponse({"ok": False, "error": "render failed"}, status_code=502)
+
+    # Playback wants the path WITHOUT the extension (it resolves "<path>.wav").
+    sound = path[:-4] if path.endswith(".wav") else path
+    try:
+        ok = await asyncio.to_thread(announce_to_ext, ext, sound)
+    except (AMIError, OSError) as exc:
+        print(f"[switchboard-webui] announce originate {ext} failed: {exc}", flush=True)
+        return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
+
+
+def build_phonebook_xml(rooms: list) -> str:
+    """Render the configured rooms as a Grandstream GS Phonebook XML document: one
+    <Contact> per room (name -> <FirstName>, ext -> <phonenumber>). Every ext is
+    re-validated with valid_ext and every value XML-escaped, so a room name with
+    & < > can't break the document or inject markup. Pure — unit-testable."""
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', "<AddressBook>"]
+    for r in rooms or []:
+        ext = str((r or {}).get("ext") or "").strip()
+        if not valid_ext(ext):
+            continue
+        name = str((r or {}).get("name") or ext)
+        out.append("  <Contact>")
+        out.append(f"    <FirstName>{_xml_escape(name)}</FirstName>")
+        out.append("    <LastName></LastName>")
+        out.append('    <Phone type="Work">')
+        out.append(f"      <phonenumber>{_xml_escape(ext)}</phonenumber>")
+        out.append("      <accountindex>0</accountindex>")
+        out.append("    </Phone>")
+        out.append("  </Contact>")
+    out.append("</AddressBook>")
+    return "\n".join(out) + "\n"
+
+
+@app.get("/phonebook.xml")
+def phonebook_xml() -> Response:
+    """Grandstream GS Phonebook XML of all configured rooms — the WP826 cordless's
+    Remote Phonebook source, so it shows room NAMES on caller-ID and dials by name.
+    Exempted from the ingress guard (see middleware) so the phone can fetch it on the
+    LAN; read-only, exposing only the internal ext directory already on each handset."""
+    xml = build_phonebook_xml(load_options().get("rooms") or [])
+    return Response(content=xml, media_type="text/xml; charset=utf-8")
 
 
 # --------------------------------------------------------------------------- #
