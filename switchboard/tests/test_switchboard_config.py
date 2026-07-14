@@ -987,8 +987,8 @@ def test_distinctive_ring_outside_calls() -> None:
                               "trunk": {"enabled": True, "provider_host": "sip.x.com",
                                         "username": "u", "secret": "goodsecret", "inbound_ext": "19"}})
     check("distinctive: [sw-alert] context emitted", "[sw-alert]" in e)
-    check("distinctive: sets a Bellcore Alert-Info header",
-          "Set(PJSIP_HEADER(add,Alert-Info)=Bellcore-dr2)" in e)
+    check("distinctive: sets a Bellcore distinctive-ring Alert-Info header (escaped ;)",
+          "Set(PJSIP_HEADER(add,Alert-Info)=" in e and "info=Bellcore-dr2)" in e)
     trunk = _ctx_body(e, "from-trunk")
     check("distinctive: inbound Dials carry the b() pre-dial subroutine",
           "b(sw-alert^s^1)" in trunk and trunk.count("b(sw-alert^s^1)") >= 1)
