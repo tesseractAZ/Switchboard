@@ -574,6 +574,14 @@ def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: i
                 "Application: Playback",
                 f"Data: {sound}",
                 f"CallerID: Switchboard Announce <{cnum}>",
+                # Auto-answer onto the SPEAKER via the standard SIP intercom header, so
+                # an alert plays HANDS-FREE instead of ringing (the WP826 has "Allow
+                # Auto Answer by Call-Info/Alert-Info" on). answer-after=0 = answer at
+                # once. PJSIP_HEADER(add,...) as an Originate variable is applied to the
+                # outgoing INVITE; the ';' is a literal byte in an AMI header value
+                # (unlike the dialplan, no escaping) — and _EXT_RE-guarded ext plus a
+                # fixed header string mean nothing here is attacker-controlled.
+                "Variable: PJSIP_HEADER(add,Call-Info)=<sip:127.0.0.1>;answer-after=0",
                 f"Timeout: {int(timeout_s * 1000)}",
                 "Async: true",
             ],

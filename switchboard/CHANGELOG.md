@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.1
+
+Announce now auto-answers onto the cordless speaker (it was ringing instead): the
+originate carries the standard SIP intercom header `Call-Info: <sip:...>;answer-after=0`,
+which the WP826 honors ("Allow Auto Answer by Call-Info/Alert-Info" is on) — so an
+alert plays hands-free. The distinctive-ring Alert-Info now uses the proper
+`<uri>;info=Bellcore-dr2` form (the bare token wasn't recognized); note Bellcore only
+changes ring CADENCE — a different ring TONE for outside calls is a handset
+Match-Caller-ID rule (GUI).
+
 ## 0.25.0
 
 Make the cordless a home-wide announcer and give it a distinctive outside-line ring.

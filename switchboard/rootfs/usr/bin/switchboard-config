@@ -1144,7 +1144,12 @@ def render_extensions(opts: dict) -> str:
             # re-open the inbound toll-fraud path the r-only flags deliberately close.
             ";; ----- Distinctive-ring pre-dial for outside calls -----",
             "[sw-alert]",
-            "exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=Bellcore-dr2)",
+            # Standard Bellcore distinctive-ring Alert-Info: <uri>;info=Bellcore-drN.
+            # The ';' is escaped (\;) so the dialplan parser keeps it as a literal
+            # header byte instead of a comment. drN selects a ring CADENCE (rhythm),
+            # not a different tone — for an obviously different SOUND, set a
+            # Match-Incoming-Caller-ID rule on the handset (GUI).
+            r"exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=<http://127.0.0.1>\;info=Bellcore-dr2)",
             " same = n,Return()",
             "",
             ";; ----- Inbound from the trunk -----",
