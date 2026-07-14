@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.2
+
+The announce URL branch now transcodes non-WAV audio: Home Assistant's tts_proxy
+serves MP3 by default (even for Piper), which the pure-Python WAV reader can't
+decode. Added ffmpeg to the image and an ffmpeg fallback in render_url_to_8k
+(fetch -> WAV directly, else ffmpeg -> 8 kHz mono WAV), so the HA media_player path
+(tts.speak / the ecoflow-panel alerts -> media_player.cordless_speaker) actually
+plays on the cordless. Best-effort: without ffmpeg the {url} branch is WAV-only; the
+{text} branch is unaffected.
+
 ## 0.25.1
 
 Announce now auto-answers onto the cordless speaker (it was ringing instead): the

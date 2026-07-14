@@ -59,6 +59,13 @@ RUN apk add --no-cache asterisk-sounds-moh 2>/dev/null || true
 RUN apk add --no-cache espeak-ng 2>/dev/null \
       || echo "NOTE: espeak-ng unavailable; home-automation voice readback limited to canned prompts"
 
+# ffmpeg: transcode a fetched TTS clip to the 8 kHz mono WAV Asterisk Playback needs.
+# Home Assistant's tts_proxy serves MP3 by default (even for Piper), which the pure-
+# Python WAV reader can't decode — ffmpeg handles MP3/OGG/etc. Best-effort: without it
+# the announce {url} branch is limited to WAV input (the {text} branch still works).
+RUN apk add --no-cache ffmpeg 2>/dev/null \
+      || echo "NOTE: ffmpeg unavailable; announce url-branch limited to WAV input"
+
 # Asterisk modules for the operator page-all intercom (ConfBridge / Page) and
 # message-waiting stutter tone (res_mwi_external). PJSIP, app_confbridge,
 # app_page and res_mwi_external all ship inside the main `asterisk` package on

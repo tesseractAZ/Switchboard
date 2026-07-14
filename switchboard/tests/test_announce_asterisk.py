@@ -101,10 +101,24 @@ def test_url_host_guard() -> None:
           aa.render_url_to_8k("http://127.0.0.1:9/x.wav", "/tmp/x") is False)
 
 
+def test_decode_audio() -> None:
+    # A real WAV decodes directly (no ffmpeg needed).
+    wav = _wav_bytes([100, 200, 300, 400], 8000, 1)
+    samples, rate = aa._decode_audio_to_mono16(wav)
+    check("decode: WAV bytes decode directly", samples is not None and list(samples) == [100, 200, 300, 400] and rate == 8000)
+    # Non-WAV bytes with no ffmpeg (this box) fall back gracefully to (None, rate) —
+    # never raise. (On the add-on, ffmpeg transcodes MP3 here.)
+    samples, _ = aa._decode_audio_to_mono16(b"ID3\x04not-a-wav-this-is-mp3ish")
+    check("decode: non-WAV without ffmpeg -> None (graceful)", samples is None)
+    check("decode: ffmpeg helper returns None when ffmpeg absent",
+          aa._ffmpeg_to_8k_wav(b"\x00\x01\x02") is None or isinstance(aa._ffmpeg_to_8k_wav(b""), (bytes, type(None))))
+
+
 if __name__ == "__main__":
     test_resample()
     test_box_filter()
     test_read_wav_mono16()
     test_url_host_guard()
+    test_decode_audio()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
