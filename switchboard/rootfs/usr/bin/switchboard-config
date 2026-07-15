@@ -1144,12 +1144,14 @@ def render_extensions(opts: dict) -> str:
             # re-open the inbound toll-fraud path the r-only flags deliberately close.
             ";; ----- Distinctive-ring pre-dial for outside calls -----",
             "[sw-alert]",
-            # Standard Bellcore distinctive-ring Alert-Info: <uri>;info=Bellcore-drN.
-            # The ';' is escaped (\;) so the dialplan parser keeps it as a literal
-            # header byte instead of a comment. drN selects a ring CADENCE (rhythm),
-            # not a different tone — for an obviously different SOUND, set a
-            # Match-Incoming-Caller-ID rule on the handset (GUI).
-            r"exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=<http://127.0.0.1>\;info=Bellcore-dr2)",
+            # Alert-Info with a plain-text tag `info=outsideline` (NOT Bellcore-drN,
+            # which only selects a ring CADENCE, not a distinct tone). The WP826 has a
+            # Match-Incoming-Caller-ID rule (account P1488="outsideline" -> ring tone 3,
+            # set via tools/wp826.mjs) that plays an obviously DIFFERENT ring for any
+            # INVITE carrying this tag — i.e. inbound trunk calls. The ';' is escaped
+            # (\;) so the dialplan parser keeps it as a literal header byte, not a
+            # comment. Analog FXS handsets ignore the header (harmless).
+            r"exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=<http://127.0.0.1>\;info=outsideline)",
             " same = n,Return()",
             "",
             ";; ----- Inbound from the trunk -----",
