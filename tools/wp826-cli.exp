@@ -1,0 +1,26 @@
+#!/usr/bin/expect -f
+# Usage: wpcli.exp "cmd1" "cmd2" ...  — runs each command in the WP826 shell (handles
+# the nested CONFIG> prompt), prints output.
+set timeout 25
+set pw [exec cat /tmp/.wp_pass]
+spawn ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@192.168.1.71
+expect {
+  "assword:" { send "$pw\r" }
+  timeout { puts "TIMEOUT_AT_PW"; exit 1 }
+}
+expect {
+  -re {(WP826|CONFIG)> $} {}
+  "assword:" { puts "AUTH_FAILED"; exit 1 }
+  timeout { puts "NO_SHELL_PROMPT"; exit 1 }
+}
+foreach cmd $argv {
+  send "$cmd\r"
+  expect {
+    -re {(WP826|CONFIG)> $} {}
+    timeout { puts "\nTIMEOUT_AFTER: $cmd" }
+  }
+}
+send "\r"
+expect -re {(WP826|CONFIG)> $}
+send "exit\r"
+expect eof
