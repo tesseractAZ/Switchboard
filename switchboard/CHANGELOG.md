@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.26.0
+
+Distinctive ring for outside-line calls, done properly. The `[sw-alert]` pre-dial
+subroutine now tags inbound-trunk INVITEs with a plain-text `Alert-Info: <…>;info=outsideline`
+instead of `info=Bellcore-drN` (which only changed the ring *cadence*, not the tone —
+the reason it "didn't sound different"). The WP826 cordless has a Match-Incoming-Caller-ID
+rule (account P1488="outsideline" → ring tone 3) that plays an obviously different ring
+for any call carrying that tag. The WP826 side was set with the new `tools/wp826.mjs`
+scriptable config client (no browser) — see `tools/wp826-pcodes.md`.
+
+
 ## 0.25.2
 
 The announce URL branch now transcodes non-WAV audio: Home Assistant's tts_proxy
