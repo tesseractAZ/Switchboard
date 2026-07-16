@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.27.0
+
+Proactive device-health monitor for the fleet's two "smart" devices — the WP826
+cordless (the alarm/announce endpoint) and the GXW4216 gateway. rtpmon already
+watched SIP registration + RTT and fired a FLEET-outage alert (>= half the fleet
+down), but two blind spots remained: (1) the cordless is a battery + Wi-Fi device
+where power alarms are announced, and its battery dying / Wi-Fi weakening / per-call
+audio degrading are all invisible to Asterisk (the callee RTP leg is unmeasurable
+from the PBX); (2) a SINGLE critical device offline (the cordless alone; the whole
+gateway) never trips the half-the-fleet gate.
+
+New `devhealth` service polls the WP826's OWN HTTP API (the same one `tools/wp826.mjs`
+uses) for battery %, Wi-Fi RSSI, and per-call MOS/jitter/loss, and derives GXW health
+from rtpmon's rollup (the reliable, already-gathered registration signal — the GXW
+blocks ICMP/HTTP off its subnet, so an independent ping would false-alarm on a healthy
+gateway). It publishes `sensor.switchboard_cordless_health` + `sensor.switchboard_gateway_health`
+(graphable), and fires a one-shot `persistent_notification` on an unhealthy transition
+(consecutive-cycle hysteresis, escalation re-alerts, recovery collapses the entry) —
+CRITICAL when the cordless is offline or its battery is discharging under 15%, or all
+gateway ports drop; DEGRADED for weak/lost Wi-Fi, a low-but-charging battery, poor recent
+MOS, or some gateway ports down. Off by default until `cordless_password` is set for the
+deep (battery/Wi-Fi/MOS) checks; reachability + gateway health work without it. New
+options: `device_health_enabled|interval|alerts`, `cordless_ip|password`, `gateway_ports`,
+`cordless_battery_crit_pct|warn_pct`, `cordless_wifi_min_signal`.
+
+
 ## 0.26.0
 
 Distinctive ring for outside-line calls, done properly. The `[sw-alert]` pre-dial
