@@ -1,7 +1,9 @@
 # WP826 config automation — API + P-code reference
 
 Scriptable, no-browser configuration of the Grandstream **WP826** WiFi cordless
-(reference deployment: extension 19, `192.168.1.71`). Reverse-engineered from the
+(reference deployment: extension 19; **DHCP-assigned IP — currently `192.168.1.84`**,
+previously `.71`; give it an Eero DHCP reservation, and override the tool with
+`WP826_HOST=<ip>` if it moves). Reverse-engineered from the
 phone's own React bundle + `tl.*.js` schema files (firmware Prog **1.0.3.35** /
 Core 1.0.3.9). The admin password is read from `/tmp/.wp_pass` (persistent copy
 `~/.wp_pass`).
@@ -32,8 +34,8 @@ attempts.
 
 ## Auth flow
 
-All requests hit **`/cgi-bin/<path>`** and REQUIRE `Referer: https://192.168.1.71/`
-and `Origin: https://192.168.1.71` headers (else `403 Forbidden`). TLS is
+All requests hit **`/cgi-bin/<path>`** and REQUIRE `Referer: https://<phone-ip>/`
+and `Origin: https://<phone-ip>` headers (the tool derives both from its host) (else `403 Forbidden`). TLS is
 self-signed (the client sets `rejectUnauthorized: false`). Login is a SHA-256
 salted challenge-response:
 
@@ -45,12 +47,12 @@ salted challenge-response:
 
 - **Read:** `GET /cgi-bin/config_get?pvalues=330,331,332&update_session=false&sid=…` → `{configs:[{pvalue,value}]}` (codes are the P-number WITHOUT the leading `P`).
 - **Write:** `PUT /cgi-bin/config_update` (JSON) `{"alias":{},"pvalue":{"332":"60"}}` → `{response:"success", body:{status:"right"}}`. Applies immediately for most settings — no separate `commit` (unlike the SSH shell).
-- **SSH alternative:** `ssh admin@192.168.1.71` → `config` → `CONFIG>` → `get N` / `set N v` / `commit` (an expect helper is committed at [`wp826-cli.exp`](wp826-cli.exp)). Same P-codes, but the SSH path needs an explicit `commit`.
+- **SSH alternative:** `ssh admin@<phone-ip>` → `config` → `CONFIG>` → `get N` / `set N v` / `commit` (an expect helper is committed at [`wp826-cli.exp`](wp826-cli.exp)). Same P-codes, but the SSH path needs an explicit `commit`.
 
 ## How to find any other code
 
 The `tl.*.js` bundles (fetch
-`https://192.168.1.71/tl/tl.<account|application|phoneSettings|proKeys|network|maintenance>.js`)
+`https://<phone-ip>/tl/tl.<account|application|phoneSettings|proKeys|network|maintenance>.js`)
 are the field → code schema: each field is
 `{ lang:'LABEL_KEY', p:'PNNNN', el:{…allowed values…} }`. Grep for the label and
 read `p`. `node tools/wp826.mjs meta <keyword>` dumps the live P-code → alias map.
