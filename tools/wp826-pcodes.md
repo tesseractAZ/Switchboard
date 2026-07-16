@@ -80,3 +80,13 @@ Custom WAV upload is a file operation (web UI / provisioning), not a `config_upd
 `tl.*.js` (fetch `https://192.168.6.71/tl/tl.<account|application|phoneSettings|proKeys|network|maintenance>.js`)
 are the field→code schema: each field is `{ lang:'LABEL_KEY', p:'PNNNN', el:{…allowed values…} }`.
 Grep for the LABEL and read `p`.
+
+## Ringtone upload (item 39 — DONE)
+- **Upload:** `node tools/wp826.mjs ring-upload office_ring.wav`  → `POST /cgi-bin/ringtone?tags=&sid=` (multipart, field `file`). ★★**GOTCHA: `tags` MUST be empty** — a non-empty tags value returns `400`. WAV is accepted (16 kHz mono 16-bit PCM); the format was never the problem.
+- **List:** `node tools/wp826.mjs rings 0` (system ring1-N + user 1001+) · **Delete:** `DELETE /cgi-bin/ringtone?id=<id>`.
+- Custom (`type:"user"`) ids are ≥1001 and are valid values for ringtone selectors like `P1489` (match rule) and `P104` (account default).
+
+## Configured state (2026-07-15)
+- **Item 3 phonebook:** P330=1 (HTTP), P331=`192.168.5.152:8099/phonebook.xml`, **P332=60** (auto-refresh).
+- **Item 1 distinctive ring + Item 39 vintage tone:** `office_ring.wav` uploaded → custom **id 1001**; match rule 1 = **P1488="outsideline" / P1489="1001"**; switchboard v0.26.0 tags inbound-trunk INVITEs `Alert-Info: …;info=outsideline`. → outside-line calls ring the cordless with the vintage warble.
+- **Item 5 speed-dial:** OPEN — QuickAccess key assignments live in a layout string (P2939); format not yet decoded.
