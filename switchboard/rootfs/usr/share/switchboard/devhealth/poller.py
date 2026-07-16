@@ -302,6 +302,24 @@ def gateway_down_exts_from_rollup() -> list[str] | None:
     return [str(e) for e in dict.fromkeys(exts)]  # de-dup, stringify
 
 
+def resolve_cordless_ip(cordless_ext: str, fallback_ip: str) -> str:
+    """The cordless's CURRENT IP, taken from its live SIP registration so a
+    DHCP-moved handset is auto-followed without editing cordless_ip. rtpmon
+    publishes the registered contact IP as ``contact_ip`` on
+    sensor.switchboard_link_<ext>; use it when present, otherwise fall back to the
+    configured static IP (also covers: no cordless_ext set, HA down, rtpmon off,
+    or the cordless de-registered)."""
+    if not cordless_ext:
+        return fallback_ip
+    try:
+        import ha_client
+        s = ha_client.get_state(f"sensor.switchboard_link_{cordless_ext}")
+    except Exception:
+        return fallback_ip
+    ip = (s.get("attributes", {}) or {}).get("contact_ip") if isinstance(s, dict) else None
+    return str(ip).strip() if ip else fallback_ip
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, "").strip() or default)
@@ -376,18 +394,27 @@ def _notify(device: str, event: str, reasons: list[str]) -> None:
 def run() -> None:
     interval = max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
     cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
+    cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
     cordless_pw = os.environ.get("CORDLESS_PASSWORD", "")
     gw_exts = [e.strip() for e in os.environ.get("GATEWAY_PORTS", "11,12,13,14,15,16,17,18").split(",") if e.strip()]
     th = _thresholds()
     cst: dict = {}
     gst: dict = {}
-    print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} api={'yes' if cordless_pw else 'no-password'} "
+    last_ip = None
+    follow = f"auto-follow ext {cordless_ext}" if cordless_ext else "static"
+    print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
+          f"api={'yes' if cordless_pw else 'no-password'} "
           f"gateway_ports={','.join(gw_exts)} every {interval}s", flush=True)
     while True:
-        # --- cordless ---
-        if cordless_ip:
+        # --- cordless (IP auto-followed from its live SIP registration) ---
+        probe_ip = resolve_cordless_ip(cordless_ext, cordless_ip)
+        if probe_ip != last_ip:
+            if last_ip is not None:
+                print(f"[devhealth] cordless IP now {probe_ip} (was {last_ip}) — following DHCP", flush=True)
+            last_ip = probe_ip
+        if probe_ip:
             try:
-                snap = probe_cordless(cordless_ip, cordless_pw)
+                snap = probe_cordless(probe_ip, cordless_pw)
                 level, reasons = classify_cordless(snap, th)
                 _publish_cordless(level, reasons, snap)
                 ev = health_transition(level, cst)

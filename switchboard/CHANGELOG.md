@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.32.0
+
+Device-health monitor auto-follows the cordless's IP (no DHCP reservation needed).
+
+The WP826 cordless is on Wi-Fi and can take a new DHCP lease after a reboot, which
+used to break battery/Wi-Fi/MOS monitoring until `cordless_ip` was hand-edited (and
+falsely flag the alarm endpoint "unreachable"). Now: the link-health monitor
+publishes each phone's registered contact IP (`contact_ip` on
+`sensor.switchboard_link_<ext>`), and the device-health monitor takes the cordless's
+**current** IP from its live SIP registration via the new **`cordless_ext`** option
+(default `19`) — so it auto-follows wherever DHCP puts the phone. `cordless_ip`
+remains as the fallback (used when the cordless is unregistered / rtpmon is off /
+`cordless_ext` is blank). No reservation required; a lease change no longer blinds
+monitoring. IP changes are logged for the durable forensic trail added in 0.31.0.
+
+
 ## 0.31.0
 
 Forensics: much longer log retention + a durable log that survives reboots.

@@ -14,6 +14,7 @@ bashio::log.info "Starting Switchboard device-health monitor ..."
 
 export DEVICE_HEALTH_INTERVAL="$(bashio::config 'device_health_interval')"
 export CORDLESS_IP="$(bashio::config 'cordless_ip')"
+export CORDLESS_EXT="$(bashio::config 'cordless_ext')"
 export CORDLESS_PASSWORD="$(bashio::config 'cordless_password')"
 export GATEWAY_PORTS="$(bashio::config 'gateway_ports')"
 export CORDLESS_BATTERY_CRIT="$(bashio::config 'cordless_battery_crit_pct')"
