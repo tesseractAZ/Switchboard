@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.29.1
+
+Console web terminal: survive an empty port env. During the v0.29.0 config-schema
+migration, `bashio::config 'console_web_port'` briefly returned an empty string while
+Home Assistant rewrote `options.json`, and `server.py` did
+`int(os.environ.get("CONSOLE_WEB_PORT", "8100"))` — whose default only covers an
+*absent* key, not a set-but-empty one — so it raised `ValueError: invalid literal for
+int() with base 10: ''` and the longrun crash-looped until s6 restarted it (the service
+self-recovered once the config settled, but the traceback was alarming and recurs on
+every schema-changing deploy). Both port parses now use a shared `_env_int()` helper
+(`int(get(name, "").strip() or default)`, the same idiom already used by console.py,
+rtpmon, and devhealth), and the s6 run script defaults the port in bash too so the log
+line is never blank. New regression test loads `server.py` with an empty port env and
+asserts it imports without raising. No config or alarm-path change.
+
+
 ## 0.29.0
 
 Friendlier Configuration tab. Added `translations/en.yaml` so every option shows a
