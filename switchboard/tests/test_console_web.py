@@ -219,7 +219,52 @@ def test_bridge_write_is_bounded() -> None:
           "sock.setblocking(True)" not in src)
 
 
+def test_env_int_tolerates_empty_port() -> None:
+    """Regression: a config-derived port env arriving *empty* must not crash the
+    service. bashio::config can hand back "" during a config reload / options.json
+    rewrite (seen live on the v0.29.0 schema migration); the old
+    ``int(os.environ.get("CONSOLE_WEB_PORT", "8100"))`` threw ``ValueError`` on ""
+    because the 2-arg default only covers the *absent* key, not a set-but-empty one.
+    server.py's CONSOLE_PORT is parsed at *import* (module top), so loading the
+    module with the env set empty exercises the real crash site end-to-end.
+    """
+    server_path = (Path(__file__).resolve().parents[1]
+                   / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "server.py")
+    saved = {k: os.environ.get(k)
+             for k in ("CONSOLE_WEB_TARGET_PORT", "CONSOLE_WEB_PORT",
+                       "T_BLANK", "T_VAL", "T_PAD")}
+    try:
+        os.environ["CONSOLE_WEB_TARGET_PORT"] = ""   # the exact crashy case
+        os.environ["CONSOLE_WEB_PORT"] = ""
+        srv = None
+        try:
+            srv = SourceFileLoader("switchboard_console_web_server",
+                                   str(server_path)).load_module()
+        except Exception as exc:  # noqa: BLE001 — a raise here IS the regression
+            print("  import raised:", repr(exc))
+        check("server.py imports with empty CONSOLE_WEB_TARGET_PORT (no ValueError)",
+              srv is not None)
+        if srv is not None:
+            check("_env_int: import-time empty port falls back to 2300",
+                  srv.CONSOLE_PORT == 2300)
+            check("_env_int: empty -> default", srv._env_int("CONSOLE_WEB_PORT", 8100) == 8100)
+            os.environ["T_BLANK"] = "   "
+            check("_env_int: whitespace-only -> default", srv._env_int("T_BLANK", 8100) == 8100)
+            check("_env_int: absent key -> default", srv._env_int("T_UNSET_ZZ", 8100) == 8100)
+            os.environ["T_VAL"] = "9000"
+            check("_env_int: a real value wins", srv._env_int("T_VAL", 8100) == 9000)
+            os.environ["T_PAD"] = "  9000  "
+            check("_env_int: surrounding whitespace tolerated", srv._env_int("T_PAD", 8100) == 9000)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> None:
+    test_env_int_tolerates_empty_port()
     test_bridge_write_is_bounded()
     test_accept_key()
     test_parse_http_headers()
