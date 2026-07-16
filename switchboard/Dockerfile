@@ -115,7 +115,9 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /etc/s6-overlay/s6-rc.d/webui/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/console-web/run \
-    && chmod +x /etc/s6-overlay/s6-rc.d/wakeup-scheduler/run
+    && chmod +x /etc/s6-overlay/s6-rc.d/wakeup-scheduler/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/devhealth/run \
+    && chmod +x /usr/share/switchboard/devhealth/poller.py
 
 EXPOSE 5060/udp
 EXPOSE 8099/tcp
