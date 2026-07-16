@@ -1541,7 +1541,6 @@ def write_features_runtime(opts: dict) -> None:
         },
         "announce": {
             "players": players,
-            "tts_engine": _clean_eid(opts.get("announce_tts_engine", "tts.piper"), ("tts",)) or "tts.piper",
         },
         # switchboard-callqos runs from the dialplan h-extension AS the asterisk
         # user, so it reads the poor-call alert opt-out here (root-only

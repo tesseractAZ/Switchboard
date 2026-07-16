@@ -399,9 +399,10 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     """Speak an announcement OUT one room handset — the SIP "media player" that lets
     HA / the ecoflow-panel announce to the cordless like an ecobee.
 
-    Body: {"text": "<message>"} OR {"url": "<http(s) WAV>"}. text is rendered offline
-    with espeak-ng; url fetches a WAV (no ffmpeg in the image -> WAV only, e.g.
-    tts.piper). Either way we produce an 8 kHz mono 16-bit PCM WAV (what Asterisk
+    Body: {"text": "<message>"} OR {"url": "<http(s) audio>"}. text is rendered offline
+    with espeak-ng; url fetches a WAV (decoded in pure Python) or a non-WAV clip (e.g.
+    an MP3 from tts.piper via HA's tts_proxy, decoded with ffmpeg if it is present).
+    Either way we produce an 8 kHz mono 16-bit PCM WAV (what Asterisk
     Playback reads) under ANNOUNCE_DIR, then Originate a Playback to the ext via
     ami.announce_to_ext — paired with the phone auto-answering calls from CID 8000.
     The ext is validated against the configured rooms (which include the cordless)

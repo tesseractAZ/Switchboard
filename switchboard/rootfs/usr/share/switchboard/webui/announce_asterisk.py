@@ -11,8 +11,11 @@ speak out the cordless speaker (the SIP equivalent of a media_player announcemen
 Dependency-free and Python-3.14-safe on purpose: espeak-ng renders the speech (in
 the image, native ~22050); the chime is generated NATIVELY at 8 kHz (announce_audio's
 synth_chime/write_combined are rate-parametric); only the espeak speech is resampled
-22050 -> 8000 in pure Python. We deliberately avoid sox/ffmpeg (not installed) and the
-stdlib ``audioop`` module (removed in CPython 3.13; the image runs 3.14).
+22050 -> 8000 in pure Python (the stdlib ``audioop`` module was removed in CPython
+3.13 and the image runs 3.14, so we resample by hand rather than depend on it). The
+{text} branch and a WAV {url} thus need no external audio tool; a non-WAV {url} (e.g.
+an MP3 from HA's tts_proxy) is decoded via ffmpeg, which is best-effort installed in
+the image (if absent, the {url} branch is limited to WAV input).
 build_announcement_8k / render_url_to_8k shell to espeak / fetch over HTTP;
 _resample_to_8k and _box_filter are pure and unit-tested with plain python3.
 """
@@ -224,10 +227,11 @@ def render_url_to_8k(url: str, out_path: str,
                      max_bytes: int = 5_000_000, timeout: int = 15) -> bool:
     """Fetch a WAV over http(s), transcode to 8 kHz mono 16-bit, wrap with chimes.
 
-    Used by the {url} branch of the announce endpoint (e.g. an HA TTS clip). Only WAV
-    is decodable here — the image has NO ffmpeg — so the caller should hand us a WAV
-    (what tts.piper produces) or use the self-contained {text} branch. Scheme is
-    restricted to http/https and the body is size-capped (defence-in-depth even
+    Used by the {url} branch of the announce endpoint (e.g. an HA TTS clip). A WAV is
+    decoded in pure Python; a non-WAV body (e.g. an MP3 from HA's tts_proxy) is decoded
+    via ffmpeg if it is present (best-effort installed in the image) — otherwise hand
+    us a WAV (what tts.piper produces) or use the self-contained {text} branch. Scheme
+    is restricted to http/https and the body is size-capped (defence-in-depth even
     though the endpoint is token/loopback gated)."""
     if not (url.startswith("http://") or url.startswith("https://")):
         return False
