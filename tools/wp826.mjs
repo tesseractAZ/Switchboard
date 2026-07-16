@@ -62,7 +62,9 @@ export async function set(sid, kv) { // kv: {P330:"val", ...}
   const jr = J(r.body);
   return { status: r.status, ok: jr?.response === 'success' && jr?.body?.status === 'right', body: r.body };
 }
-export async function reboot(sid) { return req('POST', '/api-reboot', { sid, body: {} }); }
+// Reboot: POST /api-sys_operation body request=REBOOT -> {response:"success",body:"savereboot"}.
+// (NOT /api-reboot — that 404s on this firmware.)
+export async function reboot(sid) { return req('POST', '/api-sys_operation', { sid, body: { request: 'REBOOT' } }); }
 // Upload a custom ringtone (WAV, 16 kHz mono 16-bit PCM works). ★ tags MUST be empty — a
 // non-empty tags value 400s. Returns the new ringtone {id, fileName, type:"user"}.
 export async function uploadRing(sid, filePath) {
