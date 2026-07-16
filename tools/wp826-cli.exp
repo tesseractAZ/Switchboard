@@ -1,5 +1,5 @@
 #!/usr/bin/expect -f
-# Usage: wpcli.exp "cmd1" "cmd2" ...  — runs each command in the WP826 shell (handles
+# Usage: wp826-cli.exp "cmd1" "cmd2" ...  — runs each command in the WP826 shell (handles
 # the nested CONFIG> prompt), prints output.
 set timeout 25
 set pw [exec cat /tmp/.wp_pass]
