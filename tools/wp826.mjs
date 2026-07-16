@@ -63,6 +63,25 @@ export async function set(sid, kv) { // kv: {P330:"val", ...}
   return { status: r.status, ok: jr?.response === 'success' && jr?.body?.status === 'right', body: r.body };
 }
 export async function reboot(sid) { return req('POST', '/api-reboot', { sid, body: {} }); }
+// Upload a custom ringtone (WAV, 16 kHz mono 16-bit PCM works). ★ tags MUST be empty — a
+// non-empty tags value 400s. Returns the new ringtone {id, fileName, type:"user"}.
+export async function uploadRing(sid, filePath) {
+  const buf = readFileSync(filePath); const name = filePath.split('/').pop();
+  const B = '----wpb' + buf.length + name.length;
+  const head = Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: audio/x-wav\r\n\r\n`);
+  const body = Buffer.concat([head, buf, Buffer.from(`\r\n--${B}--\r\n`)]);
+  let p = '/cgi-bin/ringtone?tags=&sid=' + encodeURIComponent(sid);
+  const r = await new Promise((res, rej) => {
+    const rq = https.request({ host: HOST, port: 443, method: 'POST', path: p, rejectUnauthorized: false, headers: {
+      'X-Requested-With': 'XMLHttpRequest', Referer: 'https://192.168.1.71/', Origin: 'https://192.168.1.71',
+      Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; '),
+      'Content-Type': `multipart/form-data; boundary=${B}`, 'Content-Length': body.length } }, (resp) => {
+      let b = ''; resp.on('data', (d) => (b += d)); resp.on('end', () => res({ status: resp.statusCode, body: b }));
+    }); rq.on('error', rej); rq.write(body); rq.end();
+  });
+  return { status: r.status, ring: (J(r.body)?.ringtones || [])[0], body: r.body };
+}
+export async function listRings(sid, type = 0) { const r = await req('GET', '/ringtone?type=' + type, { sid }); return J(r.body)?.ringtones || []; }
 
 import { pathToFileURL } from 'node:url';
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
@@ -88,5 +107,7 @@ if (isMain) (async () => {
     return;
   }
   if (cmd === 'reboot') { const r = await reboot(sid); console.log('reboot ->', r.status, r.body.slice(0, 80)); return; }
-  console.log('usage: wp826.mjs <login|get P1,P2|set P1=v P2=v|reboot>');
+  if (cmd === 'rings') { console.log(JSON.stringify(await listRings(sid, Number(process.argv[3] || 0)), null, 2)); return; }
+  if (cmd === 'ring-upload') { const r = await uploadRing(sid, process.argv[3]); console.log(r.ring ? 'UPLOADED ' + JSON.stringify(r.ring) : 'FAIL [' + r.status + '] ' + r.body.slice(0, 120)); return; }
+  console.log('usage: wp826.mjs <login|get P1,P2|set P1=v P2=v|rings [type]|ring-upload file.wav|reboot>');
 })().catch((e) => { console.log('ERR:', e.message); process.exit(1); });
