@@ -32,8 +32,8 @@ def check(name: str, cond: bool) -> None:
 # Contacts as ami.contacts_from_blocks returns them (rtt = RoundtripUsec µs). Only
 # REGISTERED phones have a contact — note ext 19 (the cordless) has none here.
 CONTACTS = {
-    "11": {"status": "Avail", "uri": "sip:11@x", "rtt": "1831"},     # healthy wired
-    "12": {"status": "Avail", "uri": "sip:12@x", "rtt": "8158"},     # reachable, high RTT (worst)
+    "11": {"status": "Avail", "uri": "sip:11@192.168.6.83:5060", "rtt": "1831"},  # healthy wired
+    "12": {"status": "Avail", "uri": "sip:12@192.168.6.83:5062", "rtt": "8158"},  # reachable, high RTT (worst)
     "17": {"status": "Unavail", "uri": "sip:17@x", "rtt": ""},       # registered, qualify failing
     "trunk-aor": {"status": "NonQual", "uri": "sip:trunk", "rtt": "nan"},
 }
@@ -78,6 +78,18 @@ def test_build_phone_health() -> None:
     check("build: offline phone status is Unregistered", by["19"]["status"] == "Unregistered")
     check("build: SIP trunk filtered out", "trunk" not in by and "trunk-aor" not in by)
     check("build: names applied", by["19"]["name"] == "Cordless" and by["11"]["name"] == "Kitchen")
+    check("build: contact_ip extracted from a registered phone's URI (DHCP auto-follow source)",
+          by["11"]["contact_ip"] == "192.168.6.83")
+    check("build: de-registered phone has no contact_ip", by["19"]["contact_ip"] is None)
+
+
+def test_ip_from_uri() -> None:
+    check("uri: user@ip:port", pm.ip_from_uri("sip:19@192.168.6.84:18357") == "192.168.6.84")
+    check("uri: angle-bracket + params", pm.ip_from_uri("<sip:11@192.168.6.83:5060>;expires=120") == "192.168.6.83")
+    check("uri: hostname (no ipv4) -> None (falls back to static IP)",
+          pm.ip_from_uri("sip:19@cordless.local:5060") is None)
+    check("uri: ipv6 -> None (IPv4-only probe path)", pm.ip_from_uri("sip:19@[2600::1]:5060") is None)
+    check("uri: empty / None -> None", pm.ip_from_uri("") is None and pm.ip_from_uri(None) is None)
 
 
 def test_summarize() -> None:
@@ -155,6 +167,9 @@ def test_publish_routing() -> None:
         # set_state doesn't apply the real regex.
         check("publish: every entity id is HA-valid (no hyphens)",
               all(re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", e) for e in by))
+        link11 = next(a for e, s, a in sets if e == "sensor.switchboard_link_11")
+        check("publish: per-phone sensor carries contact_ip (devhealth DHCP auto-follow)",
+              link11.get("contact_ip") == "192.168.6.83")
     finally:
         sys.modules.pop("ha_client", None)
 
@@ -254,6 +269,7 @@ def test_outage_notify_routing() -> None:
 if __name__ == "__main__":
     test_rtt_ms()
     test_is_reachable()
+    test_ip_from_uri()
     test_build_phone_health()
     test_summarize()
     test_room_names()

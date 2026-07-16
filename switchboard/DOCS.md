@@ -91,7 +91,8 @@ its default is fine.
 | `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
 | `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
 | `device_health_alerts` | `true` | Notify when the cordless or gateway becomes unhealthy (and again on recovery). |
-| `cordless_ip` | `192.168.6.71` | LAN address of the WP826 cordless. |
+| `cordless_ip` | `192.168.6.71` | Fallback LAN address of the WP826 cordless. Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
+| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
 | `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
 | `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
@@ -401,9 +402,12 @@ cordless integrates in two extra ways:
 - **Home Assistant announce endpoint** — with `POST /api/announce/{ext}` targeting
   the cordless's extension, Home Assistant can speak alerts on it hands-free
   ([§6](#6-paging--announcements)).
-- **Device-health monitoring** — set `cordless_ip` and `cordless_password` and the
-  add-on polls the phone's own API for battery, WiFi signal, and per-call MOS,
-  publishing `sensor.switchboard_cordless_health`
+- **Device-health monitoring** — set `cordless_ext` (its extension) and
+  `cordless_password` and the add-on polls the phone's own API for battery, WiFi
+  signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
+  `cordless_ext` set it **auto-follows the phone's IP** from its live registration,
+  so DHCP moving the handset never breaks monitoring (`cordless_ip` is just the
+  fallback)
   ([§11](#11-health-monitoring--home-assistant-sensors)).
 
 For scripting the cordless's own settings (remote phonebook, distinctive ring,

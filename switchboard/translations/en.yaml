@@ -51,7 +51,10 @@ configuration:
     description: Send a notification when the cordless or gateway becomes unhealthy (and again when it recovers). Turn off to keep the health sensors but silence the pop-ups.
   cordless_ip:
     name: Cordless IP Address
-    description: LAN address of the WP826 cordless (ext 19), used by the device-health monitor to read its battery / Wi-Fi / call-quality. Leave the default unless you assigned it a different IP.
+    description: LAN address of the WP826 cordless, used by the device-health monitor to read its battery / Wi-Fi / call-quality. Used as a fallback — if Cordless Extension is set, the monitor auto-follows the cordless's current IP from its live registration, so you don't need this to be exact.
+  cordless_ext:
+    name: Cordless Extension (auto-follow IP)
+    description: The extension the WP826 cordless registers as (e.g. 19). When set, the device-health monitor takes the cordless's CURRENT IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer breaks battery/Wi-Fi/MOS monitoring. Falls back to Cordless IP Address if the cordless is unregistered. Leave blank to use only the static IP.
   cordless_password:
     name: Cordless Admin Password
     description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
