@@ -1,6 +1,9 @@
 #!/command/with-contenv bashio
 # Wake-up scheduler — rings rooms at their set time via AMI Originate.
-if ! bashio::config.true 'wakeup_enabled'; then
+# Idle only on an explicit `false` — an empty/transient bashio read at boot must
+# not permanently idle the enabled-by-default scheduler (s6 never restarts an idle),
+# which would silently drop set wake-ups.
+if [ "$(bashio::config 'wakeup_enabled')" = "false" ]; then
     bashio::log.info "Wake-up calls disabled (wakeup_enabled: false); scheduler idling."
     exec sleep infinity
 fi

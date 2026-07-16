@@ -3,7 +3,9 @@
 # signals Asterisk can't see (battery %, Wi-Fi RSSI, per-call MOS) and derives GXW
 # gateway health from rtpmon's rollup, alerting on a SINGLE critical device (the
 # alarm cordless; the whole gateway) that the fleet-outage gate would miss.
-if ! bashio::config.true 'device_health_enabled'; then
+# Idle only on an explicit `false` — an empty/transient bashio read at boot must
+# not permanently idle this enabled-by-default monitor (s6 never restarts an idle).
+if [ "$(bashio::config 'device_health_enabled')" = "false" ]; then
     bashio::log.info "Device-health monitor disabled (device_health_enabled: false); idling."
     exec sleep infinity
 fi

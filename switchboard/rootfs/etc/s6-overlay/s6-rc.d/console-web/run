@@ -3,14 +3,20 @@
 # xterm.js, bridging WebSocket <-> the telnet console on 127.0.0.1:2300. Add it
 # to the Home Assistant sidebar with a panel_iframe pointing at this LAN port.
 # host_network exposes the port directly on the LAN.
-if ! bashio::config.true 'console_web_enabled'; then
+# Idle ONLY on an explicit `false`. `bashio::config.true` also returns false for an
+# EMPTY/transient read — bashio can momentarily read blank options during a config
+# reload / at boot — which would then `exec sleep infinity` and PERMANENTLY idle an
+# ENABLED service (s6 sees an idle process as "successfully started" and never
+# restarts it). Both console flags default enabled, so key off the literal value:
+# empty/null (transient) ⇒ run.
+if [ "$(bashio::config 'console_web_enabled')" = "false" ]; then
     bashio::log.info "Console web terminal disabled (console_web_enabled: false); idling."
     exec sleep infinity
 fi
 
 # The web terminal is a front-end for the operator console; if that's off there
 # is nothing to bridge to, so idle instead of serving a dead page.
-if ! bashio::config.true 'console_enabled'; then
+if [ "$(bashio::config 'console_enabled')" = "false" ]; then
     bashio::log.info "Operator console disabled (console_enabled: false); console web terminal idling."
     exec sleep infinity
 fi
