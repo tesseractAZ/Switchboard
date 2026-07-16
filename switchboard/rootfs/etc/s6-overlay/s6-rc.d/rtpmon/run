@@ -2,7 +2,9 @@
 # Idle link-health poller — logs each phone's PJSIP qualify RTT + reachability to
 # Home Assistant sensors, so a degrading link (notably the WiFi cordless) shows on
 # a trend graph BETWEEN calls, not only during them.
-if ! bashio::config.true 'link_health_enabled'; then
+# Idle only on an explicit `false` — an empty/transient bashio read at boot must
+# not permanently idle this enabled-by-default poller (s6 never restarts an idle).
+if [ "$(bashio::config 'link_health_enabled')" = "false" ]; then
     bashio::log.info "Idle link-health poller disabled (link_health_enabled: false); idling."
     exec sleep infinity
 fi

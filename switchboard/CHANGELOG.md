@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.30.1
+
+Service enable-gates survive a boot-time config-read race. Each optional longrun
+(console-web, operator-console, rtpmon, devhealth, wakeup-scheduler, whisper-server)
+idles with `exec sleep infinity` when its feature is off. The gate keyed off
+`bashio::config.true 'flag'`, which returns false both for a genuine `false` **and**
+for an EMPTY read — and `bashio` can momentarily read blank options at boot (seen
+live: the console-web run script logged `console_enabled: false` while the stored
+value was `true`). Because an idle process looks "successfully started" to s6, s6
+never restarts it, so an *enabled* service could be **permanently idled** until the
+next lucky restart — which is exactly what took the console-web browser terminal
+offline after the 0.30.0 deploy (the phone system, dashboard, and telnet console
+were unaffected). The gates now idle only on an explicit `false`, so a transient
+empty read runs (these features all default enabled). New `test_run_gates.py` pins
+the anti-pattern out. This is the enable-gate analogue of the v0.29.1 port-parse
+hardening.
+
+
 ## 0.30.0
 
 Documentation rewritten from scratch, verified against source. `README.md`,
