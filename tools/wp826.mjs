@@ -8,7 +8,9 @@ import https from 'node:https';
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 
-const HOST = '192.168.6.71';
+// DHCP has moved the cordless before (.71 → .84) — override with WP826_HOST=<ip>,
+// or better, give the WP826 a DHCP reservation so this default stays true.
+const HOST = process.env.WP826_HOST || '192.168.6.84';
 const USER = 'admin';
 const PASS = readFileSync('/tmp/.wp_pass', 'utf8').trim();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -22,7 +24,7 @@ function req(method, path, { body, json, sid } = {}) {
     let p = '/cgi-bin' + path;
     if (sid) p += (p.includes('?') ? '&' : '?') + 'sid=' + encodeURIComponent(sid);
     const opts = { host: HOST, port: 443, method, path: p, rejectUnauthorized: false, headers: {
-      'X-Requested-With': 'XMLHttpRequest', Referer: 'https://192.168.6.71/', Origin: 'https://192.168.6.71',
+      'X-Requested-With': 'XMLHttpRequest', Referer: `https://${HOST}/`, Origin: `https://${HOST}`,
       ...(Object.keys(cookies).length ? { Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ') } : {}),
       ...(data != null ? { 'Content-Type': ctype, 'Content-Length': Buffer.byteLength(data) } : {}) } };
     const r = https.request(opts, (resp) => {
@@ -75,7 +77,7 @@ export async function uploadRing(sid, filePath) {
   let p = '/cgi-bin/ringtone?tags=&sid=' + encodeURIComponent(sid);
   const r = await new Promise((res, rej) => {
     const rq = https.request({ host: HOST, port: 443, method: 'POST', path: p, rejectUnauthorized: false, headers: {
-      'X-Requested-With': 'XMLHttpRequest', Referer: 'https://192.168.6.71/', Origin: 'https://192.168.6.71',
+      'X-Requested-With': 'XMLHttpRequest', Referer: `https://${HOST}/`, Origin: `https://${HOST}`,
       Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; '),
       'Content-Type': `multipart/form-data; boundary=${B}`, 'Content-Length': body.length } }, (resp) => {
       let b = ''; resp.on('data', (d) => (b += d)); resp.on('end', () => res({ status: resp.statusCode, body: b }));
