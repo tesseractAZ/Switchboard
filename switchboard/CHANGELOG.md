@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.31.0
+
+Forensics: much longer log retention + a durable log that survives reboots.
+
+- **Dropped the SIP security-event flood.** `ChallengeSent` + `SuccessfulAuth` on
+  every ~60 s re-registration across the fleet were **~97% of all log volume**,
+  capping the add-on log's retention at ~11 h and crowding out the operational
+  events that matter in a post-mortem. `res_security_log` is now noloaded, so the
+  live log holds **weeks** instead of hours. Registration state is unaffected and
+  still tracked durably by the link-health monitor (`linkhealth.jsonl`) — a phone
+  that fails to authenticate still shows as unregistered there — so nothing useful
+  is lost, only the redundant per-attempt spam.
+- **Added a durable Asterisk log on the persistent `/data` volume**
+  (`/data/state/asterisk.log`). Unlike the container journal (RAM-backed, rotates
+  in hours) and the host journal (wiped by a reboot), this survives add-on restarts
+  **and host reboots** — so the next time something like the RTP `Network
+  unreachable` collapse happens, the evidence is still there afterward. Scoped to
+  `notice,warning,error` (no verbose/debug, no security flood), so it grows
+  glacially: negligible SD wear, no rotation needed.
+
+No functional/telephony change. Note: the *host* systemd journal is still
+RAM-backed and erased by a reboot — capturing host/kernel/Supervisor logs across a
+reboot needs off-box syslog forwarding, which is a Home Assistant host-side setup.
+
+
 ## 0.30.2
 
 Honesty cleanup — no behavior change. (1) Removed the `announce_tts_engine` option:
