@@ -2,7 +2,11 @@
 # Telnet operator console — a live switchboard board an operator drives over
 # telnet (ring a room, connect two rooms, hang up). host_network exposes the
 # port on the LAN, so `telnet <host> <port>` reaches it directly.
-if ! bashio::config.true 'console_enabled'; then
+# Idle ONLY on an explicit `false`. bashio can momentarily read blank options at
+# boot; `bashio::config.true` treats that empty read as false and would then
+# PERMANENTLY idle this enabled-by-default service (s6 never restarts an idle
+# process). Key off the literal value so an empty/transient read runs.
+if [ "$(bashio::config 'console_enabled')" = "false" ]; then
     bashio::log.info "Operator console disabled (console_enabled: false); idling."
     exec sleep infinity
 fi

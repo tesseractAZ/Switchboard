@@ -10,7 +10,10 @@
 # One-flip rollback: stt_resident:false idles this longrun; switchboard-stt then
 # gets connection-refused and reverts to the exact whisper-cli path, no code
 # coordination needed.
-if ! bashio::config.true 'stt_resident'; then
+# Idle only on an explicit `false` — an empty/transient bashio read at boot must not
+# permanently idle the enabled-by-default resident recognizer (a transient idle would
+# force the slower whisper-cli path until the next restart).
+if [ "$(bashio::config 'stt_resident')" = "false" ]; then
     bashio::log.info "stt_resident:false — resident recognizer disabled; idling (whisper-cli per call)."
     exec sleep infinity
 fi
