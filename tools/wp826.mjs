@@ -83,6 +83,28 @@ export async function uploadRing(sid, filePath) {
 }
 export async function listRings(sid, type = 0) { const r = await req('GET', '/ringtone?type=' + type, { sid }); return J(r.body)?.ringtones || []; }
 
+// --- Virtual keys / Quick Access (MPK) ---------------------------------------
+// Layout: GET /api-mpk_download -> {results:[{VKID,DisplayIndex,Priority,Locked,
+//   TypeMode,Description,ValueName,Account,AutoType}]} (76 keys across groups:
+//   Priority 1xxx=MPK/Programmable Keys VKID 1-10; 2xxx=Quick Access grid VKID 11-50).
+// Save: POST /api-save_mpk (JSON array; merges by VKID). TypeMode enum:
+//   -1 none · 2 SPEED_DIAL (ValueName=number, Account=SIP acct) · 6 SPEED_DIAL_ACTIVE_ACCOUNT
+//   · 3 BLF · 7 DIAL_DTMF · 8 VOICE_MAIL(no value) · 9 CALL_RETURN · 10 TRANSFER
+//   · 11 CALL_PARK · 39 QUICK_JUMP app (ValueName=app id e.g. contacts.fav).
+export async function mpkList(sid) { const r = await req('GET', '/api-mpk_download', { sid }); return J(r.body)?.results || []; }
+export async function mpkSave(sid, keys) {
+  const norm = keys.map((e) => ({ ...e, VKID: +e.VKID, Priority: +e.Priority, Locked: +e.Locked || 0, TypeMode: +e.TypeMode, Account: +e.Account }));
+  const r = await req('POST', '/api-save_mpk', { sid, json: norm });
+  return { status: r.status, ok: J(r.body)?.response === 'success', body: r.body };
+}
+// Set VKID -> Speed Dial <number> (label optional). Keeps the key's grid position.
+export async function speedDial(sid, vkid, number, label = '', account = 0) {
+  const keys = await mpkList(sid);
+  const k = keys.find((x) => +x.VKID === +vkid);
+  if (!k) return { ok: false, body: `VKID ${vkid} not found` };
+  return mpkSave(sid, [{ ...k, TypeMode: 2, ValueName: String(number), Account: account, Description: label }]);
+}
+
 import { pathToFileURL } from 'node:url';
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const cmd = process.argv[2];
@@ -109,5 +131,10 @@ if (isMain) (async () => {
   if (cmd === 'reboot') { const r = await reboot(sid); console.log('reboot ->', r.status, r.body.slice(0, 80)); return; }
   if (cmd === 'rings') { console.log(JSON.stringify(await listRings(sid, Number(process.argv[3] || 0)), null, 2)); return; }
   if (cmd === 'ring-upload') { const r = await uploadRing(sid, process.argv[3]); console.log(r.ring ? 'UPLOADED ' + JSON.stringify(r.ring) : 'FAIL [' + r.status + '] ' + r.body.slice(0, 120)); return; }
-  console.log('usage: wp826.mjs <login|get P1,P2|set P1=v P2=v|rings [type]|ring-upload file.wav|reboot>');
+  if (cmd === 'mpk') { const ks = await mpkList(sid); console.log(JSON.stringify(ks.filter((k) => +k.TypeMode !== -1), null, 2)); return; }
+  if (cmd === 'speeddial') { // speeddial <VKID> <number> [label]
+    const r = await speedDial(sid, process.argv[3], process.argv[4], process.argv[5] || '');
+    console.log(r.ok ? `SET VKID ${process.argv[3]} -> Speed Dial ${process.argv[4]}` : 'FAIL ' + (r.body || '').slice(0, 120)); return;
+  }
+  console.log('usage: wp826.mjs <login|get P1,P2|set P1=v P2=v|rings [type]|ring-upload f.wav|mpk|speeddial VKID num [label]|reboot>');
 })().catch((e) => { console.log('ERR:', e.message); process.exit(1); });
