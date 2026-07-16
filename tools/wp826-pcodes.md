@@ -90,3 +90,21 @@ Grep for the LABEL and read `p`.
 - **Item 3 phonebook:** P330=1 (HTTP), P331=`192.168.5.152:8099/phonebook.xml`, **P332=60** (auto-refresh).
 - **Item 1 distinctive ring + Item 39 vintage tone:** `office_ring.wav` uploaded → custom **id 1001**; match rule 1 = **P1488="outsideline" / P1489="1001"**; switchboard v0.26.0 tags inbound-trunk INVITEs `Alert-Info: …;info=outsideline`. → outside-line calls ring the cordless with the vintage warble.
 - **Item 5 speed-dial:** OPEN — QuickAccess key assignments live in a layout string (P2939); format not yet decoded.
+
+## Programmable keys / Quick Access speed-dial (item 5 — DONE)
+Not a P-value — a JSON key array via its own endpoints:
+- **Read:** `node tools/wp826.mjs mpk` (GET `/api-mpk_download` → 76 keys). Key shape:
+  `{VKID, DisplayIndex, Priority, Locked, TypeMode, Description, ValueName, Account, AutoType}`.
+- **Save:** POST `/api-save_mpk` (JSON array; merges by VKID, so send only changed keys).
+- **Set a speed dial:** `node tools/wp826.mjs speeddial <VKID> <number> [label]`.
+- **Key groups by Priority:** `1xxx`=VKID 1-10 = classic **MPK / Programmable Keys** (needs P1339 ENABLE_MPK=1);
+  `2xxx`=VKID 11-50 = the on-screen **Quick Access grid** (VKID 11-15 = default Quick-Jump apps, 16-50 empty);
+  `10xxx`/`3xxx`/`4xxx`/`5xxx` = other groups.
+- **`TypeMode` enum** (from `client.config.js`): `-1`=none · `0`=DEFAULT · `1`=SHARED_LINE_ACCOUNT ·
+  **`2`=SPEED_DIAL** (ValueName=number, Account=SIP acct index) · `3`=BLF · `4`=PRESENCE_WATCHER ·
+  `5`=EVENTLIST_BLF · `6`=SPEED_DIAL_ACTIVE_ACCOUNT (no Account field) · `7`=DIAL_DTMF ·
+  `8`=VOICE_MAIL (no ValueName) · `9`=CALL_RETURN · `10`=TRANSFER · `11`=CALL_PARK · `18`=MONITORED_CALL_PARK ·
+  `39`=QUICK_JUMP app (ValueName=app id, e.g. contacts.fav / wifi.settings / account.settings).
+
+**Configured live (2026-07-16):** VKID 16 = Speed Dial `0` "Operator", VKID 17 = Speed Dial `12` "Kitchen"
+(Quick Access grid, positions 6-7). Change room: `node tools/wp826.mjs speeddial 17 <ext> <name>`.
