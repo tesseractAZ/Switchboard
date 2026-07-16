@@ -42,10 +42,24 @@ import wsproto  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 
+
+def _env_int(name: str, default: int) -> int:
+    """int() of a config-derived env var, tolerating unset *or* set-but-empty.
+
+    These ports come from bashio::config in the s6 run script; during a config
+    reload / options.json rewrite (e.g. an add-on schema migration) that export
+    can momentarily be an empty string. The 2-arg ``os.environ.get(name, "8100")``
+    default only covers the *absent* case, so ``int(get(...))`` still throws on
+    ``""`` — which crash-loops this longrun until s6 restarts it. Fall back to
+    ``default`` for empty/blank too, matching console.py / rtpmon / devhealth.
+    """
+    return int(os.environ.get(name, "").strip() or default)
+
+
 # The operator console we bridge to. Loopback only: the browser never connects
 # to :2300 directly, this server does, on the same host.
 CONSOLE_HOST = os.environ.get("CONSOLE_WEB_TARGET_HOST", "127.0.0.1")
-CONSOLE_PORT = int(os.environ.get("CONSOLE_WEB_TARGET_PORT", "2300"))
+CONSOLE_PORT = _env_int("CONSOLE_WEB_TARGET_PORT", 2300)
 
 # Match the operator console's own session cap so the browser front-end can't be
 # used to exhaust console sessions; this is an unauthenticated LAN service.
@@ -283,8 +297,8 @@ def _handle_client_payload(console: socket.socket, data: bytes) -> bool:
 
 
 def main() -> None:
-    port = int(os.environ.get("CONSOLE_WEB_PORT", "8100"))
-    host = os.environ.get("CONSOLE_WEB_BIND", "0.0.0.0")
+    port = _env_int("CONSOLE_WEB_PORT", 8100)
+    host = os.environ.get("CONSOLE_WEB_BIND", "0.0.0.0") or "0.0.0.0"
     slots = threading.BoundedSemaphore(MAX_SESSIONS)
 
     class Handler(socketserver.BaseRequestHandler):
