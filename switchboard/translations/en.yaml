@@ -78,9 +78,6 @@ configuration:
   announce_players:
     name: Announce Target Speakers
     description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.west_hallway). Add one entity ID per line.
-  announce_tts_engine:
-    name: Text-to-Speech Engine
-    description: The Home Assistant TTS entity used to synthesize spoken announcements (e.g. tts.piper for the local Piper add-on, or tts.home_assistant_cloud).
   announce_token:
     name: Announce API Token
     description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / the ecoflow-panel to speak alerts on the cordless). Leave blank to allow LAN calls without a token. Masked on entry.

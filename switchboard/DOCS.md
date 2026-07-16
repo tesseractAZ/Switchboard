@@ -105,7 +105,6 @@ its default is fine.
 | `announce_enabled` | `true` | The announce feature on dial `46`. |
 | `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
 | `announce_players` | `media_player.west_hallway`, `media_player.guest_thermostat` | Home Assistant `media_player` entity IDs an announcement plays on. One per line. |
-| `announce_tts_engine` | `tts.piper` | The Home Assistant TTS entity name kept for reference. **Note:** the on-phone announce message itself is synthesized on-box by espeak-ng; this option is not currently used by the announce flow. |
 | `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
 
 ### Operator console

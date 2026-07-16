@@ -834,26 +834,26 @@ def test_features_staging() -> None:
         sbc.write_features_runtime({
             "wakeup_scene": "scene.wake_up", "wakeup_weather": True, "wakeup_calendar": "calendar.family",
             "announce_players": ["media_player.homepod", "bad id!", "light.not_a_speaker", "media_player.garage"],
-            "announce_tts_engine": "tts.piper",
         })
         data = _json.loads((run / "features.json").read_text())
         check("features: wake-up scene/weather/calendar staged",
               data["wakeup"] == {"scene": "scene.wake_up", "weather": True, "calendar": "calendar.family"})
         check("features: announce players validated (malformed + wrong-domain dropped)",
               data["announce"]["players"] == ["media_player.homepod", "media_player.garage"])
-        check("features: tts engine staged", data["announce"]["tts_engine"] == "tts.piper")
+        check("features: tts_engine no longer staged (dead announce_tts_engine option removed)",
+              "tts_engine" not in data["announce"])
         # call_quality_alerts is staged HERE (not read from root-only options.json)
         # so the dialplan's switchboard-callqos — running as the asterisk user — can
         # honor the poor-call alert opt-out. Defaults on when unset.
         check("features: callqos alerts default on when unset",
               data.get("callqos", {}).get("alerts") is True)
         sbc.write_features_runtime({"call_quality_alerts": False,
-                                    "announce_players": [], "announce_tts_engine": "tts.piper"})
+                                    "announce_players": []})
         check("features: call_quality_alerts=false staged for the asterisk-user dialplan",
               _json.loads((run / "features.json").read_text())["callqos"]["alerts"] is False)
         # A wrong-domain scene (e.g. a mistyped homeassistant.restart) is dropped.
         sbc.write_features_runtime({"wakeup_scene": "homeassistant.restart",
-                                    "announce_players": [], "announce_tts_engine": "tts.piper"})
+                                    "announce_players": []})
         check("features: wrong-domain scene dropped",
               _json.loads((run / "features.json").read_text())["wakeup"]["scene"] == "")
     finally:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.30.2
+
+Honesty cleanup — no behavior change. (1) Removed the `announce_tts_engine` option:
+it was write-only dead config (staged into `features.json` but read by nothing — the
+dial-46 announcement voice is, and has always been, on-box espeak-ng), so a setting
+that claimed to pick the announcement TTS engine actually did nothing. Dropped from
+`config.yaml`, `translations/en.yaml`, and the config generator (49 options now). (2)
+Fixed three stale "no ffmpeg / WAV only" comments in `announce_asterisk.py` and
+`app.py`: ffmpeg *is* best-effort installed and the `/api/announce` `{url}` branch
+uses it to decode a non-WAV clip (e.g. an MP3 from HA's tts_proxy) — the docstrings
+predated that and contradicted the code. Tests updated to pin the removal.
+
+
 ## 0.30.1
 
 Service enable-gates survive a boot-time config-read race. Each optional longrun
