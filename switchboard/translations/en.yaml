@@ -1,0 +1,172 @@
+# Home Assistant Configuration-page labels + inline help for the Switchboard add-on.
+# HA renders each option's `name` as its field label and `description` as the plain-
+# text helper line beneath it. Keys MUST match config.yaml `options:` exactly — a typo
+# silently falls back to the raw key with no warning. Nested options (operator, trunk,
+# rooms, operator_synonyms) are translated at the group level; their sub-fields show
+# their raw keys under the group, so the description spells the sub-fields out.
+configuration:
+  # ── Core ──────────────────────────────────────────────────────────────
+  log_level:
+    name: Log Level
+    description: How much detail the add-on writes to its log. 'info' is right for normal use; drop to 'debug'/'trace' only when diagnosing a problem, then set back (trace is very noisy).
+  rtp_start:
+    name: RTP Port Range — Start
+    description: First UDP port for live call audio (RTP). The default 10000–10200 gives ~100 simultaneous call legs. Only change if another service needs these ports; must be below the End value.
+  rtp_end:
+    name: RTP Port Range — End
+    description: Last UDP port for live call audio. Keep a comfortable gap above Start (each call uses a few ports). Must be greater than the Start value.
+
+  # ── Voice operator & speech ───────────────────────────────────────────
+  operator:
+    name: Operator (dial 0)
+    description: The voice operator reached by dialing 0 — say a room name to be connected, or a command ("wake me at 7", "what's the weather"). Sub-field 'enabled' turns it on or off.
+  operator_synonyms:
+    name: Operator Name Synonyms
+    description: Extra spoken names the operator should map to a room, for accents or nicknames. Each entry has an 'ext' (the room extension) and 'phrases' (one or more spoken aliases, e.g. "lounge" → the Living Room).
+  stt_resident:
+    name: Keep Speech Recognition Loaded
+    description: Keep the on-device speech-to-text model resident in memory so the operator responds instantly. Uses a little more RAM; turn off on a very memory-constrained host to load it on demand instead.
+
+  # ── Call-quality & device-health monitoring ──────────────────────────
+  call_quality_alerts:
+    name: Poor-Call Alerts
+    description: Send a Home Assistant notification when a call's audio quality is poor (low MOS, high packet loss, or one-way audio). The measurements are always recorded to sensors; this only controls the pop-up alert.
+  link_health_enabled:
+    name: Link-Health Monitor
+    description: Continuously poll every phone's registration + round-trip latency (RTT) between calls and publish it to sensors, so a degrading link (especially the Wi-Fi cordless) shows on a graph before a call drops.
+  link_health_interval:
+    name: Link-Health Poll Interval (seconds)
+    description: How often the link-health monitor checks every phone. 300 s (5 min) is a good balance; lower for faster detection at the cost of a little more traffic. Range 30–86400.
+  link_health_alerts:
+    name: Fleet-Outage Alerts
+    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. Independent of the per-call alerts above.
+  device_health_enabled:
+    name: Device-Health Monitor
+    description: Watch the two "smart" devices Asterisk can't see inside — the WP826 cordless (battery, Wi-Fi signal, per-call MOS) and the GXW gateway's port health — and alert when a single critical device degrades. Needs Cordless Admin Password below for the deep checks.
+  device_health_interval:
+    name: Device-Health Poll Interval (seconds)
+    description: How often to poll the cordless's own status API and re-check gateway health. 120 s is a good default. Range 30–86400.
+  device_health_alerts:
+    name: Device-Health Alerts
+    description: Send a notification when the cordless or gateway becomes unhealthy (and again when it recovers). Turn off to keep the health sensors but silence the pop-ups.
+  cordless_ip:
+    name: Cordless IP Address
+    description: LAN address of the WP826 cordless (ext 19), used by the device-health monitor to read its battery / Wi-Fi / call-quality. Leave the default unless you assigned it a different IP.
+  cordless_password:
+    name: Cordless Admin Password
+    description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
+  gateway_ports:
+    name: Gateway Port Extensions
+    description: Comma-separated extensions served by the GXW FXS gateway (the 8 wired ports), used to derive gateway health. Default 11–18 matches the standard wiring; edit if you re-mapped ports.
+  cordless_battery_crit_pct:
+    name: Cordless Battery — Critical %
+    description: Battery level (while discharging) at which the cordless is flagged CRITICAL — the alarm/announce endpoint is about to die. Default 15%. Range 1–100.
+  cordless_battery_warn_pct:
+    name: Cordless Battery — Low %
+    description: Battery level (while discharging) at which the cordless is flagged as low/DEGRADED — a heads-up before it becomes critical. Default 30%. Should be higher than the Critical %.
+  cordless_wifi_min_signal:
+    name: Cordless Wi-Fi Minimum Signal
+    description: Lowest acceptable Wi-Fi signal bars (0–5) before the cordless is flagged for a weak link that risks call quality. Default 2.
+
+  # ── Announcements (phone → speakers, alerts → cordless) ───────────────
+  announce_enabled:
+    name: Announce Feature
+    description: Enable the announce code (dial the extension below) to speak a spoken message out your Home Assistant media-player speakers.
+  announce_ext:
+    name: Announce Extension
+    description: Dial this extension to record/trigger an announcement to the speakers. Must be 2–6 digits and not clash with a room or another feature code.
+  announce_players:
+    name: Announce Target Speakers
+    description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.west_hallway). Add one entity ID per line.
+  announce_tts_engine:
+    name: Text-to-Speech Engine
+    description: The Home Assistant TTS entity used to synthesize spoken announcements (e.g. tts.piper for the local Piper add-on, or tts.home_assistant_cloud).
+  announce_token:
+    name: Announce API Token
+    description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / the ecoflow-panel to speak alerts on the cordless). Leave blank to allow LAN calls without a token. Masked on entry.
+
+  # ── Operator console (telnet + web terminal) ─────────────────────────
+  console_enabled:
+    name: Operator Console (telnet)
+    description: A text operator console over telnet that can ring, connect and hang up phones. UNAUTHENTICATED — keep it on a trusted LAN, or bind it to 127.0.0.1 (below) to restrict it, or turn it off.
+  console_port:
+    name: Operator Console Port
+    description: TCP port for the telnet operator console. Default 2300.
+  console_bind:
+    name: Operator Console Bind Address
+    description: Interface the console listens on. '0.0.0.0' = all interfaces (LAN-reachable); set '127.0.0.1' to restrict it to the host only.
+  console_web_enabled:
+    name: Console Web Terminal
+    description: A browser-based version of the operator console (same ring/connect/hang-up powers). Also UNAUTHENTICATED on the LAN — turn off if you don't need the web terminal.
+  console_web_port:
+    name: Console Web Terminal Port
+    description: TCP port for the web terminal. Default 8100.
+  console_web_bind:
+    name: Console Web Terminal Bind Address
+    description: Interface the web terminal listens on. Blank = all interfaces; '127.0.0.1' restricts it to the host.
+
+  # ── Time, clock & wake-up ────────────────────────────────────────────
+  timezone:
+    name: Timezone Override
+    description: Leave blank to auto-detect the Home Assistant timezone (used by the talking clock and wake-up calls). Set an IANA name (e.g. America/Phoenix) only to override it.
+  clock_enabled:
+    name: Talking Clock
+    description: Enable the talking-clock feature reached at the extension below — dial it to hear the current time spoken.
+  clock_ext:
+    name: Talking Clock Extension
+    description: Dial this to hear the time. 2–6 digits; must not clash with a room or another feature code. Default 41.
+  wakeup_enabled:
+    name: Wake-Up Calls
+    description: Enable scheduled wake-up calls — set one at the extension below (or via the operator) and the phone rings at the chosen time.
+  wakeup_ext:
+    name: Wake-Up Extension
+    description: Dial this to set/cancel a wake-up call. 2–6 digits. Default 42.
+  wakeup_ring_seconds:
+    name: Wake-Up Ring Duration (seconds)
+    description: How long the wake-up call rings the phone before giving up. Default 60. Range 10–600.
+  wakeup_scene:
+    name: Wake-Up Scene
+    description: Optional Home Assistant scene entity to activate when a wake-up call fires (e.g. gently raise the lights). Leave blank for none.
+  wakeup_weather:
+    name: Wake-Up Weather
+    description: Speak a short local weather summary during the wake-up call.
+  wakeup_calendar:
+    name: Wake-Up Calendar
+    description: Optional Home Assistant calendar entity whose next event is read out during the wake-up call. Leave blank for none.
+
+  # ── Extra feature codes ──────────────────────────────────────────────
+  automation_enabled:
+    name: Home-Automation Voice Menu
+    description: Enable the voice home-automation menu (dial the extension below) to control and query lights and other entities by voice.
+  automation_ext:
+    name: Home-Automation Extension
+    description: Dial this for the automation voice menu. 2–6 digits. Default 43.
+  page_enabled:
+    name: Intercom Paging
+    description: Enable all-call paging — dial the extension below to talk out of every handset at once (an intercom announcement).
+  page_ext:
+    name: Paging Extension
+    description: Dial this to page all phones. 2–6 digits. Default 44.
+  mwi_enabled:
+    name: Message-Waiting Indicator
+    description: Enable the stutter dial-tone / indicator that tells a handset it has a waiting voicemail or missed-call message.
+  status_enabled:
+    name: Status Voice Menu
+    description: Enable the dial-a-status menu (extension below) that speaks live Home Assistant states (power, doors, etc.) on demand.
+  status_ext:
+    name: Status Extension
+    description: Dial this for the spoken status menu. 2–6 digits. Default 45.
+  directory_enabled:
+    name: Voice Directory (411)
+    description: Enable the spoken room directory — dial the extension below and say (or hear) a room name to be connected, like calling 411.
+  directory_ext:
+    name: Directory Extension
+    description: Dial this for the voice directory. 2–6 digits. Default 411.
+
+  # ── Rooms & outside line ─────────────────────────────────────────────
+  rooms:
+    name: Rooms (SIP extensions)
+    description: The phones/handsets on the system. Each room has an 'ext' (2–6 digit extension), a 'name' (shown in the directory / operator), and a 'secret' (its SIP password — change from the defaults). Add one entry per handset.
+  trunk:
+    name: Outside Line (SIP Trunk)
+    description: Connects the PBX to a SIP provider for real inbound/outbound phone calls. Sub-fields — enabled; provider_host + port; username + secret (provider credentials); from_user / from_domain / outbound_caller_id (outbound identity); inbound_ext (which extension(s) an inbound outside call rings — a single extension or a comma-separated list, e.g. 19,20); dial_prefix (digit to reach an outside line, e.g. 9); registns. Leave disabled for room-to-room only.
