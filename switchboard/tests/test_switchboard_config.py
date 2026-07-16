@@ -579,15 +579,37 @@ def test_modules_conf() -> None:
           "noload = chan_console.so" in m)
     check("modules: cdr_csv noloaded (no local CDR consumer; dead per-call SD write)",
           "noload = cdr_csv.so" in m)
+    check("modules: res_security_log noloaded (drops the ~97%-of-log per-REGISTER security flood)",
+          "noload = res_security_log.so" in m)
 
 
-def test_logger_single_channel_no_duplicate_file() -> None:
-    # Only the `console` channel: the add-on captures Asterisk's console stream
-    # via journald, so a separate `messages =>` file would write every line a
-    # SECOND time to the SD card (unrotated, read by nobody) — pure card wear.
+def test_logger_durable_persistent_file() -> None:
+    # console → the add-on's journald log (live view), PLUS a durable copy on the
+    # persistent /data volume so operational forensics (flaps, trunk timeouts, RTP
+    # errors) survive an add-on restart / host reboot and journald's ~hours
+    # rotation. Scoped to notice,warning,error — no verbose/debug and (with
+    # res_security_log noloaded) no security flood — so it grows glacially:
+    # minimal SD wear, no rotation needed.
     lg = sbc.render_logger({})
     check("logger: console channel present", "console =>" in lg)
-    check("logger: no duplicate 'messages' file channel", "messages =>" not in lg)
+    check("logger: durable persistent file on /data (survives reboot)",
+          "/data/state/asterisk.log =>" in lg)
+    check("logger: durable file scoped to notice,warning,error",
+          "/data/state/asterisk.log => notice,warning,error" in lg)
+    file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
+    check("logger: durable file excludes verbose (keeps it low-volume)", "verbose" not in file_line)
+    check("logger: no legacy ephemeral 'messages' file channel", "messages =>" not in lg)
+
+
+def test_logger_durable_file_stays_low_volume_at_debug() -> None:
+    # Even when log_level is debug/trace (console gets debug,verbose), the DURABLE
+    # file must stay notice,warning,error — a debug trace on the persistent volume
+    # would defeat the low-wear design.
+    lg = sbc.render_logger({"log_level": "debug"})
+    file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
+    check("logger: durable file is notice,warning,error even at debug",
+          file_line.endswith("=> notice,warning,error"))
+    check("logger: console DOES escalate to debug", "console => notice,warning,error,debug,verbose" in lg)
 
 
 def test_secret_semicolon_or_whitespace_rejected() -> None:
@@ -1131,7 +1153,8 @@ if __name__ == "__main__":
     test_operator_mwi_clear()
     test_feature_code_collisions()
     test_modules_conf()
-    test_logger_single_channel_no_duplicate_file()
+    test_logger_durable_persistent_file()
+    test_logger_durable_file_stays_low_volume_at_debug()
     test_secret_semicolon_or_whitespace_rejected()
     test_wakeup_does_not_collide_with_disabled_clock()
     test_trunk_from_user_domain_validated()
