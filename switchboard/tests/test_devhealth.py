@@ -4,7 +4,7 @@
 
 Pins classify_cordless (the ok/degraded/critical rules that decide whether the alarm
 cordless is healthy), classify_gateway (deriving GXW health from which ports are down),
-health_transition (the consecutive-cycle one-shot alert state machine), and _latest_mos.
+health_transition (the alert state machine), and last_call_mos (newest-call MOS, recency-gated).
 The WP826 HTTP client + the poll loop are I/O and are not exercised here (mirrors how
 test_rtpmon.py leaves the AMI socket untested).
 """
@@ -25,7 +25,7 @@ def check(name, cond):
         _failures += 1
 
 
-TH = {"battery_crit": 15, "battery_warn": 30, "wifi_min": 2, "mos_min": 3.4}
+TH = {"battery_crit": 15, "battery_warn": 30, "wifi_min": 2, "mos_min": 3.4, "mos_window": 900}
 
 
 def test_classify_cordless():
@@ -69,11 +69,23 @@ def test_classify_cordless():
          "wifi_connected": True, "wifi_signal": 1}, TH)
     check("cordless: weak wifi -> degraded", lvl == "degraded" and any("weak" in r for r in why))
 
-    # Recent poor MOS -> DEGRADED.
+    # RECENT poor MOS (last call 30s ago) -> DEGRADED.
+    lvl, why = dh.classify_cordless(
+        {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
+         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 30}, TH)
+    check("cordless: recent poor MOS -> degraded", lvl == "degraded" and any("MOS" in r for r in why))
+
+    # STALE poor MOS (last call 2h ago) must NOT flag — an old bad call can't pin it degraded.
+    lvl, why = dh.classify_cordless(
+        {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
+         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 7200}, TH)
+    check("cordless: stale poor MOS -> ok (not latched)", lvl == "ok")
+
+    # Poor MOS with unknown age -> conservatively NOT flagged.
     lvl, why = dh.classify_cordless(
         {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
          "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9}, TH)
-    check("cordless: poor MOS -> degraded", lvl == "degraded" and any("MOS" in r for r in why))
+    check("cordless: poor MOS unknown age -> ok", lvl == "ok")
 
     # Answers TCP but API auth fails -> DEGRADED (can't read deep health), NOT critical.
     lvl, why = dh.classify_cordless({"reachable": True, "api_ok": False}, TH)
@@ -115,16 +127,24 @@ def test_health_transition():
     check("transition: critical x2 -> fire critical", dh.health_transition("critical", st3) == "critical")
 
 
-def test_latest_mos():
-    rtp = {"record0": {"moscq": "4.4"}, "record1": {"moscq": "3.1"}, "record2": {"moscq": "bad"}}
-    check("mos: picks the lowest valid moscq", dh._latest_mos(rtp) == 3.1)
-    check("mos: empty -> None", dh._latest_mos({}) is None)
+def test_last_call_mos():
+    # Newest by stopTimeSecond wins (NOT the min) — record1 is the most recent call.
+    rtp = {"record0": {"moscq": "4.4", "stopTimeSecond": "1000"},
+           "record1": {"moscq": "3.1", "stopTimeSecond": "2000"},
+           "record2": {"moscq": "bad", "stopTimeSecond": "3000"}}
+    mos, age = dh.last_call_mos(rtp, now=2050)
+    check("mos: picks the NEWEST call's moscq (not min)", mos == 3.1 and age == 50)
+    check("mos: empty -> (None, None)", dh.last_call_mos({}) == (None, None))
+    # An older good call doesn't get shadowed by an even-older bad one.
+    mos2, _ = dh.last_call_mos({"a": {"moscq": "2.0", "stopTimeSecond": "10"},
+                                "b": {"moscq": "4.5", "stopTimeSecond": "99"}}, now=100)
+    check("mos: newest-good over older-bad", mos2 == 4.5)
 
 
 if __name__ == "__main__":
     test_classify_cordless()
     test_classify_gateway()
     test_health_transition()
-    test_latest_mos()
+    test_last_call_mos()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

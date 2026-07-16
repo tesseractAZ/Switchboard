@@ -143,24 +143,37 @@ def probe_cordless(ip: str, password: str) -> dict:
         out["wifi_signal"] = _int(wifi.get("signal"))
         out["wifi_ssid"] = (wifi.get("connection") or {}).get("ssid")
     rtp = (wp.get("/api-get_rtp_status") or {}).get("rtpStatus") or {}
-    mos = _latest_mos(rtp)
+    mos, age = last_call_mos(rtp, now=time.time())
     if mos is not None:
-        out["last_mos"] = mos
+        out["last_mos"] = mos           # the phone's own conversational MOS for its leg
+        if age is not None:
+            out["last_mos_age_s"] = age  # seconds since that call ended (for a recency gate)
     return out
 
 
-def _latest_mos(rtp_status: dict):
-    """Lowest moscq across the recent RTP records (the WP826 keeps a few). None if
-    no records / no MOS. moscq is the conversational MOS the phone measured for its
-    OWN leg — the callee-side quality the PBX can't see."""
-    best = None
+def last_call_mos(rtp_status: dict, now: float | None = None):
+    """(moscq, age_seconds) for the MOST RECENT call in the phone's retained RTP
+    records — NOT the min across history (an old bad call must not pin the sensor
+    'degraded' forever). Picked by the latest stopTimeSecond. age is seconds since
+    that call ended (None if `now` not given / no timestamp). (None, None) if no
+    record carries a MOS. moscq is the phone's own conversational MOS for its leg —
+    the callee-side quality Asterisk cannot measure."""
+    best = None  # (stop_ts, mos)
     for rec in (rtp_status or {}).values():
         try:
             m = float(rec.get("moscq"))
         except (TypeError, ValueError):
             continue
-        best = m if best is None else min(best, m)
-    return best
+        try:
+            ts = int(rec.get("stopTimeSecond"))
+        except (TypeError, ValueError):
+            ts = 0
+        if best is None or ts > best[0]:
+            best = (ts, m)
+    if best is None:
+        return None, None
+    age = int(now - best[0]) if (now is not None and best[0]) else None
+    return best[1], age
 
 
 def _int(v):
@@ -205,9 +218,13 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
             reasons.append("Wi-Fi disconnected")
         elif snap.get("wifi_signal") is not None and snap["wifi_signal"] < th["wifi_min"]:
             reasons.append(f"Wi-Fi signal weak ({snap['wifi_signal']}/5)")
-        m = snap.get("last_mos")
-        if m is not None and m < th["mos_min"]:
-            reasons.append(f"recent call quality poor (MOS {m:.1f})")
+        # Call quality: only flag when the phone's LAST call was BOTH poor AND recent
+        # (within mos_window). The phone retains a few historical RTP records, so a bad
+        # call hours ago must not pin this sensor 'degraded' — and callqos already owns
+        # per-call alerting; here it's a supporting, current-state signal only.
+        m, age = snap.get("last_mos"), snap.get("last_mos_age_s")
+        if m is not None and m < th["mos_min"] and age is not None and age <= th["mos_window"]:
+            reasons.append(f"last call quality poor (MOS {m:.1f}, {age}s ago)")
     elif snap.get("reachable"):
         reasons.append("cordless answers on the network but its admin API is unreadable (wrong password?)")
 
@@ -298,6 +315,7 @@ def _thresholds() -> dict:
         "battery_warn": _env_int("CORDLESS_BATTERY_WARN", 30),
         "wifi_min": _env_int("CORDLESS_WIFI_MIN", 2),
         "mos_min": float(os.environ.get("CORDLESS_MOS_MIN", "3.4") or 3.4),
+        "mos_window": _env_int("CORDLESS_MOS_WINDOW_S", 900),  # only a call within 15 min counts
     }
 
 
