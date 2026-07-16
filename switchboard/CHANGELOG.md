@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.29.0
+
+Friendlier Configuration tab. Added `translations/en.yaml` so every option shows a
+proper label + inline help instead of its raw key (`device_health_enabled` →
+"Device-Health Monitor" with a sentence explaining it), across all 50 options — core,
+voice operator, the call-quality + device-health monitors, announcements, the consoles,
+clock/wake-up, feature codes, rooms, and the SIP trunk. Input-type polish: the announce
+API token is now a masked `password` field, and the single-extension feature-code fields
+(clock/wakeup/automation/page/status/directory/announce _ext) validate as 2–6 digit
+numbers in the form. `trunk.inbound_ext` stays a free string — it legitimately holds a
+comma-separated list (e.g. `19,20`). A new test pins the translation file to the option
+list so a future option can't ship unlabeled.
+
+
 ## 0.28.0
 
 devhealth refinement (live-tuning). The cordless MOS signal now uses the NEWEST call
