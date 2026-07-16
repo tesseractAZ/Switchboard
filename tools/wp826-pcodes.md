@@ -21,7 +21,7 @@ node tools/wp826.mjs rings [type]              # list ringtones (0 = system + us
 node tools/wp826.mjs ring-upload office_ring.wav   # upload a custom ringtone
 node tools/wp826.mjs mpk                        # dump the virtual/quick-access keys
 node tools/wp826.mjs speeddial <VKID> <num> [label]  # set a key to Speed Dial
-node tools/wp826.mjs reboot                    # POST /api-reboot
+node tools/wp826.mjs reboot                    # POST /api-sys_operation (request=REBOOT)
 ```
 
 Importable (`import { login, get, set, reboot, uploadRing, listRings, mpkList,
