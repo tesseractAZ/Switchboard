@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.30.0
+
+Documentation rewritten from scratch, verified against source. `README.md`,
+`switchboard/DOCS.md`, and `STATUS.md` were fully rewritten to match the current
+system, and a new `switchboard/SECURITY.md` documents the security model, the
+toll-fraud threat model, and the accepted LAN-local risks (the unauthenticated
+consoles). The old docs had drifted: they advertised "G.722 and Opus offered" and a
+configurable codec list (the add-on has been **G.711 µ-law only** for many releases),
+listed only feature codes 0/41–44 (the real set is 0, 41–46, and 411), and STATUS.md
+still described v0.1.2 with "no phones registered." Every option, sensor, extension,
+port, and default in the new docs is drawn from the source. `tools/wp826-pcodes.md`
+was reconciled to its final state (the earlier file appended "DONE" sections without
+clearing the contradicting "TBD/OPEN" text) and its stale `wpcli.exp` filename
+reference fixed to `wp826-cli.exp`. Hygiene: the Dockerfile `io.hass.version` label,
+which had been left at a stale `0.5.0`, now matches the manifest version;
+`.pytest_cache/` is gitignored. No functional code change — the add-on image behaves
+identically.
+
+
 ## 0.29.1
 
 Console web terminal: survive an empty port env. During the v0.29.0 config-schema
