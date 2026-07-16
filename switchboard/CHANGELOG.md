@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.28.0
+
+devhealth refinement (live-tuning). The cordless MOS signal now uses the NEWEST call
+(by stopTimeSecond) and only flags it when that call was BOTH poor AND recent (within
+15 min), instead of the min across the phone's retained RTP history — an old bad call
+was pinning the sensor 'degraded'. callqos still owns per-call alerting; here MOS is a
+supporting current-state signal. Unknown-age MOS is not flagged (conservative).
+
+
 ## 0.27.0
 
 Proactive device-health monitor for the fleet's two "smart" devices — the WP826
