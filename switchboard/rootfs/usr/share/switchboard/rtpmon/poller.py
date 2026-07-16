@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -88,6 +89,19 @@ def room_names(opts: dict) -> dict:
     return out
 
 
+_IPV4 = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+def ip_from_uri(uri) -> str | None:
+    """The IPv4 host of a PJSIP contact URI, e.g. 'sip:19@192.168.6.84:18357' ->
+    '192.168.6.84'. Published so the device-health monitor can auto-follow a
+    DHCP-moved phone to its current IP. IPv4 only (the HTTP probe path is IPv4); a
+    non-IPv4 / hostname contact returns None and the caller falls back to the
+    configured static IP."""
+    m = _IPV4.search(str(uri or ""))
+    return m.group(1) if m else None
+
+
 def build_phone_health(endpoints: list, contacts: dict, names: dict) -> list:
     """One row per CONFIGURED phone: {ext, name, status, rtt_ms, reachable, registered}.
 
@@ -111,10 +125,12 @@ def build_phone_health(endpoints: list, contacts: dict, names: dict) -> list:
             status = c.get("status", "Unknown")
             rtt = rtt_ms(c.get("rtt"))
             reachable = is_reachable(status)
+            contact_ip = ip_from_uri(c.get("uri"))
         else:
             status = "Unregistered"  # configured but no contact -> offline
             rtt = None
             reachable = False
+            contact_ip = None
         rows.append({
             "ext": ext,
             "name": names.get(ext, ext),
@@ -122,6 +138,7 @@ def build_phone_health(endpoints: list, contacts: dict, names: dict) -> list:
             "rtt_ms": rtt,
             "reachable": reachable,
             "registered": registered,
+            "contact_ip": contact_ip,  # current registered IP (auto-follows DHCP)
         })
     return sorted(rows, key=lambda r: r["ext"])
 
@@ -265,6 +282,7 @@ def _publish(phones: list, summ: dict) -> None:
             "icon": "mdi:phone-in-talk" if p["reachable"] else "mdi:phone-off",
             "status": p["status"], "extension": p["ext"], "name": p["name"],
             "reachable": p["reachable"], "registered": p["registered"],
+            "contact_ip": p.get("contact_ip"),  # for devhealth DHCP auto-follow
         }
         try:
             ha_client.set_state(eid, state, {k: v for k, v in attrs.items() if v is not None})
