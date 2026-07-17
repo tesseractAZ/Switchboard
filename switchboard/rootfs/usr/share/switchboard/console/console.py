@@ -295,8 +295,9 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
 def vis_width(s: str) -> int:
     """Visible column width of a line: strip ANSI SGR codes, count East-Asian
-    wide/fullwidth glyphs (our 🔌 / ⏰ emoji) as 2 and everything else — including
-    'ambiguous' box/arrow glyphs, which terminals render narrow — as 1."""
+    wide/fullwidth glyphs (our ☎️ / ⏰ emoji) as 2 and everything else — including
+    'ambiguous' box/arrow glyphs, which terminals render narrow — as 1. Note ☎️
+    counts 2 only WITH its U+FE0F variation selector; a bare ☎ is ambiguous → 1."""
     s = _ANSI_RE.sub("", s)
     return sum(0 if unicodedata.combining(c) else (2 if unicodedata.east_asian_width(c) in ("W", "F") else 1)
                for c in s)
@@ -443,7 +444,7 @@ def _help_lines(width: int) -> list[str]:
     rule = color(GREY, "─" * min(width, 72))
     b = lambda s: color(BOLD, s)  # noqa: E731 (tiny local alias for the key glyphs)
     return [
-        f" {BOLD}🔌 SWITCHBOARD OPERATOR — HELP{RESET}",
+        f" {BOLD}☎️ SWITCHBOARD OPERATOR — HELP{RESET}",
         rule,
         f"  {b('↑ ↓')} / {b('j k')}   Move the selection between rooms",
         f"  {b('R')}         Ring the selected room (a short test ring)",
@@ -522,7 +523,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     on_calls = sum(1 for r in rooms if r.get("call_state"))
     online = sum(1 for r in rooms if r.get("registered"))
     clock = time.strftime("%H:%M:%S", time.localtime(now))
-    head_left = f" {BOLD}🔌 SWITCHBOARD OPERATOR{RESET}"
+    head_left = f" {BOLD}☎️ SWITCHBOARD OPERATOR{RESET}"
     head_right = color(GREY, f"{online}/{len(rooms)} online · {on_calls} on call · {clock} ")
     lines.append(f"{head_left}   {head_right}")
     lines.append(rule)
