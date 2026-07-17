@@ -183,7 +183,7 @@ Dial these from any room phone. All are configurable (`*_ext`) and can be disabl
 
 | Dial | Feature | Section |
 |-----:|---------|---------|
-| `0`   | **Operator** — say a room, an extension, "lights", or "wake me up" | [§4](#4-the-voice-operator--directory-assistance) |
+| `0`   | **Operator** — say a room, an extension, or any feature ("lights", "wake me up", "what time is it", "weather", "directory", "announce", "page") | [§4](#4-the-voice-operator--directory-assistance) |
 | `41`  | **Talking clock** | [§5](#5-wake-up-calls--the-talking-clock) |
 | `42`  | **Wake-up call** — set or cancel by speaking the time | [§5](#5-wake-up-calls--the-talking-clock) |
 | `43`  | **Home-automation voice menu** — control your lights | [§4](#4-the-voice-operator--directory-assistance) |
@@ -221,10 +221,20 @@ Say what you want:
   — you're connected to that room. Add aliases with `operator_synonyms`.
 - **"Wake me up"** — jumps to the wake-up flow ([§5](#5-wake-up-calls--the-talking-clock)).
 - **"Lights"** / **"automation"** — jumps to the home-automation menu (below).
+- **"What time is it"** — jumps to the talking clock ([§5](#5-wake-up-calls--the-talking-clock)).
+- **"Weather"** / **"power"** / **"battery"** / **"house status"** — jumps to
+  dial-a-status (below).
+- **"Directory"** / **"who's here"** / **"list the rooms"** — jumps to directory
+  assistance (below).
+- **"Announce"** / **"over the speakers"** — jumps to announce ([§6](#6-paging--announcements)).
+- **"Page everyone"** / **"intercom"** / **"all call"** — jumps to page-all ([§6](#6-paging--announcements)).
 
-If it can't understand you after two tries, it says so and hangs up. Room-name
-matching is deliberately forgiving of narrowband tail-clipping ("Base" →
-"Basement"), and refuses to guess between two similar names.
+A **room name always wins** over a feature word, so a handset named "Office" or
+"Garage" still connects normally. A feature you name but have disabled falls
+through to a polite goodbye. If it can't understand you after two tries, it says
+so and hangs up. Room-name matching is deliberately forgiving of narrowband
+tail-clipping ("Base" → "Basement"), and refuses to guess between two similar
+names.
 
 ### Directory assistance — dial `411`
 

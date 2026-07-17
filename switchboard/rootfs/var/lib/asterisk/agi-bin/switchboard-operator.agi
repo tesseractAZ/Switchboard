@@ -29,6 +29,11 @@ import sys
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
+# Feature tokens the STT wrapper can return (besides a room extension): each is
+# a hand-off to another feature's flow. The dialplan (render_operator_context)
+# routes OP_RESULT=<token> to that feature — gated on the feature being enabled;
+# an unrouted token just falls through to a polite goodbye.
+_FEATURE_TOKENS = ("wakeup", "automation", "clock", "status", "directory", "announce", "page")
 # The operator's callers include OUTSIDE lines (an inbound trunk call the
 # answering phone transferred to 0) — people unfamiliar with the flow, on a
 # cell audio path with real latency. Give them more grace than the room
@@ -85,14 +90,17 @@ def _stt(args: list[str], wav: str) -> str:
 
 def recognize(attempt: int) -> tuple[str, str]:
     """Record one utterance. Return (kind, value):
-      ('automation', '')  — caller said "lights"/"automation"
+      (<feature>, '')     — caller asked for a feature; <feature> is one of
+                            _FEATURE_TOKENS (wakeup, automation, clock, status,
+                            directory, announce, page)
       ('connect', ext)    — caller named a room
       ('', '')            — nothing usable
 
-    A single whisper pass (rooms mode) does BOTH jobs: switchboard-stt now checks
-    the automation gate on the same transcript and prints the literal token
-    'automation' for a lights request, otherwise a room extension — so the
-    operator transcribes the recording only once."""
+    A single whisper pass (rooms mode) does ALL jobs: switchboard-stt runs the
+    wake-up / automation / feature gates on the same transcript and prints the
+    matching feature token, otherwise a room extension — so the operator
+    transcribes the recording only once. main() maps a feature token to
+    OP_RESULT and the dialplan routes it; 'connect' Dials the room ext."""
     rec = f"{ASR_DIR}/utt-{os.getpid()}-{attempt}"
     stream("switchboard/sw-beep")  # "speak now" cue — Alpine asterisk-sounds has no built-in beep
     # RECORD FILE <name> <fmt> <escape> <timeout_ms> s=<silence>.
@@ -114,12 +122,9 @@ def recognize(attempt: int) -> tuple[str, str]:
     sys.stderr.write(f"[operator] rec attempt={attempt} bytes={size}\n")
     try:
         result = _stt(["--mode", "rooms"], wav)
-        if result == "wakeup":
-            sys.stderr.write("[operator] wake-up intent\n")
-            return "wakeup", ""
-        if result == "automation":
-            sys.stderr.write("[operator] automation intent\n")
-            return "automation", ""
+        if result in _FEATURE_TOKENS:
+            sys.stderr.write(f"[operator] {result} intent\n")
+            return result, ""
         return ("connect", result) if result else ("", "")
     finally:
         try:
@@ -133,11 +138,9 @@ def main() -> None:
     for attempt in range(MAX_ATTEMPTS):
         stream("switchboard/sw-greeting" if attempt == 0 else "switchboard/sw-didnt-catch")
         kind, ext = recognize(attempt)
-        if kind == "wakeup":
-            set_var("OP_RESULT", "wakeup")
-            return
-        if kind == "automation":
-            set_var("OP_RESULT", "automation")
+        if kind in _FEATURE_TOKENS:
+            # The dialplan routes OP_RESULT=<feature> to that feature's flow.
+            set_var("OP_RESULT", kind)
             return
         if kind == "connect" and ext:
             set_var("OP_TARGET", ext)
