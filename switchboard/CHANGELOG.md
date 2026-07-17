@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.34.0
+
+Outside line: **dial numbers directly, without the `9` prefix** (opt-in).
+
+A new trunk toggle **`direct_dial`** (default off) lets you dial a phone number
+straight, like a cell phone — no outside-line prefix. When it's on, a **10-digit**
+(`602-555-1234`) or **11-digit** (`1-602-555-1234`) US/Canada number routes out the
+trunk, while your 2–3-digit extensions and feature codes still ring internally. The
+system tells them apart by number **length** (NANP patterns), since without a prefix
+that's the only signal. `011` international and `900`/`1-900` premium stay blocked,
+and the anti-toll-fraud guards (transferred-in callers can't reach the trunk) are
+unchanged. **911 is intentionally not routed** — this trunk has no E911, so use a
+cell phone for emergencies.
+
+Why a toggle and not just blanking `dial_prefix`: the Home Assistant options form
+reverts a cleared optional field to its default (`9`), so blanking the prefix didn't
+actually disable it — it silently reverted. `direct_dial` is the dependable switch;
+it overrides `dial_prefix` when on. Prefix mode (the default) is byte-for-byte
+unchanged.
+
+
 ## 0.33.1
 
 Cosmetic: the Switchboard title icon is now a **classic telephone** (☎️) instead

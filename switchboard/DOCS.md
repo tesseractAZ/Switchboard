@@ -157,7 +157,8 @@ system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
 | `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
 | `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
 | `inbound_ext` | `""` | Which extension(s) an inbound call rings — a single ext (`19`), a comma-separated list (`19,20`), or blank = **ring the whole house**. |
-| `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line. |
+| `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
+| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no prefix** — a 10-digit (`6025551234`) or 11-digit (`16025551234`) US/Canada number goes straight out, like a cell phone. Extensions and feature codes (2–3 digits) still ring internally; `011` international and `900`/`1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
 | `registns` | `true` | Register to the provider (most trunks need this). |
 
 ---
@@ -441,11 +442,17 @@ reference at [`tools/wp826.mjs`](../tools/wp826.mjs) and
      from_domain: losangeles.voip.ms
      outbound_caller_id: "15205551234"
      inbound_ext: "19"        # ring one room, or "19,20", or "" for the whole house
-     dial_prefix: "9"
+     dial_prefix: "9"         # or set direct_dial: true to drop the prefix (below)
      registns: true
    ```
 3. **Restart** the add-on.
-4. **Outbound**: dial `9` then the number.
+4. **Outbound**: dial `9` then the number. Prefer dialing **without** a prefix?
+   Set `direct_dial: true` — then a 10- or 11-digit US/Canada number dials straight
+   out (like a cell), while your 2–3-digit extensions and feature codes still ring
+   internally. `011` international and `900`/`1-900` premium stay blocked, and
+   **911 is not routed** (no E911 — use a cell for emergencies). Don't try to
+   disable the prefix by blanking `dial_prefix`; the options form reverts a cleared
+   field to its default, so use the `direct_dial` toggle.
 5. **Inbound**: rings the `inbound_ext` room(s), or every room if blank. Outside
    calls ring with a **distinctive ring** on the WP826 cordless (an
    `Alert-Info: …;info=outsideline` tag; analog handsets ignore it).
