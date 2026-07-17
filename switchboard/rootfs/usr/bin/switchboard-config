@@ -739,43 +739,46 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
       while bare extensions still ring rooms. Toll-fraud blocks are more specific
       than the general ``_<prefix>.`` rule, so Asterisk denies them first.
 
-    * DIRECT mode (``prefix`` == ""): no prefix. Outside numbers are recognised by
-      NANP length — ``_NXXNXXXXXX`` (10-digit) and ``_1NXXNXXXXXX`` (11-digit,
-      1+area) — which are more specific than ``_X.`` for a full number yet never
-      match a 2–3-digit extension/feature code, so short internal targets still
-      ring. Toll-fraud blocks (011 international, 900 / 1-900 premium) are more
-      specific still and deny first. There is deliberately NO catch-all outbound
-      rule, so a mis-dial (e.g. a 7-digit fragment, or 911 with E911 unconfigured)
-      falls through to ``_X.`` → "not a room" → Congestion rather than the trunk.
+    * DIRECT mode (``prefix`` == ""): no outside-line prefix, but a leading **1**
+      is REQUIRED — outside numbers are NANP 11-digit ``_1NXXNXXXXXX`` (1 + area +
+      number), dialed as-is. This is more specific than ``_X.`` for a full number
+      yet never matches a 2–3-digit extension/feature code, so short internal
+      targets still ring. Requiring the 1 (vs also allowing a bare 10-digit
+      ``_NXXNXXXXXX``) is deliberate: a bare-10 pattern makes feature codes 41–46
+      and any extension starting 2–9 look like the *start* of a phone number,
+      which stalls their dialing on analog phones (the gateway must wait out the
+      inter-digit timer). With 1-required, only extensions that start with 1
+      (12–19) overlap the outbound pattern. 011 international and 1-900 premium
+      are blocked (more specific, denied first). There is deliberately NO catch-all
+      outbound rule, so a mis-dial — a bare 10-digit number, a 7-digit fragment, or
+      911 (E911 unconfigured) — falls through ``_X.`` → "not a room" → Congestion,
+      never the trunk.
 
     (Regression guard: when these lived after the feature contexts they landed in
     [automation], so [rooms] had no outbound rule — every outbound call fell
     through to ``_X.`` → "not a room" → Congestion = "Service Unavailable".)
     """
     if prefix == "":
-        # Direct-dial: length-based NANP. Blocks first (more specific), then the
-        # 10- and 11-digit outbound patterns. Number dialed as-is (${EXTEN}).
+        # Direct-dial: NANP 11-digit (1 + 10). Blocks first (more specific), then
+        # the single outbound pattern. Number dialed as-is (${EXTEN}).
         return [
             "",
             ";; ----- Blocked destinations (toll-fraud guard) — direct-dial -----",
-            ";; International (011) and premium 900 / 1-900 are denied. More",
-            ";; specific than the outbound patterns below, so matched first.",
+            ";; International (011) and premium 1-900 are denied. More specific",
+            ";; than the outbound pattern below, so matched first.",
             "exten = _011.,1,NoOp(Blocked international)",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
             "exten = _1900NXXXXXX,1,NoOp(Blocked premium 1-900)",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
-            "exten = _900NXXXXXX,1,NoOp(Blocked premium 900)",
-            " same = n,Congestion(5)",
-            " same = n,Hangup()",
             "",
-            ";; ----- Outbound via SIP trunk, no prefix (10-/11-digit NANP) -----",
+            ";; ----- Outbound via SIP trunk — 1 + 10-digit NANP (leading 1 req.) -----",
             ";; More specific than _X. for a full number; never matches a 2-3 digit",
-            ";; extension/feature code, so internal dialing is unaffected.",
+            ";; extension/feature code, so internal dialing is unaffected. A bare",
+            ";; 10-digit number is NOT routed (add the 1) — that is what keeps the",
+            ";; feature codes and extension 20 dialing instantly.",
             "exten = _1NXXNXXXXXX,1,NoOp(Outbound ${EXTEN})",
-        ] + _outbound_dial_body("${EXTEN}", caller_id) + [
-            "exten = _NXXNXXXXXX,1,NoOp(Outbound ${EXTEN})",
         ] + _outbound_dial_body("${EXTEN}", caller_id)
 
     # Prefix mode.
@@ -930,7 +933,7 @@ def render_extensions(opts: dict) -> str:
         log(f"trunk: invalid dial_prefix {prefix_raw!r}; using '9'")
     if trunk.get("enabled"):
         log("trunk: outbound dialing = "
-            + ("DIRECT (10/11-digit, no prefix)" if prefix == "" else f"prefix '{prefix}'"))
+            + ("DIRECT (1 + 10-digit, no prefix)" if prefix == "" else f"prefix '{prefix}'"))
     caller_id_raw = str(trunk.get("outbound_caller_id", "") or "").strip()
     caller_id = caller_id_raw if re.fullmatch(r"[0-9+]*", caller_id_raw) else ""
     if caller_id != caller_id_raw:
