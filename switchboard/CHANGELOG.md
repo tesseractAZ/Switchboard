@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.33.1
+
+Cosmetic: the Switchboard title icon is now a **classic telephone** (☎️) instead
+of an electrical plug (🔌), across both the web dashboard header and the operator
+console (telnet/browser) headers — matching the `mdi:phone-classic` sidebar icon
+and the antique-phone theme. The console uses the emoji-presentation form (with
+its variation selector) so it still measures two terminal cells and the board
+stays aligned.
+
+
 ## 0.33.0
 
 The operator now recognizes and hands off to **any** feature, not just rooms.
