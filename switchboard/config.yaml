@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.33.1"
+version: "0.34.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -98,6 +98,7 @@ options:
     outbound_caller_id: ""
     inbound_ext: ""
     dial_prefix: "9"
+    direct_dial: false
     registns: true
 schema:
   log_level: list(trace|debug|info|notice|warning|error|critical)
@@ -168,4 +169,5 @@ schema:
     outbound_caller_id: str?
     inbound_ext: str?
     dial_prefix: str?
+    direct_dial: bool?
     registns: bool?
