@@ -952,7 +952,7 @@ INDEX_HTML = """<!doctype html>
 </style>
 </head>
 <body>
-  <h1>🔌 Switchboard</h1>
+  <h1>☎️ Switchboard</h1>
   <div class="sub" id="sub">Loading…</div>
   <div id="banner"></div>
 
