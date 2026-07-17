@@ -376,6 +376,34 @@ def test_operator_voice_dialplan() -> None:
           "[operator]" not in off and "exten = 0," not in off)
 
 
+def test_operator_feature_routing() -> None:
+    # The operator hands a caller off to ANY other feature it recognizes: the AGI
+    # sets OP_RESULT=<feature> and the dialplan routes it. status/directory/announce
+    # have their own contexts (routed via Goto <ctx>,s,1); clock/page live inline in
+    # [rooms] at their ext (routed via Goto rooms,<ext>,1).
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Living Room", "secret": "s2"}])
+    on = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
+    for token, target in [("wakeup", "wakeup,s,1"), ("automation", "automation,s,1"),
+                          ("status", "status,s,1"), ("directory", "directory,s,1"),
+                          ("announce", "announce,s,1"), ("clock", "rooms,41,1"),
+                          ("page", "rooms,44,1")]:
+        check(f"operator routes '{token}' -> {target}",
+              f'GotoIf($["${{OP_RESULT}}" = "{token}"]?{target})' in on)
+    # clock/page are inline in [rooms]: if the dial code collides with a room (so
+    # it's suppressed), the operator must NOT route there — a Goto to a missing
+    # extension would fail. clock_ext=11 (a room) suppresses the clock code.
+    coll = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True},
+                                  "clock_ext": "11", "trunk": {}})
+    check("operator does NOT route 'clock' when its inline code collided",
+          '= "clock"]?rooms' not in coll)
+    # A disabled feature -> no operator route for it.
+    nodir = sbc.render_extensions({"rooms": rooms, "operator": {"enabled": True},
+                                   "directory_enabled": False, "trunk": {}})
+    check("operator does NOT route 'directory' when directory is disabled",
+          '= "directory"]?directory,s,1' not in nodir)
+
+
 def test_talking_clock() -> None:
     rooms = [{"ext": "11", "name": "Kitchen", "secret": "s1"},
              {"ext": "12", "name": "Office", "secret": "s2"}]
@@ -1143,6 +1171,7 @@ if __name__ == "__main__":
     test_features_conf_transfer()
     test_clean_config_unchanged()
     test_operator_voice_dialplan()
+    test_operator_feature_routing()
     test_talking_clock()
     test_timezone_resolution()
     test_wakeup_dialplan()

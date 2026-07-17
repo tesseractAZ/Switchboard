@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.33.0
+
+The operator now recognizes and hands off to **any** feature, not just rooms.
+
+Before, dialing **0** and speaking only routed to a room (or the lights/wake-up
+intents). Now the voice operator also understands requests for the **talking clock**
+("what time is it"), **house status** ("weather", "power", "battery", "solar",
+"thermostat"…), **directory assistance** ("directory", "who's here", "room list"),
+**announce** ("make an announcement", "over the speakers"), and **page/intercom**
+("page everyone", "all call"). It classifies the spoken request and hands the caller
+to that feature's own menu — same as if they had dialed the feature's code directly —
+so there's nothing new to memorize. Room names still win over feature words, and a
+feature the caller names but that's disabled falls through to a graceful goodbye.
+
+Recognition is offline (whisper.cpp, no cloud). Room-vs-feature is resolved by
+match *confidence*, not a fixed order: a confident room match (an exact name or
+synonym) always wins, so a handset named "Weather" or "Battery" still connects by
+name; only then do the feature words get a look, so a bare word like "page" isn't
+misrouted to an unrelated room it merely shares letters with ("Garage"); and a
+lower-confidence but genuine room match ("kitchin" → Kitchen) still connects after
+that. Wake-up and lights already worked; this generalizes the same hand-off to
+clock, status, directory, announce, and page.
+
+
 ## 0.32.0
 
 Device-health monitor auto-follows the cordless's IP (no DHCP reservation needed).

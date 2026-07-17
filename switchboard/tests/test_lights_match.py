@@ -216,6 +216,37 @@ def test_automation_gate():
     check("room match still works ('office' -> 16)", ext == "16")
 
 
+def test_feature_intent():
+    # The operator hands a caller off to any other feature. feature_intent maps a
+    # spoken request to a feature token (clock/status/directory/announce/page);
+    # wake-up + lights are handled separately (is_wakeup_request/is_automation).
+    fi = matcher.feature_intent
+    check("feature: 'what time is it' -> clock", fi("what time is it") == "clock")
+    check("feature: 'the time please' -> clock", fi("the time please") == "clock")
+    check("feature: 'clock' -> clock", fi("clock") == "clock")
+    check("feature: 'the weather' -> status", fi("what's the weather") == "status")
+    check("feature: 'power' -> status", fi("power") == "status")
+    check("feature: 'house status' -> status", fi("house status") == "status")
+    check("feature: 'directory assistance' -> directory", fi("directory assistance") == "directory")
+    check("feature: 'phone book' -> directory", fi("phone book") == "directory")
+    check("feature: 'make an announcement' -> announce", fi("make an announcement") == "announce")
+    check("feature: 'page everyone' -> page", fi("page everyone") == "page")
+    check("feature: 'intercom' -> page", fi("intercom") == "page")
+    # Apostrophes/contractions must normalize (the transcript drops apostrophes so
+    # "who's" -> "whos"): a phrase written with an apostrophe would otherwise be
+    # dead. Both the straight and curly apostrophe, and the spelled-out form.
+    check("feature: \"who's here\" -> directory", fi("who's here") == "directory")
+    check("feature: 'who is here' -> directory", fi("who is here") == "directory")
+    check("feature: \"what's the time\" -> clock", fi("what's the time") == "clock")
+    check("feature: \"how's the house\" -> status", fi("how's the house") == "status")
+    # Real room names / a plain connect request must NOT trip a feature — they
+    # have to keep resolving to a room, exactly like the automation gate above.
+    for room in ("kitchen", "living room", "master bedroom", "office", "garage",
+                 "basement", "study", "the office please", "connect me to the kitchen"):
+        check(f"feature: {room!r} -> None (stays a room)", fi(room) is None)
+    check("feature: '' -> None", fi("") is None)
+
+
 def test_stt_rooms_decision():
     """switchboard-stt --mode rooms now does ONE whisper pass: it prints the
     literal token 'automation' for a lights request, otherwise a room extension.
@@ -246,6 +277,45 @@ def test_stt_rooms_decision():
           stt.resolve_rooms_text("set an alarm", rooms) == "wakeup")
     # ... and a plain room name is NOT mistaken for a wake-up.
     check("stt 'kitchen' is not a wake-up", stt.resolve_rooms_text("kitchen", rooms) == "11")
+    # Every other feature request short-circuits to its token (operator hand-off);
+    # checked AFTER wakeup/automation AND after a confident room match.
+    check("stt 'what time is it' -> clock",
+          stt.resolve_rooms_text("what time is it", rooms) == "clock")
+    check("stt weather -> status",
+          stt.resolve_rooms_text("what's the weather", rooms) == "status")
+    check("stt 'directory assistance' -> directory",
+          stt.resolve_rooms_text("directory assistance", rooms) == "directory")
+    check("stt 'make an announcement' -> announce",
+          stt.resolve_rooms_text("make an announcement", rooms) == "announce")
+    check("stt 'page everyone' -> page",
+          stt.resolve_rooms_text("page everyone", rooms) == "page")
+    # A room name still wins over a feature (an exact room name scores ~1.0).
+    check("stt 'garage' still -> 13 (not a feature)",
+          stt.resolve_rooms_text("garage", rooms) == "13")
+
+    # --- intent-vs-entity collision (the reason resolution is score-based) ------
+    # REGRESSION: a bare feature word must NOT be swallowed by an unrelated room
+    # it only fuzzy-rhymes with. "page" scores ~0.67 against a room named "Garage"
+    # (both clear the 0.6 room threshold) — but 0.67 < ROOM_CONFIDENT, so the
+    # feature word wins and the caller gets the intercom, not the Garage phone.
+    # (This fixture HAS a Garage at ext 13, exactly the live-config collision.)
+    check("stt 'page' -> page (NOT Garage-by-fuzz)",
+          stt.resolve_rooms_text("page", rooms) == "page")
+    check("stt 'solar' -> status (NOT Garage-by-fuzz)",
+          stt.resolve_rooms_text("solar", rooms) == "status")
+    check("stt 'charge' -> status (NOT Garage-by-fuzz)",
+          stt.resolve_rooms_text("charge", rooms) == "status")
+    check("stt 'weather' -> status (no confident room)",
+          stt.resolve_rooms_text("weather", rooms) == "status")
+    # ...yet a handset genuinely NAMED after a feature keyword still connects by
+    # name: an exact room match scores ~1.0 >= ROOM_CONFIDENT and wins outright.
+    kw_rooms = rooms + [{"ext": "22", "name": "Weather"}]
+    check("stt 'weather' room -> 22 (exact room wins over status)",
+          stt.resolve_rooms_text("weather", kw_rooms) == "22")
+    # ...and a LOW-confidence but real room match (misheard/clipped, not a feature
+    # word) still resolves via the third tier — "kitchin" -> Kitchen.
+    check("stt 'kitchin' -> 11 (fuzzy room, tier 3)",
+          stt.resolve_rooms_text("kitchin", rooms) == "11")
 
 
 def test_wakeup_gate():
@@ -265,6 +335,7 @@ if __name__ == "__main__":
     test_light()
     test_intent()
     test_automation_gate()
+    test_feature_intent()
     test_stt_rooms_decision()
     test_wakeup_gate()
     print(f"\n{_count - _failures}/{_count} passed")
