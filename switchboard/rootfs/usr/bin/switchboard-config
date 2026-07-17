@@ -699,20 +699,86 @@ def render_announce_context() -> list[str]:
     ]
 
 
+def _outbound_dial_body(num_expr: str, caller_id: str) -> list:
+    """The shared priority-2..n body of an outbound rule: toll-fraud origin guard,
+    caller-ID, transfer confinement, and the trunk Dial. ``num_expr`` is the
+    dialplan expression for the number to send to the trunk (``${EXTEN}`` in
+    direct mode, ``${EXTEN:<plen>}`` in prefix mode). Priority 1 (the NoOp that
+    labels the call) is emitted by the caller so the pattern line reads clearly."""
+    cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"
+    return [
+        # ANTI-TOLL-FRAUD origin guard (version-independent BACKSTOP): refuse
+        # outbound origination from the TRUNK endpoint itself. If a transferred-in
+        # outside caller's trunk channel ever masqueraded into [rooms] and reached
+        # here, CHANNEL(endpoint)=="trunk" blocks it — WITHOUT relying on
+        # TRANSFER_CONTEXT. (This catches the blind-## / masquerade case; the
+        # attended-*2 path originates a Local channel with an EMPTY endpoint, so
+        # this guard doesn't fire for it — that path is closed by the primary
+        # defence, __TRANSFER_CONTEXT=internal-xfer, which has no outbound rule.)
+        ' same = n,GotoIf($["${CHANNEL(endpoint)}" = "trunk"]?blocked)',
+        f" same = n,{cid}",
+        # Confine any onward ##/*2 transfer OF this outbound call to internal-only.
+        " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",
+        # 'rT' not 'rtT': 'T' lets our (internal) caller transfer via ##/*2, but
+        # we drop 't' so the far-end PSTN callee can't invoke our feature codes.
+        f" same = n,Dial(PJSIP/{num_expr}@trunk,60,rT)",
+        " same = n,Hangup()",
+        " same = n(blocked),Congestion(5)",
+        " same = n,Hangup()",
+    ]
+
+
 def render_outbound_rules(prefix: str, caller_id: str) -> list:
     """Outbound-via-trunk dialplan lines, emitted INSIDE the [rooms] context.
 
-    These MUST live in [rooms] (where the phones dial from). The literal-``prefix``
-    patterns (``_<prefix>011.`` / ``_<prefix>900.`` / ``_<prefix>.``) out-prioritise
-    the catch-all ``_X.`` room pattern, so a prefixed number routes to the trunk
-    while bare extensions still ring rooms. The toll-fraud blocks are more specific
-    than the general ``_<prefix>.`` rule, so Asterisk denies them first.
+    These MUST live in [rooms] (where the phones dial from). Two modes:
+
+    * PREFIX mode (``prefix`` non-empty, e.g. "9"): the literal-``prefix`` patterns
+      (``_<prefix>011.`` / ``_<prefix>900.`` / ``_<prefix>.``) out-prioritise the
+      catch-all ``_X.`` room pattern, so a prefixed number routes to the trunk
+      while bare extensions still ring rooms. Toll-fraud blocks are more specific
+      than the general ``_<prefix>.`` rule, so Asterisk denies them first.
+
+    * DIRECT mode (``prefix`` == ""): no prefix. Outside numbers are recognised by
+      NANP length — ``_NXXNXXXXXX`` (10-digit) and ``_1NXXNXXXXXX`` (11-digit,
+      1+area) — which are more specific than ``_X.`` for a full number yet never
+      match a 2–3-digit extension/feature code, so short internal targets still
+      ring. Toll-fraud blocks (011 international, 900 / 1-900 premium) are more
+      specific still and deny first. There is deliberately NO catch-all outbound
+      rule, so a mis-dial (e.g. a 7-digit fragment, or 911 with E911 unconfigured)
+      falls through to ``_X.`` → "not a room" → Congestion rather than the trunk.
 
     (Regression guard: when these lived after the feature contexts they landed in
-    [automation], so [rooms] had no ``_9.`` — every outbound call fell through to
-    ``_X.`` → "not a room" → Congestion, which phones show as "Service Unavailable".)
+    [automation], so [rooms] had no outbound rule — every outbound call fell
+    through to ``_X.`` → "not a room" → Congestion = "Service Unavailable".)
     """
-    cid = f"Set(CALLERID(num)={caller_id})" if caller_id else "NoOp(no outbound CID)"
+    if prefix == "":
+        # Direct-dial: length-based NANP. Blocks first (more specific), then the
+        # 10- and 11-digit outbound patterns. Number dialed as-is (${EXTEN}).
+        return [
+            "",
+            ";; ----- Blocked destinations (toll-fraud guard) — direct-dial -----",
+            ";; International (011) and premium 900 / 1-900 are denied. More",
+            ";; specific than the outbound patterns below, so matched first.",
+            "exten = _011.,1,NoOp(Blocked international)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "exten = _1900NXXXXXX,1,NoOp(Blocked premium 1-900)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "exten = _900NXXXXXX,1,NoOp(Blocked premium 900)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "",
+            ";; ----- Outbound via SIP trunk, no prefix (10-/11-digit NANP) -----",
+            ";; More specific than _X. for a full number; never matches a 2-3 digit",
+            ";; extension/feature code, so internal dialing is unaffected.",
+            "exten = _1NXXNXXXXXX,1,NoOp(Outbound ${EXTEN})",
+        ] + _outbound_dial_body("${EXTEN}", caller_id) + [
+            "exten = _NXXNXXXXXX,1,NoOp(Outbound ${EXTEN})",
+        ] + _outbound_dial_body("${EXTEN}", caller_id)
+
+    # Prefix mode.
     plen = len(prefix)  # strip the whole prefix, not a hardcoded single char
     return [
         "",
@@ -732,25 +798,7 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         "",
         ";; ----- Outbound via SIP trunk (in [rooms] so the phones can dial it) -----",
         f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:{plen}}})",
-        # ANTI-TOLL-FRAUD origin guard (version-independent BACKSTOP): refuse
-        # outbound origination from the TRUNK endpoint itself. If a transferred-in
-        # outside caller's trunk channel ever masqueraded into [rooms] and reached
-        # here, CHANNEL(endpoint)=="trunk" blocks it — WITHOUT relying on
-        # TRANSFER_CONTEXT. (This catches the blind-## / masquerade case; the
-        # attended-*2 path originates a Local channel with an EMPTY endpoint, so
-        # this guard doesn't fire for it — that path is closed by the primary
-        # defence, __TRANSFER_CONTEXT=internal-xfer, which has no _9. to reach.)
-        ' same = n,GotoIf($["${CHANNEL(endpoint)}" = "trunk"]?blocked)',
-        f" same = n,{cid}",
-        # Confine any onward ##/*2 transfer OF this outbound call to internal-only.
-        " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",
-        # 'rT' not 'rtT': 'T' lets our (internal) caller transfer via ##/*2, but
-        # we drop 't' so the far-end PSTN callee can't invoke our feature codes.
-        f" same = n,Dial(PJSIP/${{EXTEN:{plen}}}@trunk,60,rT)",
-        " same = n,Hangup()",
-        " same = n(blocked),Congestion(5)",
-        " same = n,Hangup()",
-    ]
+    ] + _outbound_dial_body(f"${{EXTEN:{plen}}}", caller_id)
 
 
 def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
@@ -861,10 +909,28 @@ def render_extensions(opts: dict) -> str:
     exts = [r["ext"] for r in rooms]
     operator_on = bool((opts.get("operator") or {}).get("enabled", True))
     mwi_on = bool(opts.get("mwi_enabled", True))
+    # Outbound dialing plan. Two modes:
+    #   * PREFIX mode (default): dial <prefix><number>; the literal-prefix patterns
+    #     out-prioritise the room catch-all so a bare extension still rings a room.
+    #   * DIRECT mode: no prefix — outside numbers are recognised by LENGTH
+    #     (10-/11-digit NANP), so you dial a phone number straight, like a cell.
+    # Direct mode is enabled ONLY by the explicit `direct_dial` toggle. Blanking
+    # dial_prefix is deliberately NOT the switch: the HA options form reverts a
+    # cleared optional field to its default ("9"), so a blank prefix is unreliable
+    # — it keeps the old "fall back to '9'" behaviour instead. `prefix == ""` is
+    # the internal signal for direct mode, set only when direct_dial is true.
+    direct_dial = bool(trunk.get("direct_dial", False))
     prefix_raw = str(trunk.get("dial_prefix", "9") or "9").strip()
-    prefix = prefix_raw if re.fullmatch(r"[0-9*#]+", prefix_raw) else "9"
-    if prefix != prefix_raw:
+    if direct_dial:
+        prefix = ""  # direct-dial (length-based) mode
+    elif re.fullmatch(r"[0-9*#]+", prefix_raw):
+        prefix = prefix_raw
+    else:
+        prefix = "9"
         log(f"trunk: invalid dial_prefix {prefix_raw!r}; using '9'")
+    if trunk.get("enabled"):
+        log("trunk: outbound dialing = "
+            + ("DIRECT (10/11-digit, no prefix)" if prefix == "" else f"prefix '{prefix}'"))
     caller_id_raw = str(trunk.get("outbound_caller_id", "") or "").strip()
     caller_id = caller_id_raw if re.fullmatch(r"[0-9+]*", caller_id_raw) else ""
     if caller_id != caller_id_raw:

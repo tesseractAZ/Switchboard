@@ -165,6 +165,65 @@ def test_outbound_rules_live_in_rooms_context() -> None:
     check("room pattern still present in [rooms]", _context_of(e, "Room call to") == "rooms")
 
 
+def test_direct_dial_mode() -> None:
+    # direct_dial=true removes the outside-line prefix: outside numbers are matched
+    # by NANP length (10-/11-digit) so you dial straight, like a cell. Internal
+    # extensions/feature codes (2-3 digits) and toll-fraud blocks are unaffected.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "19", "name": "Cordless", "secret": "s2"}])
+    opts = {"rooms": rooms, "operator": {"enabled": True}, "directory_enabled": True,
+            "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
+                      "username": "100000_switchboard", "secret": "s",
+                      # dial_prefix present but direct_dial MUST override it.
+                      "dial_prefix": "9", "direct_dial": True,
+                      "outbound_caller_id": "2025550100", "inbound_ext": "19"}}
+    e = sbc.render_extensions(opts)
+    # Length-based outbound patterns present, in [rooms], dialing the number AS-IS.
+    check("direct: 11-digit pattern in [rooms]", _context_of(e, "exten = _1NXXNXXXXXX,") == "rooms")
+    check("direct: 10-digit pattern in [rooms]", _context_of(e, "exten = _NXXNXXXXXX,") == "rooms")
+    check("direct: dials ${EXTEN} as-is (no prefix strip)",
+          "Dial(PJSIP/${EXTEN}@trunk" in e and "${EXTEN:1}" not in e)
+    # The prefix rule is GONE (direct_dial overrides dial_prefix=9).
+    check("direct: no _9. prefix rule", "exten = _9.," not in e and "_9011." not in e)
+    # Toll-fraud blocks are NANP-shaped and precede the outbound patterns.
+    check("direct: 011 international blocked", "exten = _011.," in e)
+    check("direct: 1-900 premium blocked", "exten = _1900NXXXXXX," in e)
+    check("direct: 900 premium blocked", "exten = _900NXXXXXX," in e)
+    check("direct: blocks precede the 10-digit outbound rule",
+          e.index("exten = _011.,") < e.index("exten = _NXXNXXXXXX,"))
+    check("direct: blocks precede the 11-digit outbound rule",
+          e.index("exten = _1900NXXXXXX,") < e.index("exten = _1NXXNXXXXXX,"))
+    # Internal dialing untouched: the room catch-all is intact and 2-digit exts
+    # can't match a 10/11-digit pattern, so they still ring rooms.
+    check("direct: room _X. pattern still in [rooms]", _context_of(e, "Room call to") == "rooms")
+    # Anti-toll-fraud origin guard survives on the direct-dial Dial path.
+    check("direct: trunk-origin guard present",
+          '$["${CHANNEL(endpoint)}" = "trunk"]?blocked' in e)
+    check("direct: outbound CID set before the trunk Dial",
+          e.index("CALLERID(num)=2025550100") < e.index("@trunk"))
+    # 911 is deliberately NOT routed (E911 unconfigured): no literal 911 rule, so
+    # it falls through _X. -> not-a-room -> Congestion rather than the trunk.
+    check("direct: 911 not routed to trunk", "exten = 911," not in e)
+    # SECURITY: a transferred-in outside caller still can't reach the trunk — the
+    # [internal-xfer] context has NO outbound (length) patterns.
+    xfer = e[e.index("[internal-xfer]"):] if "[internal-xfer]" in e else ""
+    xfer = xfer.split("\n[", 1)[0]
+    check("direct: [internal-xfer] has no outbound length patterns",
+          "_NXXNXXXXXX" not in xfer and "_1NXXNXXXXXX" not in xfer)
+
+
+def test_direct_dial_off_keeps_prefix() -> None:
+    # With direct_dial absent/false, prefix mode is byte-for-byte the old behaviour.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    base = {"enabled": True, "provider_host": "x", "username": "u", "secret": "s",
+            "dial_prefix": "9"}
+    e_absent = sbc.render_extensions({"rooms": rooms, "trunk": dict(base)})
+    e_false = sbc.render_extensions({"rooms": rooms, "trunk": {**base, "direct_dial": False}})
+    check("direct_dial absent == false (prefix mode)", e_absent == e_false)
+    check("prefix mode keeps _9.", "exten = _9.," in e_absent)
+    check("prefix mode has no length patterns", "_NXXNXXXXXX" not in e_absent)
+
+
 def test_trunk_codec_pinned_to_ulaw() -> None:
     # The outside line is the PSTN (always narrowband). The trunk endpoint must
     # advertise ulaw ONLY (disallow=all) so the provider can't negotiate a
@@ -1161,6 +1220,8 @@ if __name__ == "__main__":
     test_whitespace_dial_prefix()
     test_outbound_toll_fraud_blocks()
     test_outbound_rules_live_in_rooms_context()
+    test_direct_dial_mode()
+    test_direct_dial_off_keeps_prefix()
     test_trunk_codec_pinned_to_ulaw()
     test_rooms_are_ulaw_only()
     test_trunk_aor_not_qualified()
