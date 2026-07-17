@@ -147,6 +147,56 @@ def is_wakeup_request(transcript: str) -> bool:
     return any(f" {w} " in low for w in _WAKEUP_PHRASES)
 
 
+# Other system features the operator can hand a caller off to (besides a room
+# connection, wake-up, or lights). Grouped by the token the operator routes on;
+# weather/power/house all reach the dial-a-status menu, so they share "status".
+# Whole-phrase word-boundary matching (like the wake-up/automation gates). The
+# caller (resolve_rooms_text) checks these AFTER a *confident* room match but
+# BEFORE a low-confidence fuzzy one — so a handset named after a feature keyword
+# ("Weather") still connects by name, yet a bare feature word ("page") isn't
+# swallowed by an unrelated room it merely rhymes with ("Garage"). Order below =
+# precedence among the feature words themselves.
+# Phrases are stored in NORMALIZED form (see feature_intent): apostrophes are
+# dropped so contractions join — "who's" -> "whos", "what's" -> "whats" — because
+# the transcript is normalized the same way before matching. Writing "who's here"
+# here would be dead: it could never match the normalized "whos here".
+_FEATURE_PHRASES = (
+    ("directory", ("directory assistance", "directory", "phone book", "phonebook",
+                   "phone directory", "room list", "list of rooms", "list the rooms",
+                   "whos here", "who is here")),
+    ("announce",  ("make an announcement", "an announcement", "announcement",
+                   "announce", "over the speakers", "on the speakers")),
+    ("page",      ("page everyone", "page everybody", "page all", "page the house",
+                   "all call", "intercom", "page")),
+    ("clock",     ("what time is it", "whats the time", "current time", "the time",
+                   "time please", "tell me the time", "what time", "time is it",
+                   "clock")),
+    ("status",    ("weather", "forecast", "temperature", "power", "battery",
+                   "solar", "grid", "energy", "electricity", "charge",
+                   "house status", "home status", "hows the house", "how is the house",
+                   "thermostat", "status")),
+)
+
+
+def feature_intent(transcript: str) -> str | None:
+    """The non-room system feature the caller is asking the operator to hand them
+    off to, or None. One of: ``clock`` (talking clock), ``status`` (dial-a-status:
+    weather/power/house), ``directory`` (directory assistance), ``announce``
+    (announce to speakers), ``page`` (all-call intercom). Wake-up and lights are
+    handled separately by is_wakeup_request / lights_match.is_automation_request,
+    which the operator checks first."""
+    # Drop apostrophes FIRST (so contractions join: "who's" -> "whos"), then map
+    # every other non-alphanumeric run to a single space; whole-phrase boundaries
+    # come from the leading/trailing space. _FEATURE_PHRASES is stored to match.
+    low = re.sub(r"['’]", "", (transcript or "").lower())
+    low = " " + re.sub(r"[^a-z0-9 ]+", " ", low) + " "
+    low = re.sub(r"\s+", " ", low)
+    for token, phrases in _FEATURE_PHRASES:
+        if any(f" {p} " in low for p in phrases):
+            return token
+    return None
+
+
 def match(transcript: str, rooms: list[dict], synonyms: dict | None = None,
           threshold: float = 0.6, margin: float = 0.08) -> tuple[str | None, float, str]:
     """Resolve a transcript to an extension. See module docstring."""

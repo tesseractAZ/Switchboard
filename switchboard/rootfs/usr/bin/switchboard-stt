@@ -263,26 +263,61 @@ def _recording_to_text(infile: str, prompt: str) -> str:
 _TIME_PROMPT = ("A time of day, for example: seven a.m., six thirty, "
                 "quarter past seven, ten forty five, half past six, noon, midnight.")
 
+# Above this match score a room result is treated as CONFIDENT and wins over the
+# feature words; below it (but still >= the room threshold) the feature words get
+# first refusal. match._score bumps a real match to >= 0.9 — exact fuzzy = 1.0,
+# every-candidate-word-heard = 0.95, clipped word-prefix = 0.9 — while a pure
+# character-overlap collision (a bare feature word vs an unrelated room name)
+# tops out around 0.67, so 0.9 is a clean separator. See resolve_rooms_text.
+ROOM_CONFIDENT = 0.9
+
 
 def resolve_rooms_text(text: str, rooms: list, synonyms: dict | None = None,
                        threshold: float = 0.6) -> str:
     """Pure rooms-mode decision (importable for tests, no I/O).
 
-    A single transcript decides between the home-automation flow and a room
-    connection so the operator only runs whisper ONCE:
+    A single transcript decides the operator's action so it only runs whisper ONCE:
 
-      * a clear automation/lights request  -> the literal token 'automation'
-      * a recognized room name             -> that room's extension
+      * a wake-up request                  -> 'wakeup'
+      * a clear automation/lights request  -> 'automation'
+      * a CONFIDENT room name              -> that room's extension
+      * another feature (clock / status / directory / announce / page)
+                                           -> that feature token
+      * a lower-confidence (misheard/clipped) room name -> its extension
       * anything else                      -> '' (no match)
 
-    The automation check is intentionally conservative (lights_match keeps it so)
+    The dialplan routes each feature token to that feature's flow (see
+    render_operator_context); a room extension is Dialed as before.
+
+    Room vs feature is an intent-vs-entity collision, resolved by the match
+    *score* rather than a fixed order — because neither pure order is right:
+
+      * feature-first would let a bare feature word swallow a handset genuinely
+        NAMED after it (a room called "Weather" → dial-a-status, never the room);
+      * room-first would let match()'s fuzzy scorer misroute a bare feature word
+        to an unrelated room that merely shares letters — e.g. "page" scores 0.67
+        against a room named "Garage" (both clear the 0.6 room threshold), so the
+        caller who said "page" would reach the Garage phone, not the intercom.
+
+    So: a CONFIDENT room match (exact name/synonym, full-word, or a clipped
+    prefix — all score >= ROOM_CONFIDENT) wins outright; only then do the feature
+    words get a look (they beat a merely-fuzzy room collision, which sits well
+    below ROOM_CONFIDENT); and a genuine but lower-confidence room match still
+    connects after that. The automation check stays conservative (lights_match)
     so an ordinary room name like "garage"/"office" still resolves to its ext."""
     if matcher.is_wakeup_request(text):
         return "wakeup"
     if lights_match is not None and lights_match.is_automation_request(text):
         return "automation"
-    ext, _score, _reason = matcher.match(text, rooms, synonyms or {}, threshold)
-    return ext or ""
+    ext, score, _reason = matcher.match(text, rooms, synonyms or {}, threshold)
+    if ext and score >= ROOM_CONFIDENT:
+        return ext                 # exact/synonym/full-word/clipped-prefix room
+    feat = matcher.feature_intent(text)
+    if feat:
+        return feat                # clock | status | directory | announce | page
+    if ext:
+        return ext                 # lower-confidence but real room (e.g. "kitchin")
+    return ""
 
 
 def main() -> int:

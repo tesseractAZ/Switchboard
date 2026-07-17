@@ -441,7 +441,10 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
 # --------------------------------------------------------------------------- #
 def render_operator_context(joined: str, automation_on: bool = False,
                             mwi_on: bool = True, trunk_on: bool = False,
-                            wakeup_on: bool = False) -> list[str]:
+                            wakeup_on: bool = False, clock_route: bool = False,
+                            clock_ext: str = "41", status_on: bool = False,
+                            directory_on: bool = False, announce_on: bool = False,
+                            page_route: bool = False, page_ext: str = "44") -> list[str]:
     """The [operator] context: dial 0 -> AGI voice operator -> validated Dial.
 
     The AGI only *sets* OP_RESULT/OP_TARGET; the dialplan does the Dial, and only
@@ -493,6 +496,22 @@ def render_operator_context(joined: str, automation_on: bool = False,
         lines += [
             " same = n,GotoIf($[\"${OP_RESULT}\" = \"automation\"]?automation,s,1)",
         ]
+    # More feature hand-offs, all checked before the connect/bye dial path.
+    # status/directory/announce have their own contexts (emitted whenever the
+    # feature is on). clock/page are inline in [rooms] at their ext, so route
+    # there only when that dial code was actually emitted (clock_route/page_route)
+    # — else an OP_RESULT of clock/page just falls through to a polite goodbye
+    # instead of a Goto to a missing extension.
+    if clock_route:
+        lines += [f" same = n,GotoIf($[\"${{OP_RESULT}}\" = \"clock\"]?rooms,{clock_ext},1)"]
+    if status_on:
+        lines += [" same = n,GotoIf($[\"${OP_RESULT}\" = \"status\"]?status,s,1)"]
+    if directory_on:
+        lines += [" same = n,GotoIf($[\"${OP_RESULT}\" = \"directory\"]?directory,s,1)"]
+    if announce_on:
+        lines += [" same = n,GotoIf($[\"${OP_RESULT}\" = \"announce\"]?announce,s,1)"]
+    if page_route:
+        lines += [f" same = n,GotoIf($[\"${{OP_RESULT}}\" = \"page\"]?rooms,{page_ext},1)"]
     lines += [
         " same = n,GotoIf($[\"${OP_RESULT}\" = \"connect\"]?:bye)",
         # Defense in depth: only dial a *known room* ext, even if the AGI misbehaves.
@@ -876,6 +895,7 @@ def render_extensions(opts: dict) -> str:
     # out-prioritizes the _X. room pattern. Skipped if it collides with a room.
     clock_on = bool(opts.get("clock_enabled", True))
     clock_ext = str(opts.get("clock_ext", "41") or "41").strip()
+    clock_emitted = False  # did the inline [rooms] clock dial code actually get emitted?
     if clock_on and exts:
         if not re.fullmatch(r"[0-9]{2,6}", clock_ext):
             log(f"clock: invalid clock_ext {clock_ext!r}; talking clock disabled")
@@ -903,6 +923,7 @@ def render_extensions(opts: dict) -> str:
                 " same = n,Hangup()",
                 "",
             ]
+            clock_emitted = True
 
     # Wake-up calls — dial the code to set/change/cancel by voice. Literal
     # extension; skipped if it collides with a room or the clock.
@@ -934,6 +955,7 @@ def render_extensions(opts: dict) -> str:
     # 'd' flag = everyone can talk back). Literal extension; skipped on collision.
     page_on = bool(opts.get("page_enabled", True))
     page_ext = str(opts.get("page_ext", "44") or "44").strip()
+    page_emitted = False  # did the inline [rooms] page dial code actually get emitted?
     if page_on and exts:
         if not re.fullmatch(r"[0-9]{2,6}", page_ext):
             log(f"page: invalid page_ext {page_ext!r}; page dial code disabled")
@@ -951,6 +973,7 @@ def render_extensions(opts: dict) -> str:
                 "",
             ]
             reserved.add(page_ext)
+            page_emitted = True
 
     # Voice home automation — a phone dialing this enters the lights flow.
     # Literal extension; skipped on collision with rooms/0/clock/wakeup/page.
@@ -1056,7 +1079,11 @@ def render_extensions(opts: dict) -> str:
     if operator_on and exts:
         parts += render_operator_context("|".join(exts), automation_on, mwi_on,
                                          trunk_on=bool(trunk.get("enabled")),
-                                         wakeup_on=wakeup_on)
+                                         wakeup_on=wakeup_on,
+                                         clock_route=clock_emitted, clock_ext=clock_ext,
+                                         status_on=status_on, directory_on=directory_on,
+                                         announce_on=announce_on,
+                                         page_route=page_emitted, page_ext=page_ext)
 
     # Internal-only DTMF transfer-target context (anti-toll-fraud). Emitted only
     # when the trunk is live and rooms exist — the sole case where an outside
