@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.35.0
+
+Direct dial now **requires a leading `1`** (NANP 11-digit) instead of also
+accepting a bare 10-digit number.
+
+0.34.0's direct mode routed both 10- and 11-digit numbers. The bare-10-digit
+pattern was the problem: it made feature codes **41–46** and any extension
+starting **2–9** (i.e. **20**) look like the *start* of a phone number, so on
+analog phones the gateway had to wait out its inter-digit timer before dialing
+them. Requiring the `1` (dial **`1` + the 10-digit number**) removes that: with no
+bare-10 pattern, feature codes and extension 20 dial instantly. Only extensions
+**12–19** still pause briefly — unavoidable, since they start with `1` exactly
+like an 11-digit number.
+
+A bare 10-digit number is no longer routed (falls to Congestion — add the `1`).
+`011` international and `1-900` premium stay blocked; the anti-toll-fraud guards
+and the 911-not-routed behavior are unchanged. Prefix mode (the default) is
+untouched.
+
+
 ## 0.34.0
 
 Outside line: **dial numbers directly, without the `9` prefix** (opt-in).
