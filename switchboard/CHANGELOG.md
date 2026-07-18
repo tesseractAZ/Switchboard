@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.41.0
+
+Full-screen operator console + the new signals mirrored into the TUI.
+
+The telnet/browser console now uses the **whole terminal width** instead of a
+72-column board floating in the middle: the rules span the full width, the header
+puts the title on the left and the online/on-call/clock stats on the right edge,
+and each room row right-aligns its live **link RTT** (idle qualify round-trip) and
+any notable contact status. A compact status line under the header shows the same
+two signals the web dashboard got in 0.40.0 — **trunk SIP registration** (green
+Registered / red Unregistered / grey Unknown) and **resident-STT health** (green
+resident / amber CLI fallback). It's still vertically centered and degrades
+cleanly on a narrow window (the right-aligned detail drops rather than wrapping).
+
+The trunk-registration and STT-health reads are on their own 20s throttle (they
+each cost an extra AMI login / loopback probe), separate from the ~3s board poll,
+so console AMI churn stays negligible. No behavior change to calls or routing.
+
+
 ## 0.40.0
 
 Dashboard: trunk registration status + resident-STT health.
