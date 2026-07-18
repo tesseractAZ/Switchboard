@@ -1,3 +1,17 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Secrets / runtime state — never commit (defense-in-depth; none currently tracked)
+*.pass
+*.token
+.ha_token
+.env
+options.json
+data/
+state/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~

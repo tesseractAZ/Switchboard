@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.36.0"
+version: "0.37.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -43,7 +43,7 @@ options:
   device_health_enabled: true
   device_health_interval: 120
   device_health_alerts: true
-  cordless_ip: "192.168.1.71"
+  cordless_ip: ""
   cordless_ext: "19"
   cordless_password: ""
   gateway_ports: "11,12,13,14,15,16,17,18"
