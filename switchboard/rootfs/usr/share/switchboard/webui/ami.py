@@ -878,6 +878,38 @@ def get_channels() -> list[dict]:
     return channels_from_blocks(blocks)
 
 
+def registrations_from_blocks(blocks: list[dict]) -> dict[str, dict]:
+    """Outbound SIP registration status keyed by registration id (ObjectName),
+    from OutboundRegistrationDetail events. For this add-on the only id is
+    ``trunk-reg`` (the [trunk-reg] section switchboard-config emits when the trunk
+    is enabled + registering). ``status`` is Registered / Unregistered / Rejected /
+    Stopped. ZERO events is a legitimate distinct state ("no registration
+    configured" — trunk off or register=no), not a failure. Matched on the
+    ``outboundregistration`` prefix so a minor event-title skew still parses."""
+    out: dict[str, dict] = {}
+    for b in blocks:
+        if not (b.get("event") or "").lower().startswith("outboundregistration"):
+            continue
+        name = b.get("objectname") or ""
+        if name:
+            out[name] = {
+                "status": b.get("status", "Unknown"),
+                "server_uri": b.get("serveruri", ""),
+                "next_reg": b.get("nextreg", ""),
+            }
+    return out
+
+
+def get_registrations() -> dict[str, dict]:
+    """Outbound registration status keyed by section id (e.g. ``trunk-reg``).
+    Empty dict on AMI failure OR when no outbound registration is configured."""
+    try:
+        blocks = _ami_command(["Action: PJSIPShowRegistrationsOutbound"])
+    except (OSError, AMIError):
+        return {}
+    return registrations_from_blocks(blocks)
+
+
 def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
     """The whole dashboard/console status read — endpoints, contacts, channels —
     over ONE AMI connection. Returns ``(endpoints, contacts, channels)``.

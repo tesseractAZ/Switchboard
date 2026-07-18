@@ -58,6 +58,7 @@ from ami import (  # noqa: E402
     codecs_for_channels,
     connect_extensions,
     get_endpoints,
+    get_registrations,
     get_status_bundle,
     hangup_channel,
     is_registered,
@@ -68,6 +69,7 @@ from ami import (  # noqa: E402
     summarize_calls,
     transfer_channel,
 )
+import stthealth  # noqa: E402  (whisper-server resident-STT health probe)
 
 # Short-TTL cache over the AMI status bundle. An open dashboard refreshes every
 # 4s and the transfer offline-pre-check reads the same data, so without this each
@@ -98,6 +100,45 @@ def cached_status_bundle():
     with _status_lock:
         _status_cache["ts"] = time.monotonic()
         _status_cache["value"] = value
+    return value
+
+
+# Trunk outbound-registration status changes slowly (re-REGISTER ~every 120s), so
+# it rides its OWN longer-TTL cache instead of widening get_status_bundle()'s
+# 3-tuple (which has three unpack sites). Same fetch-outside-the-lock discipline.
+# get_registrations() returns {} on AMI failure/no-registration (never raises).
+_REG_TTL = 20.0
+_reg_lock = threading.Lock()
+_reg_cache: dict = {"ts": 0.0, "value": None}
+
+
+def cached_registrations() -> dict:
+    with _reg_lock:
+        c = _reg_cache
+        if c["value"] is not None and (time.monotonic() - c["ts"]) < _REG_TTL:
+            return c["value"]
+    value = get_registrations()  # blocking AMI OUTSIDE the lock
+    with _reg_lock:
+        _reg_cache["ts"] = time.monotonic()
+        _reg_cache["value"] = value
+    return value
+
+
+# Whisper-server health probe: cheap, but don't run it on every 4s poll × tab.
+_STT_TTL = 8.0
+_stt_lock = threading.Lock()
+_stt_cache: dict = {"ts": 0.0, "value": None}
+
+
+def cached_stt_status(opts: dict) -> str:
+    with _stt_lock:
+        c = _stt_cache
+        if c["value"] is not None and (time.monotonic() - c["ts"]) < _STT_TTL:
+            return c["value"]
+    value = stthealth.status(opts)  # loopback probe OUTSIDE the lock
+    with _stt_lock:
+        _stt_cache["ts"] = time.monotonic()
+        _stt_cache["value"] = value
     return value
 
 
@@ -585,6 +626,12 @@ def api_status() -> JSONResponse:
             )
     rooms.sort(key=lambda r: r["ext"])
 
+    # Trunk outbound registration (slow-changing → its own 20s cache) and resident
+    # -STT health (own 8s cache) — neither touches the hot get_status_bundle path.
+    trunk_reg = ""
+    if trunk.get("enabled"):
+        reg = cached_registrations().get("trunk-reg")
+        trunk_reg = (reg or {}).get("status") or "Unknown"
     return JSONResponse(
         {
             "ami_ok": ami_ok,
@@ -595,7 +642,9 @@ def api_status() -> JSONResponse:
             "trunk": {
                 "enabled": bool(trunk.get("enabled")),
                 "provider": trunk.get("provider_host", ""),
+                "registration": trunk_reg,
             },
+            "stt": cached_stt_status(opts),
         }
     )
 
@@ -1052,9 +1101,21 @@ async function refresh() {
       esc(data.error || 'unknown') + '. The PBX may still be starting.</div>';
 
     const reg = data.rooms.filter(r => r.registered).length;
-    document.getElementById('sub').textContent =
-      reg + ' of ' + data.rooms.length + ' phones registered' +
-      (data.trunk.enabled ? ' · trunk: ' + (data.trunk.provider || 'on') : ' · no trunk');
+    let subHtml = reg + ' of ' + data.rooms.length + ' phones registered';
+    if (data.trunk.enabled) {
+      subHtml += ' · trunk: ' + esc(data.trunk.provider || 'on');
+      const tr = data.trunk.registration || '';
+      if (tr) {  // green Registered, grey Unknown, red anything else (Rejected/Unregistered)
+        const col = (tr === 'Registered') ? '#1a8f3c' : (tr === 'Unknown' ? '#888' : '#c0392b');
+        subHtml += ' <span style="color:' + col + '">(' + esc(tr) + ')</span>';
+      }
+    } else {
+      subHtml += ' · no trunk';
+    }
+    // Resident STT: quiet when up/disabled, amber when it fell back to slow per-call CLI.
+    if (data.stt === 'up') subHtml += ' · <span style="color:#888">STT resident</span>';
+    else if (data.stt === 'down') subHtml += ' · <span style="color:#c77f00">STT: CLI fallback</span>';
+    document.getElementById('sub').innerHTML = subHtml;
 
     const now = Date.now();
     // Refresh the ext->channel maps (Hang up uses the room's own leg; Transfer
