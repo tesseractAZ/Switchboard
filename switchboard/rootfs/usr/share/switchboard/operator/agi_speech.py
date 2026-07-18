@@ -91,29 +91,64 @@ def say_or(text: str, fallback_prompt: str = PROMPT_GOODBYE) -> None:
         stream(fallback_prompt)
 
 
+def _stt_start(cmd: list[str]):
+    """Spawn switchboard-stt WITHOUT waiting (Popen or None). The child reads its
+    input from --in (stdin=DEVNULL) and never touches the AGI stdin/stdout, so it
+    runs CONCURRENTLY with a blocking STREAM FILE. Pair with _stt_finish()."""
+    try:
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True)
+    except OSError as exc:
+        log("speech", f"stt spawn error: {exc}")
+        return None
+
+
+def _stt_finish(proc) -> str:
+    """Collect a _stt_start() process; return stdout (stripped), '' on any error."""
+    if proc is None:
+        return ""
+    try:
+        out, err = proc.communicate(timeout=25)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate()
+        except OSError:
+            pass
+        log("speech", "stt timeout")
+        return ""
+    except OSError as exc:
+        try:
+            proc.kill()
+            proc.communicate()
+        except OSError:
+            pass
+        log("speech", f"stt error: {exc}")
+        return ""
+    if err:
+        sys.stderr.write(err)
+    return (out or "").strip()
+
+
 def listen(tag: str, attempt: int = 0, record_ms: int = 6000, silence_s: int = 2,
            bias: str = "") -> str:
     """Record one utterance (beep -> record -> 'one moment') and return the
-    transcript ('' on nothing / STT failure)."""
+    transcript ('' on nothing / STT failure). The transcription runs CONCURRENTLY
+    with the 'one moment' prompt — started just before it, collected just after —
+    so the recognition latency hides behind audio instead of being added after."""
     rec = f"{ASR_DIR}/{tag}-{os.getpid()}-{attempt}"
     stream(PROMPT_BEEP)
     agi(f'RECORD FILE {rec} wav "" {record_ms} s={silence_s}')
-    stream(PROMPT_ONEMOMENT)
     wav = rec + ".wav"
-    text = ""
+    cmd = [STT, "--in", wav, "--mode", "transcribe"]
+    if bias:
+        cmd += ["--bias", bias]
+    proc = _stt_start(cmd)       # start whisper BEFORE the prompt
+    stream(PROMPT_ONEMOMENT)     # ~0.9 s of audio overlaps the inference
     try:
-        cmd = [STT, "--in", wav, "--mode", "transcribe"]
-        if bias:
-            cmd += ["--bias", bias]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-        text = (proc.stdout or "").strip()
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log("speech", f"stt error: {exc}")
+        return _stt_finish(proc)
     finally:
         try:
             os.unlink(wav)
         except OSError:
             pass
-    return text

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.38.0
+
+Voice operator feels snappier — the ~1s recognition now hides behind the prompt.
+
+Every voice flow (dial-0 operator, dial-a-status 45, directory 411, announce 46,
+wake-up 42, automation 43) recorded your speech, played "one moment," and *then*
+ran whisper — so the ~1s of recognition was dead air added after the prompt. Now
+the transcription is started (as a background process) just BEFORE the "one moment"
+prompt and collected just after, so the ~0.9s of prompt audio plays OVER the
+inference instead of before it. That shaves roughly the prompt's length off every
+voice interaction, cutting the post-speech wait from ~2s to ~1s.
+
+Safe by construction: the STT child reads its input from the recorded WAV file
+(stdin=/dev/null) and only talks to the loopback whisper-server — it never touches
+the AGI's stdin/stdout, so it runs concurrently with the (blocking) prompt playback
+without any chance of corrupting the Asterisk AGI protocol stream. The 25s STT
+backstop, error handling, and the recognition result contract are unchanged.
+
+
 ## 0.37.0
 
 Operator greeting now advertises the voice features, plus public-repo hygiene.
