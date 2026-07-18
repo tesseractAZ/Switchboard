@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.40.0
+
+Dashboard: trunk registration status + resident-STT health.
+
+The header sub-line now shows two things it never surfaced before:
+- **Trunk registration** — for an enabled outside line, its live SIP registration
+  state (green *Registered*, red *Rejected/Unregistered*, grey *Unknown*), read via
+  the AMI `PJSIPShowRegistrationsOutbound` action. A dead trunk registration
+  (wrong secret, NAT pinhole, provider down) kills all PSTN calls but was
+  previously invisible in the UI.
+- **Resident STT** — an amber *"STT: CLI fallback"* when the whisper-server isn't
+  answering (so voice recognition is silently running on the slow per-call
+  whisper-cli); quiet when it's resident or intentionally disabled.
+
+Both ride their own longer-TTL caches (20s / 8s) so the hot `/api/status` path and
+its 3-tuple bundle are untouched; the whisper probe is a 1s loopback GET. Completes
+the dashboard observability alongside the per-phone link health added in 0.39.0.
+(The telnet/browser TUI mirror of these is coming next.)
+
+
 ## 0.39.0
 
 Dashboard now shows per-phone link health (contact status + round-trip time).
