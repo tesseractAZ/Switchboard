@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.41.1
+
+Fix: saying just "time" to the operator now reaches the talking clock.
+
+Whisper transcribed a caller's "time" request correctly (heard `Time.`), but the
+operator's clock trigger only listed multi-word forms ("the time", "what time
+is it", "time please"…) and not the bare word **"time"**, so the most natural
+utterance matched nothing and the operator gave up. Added `time` (plus "the
+current time" / "got the time") to the clock phrases. Whole-word matching still
+protects fragments — "anytime", "overtime", "bedtime" don't trip it — and a
+confident room match still wins first, so nothing named after the word is
+shadowed. No other feature had a bare-word gap (weather/power/directory/announce/
+page/intercom all already resolve as single words).
+
+
 ## 0.41.0
 
 Full-screen operator console + the new signals mirrored into the TUI.
