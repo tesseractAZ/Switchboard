@@ -887,6 +887,7 @@ INDEX_HTML = """<!doctype html>
   .busy { background: #fff4e0; color: #b25e00; }
   .conn { font-size: .75rem; color: #b25e00; margin-top: .4rem; }
   .conn .codec { color: #888; font-weight: 600; }
+  .conn.linkinfo { color: #888; margin-top: .25rem; }  /* idle link health (RTT), not a call */
   .ringbtn { margin-top: .6rem; width: 100%; font-size: .75rem; font-weight: 600;
              padding: .35rem .5rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
              background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
@@ -1082,6 +1083,14 @@ async function refresh() {
             (r.call_codec ? ' <span class="codec">· ' + esc(codecName(r.call_codec)) + '</span>' : '') +
           '</div>'
         : '';
+      // Idle link health: SIP contact status + round-trip time (AMI RoundtripUsec,
+      // in microseconds), shown when the phone is registered and NOT on a call.
+      const _us = parseFloat(r.rtt);
+      const rttTxt = (isFinite(_us) && _us >= 0) ? (Math.round(_us / 100) / 10) + ' ms' : '';
+      const linkInfo = (r.registered && !active && (rttTxt || r.contact_status))
+        ? '<div class="conn linkinfo">' + esc(r.contact_status || '') +
+            (rttTxt ? ' · ' + rttTxt : '') + '</div>'
+        : '';
       const ex = esc(r.ext);
       const ringing = (ringingUntil[r.ext] || 0) > now;
       const ringDis = (!r.registered || ringing) ? ' disabled' : '';
@@ -1126,7 +1135,7 @@ async function refresh() {
       return '<div class="card"><div class="ext">ext ' + ex + mwiBadge + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
              '<span class="pill ' + cls + '">' + esc(txt) + '</span>' +
-             conn +
+             conn + linkInfo +
              '<div class="actions">' + ringBtn + connBtn + hangBtn + xferBtn + mwiBtn + '</div>' +
              wakeRow + '</div>';
     }).join('');
