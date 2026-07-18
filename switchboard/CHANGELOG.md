@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.39.0
+
+Dashboard now shows per-phone link health (contact status + round-trip time).
+
+Each registered, idle room card now displays its SIP contact status and idle
+round-trip time (e.g. "Reachable · 2.4 ms") beneath the status pill — the data was
+already collected (AMI ContactList RoundtripUsec, surfaced in /api/status) but never
+rendered. At a glance you can now see which handsets are responding quickly and spot
+a laggy one (e.g. the Wi-Fi cordless) without opening logs. Rendering-only change to
+the web dashboard; no new polling. (Trunk-registration status and whisper-server
+health indicators are coming next.)
+
+
 ## 0.38.0
 
 Voice operator feels snappier — the ~1s recognition now hides behind the prompt.
