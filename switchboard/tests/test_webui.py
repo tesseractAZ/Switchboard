@@ -58,6 +58,19 @@ CONTACTS = (
     "Event: ContactListComplete\r\nEventList: Complete\r\nListItems: 3\r\n\r\n"
 ).encode()
 
+# A PJSIPShowRegistrationsOutbound capture. This add-on's outbound registration
+# section is [trunk-reg]; Status is Registered/Unregistered/Rejected/Stopped. The
+# terminator (OutboundRegistrationDetailComplete) must NOT be read as a
+# registration even though it shares the OutboundRegistration* prefix.
+REGISTRATIONS = (
+    "Asterisk Call Manager/9.0.0\r\n\r\n"
+    "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+    "Response: Success\r\nEventList: start\r\nMessage: Following are Registrations\r\n\r\n"
+    "Event: OutboundRegistrationDetail\r\nObjectType: registration\r\nObjectName: trunk-reg\r\n"
+    "Status: Registered\r\nServerUri: sip:losangeles4.voip.ms\r\nNextReg: 95\r\n\r\n"
+    "Event: OutboundRegistrationDetailComplete\r\nEventList: Complete\r\nListItems: 1\r\n\r\n"
+).encode()
+
 AUTH_FAIL = (
     "Asterisk Call Manager/9.0.0\r\n\r\n"
     "Response: Error\r\nMessage: Authentication failed\r\n\r\n"
@@ -89,6 +102,22 @@ def test_contacts() -> None:
     check("contacts: not keyed by raw ObjectName", "11@@a88df67525" not in cs)
     check("contacts: status populated (real value, not empty)", cs.get("11", {}).get("status") == "Reachable")
     check("contacts: RTT populated", cs.get("11", {}).get("rtt") == "3706")
+
+
+def test_registrations() -> None:
+    regs = ami.registrations_from_blocks(ami.parse_ami_blocks(REGISTRATIONS))
+    check("regs: keyed by ObjectName -> 'trunk-reg'", "trunk-reg" in regs)
+    check("regs: status read", regs.get("trunk-reg", {}).get("status") == "Registered")
+    check("regs: server uri captured", "voip.ms" in regs.get("trunk-reg", {}).get("server_uri", ""))
+    # No registrations = a legitimate distinct empty state (trunk off / register=no),
+    # not a crash.
+    check("regs: empty capture -> {}", ami.registrations_from_blocks([]) == {})
+    # The ...Complete terminator shares the OutboundRegistration* prefix but has no
+    # ObjectName, so it must NOT be counted as a registration.
+    only_complete = ami.parse_ami_blocks(
+        b"Event: OutboundRegistrationDetailComplete\r\nEventList: Complete\r\nListItems: 1\r\n\r\n")
+    check("regs: Complete event is not a registration",
+          ami.registrations_from_blocks(only_complete) == {})
 
 
 def test_registered() -> None:
@@ -708,6 +737,7 @@ def main() -> None:
     test_get_channel_codec_guards()
     test_get_channel_codec_reads_value()
     test_contacts()
+    test_registrations()
     test_registered()
     test_lowercasing()
     test_login_failure()
