@@ -74,18 +74,48 @@ def set_var(name: str, value: str) -> None:
     agi(f'SET VARIABLE {name} "{value}"')
 
 
-def _stt(args: list[str], wav: str) -> str:
-    """Run switchboard-stt with the given args on `wav`; return stdout (stripped),
-    '' on any error. Never raises."""
+def _stt_start(args: list[str], wav: str):
+    """Spawn switchboard-stt on `wav` WITHOUT waiting; return a Popen or None.
+    The child reads its input from --in (stdin=DEVNULL) and only touches the WAV
+    plus the loopback whisper-server — it never reads/writes this AGI's stdin or
+    stdout, so it can run CONCURRENTLY with a blocking STREAM FILE. Pair with
+    _stt_finish(): starting it just before the 'one moment' prompt overlaps ~0.9 s
+    of inference with the prompt's playback instead of adding it as dead air."""
     try:
-        proc = subprocess.run([STT, "--in", wav, *args], capture_output=True,
-                              text=True, timeout=25)
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)  # transcript/decision -> Asterisk log
-        return (proc.stdout or "").strip()
-    except (subprocess.TimeoutExpired, OSError) as exc:
+        return subprocess.Popen([STT, "--in", wav, *args],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True)
+    except OSError as exc:
+        sys.stderr.write(f"[operator] stt spawn error: {exc}\n")
+        return None
+
+
+def _stt_finish(proc) -> str:
+    """Collect a _stt_start() process; return stdout (stripped), '' on any error
+    (spawn-failed None / timeout / OSError). Never raises."""
+    if proc is None:
+        return ""
+    try:
+        out, err = proc.communicate(timeout=25)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate()
+        except OSError:
+            pass
+        sys.stderr.write("[operator] stt timeout\n")
+        return ""
+    except OSError as exc:
+        try:
+            proc.kill()
+            proc.communicate()
+        except OSError:
+            pass
         sys.stderr.write(f"[operator] stt error: {exc}\n")
         return ""
+    if err:
+        sys.stderr.write(err)  # transcript/decision -> Asterisk log
+    return (out or "").strip()
 
 
 def recognize(attempt: int) -> tuple[str, str]:
@@ -108,7 +138,6 @@ def recognize(attempt: int) -> tuple[str, str]:
     # play the (absent) 'beep' sound and abort the recording before it writes the
     # file. 's=N' contains '=', so res_agi correctly skips the beep path.
     agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
-    stream("switchboard/sw-onemoment")  # cover STT latency (no dead air)
     wav = rec + ".wav"
     # Diagnostic breadcrumb: the WAV is deleted after transcription, so its size
     # is the only after-the-fact evidence of what RECORD captured. A silent
@@ -120,8 +149,13 @@ def recognize(attempt: int) -> tuple[str, str]:
     except OSError:
         size = -1
     sys.stderr.write(f"[operator] rec attempt={attempt} bytes={size}\n")
+    # Start transcribing NOW, then play "one moment": the prompt audio plays OVER
+    # the inference (the STT child never touches this AGI channel), hiding the
+    # recognition latency instead of adding it as dead air after the prompt.
+    proc = _stt_start(["--mode", "rooms"], wav)
+    stream("switchboard/sw-onemoment")  # cover STT latency — now OVERLAPS it
     try:
-        result = _stt(["--mode", "rooms"], wav)
+        result = _stt_finish(proc)
         if result in _FEATURE_TOKENS:
             sys.stderr.write(f"[operator] {result} intent\n")
             return result, ""

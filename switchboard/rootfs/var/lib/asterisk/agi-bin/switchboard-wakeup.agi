@@ -69,16 +69,38 @@ def recognize(attempt: int) -> str:
     rec = f"{ASR_DIR}/wake-{os.getpid()}-{attempt}"
     stream("switchboard/sw-beep")
     agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
-    stream("switchboard/sw-onemoment")
     wav = rec + ".wav"
     out = ""
+    # Start STT before the "one moment" prompt so inference overlaps its playback
+    # (the child only touches the WAV + loopback whisper-server, not the AGI channel).
     try:
-        proc = subprocess.run([STT, "--in", wav, "--mode", "time"],
-                              capture_output=True, text=True, timeout=25)
-        out = (proc.stdout or "").strip()
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-    except (subprocess.TimeoutExpired, OSError) as exc:
+        proc = subprocess.Popen([STT, "--in", wav, "--mode", "time"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True)
+    except OSError as exc:
+        sys.stderr.write(f"[wakeup] stt spawn error: {exc}\n")
+        proc = None
+    stream("switchboard/sw-onemoment")
+    try:
+        if proc is not None:
+            so, se = proc.communicate(timeout=25)
+            out = (so or "").strip()
+            if se:
+                sys.stderr.write(se)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate()
+        except OSError:
+            pass
+        sys.stderr.write("[wakeup] stt timeout\n")
+    except OSError as exc:
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.communicate()
+            except OSError:
+                pass
         sys.stderr.write(f"[wakeup] stt error: {exc}\n")
     finally:
         try:
