@@ -170,7 +170,7 @@ _FEATURE_PHRASES = (
                    "all call", "intercom", "page")),
     ("clock",     ("what time is it", "whats the time", "current time", "the time",
                    "time please", "tell me the time", "what time", "time is it",
-                   "clock")),
+                   "time", "the current time", "got the time", "clock")),
     ("status",    ("weather", "forecast", "temperature", "power", "battery",
                    "solar", "grid", "energy", "electricity", "charge",
                    "house status", "home status", "hows the house", "how is the house",

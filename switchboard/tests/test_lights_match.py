@@ -224,6 +224,13 @@ def test_feature_intent():
     check("feature: 'what time is it' -> clock", fi("what time is it") == "clock")
     check("feature: 'the time please' -> clock", fi("the time please") == "clock")
     check("feature: 'clock' -> clock", fi("clock") == "clock")
+    # REGRESSION: a caller who just says "time" (what whisper transcribed as
+    # 'Time.' on a real call) must reach the clock — bare "time" was missing.
+    check("feature: bare 'time' -> clock", fi("time") == "clock")
+    check("feature: 'Time.' (whisper punctuation) -> clock", fi("Time.") == "clock")
+    # ...but "time" as a word-fragment inside another word must NOT trip it.
+    for w in ("anytime", "overtime", "sometime", "bedtime"):
+        check(f"feature: {w!r} -> None (no substring hijack)", fi(w) is None)
     check("feature: 'the weather' -> status", fi("what's the weather") == "status")
     check("feature: 'power' -> status", fi("power") == "status")
     check("feature: 'house status' -> status", fi("house status") == "status")
@@ -281,6 +288,8 @@ def test_stt_rooms_decision():
     # checked AFTER wakeup/automation AND after a confident room match.
     check("stt 'what time is it' -> clock",
           stt.resolve_rooms_text("what time is it", rooms) == "clock")
+    check("stt bare 'time' -> clock (real-call regression)",
+          stt.resolve_rooms_text("time", rooms) == "clock")
     check("stt weather -> status",
           stt.resolve_rooms_text("what's the weather", rooms) == "status")
     check("stt 'directory assistance' -> directory",
