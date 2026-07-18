@@ -150,8 +150,8 @@ def test_outbound_rules_live_in_rooms_context() -> None:
     opts = {"rooms": rooms, "operator": {"enabled": True}, "automation_enabled": True,
             "page_enabled": True, "clock_enabled": True, "wakeup_enabled": True,
             "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
-                      "username": "553774_switchboard", "secret": "s", "dial_prefix": "9",
-                      "outbound_caller_id": "5204855554", "inbound_ext": "19"}}
+                      "username": "100000_switchboard", "secret": "s", "dial_prefix": "9",
+                      "outbound_caller_id": "2025550100", "inbound_ext": "19"}}
     e = sbc.render_extensions(opts)
     check("outbound _9. lives in [rooms]", _context_of(e, "exten = _9.,") == "rooms")
     check("Dial(...@trunk) lives in [rooms]", _context_of(e, "@trunk") == "rooms")
@@ -160,7 +160,7 @@ def test_outbound_rules_live_in_rooms_context() -> None:
           _context_of(e, "exten = _9.,") not in ("automation", "page", "operator", "wakeup"))
     check("inbound ring rule lives in [from-trunk]", _context_of(e, "Inbound call") == "from-trunk")
     check("outbound CID set before the trunk Dial",
-          e.index("CALLERID(num)=5204855554") < e.index("@trunk"))
+          e.index("CALLERID(num)=2025550100") < e.index("@trunk"))
     # A non-prefixed extension still rings a room (the _X. room pattern is intact).
     check("room pattern still present in [rooms]", _context_of(e, "Room call to") == "rooms")
 
@@ -174,10 +174,10 @@ def test_direct_dial_mode() -> None:
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
     opts = {"rooms": rooms, "operator": {"enabled": True}, "directory_enabled": True,
             "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
-                      "username": "553774_switchboard", "secret": "s",
+                      "username": "100000_switchboard", "secret": "s",
                       # dial_prefix present but direct_dial MUST override it.
                       "dial_prefix": "9", "direct_dial": True,
-                      "outbound_caller_id": "5204855554", "inbound_ext": "19"}}
+                      "outbound_caller_id": "2025550100", "inbound_ext": "19"}}
     e = sbc.render_extensions(opts)
     # The 11-digit (1 + 10) outbound pattern is present, in [rooms], dialed AS-IS.
     check("direct: 11-digit pattern in [rooms]", _context_of(e, "exten = _1NXXNXXXXXX,") == "rooms")
@@ -200,7 +200,7 @@ def test_direct_dial_mode() -> None:
     check("direct: trunk-origin guard present",
           '$["${CHANNEL(endpoint)}" = "trunk"]?blocked' in e)
     check("direct: outbound CID set before the trunk Dial",
-          e.index("CALLERID(num)=5204855554") < e.index("@trunk"))
+          e.index("CALLERID(num)=2025550100") < e.index("@trunk"))
     # 911 is deliberately NOT routed (E911 unconfigured): no literal 911 rule, so
     # it falls through _X. -> not-a-room -> Congestion rather than the trunk.
     check("direct: 911 not routed to trunk", "exten = 911," not in e)
@@ -264,7 +264,7 @@ def test_trunk_aor_not_qualified() -> None:
     # (LAN ATAs answer OPTIONS fine) — this disable is trunk-only.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
-             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9"}
+             "username": "100000_switchboard", "secret": "x", "dial_prefix": "9"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     aor = pj[pj.index("[trunk-aor]"):pj.index("[trunk]\n")]
     check("trunk AOR disables qualify (qualify_frequency=0)", "qualify_frequency = 0" in aor)
@@ -282,7 +282,7 @@ def test_trunk_registration_keepalive() -> None:
     # the INVITE never reaching us. expiration=120 keeps the pinhole warm.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
-             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9",
+             "username": "100000_switchboard", "secret": "x", "dial_prefix": "9",
              "registns": True}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     reg = pj[pj.index("[trunk-reg]"):]
@@ -738,12 +738,12 @@ def test_trunk_from_user_domain_validated() -> None:
     # fall back to the already-validated username/host, never emit unchecked.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
-             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9",
+             "username": "100000_switchboard", "secret": "x", "dial_prefix": "9",
              "from_user": "bad user;evil", "from_domain": "ok.example.com"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     tk = pj[pj.index("[trunk]\n"):]
     check("trunk: injecting from_user falls back to username",
-          "from_user = 553774_switchboard" in tk and "evil" not in tk)
+          "from_user = 100000_switchboard" in tk and "evil" not in tk)
     check("trunk: valid from_domain is kept", "from_domain = ok.example.com" in tk)
 
 
@@ -753,7 +753,7 @@ def test_call_audio_qos_rtp_jitter() -> None:
     # buffer on the public-internet trunk leg toward the answering handset.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
-             "username": "553774_switchboard", "secret": "x", "dial_prefix": "9"}
+             "username": "100000_switchboard", "secret": "x", "dial_prefix": "9"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     transport = pj[pj.index("[transport-udp]"):pj.index("[room-endpoint]")]
     check("qos: SIP signalling marked CS3 on the transport",
@@ -799,7 +799,7 @@ def test_transfer_toll_fraud_defense() -> None:
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
     trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
              "username": "u", "secret": "x", "dial_prefix": "9",
-             "outbound_caller_id": "5204855554"}
+             "outbound_caller_id": "2025550100"}
     opts = {"rooms": rooms, "trunk": trunk, "operator": {"enabled": True}}
     e = sbc.render_extensions(opts)
     pj = sbc.render_pjsip(opts)
