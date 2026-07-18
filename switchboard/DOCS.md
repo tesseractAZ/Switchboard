@@ -26,6 +26,7 @@ LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
 13. [Codecs — G.711 µ-law only, on purpose](#13-codecs--g711-µ-law-only-on-purpose)
 14. [Troubleshooting](#14-troubleshooting)
 15. [Security](#15-security)
+16. [Reproducing on new hardware](#16-reproducing-on-new-hardware)
 
 ---
 
@@ -385,18 +386,62 @@ Save & **Apply**; reboot the gateway if ports don't register.
 > Tone"** in Profile 1 (or per port); the label varies by firmware. Without it the
 > indicator still tracks in the dashboard, but the dial tone won't stutter.
 
-### 7.3 Dialing behavior
+### 7.3 Configuring the gateway from the CLI (reliable path)
 
-In **Profile 1 → Dial Plan**, a starter pattern (adjust to your extensions and
-outside-line prefix):
+The GXW's web UI works, but its **SSH command shell** is the authoritative,
+scriptable way to read and write settings — and, importantly, the **only** way to
+*confirm* a value. Grandstream's `export`/HTTP config views show the *firmware
+default* for many Profile-1 codes, not the committed value; only `get P<n>` in the
+shell reflects what's actually running.
 
 ```
-{ 1x | 4x | 411 | 0 | 9xxxxxxxxxx }
+ssh admin@<gateway-ip>        # password = the GXW admin password
+> config                      # enter config mode
+CONFIG> get P4200             # read a value (authoritative)
+CONFIG> set P85 3             # change a value
+CONFIG> commit                # persist
+CONFIG> exit
 ```
+
+Useful P-codes (Profile 1 is shared by all eight FXS ports):
+
+| P-code | Setting | Reference value |
+|--------|---------|-----------------|
+| `P4200`–`P4203` | **Dial Plan** (per profile; the FXS ports use Profile 1 = `P4200`) | see below |
+| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see §7.4 |
+| `P37` | **Voice Frames per TX** (G.711 ptime = value × 10 ms) | `2` (20 ms) |
+| `P57` | Codec preference | µ-law first |
+| `P32` | Register Expiration (minutes) | `2` (fast re-register after a restart) |
+| `P72` | Use `#` as dial key | `1` (enabled) |
+
+### 7.4 Dial plan & the send delay
+
+A dial plan that supports **prefix-free direct dial** (`direct_dial: true`, §9) —
+2-digit rooms, feature codes, and `1` + 10-digit outside numbers — for the
+reference home's `11`–`20` extensions:
+
+```
+{ 0 | 1[1-9] | 20 | 4[1-6] | 411 | 1[2-9]xxxxxxxxx | \+x+ | *x+ | *xx*x+ }
+```
+
+- `1[1-9]` = rooms 11–19; `20` = the softphone; `4[1-6]`/`411` = feature codes.
+- `1[2-9]xxxxxxxxx` = 1 + 10-digit direct dial. This **overlaps** rooms 12–19
+  (each is both a complete room *and* the start of an 11-digit number), so those
+  extensions send only after the **No Key Entry Timeout** (`P85`) — or immediately
+  if you press `#` (`P72` is enabled). Room 11, `20`, `0`, and feature codes are
+  unambiguous and send instantly.
+- **`P85 = 3` seconds** is the reference value: it trims that 12–19 pause from the
+  firmware default of 4 s while staying above a **rotary/pulse** phone's
+  inter-digit gap, so a slow rotary dial of a long number isn't cut off mid-number.
+  Dropping to 2 s risks that on rotary sets. It's a single global value (no
+  per-port setting).
 
 For **pulse/rotary** phones, enable the **Pulse Dialing** option on that FXS port.
 
-### 7.4 Verify
+If you're not using direct dial, a simpler prefix-mode plan works:
+`{ 1x | 20 | 4[1-6] | 411 | 0 | 9xxxxxxxxxx }` (dial `9` for an outside line).
+
+### 7.5 Verify
 
 On the **Switchboard** panel, each provisioned room shows **Registered** within
 ~30 s. If not, see [§14](#14-troubleshooting).
@@ -486,7 +531,11 @@ layered on automatically (details in [SECURITY.md](SECURITY.md#toll-fraud-the-tr
 A live switchboard board an operator can drive by keystroke: see every phone's
 status, **ring** a room, **connect** two rooms (patch a call), **hang up**,
 **transfer**, **set/cancel a wake-up**, toggle **message-waiting**, **page all**,
-and control **lights**. Two front-ends onto the same board:
+and control **lights**. The board fills the whole terminal: each room row shows its
+registration, any live call + peer, and its idle **round-trip latency** (RTT); a
+status line under the header shows the **SIP trunk registration** (Registered /
+Unregistered) and **resident-STT health** (resident / CLI-fallback) — the same
+signals the Ingress dashboard surfaces. Two front-ends onto the same board:
 
 - **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
@@ -655,3 +704,57 @@ essentials:
 - **Change the default room secrets** before your phones register.
 - The telnet console and web terminal are **unauthenticated on your LAN by
   design** — bind them to `127.0.0.1` or disable them if the LAN isn't trusted.
+
+---
+
+## 16. Reproducing on new hardware
+
+Everything needed to rebuild Switchboard lives in this repository, so replacing
+the Home Assistant host (a new Raspberry Pi, a restored image, a different
+machine) is straightforward.
+
+### Rebuild the add-on from GitHub
+
+1. Install **Home Assistant OS** on the new host.
+2. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
+   `https://github.com/tesseractAZ/Switchboard`.
+3. Install **Switchboard**. The add-on builds from source in the repo (Asterisk,
+   whisper.cpp, espeak-ng, everything) — no external image to host.
+4. To pin an exact prior version, check out that release's tag first: every
+   version is tagged (`v0.1.0` … the current release) and published as a **GitHub
+   Release** with its changelog, and each release carries a generated `.docx` +
+   `.pdf` of this manual. `git checkout vX.Y.Z` gives you the precise source that
+   built any release.
+
+### Restore your configuration (the one thing not in the repo)
+
+Your **runtime configuration** — room names, SIP `secret`s, the trunk
+credentials, the cordless address — is **not** in the (public) repository by
+design; secrets don't belong in source control. It lives in the add-on's options
+(`/data/options.json`) and is captured by Home Assistant's own backups. Two ways
+to restore it:
+
+- **Home Assistant backup (recommended).** A full or partial HA backup includes
+  each add-on's configuration; restoring one on the new host repopulates
+  Switchboard's options automatically. Take a fresh backup whenever you change the
+  configuration.
+- **Re-enter by hand.** It's a handful of fields in the **Configuration** tab
+  (rooms + secrets, and the trunk block if you use an outside line).
+
+### The gateway and cordless are separate devices
+
+The **GXW4216 gateway** and the **WP826 cordless** are independent hardware on
+your LAN — swapping the Home Assistant host does **not** touch them, so their
+settings survive. You only need to reconfigure them if you replace *those*
+devices, in which case:
+
+- **GXW** — re-apply Profile-1 and the per-port SIP credentials via the SSH shell
+  ([§7.3](#73-configuring-the-gateway-from-the-cli-reliable-path)); the reference
+  dial plan and `P85 = 3` send delay are in [§7.4](#74-dial-plan--the-send-delay).
+- **WP826** — re-register it as its extension and, for the phonebook / distinctive
+  ring / ringtone / speed-dial extras, re-run the tools in
+  [`tools/`](../tools/) (`wp826.mjs`, `wp826-pcodes.md`).
+
+Point the rebuilt gateway/cordless at the new host's IP as the SIP server and the
+phones re-register — the add-on regenerates all of Asterisk's config from your
+options on start.

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.42.0
+
+Documentation: a generated Word + PDF manual, built and attached automatically.
+
+`scripts/build-docs-docx.py` assembles README + SECURITY + DOCS.md into one
+printable manual — an editable **.docx** (via pandoc) and a reader-friendly
+**.pdf** (via LibreOffice, no LaTeX) — and a new `docs` CI workflow builds both on
+every push/PR (uploaded as an artifact, so a DOCS.md that stops converting fails
+the check) and attaches them to each published GitHub Release. Same process the
+ecoflow-panel and zwave repos use.
+
+The reference itself was refreshed for the current release: the real
+prefix-free **direct-dial GXW dial plan** and the **SSH CLI** config path (with
+the `P85 = 3 s` rotary-safe send delay), the **full-screen operator console** with
+its trunk-registration / STT-health / per-room-RTT signals, and a new
+**"Reproducing on new hardware"** chapter (rebuild from a release tag; restore
+config from a Home Assistant backup).
+
+
 ## 0.41.1
 
 Fix: saying just "time" to the operator now reaches the talking clock.
