@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.37.0
+
+Operator greeting now advertises the voice features, plus public-repo hygiene.
+
+- **Greeting** — dial-0 now says "Say a room name, or ask for the time, weather,
+  directory, or lights," so the voice features (added in 0.33.0) are discoverable
+  instead of hidden. Inbound outside calls ring only the cordless by default now
+  (`inbound_ext` example trimmed to a single ext; re-add a second to group-ring).
+- **Public-readiness** (the add-on is open-source): genericized the example
+  provider username and caller-ID in the test fixtures to fictional values
+  (`100000_switchboard`, a 555-0100 reserved number) so no real account identifier
+  or home phone number ships in the repo; neutralized the shipped default
+  `cordless_ip` (was a real-home address) to empty (device-health auto-follows the
+  cordless's registration anyway); hardened `.gitignore` against accidentally
+  committing secrets/state. No secret was ever committed — nothing required
+  rotation (verified against full git history).
+
+
 ## 0.36.0
 
 Hardened the whisper-server RAM gate against the boot-race that already bit the

@@ -200,7 +200,7 @@ def test_mes_zero_is_no_data() -> None:
           rec["mes_worst"] is None and rec["quality"] == "unknown" and not rec["notify"])
     # #18: a 6s call, tx MES 0 (unmeasured) but rx MES 88 -> excellent, not poor.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/x-2",
-                                cid="5204855554", billsec="6",
+                                cid="2025550100", billsec="6",
                                 rxcount="248", txcount="332", rxmes="88.1", txmes="0"))
     check("mes0: one-zero MES falls back to the measured direction",
           rec["mes_worst"] == 88.1 and rec["quality"] == "excellent" and not rec["notify"])
