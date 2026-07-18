@@ -1,0 +1,82 @@
+name: Docs
+
+# Assemble README + SECURITY + DOCS.md into one printable manual — an editable
+# Word (.docx) and a reader-friendly PDF — on every push/PR, and attach both to
+# each GitHub Release. Two purposes:
+#   1. Gate: a DOCS.md that no longer converts cleanly (bad table, broken raw
+#      block) fails the PR instead of silently shipping.
+#   2. Distribution: reviewers get the offline manual for the branch as an
+#      artifact, and every published release carries its documentation.
+# Generator: scripts/build-docs-docx.py (pandoc for the .docx, LibreOffice for
+# the .pdf — no LaTeX). Same process as the ecoflow-panel and zwave repos.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+# Read is enough for the PR/push artifact path; the release path needs write to
+# upload assets onto the Release.
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    name: Build documentation (.docx + .pdf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure pandoc
+        run: |
+          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          pandoc --version | head -1
+
+      - name: Build .docx
+        run: |
+          python3 scripts/build-docs-docx.py \
+            --ref "${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}" \
+            --output "Switchboard-Documentation.docx"
+
+      # A PDF alongside the .docx — a faithful render of the SAME document (same
+      # generated TOC + page breaks) via LibreOffice headless (no LaTeX). This is
+      # a HARD gate (test -s below): a DOCS.md or toolchain change that can't
+      # produce a PDF fails the check rather than silently shipping without one.
+      - name: Ensure LibreOffice (docx → pdf)
+        run: |
+          command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
+          libreoffice --version | head -1
+
+      - name: Build .pdf (render the .docx)
+        run: |
+          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
+            --convert-to pdf --outdir . "Switchboard-Documentation.docx"
+          test -s Switchboard-Documentation.pdf
+          ls -la Switchboard-Documentation.docx Switchboard-Documentation.pdf
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: documentation
+          path: |
+            Switchboard-Documentation.docx
+            Switchboard-Documentation.pdf
+          if-no-files-found: error
+
+      # On a published release, attach both files (versioned filenames) as release
+      # assets. Race-free: the release already exists when this event fires.
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v="${TAG#v}"
+          cp Switchboard-Documentation.docx "Switchboard-Documentation-${TAG}.docx"
+          cp Switchboard-Documentation.pdf  "Switchboard-Documentation-${TAG}.pdf"
+          gh release upload "$TAG" \
+            "Switchboard-Documentation-${TAG}.docx" \
+            "Switchboard-Documentation-${TAG}.pdf" \
+            --clobber --repo "$GITHUB_REPOSITORY"
