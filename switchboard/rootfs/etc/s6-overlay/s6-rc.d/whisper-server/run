@@ -25,12 +25,19 @@ fi
 # toggles independently; miss any one and that feature silently falls back to the
 # slow per-call whisper-cli, which can blow the 25 s AGI timeout. Keep this list
 # in lockstep with the AGIs that call sp.listen / switchboard-stt.
-if ! bashio::config.true 'operator.enabled' \
-   && ! bashio::config.true 'wakeup_enabled' \
-   && ! bashio::config.true 'automation_enabled' \
-   && ! bashio::config.true 'status_enabled' \
-   && ! bashio::config.true 'announce_enabled' \
-   && ! bashio::config.true 'directory_enabled'; then
+# Idle ONLY when EVERY speech feature reads an explicit literal "false" — never
+# on a blank/absent read. bashio can momentarily return "" during a config reload
+# or at boot; `! bashio::config.true` treats "" as "not enabled", so a transient
+# all-blank read would satisfy every clause and PERMANENTLY idle the recognizer
+# even with features enabled (s6 sees the idle process as "started" and never
+# restarts it — the v0.30.1 console-web regression, same class). `= "false"` makes
+# a blank read fall through to "stay resident", which is the safe default.
+if [ "$(bashio::config 'operator.enabled')" = "false" ] \
+   && [ "$(bashio::config 'wakeup_enabled')" = "false" ] \
+   && [ "$(bashio::config 'automation_enabled')" = "false" ] \
+   && [ "$(bashio::config 'status_enabled')" = "false" ] \
+   && [ "$(bashio::config 'announce_enabled')" = "false" ] \
+   && [ "$(bashio::config 'directory_enabled')" = "false" ]; then
     bashio::log.info "No STT feature enabled (operator/wakeup/automation/status/announce/directory all off); whisper-server idling."
     exec sleep infinity
 fi
