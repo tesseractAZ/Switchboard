@@ -47,6 +47,10 @@ try:
     import ha_client  # noqa: E402
 except ImportError:  # pragma: no cover
     ha_client = None
+try:
+    import stthealth  # noqa: E402  (resident whisper-server probe; webui/ on sys.path)
+except ImportError:  # pragma: no cover
+    stthealth = None
 
 OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 # Board refresh cadence. A phone board's registration/call state changes on the
@@ -177,13 +181,67 @@ def parse_input(buf: bytes):
 
 
 # ── Board model (shared snapshot, refreshed by a poller thread) ─────────────── #
-def load_rooms_cfg() -> dict:
+def load_options() -> dict:
+    """The full add-on options.json (rooms + trunk + feature toggles), or {}."""
     try:
         with open(OPTIONS_PATH) as fh:
-            opts = json.load(fh)
+            return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def load_rooms_cfg(opts: dict | None = None) -> dict:
+    if opts is None:
+        opts = load_options()
     return {str(r.get("ext")): r for r in (opts.get("rooms") or [])}
+
+
+def _rtt_ms(us) -> float | None:
+    """Contact round-trip µs (AMI RoundtripUsec, a raw string) → ms, 1 decimal.
+    None for missing/''/non-numeric/negative (mirrors rtpmon.poller.rtt_ms)."""
+    try:
+        v = float(us)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0 or v != v:  # non-positive or NaN
+        return None
+    return round(v / 1000.0, 1)
+
+
+def _fill_row(left: str, right: str, width: int, min_gap: int = 2) -> str:
+    """Left text + a RIGHT-aligned right text within `width` visible columns
+    (ANSI-aware via vis_width, so color codes don't skew the math). If they'd
+    collide (narrow terminal), drop the right detail rather than show a fragment."""
+    if not right:
+        return left
+    pad = width - vis_width(left) - vis_width(right)
+    if pad < min_gap:
+        return left
+    return left + (" " * pad) + right
+
+
+# The trunk registration + resident-STT health change slowly and each costs an
+# extra AMI login / loopback probe, so refresh them on their own throttle instead
+# of every ~3s board poll. Module-level (the poller is a single thread).
+_SLOW_TTL = 20.0
+_slow_cache: dict = {"ts": -1e9, "trunk_reg": "", "stt": ""}
+
+
+def _slow_signals(opts: dict) -> tuple[str, str]:
+    """(trunk_registration, stt_state), throttled to _SLOW_TTL. trunk_reg is ''
+    when the trunk is disabled; stt is stthealth.status (up/down/disabled/'')."""
+    now = time.time()
+    if now - _slow_cache["ts"] < _SLOW_TTL:
+        return _slow_cache["trunk_reg"], _slow_cache["stt"]
+    trunk_reg = ""
+    if (opts.get("trunk") or {}).get("enabled"):
+        try:
+            trunk_reg = (ami.get_registrations().get("trunk-reg") or {}).get("status") or "Unknown"
+        except (ami.AMIError, OSError):
+            trunk_reg = ""
+    stt = stthealth.status(opts) if stthealth is not None else ""
+    _slow_cache.update(ts=now, trunk_reg=trunk_reg, stt=stt)
+    return trunk_reg, stt
 
 
 _CODEC_NAMES = {"ulaw": "µ-law", "alaw": "A-law", "g722": "G.722", "g729": "G.729",
@@ -197,9 +255,11 @@ def _codec_label(codec: str) -> str:
     return "/".join(_CODEC_NAMES.get(x, x) for x in codec.split("/")) if codec else ""
 
 
-def build_board(rooms_cfg: dict) -> dict:
+def build_board(rooms_cfg: dict, opts: dict | None = None) -> dict:
     """One AMI poll → a board dict the renderer consumes. Pure given the AMI
-    helpers; isolated here so the renderer/tests never touch a socket."""
+    helpers; isolated here so the renderer/tests never touch a socket. `opts` (the
+    full options) enables the slow trunk-registration + STT-health signals; omit
+    it (tests) and those board keys are simply absent and the renderer skips them."""
     rooms_by_ext = {ext: (cfg.get("name") or ext) for ext, cfg in rooms_cfg.items()}
     try:
         # One AMI session for the whole board read (endpoints + contacts +
@@ -250,6 +310,7 @@ def build_board(rooms_cfg: dict) -> dict:
             "device_state": ds, "call_state": call.get("state", ""), "peer": call.get("peer", ""),
             "codec": call.get("codec", ""),
             "channel": chan_by_ext.get(name, ""), "peer_channel": peer_by_ext.get(name, ""),
+            "rtt": contact.get("rtt", ""), "contact_status": contact.get("status", ""),
             "mwi": _mwi(name),
         })
     for ext, cfg in rooms_cfg.items():
@@ -270,8 +331,9 @@ def build_board(rooms_cfg: dict) -> dict:
             wakeups.sort(key=lambda w: w["target_epoch"])
         except Exception:
             wakeups = []
+    trunk_reg, stt = _slow_signals(opts) if opts is not None else ("", "")
     return {"ami_ok": ami_ok, "rooms": rooms, "calls": summary["calls"],
-            "wakeups": wakeups, "ts": time.time()}
+            "wakeups": wakeups, "trunk_reg": trunk_reg, "stt": stt, "ts": time.time()}
 
 
 def fmt12(hhmm: str) -> str:
@@ -415,7 +477,8 @@ def poller_loop(board: Board, stop: threading.Event, gate: ClientGate, log) -> N
         if not gate.wait_active():
             break  # woken for shutdown
         try:
-            board.set(build_board(load_rooms_cfg()))
+            opts = load_options()
+            board.set(build_board(load_rooms_cfg(opts), opts))
         except Exception as exc:  # never let the poller die
             log(f"poll error: {exc}")
         stop.wait(POLL_SECONDS)
@@ -517,16 +580,37 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     rooms = board.get("rooms", [])
     calls = board.get("calls", [])
     sel = sess.get("sel", 0)
-    rule = color(GREY, "─" * min(width, 72))
+    # Full-screen board: the rules and rows span (almost) the whole terminal, and
+    # live per-row detail is right-aligned to this edge. center() still gives a
+    # 1-col margin + vertical centering. A wider label column uses the new room.
+    bw = max(24, width - 2)
+    label_w = 16 if width < 64 else 22
+    rule = color(GREY, "─" * bw)
     lines: list[str] = []
 
     on_calls = sum(1 for r in rooms if r.get("call_state"))
     online = sum(1 for r in rooms if r.get("registered"))
     clock = time.strftime("%H:%M:%S", time.localtime(now))
     head_left = f" {BOLD}☎️ SWITCHBOARD OPERATOR{RESET}"
-    head_right = color(GREY, f"{online}/{len(rooms)} online · {on_calls} on call · {clock} ")
-    lines.append(f"{head_left}   {head_right}")
+    head_right = color(GREY, f"{online}/{len(rooms)} online · {on_calls} on call · {clock}")
+    head = _fill_row(head_left, head_right, bw)
+    lines.append(head if head != head_left else f"{head_left}   {head_right}")  # narrow: left-cluster
     lines.append(rule)
+
+    # Slow signals (present only when build_board was given opts): trunk SIP
+    # registration + resident-STT health, as a compact status line under the head.
+    trunk_reg = board.get("trunk_reg", "")
+    stt = board.get("stt", "")
+    bits = []
+    if trunk_reg:
+        tcol = GREEN if trunk_reg == "Registered" else (GREY if trunk_reg == "Unknown" else RED)
+        bits.append(color(GREY, "trunk ") + color(tcol, "● " + trunk_reg))
+    if stt and stt != "disabled":
+        bits.append(color(GREY, "STT ") + color(GREEN if stt == "up" else YELLOW,
+                                                "● " + ("resident" if stt == "up" else "CLI fallback")))
+    if bits:
+        lines.append("  " + color(GREY, "     ").join(bits))
+        lines.append(rule)
 
     if not board.get("ami_ok", False):
         lines.append("  " + color(RED, "Asterisk Manager unreachable — the PBX may still be starting."))
@@ -538,12 +622,25 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         # Pad the PLAIN text first; wrap in color after, so ANSI codes don't
         # throw off the column width.
         ext = f"{r['ext']:<3}"
-        label = (r.get("label") or r["ext"])[:16].ljust(16)
+        label = (r.get("label") or r["ext"])[:label_w].ljust(label_w)
         status = color(col, f"{glyph} {txt}")
         # ✉ marker for a room with a message-waiting flag set. The glyph is a
         # narrow (width-1) char, so it lines up like any other trailing badge.
         mwi = color(YELLOW, "  ✉") if r.get("mwi") else ""
-        row = f"  {cursor} {BOLD}{ext}{RESET}  {label}  {status}{color(GREY, suffix)}{mwi}"
+        left = f"  {cursor} {BOLD}{ext}{RESET}  {label}  {status}{color(GREY, suffix)}{mwi}"
+        # Right-aligned live link detail: idle qualify RTT + a notable contact
+        # status (anything other than the healthy "Reachable"). Registered only.
+        detail = ""
+        if r.get("registered"):
+            parts = []
+            rttms = _rtt_ms(r.get("rtt"))
+            if rttms is not None:
+                parts.append(f"{rttms:g} ms")
+            cs = (r.get("contact_status") or "")
+            if cs and cs.lower() not in ("reachable", "created", ""):
+                parts.append(cs)
+            detail = color(GREY, "  ·  ".join(parts)) if parts else ""
+        row = _fill_row(left, detail, bw)
         lines.append(row)
 
     lines.append(rule)

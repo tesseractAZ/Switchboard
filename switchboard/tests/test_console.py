@@ -199,6 +199,39 @@ def test_render_wakeups() -> None:
           "set wake-up" in text and "cancel wake-up" in text and "help" in text)
 
 
+def test_render_signals() -> None:
+    # Full-screen board (v0.41.0) surfaces per-room idle RTT, the trunk SIP
+    # registration, and resident-STT health.
+    rooms = [{"ext": "11", "label": "Family Room", "registered": True,
+              "device_state": "Not in use", "rtt": "2800", "contact_status": "Reachable"},
+             {"ext": "20", "label": "Computer", "registered": False, "device_state": "Unavailable"}]
+    b = console.Board()
+    b.set({"ami_ok": True, "rooms": rooms, "calls": [], "wakeups": [],
+           "trunk_reg": "Registered", "stt": "up", "ts": 0.0})
+    text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 100, "h": 30}, 0.0))
+    check("signals: per-room RTT rendered", "2.8 ms" in text)
+    check("signals: an offline room shows no RTT", text.count("ms") == 1)  # only the registered one
+    check("signals: trunk registration rendered", "trunk" in text and "Registered" in text)
+    check("signals: STT health rendered", "STT" in text and "resident" in text)
+    # A down trunk is shown; STT 'down' reads as the slow CLI fallback.
+    b.set({"ami_ok": True, "rooms": rooms, "calls": [], "wakeups": [],
+           "trunk_reg": "Unregistered", "stt": "down", "ts": 0.0})
+    text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 100, "h": 30}, 0.0))
+    check("signals: unregistered trunk shown", "Unregistered" in text)
+    check("signals: STT down -> CLI fallback", "CLI fallback" in text)
+    # 'disabled' STT is hidden; a board WITHOUT the new keys (old poll) doesn't crash.
+    b.set({"ami_ok": True, "rooms": rooms, "calls": [], "wakeups": [],
+           "trunk_reg": "", "stt": "disabled", "ts": 0.0})
+    text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 100, "h": 30}, 0.0))
+    check("signals: disabled STT hidden", "CLI fallback" not in text and "resident" not in text)
+    check("signals: no trunk line when trunk_reg empty", "trunk ●" not in text)
+    # µs -> ms helper.
+    check("rtt: 2800us -> 2.8ms", console._rtt_ms("2800") == 2.8)
+    check("rtt: ''/0/neg/NaN -> None",
+          console._rtt_ms("") is None and console._rtt_ms("0") is None
+          and console._rtt_ms("-5") is None and console._rtt_ms("nan") is None)
+
+
 def test_cancel_wakeup_key() -> None:
     console.wakeup_store.set_wakeup("11", "07:00")
     board = console.Board()
@@ -348,10 +381,13 @@ def test_center() -> None:
     check("center: vertical padding", console.center(["a", "b"], 1, 6) == ["", "", "a", "b"])
     check("center: no padding when content fills", console.center(["abcd", "efgh"], 4, 2) == ["abcd", "efgh"])
     check("center: empty input unchanged", console.center([], 80, 24) == [])
-    # On a wide+tall terminal the board floats off the top-left corner.
+    # On a wide+tall terminal the board now FILLS the width (full-screen, v0.41.0)
+    # and is still vertically centered (blank top rows), instead of floating in a
+    # narrow centered column.
     board = _board(ROOMS)
     lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": 120, "h": 40}, 0.0)
-    check("center: board indented on a wide screen", lines[0] == "" and any(ln.startswith("   ") for ln in lines if ln.strip()))
+    check("full-screen: board fills the width on a wide screen",
+          lines[0] == "" and max(console.vis_width(ln) for ln in lines) >= 116)
 
 
 def test_truncate_and_clamp() -> None:
@@ -613,14 +649,15 @@ def test_poller_gated_on_clients() -> None:
     import time
     calls = {"n": 0}
 
-    def fake_build(cfg):
+    def fake_build(cfg, opts=None):
         calls["n"] += 1
         return {"ami_ok": True, "rooms": [], "calls": [], "ts": 0.0}
 
-    orig_build, orig_rooms, orig_poll = (
-        console.build_board, console.load_rooms_cfg, console.POLL_SECONDS)
+    orig_build, orig_rooms, orig_opts, orig_poll = (
+        console.build_board, console.load_rooms_cfg, console.load_options, console.POLL_SECONDS)
     console.build_board = fake_build
-    console.load_rooms_cfg = lambda: []
+    console.load_rooms_cfg = lambda opts=None: []
+    console.load_options = lambda: {}
     console.POLL_SECONDS = 0.02
     try:
         board = console.Board()
@@ -647,6 +684,7 @@ def test_poller_gated_on_clients() -> None:
     finally:
         console.build_board = orig_build
         console.load_rooms_cfg = orig_rooms
+        console.load_options = orig_opts
         console.POLL_SECONDS = orig_poll
 
 
@@ -664,6 +702,7 @@ def main() -> None:
     test_transfer_offline_target_refused()
     test_fmt12()
     test_render_wakeups()
+    test_render_signals()
     test_cancel_wakeup_key()
     test_guarded_actions()
     test_parse_input_backspace()
