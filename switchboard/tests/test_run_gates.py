@@ -11,10 +11,13 @@ process as "successfully started" and never restarts it). This actually happened
 the console-web terminal (v0.30.1). So: a single-flag idle gate must use
 ``[ "$(bashio::config 'flag')" = "false" ]``, never ``! bashio::config.true 'flag'``.
 
-This pins the anti-pattern out. The whisper-server RAM gate is a deliberate
-multi-flag ``&&`` chain (idle only when NO speech feature is on) spread across
-several lines, so it does not match the single-line ``; then`` form this guards and
-is intentionally not flagged.
+This pins the anti-pattern out — including the whisper-server RAM gate, a
+multi-flag ``&&`` chain that idles only when NO speech feature is on. That gate was
+previously exempted for spanning several lines, but the boot-race is identical: a
+transient all-blank read would satisfy every ``! bashio::config.true`` clause and
+permanently idle the resident recognizer. It now uses the explicit-``false`` form
+too, and the lint below is multi-line-aware so any idle gate keying off
+``bashio::config.true`` (single- or multi-flag) is caught.
 """
 import re
 import sys
@@ -56,13 +59,28 @@ def test_no_unsafe_idle_gates():
     check(f"no single-flag idle gate keys off bashio::config.true (offenders: {offenders or 'none'})",
           not offenders)
 
+    # Multi-line-aware: an idle run script (one that `exec sleep infinity`s) must
+    # not use `! bashio::config.true` ANYWHERE — that catches multi-flag `&&` idle
+    # chains (e.g. the whisper-server RAM gate) the single-line regex above misses.
+    multi = []
+    for run in run_scripts:
+        # Strip comment lines so a comment *describing* the anti-pattern (like the
+        # one in whisper-server/run) isn't mistaken for a real gate.
+        code = "\n".join(l for l in run.read_text().splitlines()
+                         if not l.lstrip().startswith("#"))
+        if "exec sleep infinity" in code and "! bashio::config.true" in code:
+            multi.append(f"{run.parent.name}/run")
+    check(f"no idle run-script uses `! bashio::config.true` (multi-flag; offenders: {multi or 'none'})",
+          not multi)
+
     # Positive assertion: the console services (the ones that actually regressed)
-    # use the hardened explicit-false form.
+    # AND the whisper-server RAM gate use the hardened explicit-false form.
     for svc, flag in [("console-web", "console_enabled"),
                       ("operator-console", "console_enabled"),
                       ("rtpmon", "link_health_enabled"),
                       ("devhealth", "device_health_enabled"),
-                      ("wakeup-scheduler", "wakeup_enabled")]:
+                      ("wakeup-scheduler", "wakeup_enabled"),
+                      ("whisper-server", "operator.enabled")]:
         txt = (_S6 / svc / "run").read_text()
         hardened = f'[ "$(bashio::config \'{flag}\')" = "false" ]' in txt
         check(f"{svc}/run idles only on explicit false for {flag}", hardened)
