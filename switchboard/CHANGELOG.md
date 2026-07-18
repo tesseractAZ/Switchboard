@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.36.0
+
+Hardened the whisper-server RAM gate against the boot-race that already bit the
+console services (v0.30.1).
+
+The resident speech recognizer idles (`exec sleep infinity`) only when no voice
+feature is enabled. That gate was the last one still written as a multi-flag
+`! bashio::config.true` chain — and bashio can momentarily read a **blank** options
+value at boot / during a reload, which `! bashio::config.true` treats as "not
+enabled". A transient all-blank read would therefore satisfy every clause and
+**permanently idle the recognizer even with features on** (s6 sees the idle process
+as "started" and never restarts it), silently forcing the slow per-call
+`whisper-cli`. The gate now idles only when every feature reads an explicit literal
+`false`; a blank read falls through to "stay resident" (the safe default). The gate
+lint (`test_run_gates.py`) is now multi-line-aware so this class can't creep back.
+
+
 ## 0.35.0
 
 Direct dial now **requires a leading `1`** (NANP 11-digit) instead of also
