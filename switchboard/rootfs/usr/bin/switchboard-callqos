@@ -184,13 +184,17 @@ def build_record(a) -> dict:
     # One-way audio: one direction carried real traffic while the other was fully
     # dead. Worst-direction MES scoring alone MISSES this — the dead side reports
     # no MES, so min() ignores it and a dead-receive call scores "excellent". This
-    # IS the failure the feature must catch, so flag it explicitly. A count of 0 OR
-    # absent is "dead"; require ~1s (>50 pkts) on the live side so a tiny call-setup
-    # blip isn't a false alarm. (Continuous G.711 RTP flows even in silence, so a
-    # multi-second call with a 0-packet direction is genuinely one-way.)
-    rx_dead = not (rxcount and rxcount > 0)
-    tx_dead = not (txcount and txcount > 0)
-    one_way = (rxcount and rxcount > 50 and tx_dead) or (txcount and txcount > 50 and rx_dead)
+    # IS the failure the feature must catch, so flag it explicitly. "Dead" means
+    # effectively no audio, not literally zero: a live G.711 leg streams ~50 pkts/s
+    # even in silence (VAD is off), so a direction carrying only a handful of packets
+    # across a multi-second call is dead too — a lone stray packet (rxcount=1, seen
+    # live) must not read as healthy. Require ~1s (>50 pkts) on the LIVE side so a
+    # tiny call-setup blip (both sides near-zero) still isn't a false alarm.
+    DEAD_PKTS = 10  # < ~0.2s of audio over a whole call == effectively dead
+    rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
+    rx_dead = rxc < DEAD_PKTS
+    tx_dead = txc < DEAD_PKTS
+    one_way = (rxc > 50 and tx_dead) or (txc > 50 and rx_dead)
     if one_way:
         reasons = [f"one-way audio ({'receive' if rx_dead else 'transmit'} dead)"] + reasons
         label, notify = "poor", True

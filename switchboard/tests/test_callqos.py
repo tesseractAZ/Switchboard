@@ -187,6 +187,20 @@ def test_one_way_audio() -> None:
                                 rxcount="8", txcount="0", rxmes="88"))
     check("one-way: sub-second blip is not flagged one-way",
           not any("one-way" in r for r in rec["reasons"]))
+    # REGRESSION (seen live): a lone stray inbound packet across a 38s call — rx=1,
+    # tx=542 — is effectively dead-receive and MUST flag. The old exactly-zero test
+    # ("rxcount and rxcount > 0") let it read "excellent".
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/12-5",
+                                billsec="38", rxcount="1", txcount="542", txmes="88"))
+    check("one-way: rx=1 (near-dead receive) -> poor + notify",
+          rec["quality"] == "poor" and rec["notify"]
+          and any("one-way" in r and "receive" in r for r in rec["reasons"]))
+    # ...and the mirror: tx just under the dead threshold with a live receive side.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-6",
+                                rxcount="900", txcount="3", rxmes="88"))
+    check("one-way: tx=3 (near-dead transmit) -> poor + notify",
+          rec["quality"] == "poor" and rec["notify"]
+          and any("transmit" in r for r in rec["reasons"]))
 
 
 def test_mes_zero_is_no_data() -> None:
