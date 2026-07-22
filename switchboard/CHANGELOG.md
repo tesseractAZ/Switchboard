@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.42.1
+
+Fix: one-way-audio detection missed a near-dead direction (not just a fully dead one).
+
+A live call scored "excellent" despite receiving **one** inbound RTP packet across
+38 seconds — the caller's audio never reached the PBX. The one-way detector treated
+a direction as dead only when its packet count was *exactly* zero, so a lone stray
+packet (`rxcount=1`) read as healthy. It now treats a direction carrying fewer than
+~10 packets over the whole call as dead — a live G.711 leg streams ~50 packets/s
+even in silence (VAD is off), so a handful of packets is effectively no audio. The
+existing guard (require >50 packets on the *live* side) still prevents a call-setup
+blip from false-alarming. Found by the durable `callqos.jsonl` ledger during a log
+audit; the monitor otherwise correctly flagged 9 genuinely rough calls out of 66.
+
+
 ## 0.42.0
 
 Documentation: a generated Word + PDF manual, built and attached automatically.
