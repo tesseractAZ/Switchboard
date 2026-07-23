@@ -25,7 +25,7 @@ subnet, so an independent ping would false-alarm on a healthy gateway.
 
 Env (bridged by the s6 run script from config.yaml):
   DEVICE_HEALTH_INTERVAL   poll seconds (default 120, floor 30)
-  CORDLESS_IP              WP826 IP (default 192.168.6.71); '' disables cordless checks
+  CORDLESS_IP              WP826 IP (default 192.168.1.71); '' disables cordless checks
   CORDLESS_PASSWORD        WP826 admin password; '' -> cordless API checks skipped
                            (reachability + registration still covered by rtpmon)
   GATEWAY_PORTS            comma ext range for the GXW ports (default '11,12,...,18')
@@ -393,7 +393,7 @@ def _notify(device: str, event: str, reasons: list[str]) -> None:
 
 def run() -> None:
     interval = max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
-    cordless_ip = os.environ.get("CORDLESS_IP", "192.168.6.71").strip()
+    cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
     cordless_pw = os.environ.get("CORDLESS_PASSWORD", "")
     gw_exts = [e.strip() for e in os.environ.get("GATEWAY_PORTS", "11,12,13,14,15,16,17,18").split(",") if e.strip()]

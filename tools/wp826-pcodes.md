@@ -1,7 +1,7 @@
 # WP826 config automation — API + P-code reference
 
 Scriptable, no-browser configuration of the Grandstream **WP826** WiFi cordless
-(reference deployment: extension 19; **DHCP-assigned IP — currently `192.168.6.84`**,
+(reference deployment: extension 19; **DHCP-assigned IP — currently `192.168.1.84`**,
 previously `.71`; give it an Eero DHCP reservation, and override the tool with
 `WP826_HOST=<ip>` if it moves). Reverse-engineered from the
 phone's own React bundle + `tl.*.js` schema files (firmware Prog **1.0.3.35** /
@@ -145,7 +145,7 @@ Access grid), `P2923` CUST_CALL_KEY_LAYOUT, `P22639` QUICK_APP_LONG_PRESS.
 
 ## Reference configured state
 
-- **Phonebook:** `P330=1` (HTTP), `P331=192.168.5.152:8099/phonebook.xml`,
+- **Phonebook:** `P330=1` (HTTP), `P331=192.168.1.152:8099/phonebook.xml`,
   `P332=60` (auto-refresh).
 - **Distinctive outside-line ring + vintage tone:** `office_ring.wav` uploaded as
   custom **id 1001**; match rule 1 = `P1488="outsideline"` / `P1489="1001"`. The

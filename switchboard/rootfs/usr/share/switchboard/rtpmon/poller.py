@@ -93,8 +93,8 @@ _IPV4 = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
 
 def ip_from_uri(uri) -> str | None:
-    """The IPv4 host of a PJSIP contact URI, e.g. 'sip:19@192.168.6.84:18357' ->
-    '192.168.6.84'. Published so the device-health monitor can auto-follow a
+    """The IPv4 host of a PJSIP contact URI, e.g. 'sip:19@192.168.1.84:18357' ->
+    '192.168.1.84'. Published so the device-health monitor can auto-follow a
     DHCP-moved phone to its current IP. IPv4 only (the HTTP probe path is IPv4); a
     non-IPv4 / hostname contact returns None and the caller falls back to the
     configured static IP."""

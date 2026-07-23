@@ -307,7 +307,7 @@ def test_client_guard() -> None:
     # new POST (via the middleware).
     check("guard: Supervisor IP allowed", app._client_allowed("172.30.32.2") is True)
     check("guard: loopback allowed", app._client_allowed("127.0.0.1") is True)
-    check("guard: LAN client rejected", app._client_allowed("192.168.5.10") is False)
+    check("guard: LAN client rejected", app._client_allowed("192.168.1.10") is False)
     check("guard: empty rejected", app._client_allowed("") is False)
 
 

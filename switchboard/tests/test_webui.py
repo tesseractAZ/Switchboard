@@ -50,11 +50,11 @@ CONTACTS = (
     "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
     "Response: Success\r\nEventList: start\r\nMessage: A listing of Contacts follows\r\n\r\n"
     "Event: ContactList\r\nObjectType: contact\r\nObjectName: 11@@a88df67525\r\n"
-    "Endpoint: 11\r\nUri: sip:11@192.168.6.65:5060\r\nStatus: Reachable\r\nRoundtripUsec: 3706\r\n\r\n"
+    "Endpoint: 11\r\nUri: sip:11@192.168.1.65:5060\r\nStatus: Reachable\r\nRoundtripUsec: 3706\r\n\r\n"
     "Event: ContactList\r\nObjectType: contact\r\nObjectName: 12@@b1c2d3e4f5\r\n"
-    "Uri: sip:12@192.168.6.65:5062\r\nStatus: NonQualified\r\nRoundtripUsec: 0\r\n\r\n"
-    "Event: ContactList\r\nObjectType: contact\r\nObjectName: 13/sip:13@192.168.6.65:5064\r\n"
-    "Uri: sip:13@192.168.6.65:5064\r\nStatus: Reachable\r\nRoundtripUsec: 4210\r\n\r\n"
+    "Uri: sip:12@192.168.1.65:5062\r\nStatus: NonQualified\r\nRoundtripUsec: 0\r\n\r\n"
+    "Event: ContactList\r\nObjectType: contact\r\nObjectName: 13/sip:13@192.168.1.65:5064\r\n"
+    "Uri: sip:13@192.168.1.65:5064\r\nStatus: Reachable\r\nRoundtripUsec: 4210\r\n\r\n"
     "Event: ContactListComplete\r\nEventList: Complete\r\nListItems: 3\r\n\r\n"
 ).encode()
 

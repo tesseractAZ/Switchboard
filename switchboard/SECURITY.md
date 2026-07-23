@@ -8,9 +8,9 @@ things **you** must configure.
 
 ## Reporting a vulnerability
 
-Please report suspected vulnerabilities privately to the maintainer at
-**epaschal@outlook.com**, or open a
-[GitHub security advisory](https://github.com/tesseractAZ/Switchboard/security/advisories/new).
+Please report suspected vulnerabilities **privately** by opening a
+[GitHub security advisory](https://github.com/tesseractAZ/Switchboard/security/advisories/new)
+(Security → Advisories → *Report a vulnerability* on this repository).
 Do not open a public issue for an unpatched vulnerability. Include the version, the
 component, and a reproduction if you have one. This is a personal open-source
 project; expect a best-effort response rather than a guaranteed SLA.

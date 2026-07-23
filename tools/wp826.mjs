@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 
 // DHCP has moved the cordless before (.71 → .84) — override with WP826_HOST=<ip>,
 // or better, give the WP826 a DHCP reservation so this default stays true.
-const HOST = process.env.WP826_HOST || '192.168.6.84';
+const HOST = process.env.WP826_HOST || '192.168.1.84';
 const USER = 'admin';
 const PASS = readFileSync('/tmp/.wp_pass', 'utf8').trim();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');

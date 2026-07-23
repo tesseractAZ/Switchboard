@@ -90,7 +90,7 @@ def test_url_host_guard() -> None:
     check("ssrf: link-local blocked", aa._host_is_safe("169.254.169.254") is False)
     check("ssrf: unspecified blocked", aa._host_is_safe("0.0.0.0") is False)
     check("ssrf: multicast blocked", aa._host_is_safe("239.0.0.1") is False)
-    check("ssrf: private LAN host allowed (HA TTS host)", aa._host_is_safe("192.168.5.152") is True)
+    check("ssrf: private LAN host allowed (HA TTS host)", aa._host_is_safe("192.168.1.152") is True)
     check("ssrf: unresolvable host rejected",
           aa._host_is_safe("no-such-host.invalid") is False)
     check("ssrf: the fetch opener refuses redirects",

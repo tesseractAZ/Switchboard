@@ -14,7 +14,7 @@ voice/TUI/GUI caller can say "unavailable" instead of crashing.
 
 Shared by webui/app.py (GUI), console/console.py (TUI lights view) and the
 switchboard-automation.agi voice flow. For local testing against a real HA,
-set HA_BASE_URL (e.g. http://192.168.5.152:8123/api) + HA_TOKEN.
+set HA_BASE_URL (e.g. http://192.168.1.152:8123/api) + HA_TOKEN.
 """
 
 from __future__ import annotations
