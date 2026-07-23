@@ -80,3 +80,35 @@ jobs:
             "Switchboard-Documentation-${TAG}.docx" \
             "Switchboard-Documentation-${TAG}.pdf" \
             --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Guard against screenshot rot: the images in switchboard/docs/img/ are rendered
+  # from the REAL dashboard + console by scripts/build-screenshots.py. If a UI
+  # change breaks that generator, this job fails here rather than leaving the
+  # documentation quietly showing a UI that no longer exists. The freshly rendered
+  # pair is uploaded as an artifact so a reviewer can eyeball drift against the
+  # committed images (they are not auto-committed: font rendering differs between
+  # this runner and a maintainer's machine, so byte-comparison would be noise).
+  screenshots:
+    name: Render documentation screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure a Chrome/Chromium binary
+        run: |
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+          (google-chrome --version || chromium-browser --version) 2>/dev/null | head -1
+
+      - name: Render screenshots from the live UI source
+        run: |
+          python3 scripts/build-screenshots.py --out-dir "$RUNNER_TEMP/shots"
+          ls -la "$RUNNER_TEMP/shots"
+          test -s "$RUNNER_TEMP/shots/dashboard.png"
+          test -s "$RUNNER_TEMP/shots/console.png"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: screenshots-rendered
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: error
