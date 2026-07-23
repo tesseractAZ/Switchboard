@@ -29,12 +29,22 @@ import argparse
 import html as H
 import importlib.machinery
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+# Pin the clock's timezone. The console header renders its time with
+# time.localtime(), so without this the screenshot's clock reads differently on a
+# maintainer's machine than on the (UTC) release runner — a spurious diff in a
+# file that is otherwise deterministic. UTC is the runner's zone, so the release
+# refresh and a local preview now agree.
+os.environ["TZ"] = "UTC"
+time.tzset()
 
 # --------------------------------------------------------------------------- #
 # The example board. One definition drives BOTH screenshots so the dashboard and
