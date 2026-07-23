@@ -90,6 +90,13 @@ def internalize_links(md: str) -> str:
     md = md.replace('](switchboard/SECURITY.md#', '](#')
     md = md.replace('](SECURITY.md#', '](#')
     md = md.replace('](DOCS.md#', '](#')
+    # Normalise screenshot paths to ONE spelling. README cites them repo-root
+    # relative (switchboard/docs/img/…) and DOCS.md relative to its own directory
+    # (docs/img/…); both resolve to the same file, but Pandoc keys embedded media
+    # by the literal path string, so two spellings embed the same PNG twice and
+    # double the manual's size. Collapse to the repo-root form.
+    md = md.replace('](docs/img/', '](switchboard/docs/img/')
+    md = md.replace('](switchboard/switchboard/docs/img/', '](switchboard/docs/img/')
     return md
 
 
