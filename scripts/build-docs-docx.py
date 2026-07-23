@@ -34,6 +34,7 @@ locally). `--pdf` additionally needs `soffice`/`libreoffice`.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -129,10 +130,15 @@ def main() -> int:
     combined_path = output.with_suffix(".combined.md")
     combined_path.write_text(combined, encoding="utf-8")
 
+    # Images are referenced repo-root-relative in README (switchboard/docs/img/…)
+    # and switchboard-relative in DOCS.md (docs/img/…); give pandoc both roots so
+    # every screenshot embeds into the .docx regardless of which file cited it.
+    resource_path = os.pathsep.join([str(repo_root), str(repo_root / "switchboard")])
     cmd = [
         "pandoc", str(combined_path), "-o", str(output),
         "-f", "markdown+pipe_tables+gfm_auto_identifiers",
         "--standalone", "--toc", "--toc-depth=2",
+        "--resource-path", resource_path,
         "--metadata", f"title={TITLE}",
         "--metadata", f"subtitle={SUBTITLE_TMPL.format(version=version)}",
         "--metadata", f"date=Version {version} · source ref {args.ref}",
