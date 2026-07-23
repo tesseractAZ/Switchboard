@@ -3,7 +3,10 @@
 # the nested CONFIG> prompt), prints output.
 set timeout 25
 set pw [exec cat /tmp/.wp_pass]
-spawn ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@192.168.1.71
+# WP826 address: set WP826_HOST for your cordless (matches tools/wp826.mjs); the
+# 192.168.1.71 default is a placeholder, not a real device.
+set host [expr {[info exists env(WP826_HOST)] ? $env(WP826_HOST) : "192.168.1.71"}]
+spawn ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@$host
 expect {
   "assword:" { send "$pw\r" }
   timeout { puts "TIMEOUT_AT_PW"; exit 1 }
