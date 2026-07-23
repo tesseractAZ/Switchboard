@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.42.2
+
+Public-repo hygiene: no real home network details or personal contact in the tree.
+
+- Genericized every real LAN address to the example range `192.168.1.x` across the
+  documentation, the shipped monitors (their fallback defaults), the tools, and the
+  test fixtures. No add-on behaviour changes — the affected values are fallback
+  defaults and examples that a live install overrides.
+- Corrected the documented `cordless_ip` default to `""` (matches the shipped
+  manifest; a live install auto-follows the cordless via `cordless_ext`).
+- Vulnerability reports now route through a GitHub Security Advisory rather than a
+  personal email; the maintainer field no longer carries a personal address.
+- Removed `STATUS.md` — an internal, stale maintainer handoff that documented the
+  reference deployment; `README.md` and `switchboard/DOCS.md` are the reference.
+- The `wp826-cli.exp` tool reads `WP826_HOST` (matching `wp826.mjs`) instead of a
+  hard-coded address.
+
+
 ## 0.42.1
 
 Fix: one-way-audio detection missed a near-dead direction (not just a fully dead one).

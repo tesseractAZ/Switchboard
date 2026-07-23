@@ -57,7 +57,7 @@ def test_accept_key() -> None:
 
 def test_parse_http_headers() -> None:
     raw = (
-        b"GET /ws HTTP/1.1\r\nHost: 192.168.5.152:8100\r\n"
+        b"GET /ws HTTP/1.1\r\nHost: 192.168.1.152:8100\r\n"
         b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
         b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     )

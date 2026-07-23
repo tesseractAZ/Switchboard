@@ -146,7 +146,7 @@ def test_resolve_cordless_ip():
     # (rtpmon publishes contact_ip on sensor.switchboard_link_<ext>), with the static
     # cordless_ip as the fallback for every unavailable case.
     check("resolve: no cordless_ext -> static fallback (opt-out)",
-          dh.resolve_cordless_ip("", "192.168.6.71") == "192.168.6.71")
+          dh.resolve_cordless_ip("", "192.168.1.71") == "192.168.1.71")
 
     class _FakeHA:
         _state = None
@@ -157,17 +157,17 @@ def test_resolve_cordless_ip():
             return _FakeHA._state
     sys.modules["ha_client"] = _FakeHA
     try:
-        _FakeHA._state = {"state": "9.98", "attributes": {"contact_ip": "192.168.6.84", "registered": True}}
+        _FakeHA._state = {"state": "9.98", "attributes": {"contact_ip": "192.168.1.84", "registered": True}}
         check("resolve: follows the cordless's live registration IP",
-              dh.resolve_cordless_ip("19", "192.168.6.71") == "192.168.6.84")
+              dh.resolve_cordless_ip("19", "192.168.1.71") == "192.168.1.84")
         check("resolve: reads the cordless's own link sensor",
               _FakeHA.last == "sensor.switchboard_link_19")
         _FakeHA._state = {"state": "offline", "attributes": {"registered": False}}
         check("resolve: cordless de-registered (no contact_ip) -> fallback",
-              dh.resolve_cordless_ip("19", "192.168.6.71") == "192.168.6.71")
+              dh.resolve_cordless_ip("19", "192.168.1.71") == "192.168.1.71")
         _FakeHA._state = None  # rtpmon off / HA down / sensor not yet created
         check("resolve: sensor missing -> fallback",
-              dh.resolve_cordless_ip("19", "192.168.6.71") == "192.168.6.71")
+              dh.resolve_cordless_ip("19", "192.168.1.71") == "192.168.1.71")
     finally:
         sys.modules.pop("ha_client", None)
 
