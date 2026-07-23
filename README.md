@@ -17,6 +17,22 @@ want it, dial the outside world over a SIP trunk like it's a cell phone.
 
 ---
 
+## Screenshots
+
+**The dashboard** in the Home Assistant sidebar — every phone's registration and
+call state, the trunk registration and speech-engine health, per-phone latency,
+and one click to ring, patch two rooms together, hang up, transfer, page, or set a
+wake-up:
+
+![The Switchboard dashboard in the Home Assistant sidebar](switchboard/docs/img/dashboard.png)
+
+**The operator console** — the same board, full-screen, driven by keystroke over
+telnet or in the browser:
+
+![The full-screen operator console](switchboard/docs/img/console.png)
+
+---
+
 ## What you get
 
 - **Room-to-room calling** between every analog phone in the house.

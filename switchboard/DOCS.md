@@ -47,6 +47,8 @@ LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
    room flips to **Registered** as its port comes online.
 6. Pick up a phone and dial another room's extension. Done.
 
+![The Switchboard dashboard in the Home Assistant sidebar](docs/img/dashboard.png)
+
 Changing options and restarting the add-on regenerates the entire Asterisk
 configuration — **the add-on options are the source of truth.** Editing
 `/etc/asterisk/*.conf` by hand is pointless; every file is overwritten on start.
@@ -536,6 +538,8 @@ registration, any live call + peer, and its idle **round-trip latency** (RTT); a
 status line under the header shows the **SIP trunk registration** (Registered /
 Unregistered) and **resident-STT health** (resident / CLI-fallback) — the same
 signals the Ingress dashboard surfaces. Two front-ends onto the same board:
+
+![The full-screen operator console](docs/img/console.png)
 
 - **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
