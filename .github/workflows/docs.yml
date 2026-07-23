@@ -112,3 +112,43 @@ jobs:
           name: screenshots-rendered
           path: ${{ runner.temp }}/shots/*.png
           if-no-files-found: error
+
+  # HARD REFRESH. On a published release, re-render the screenshots from the
+  # current UI and commit them back to main if they changed, so the documentation
+  # images can never lag a release. The PR-time `screenshots` job above only
+  # proves the generator still runs; this one is what keeps the committed pair
+  # honest. Note the images will render with this runner's fonts, so the first
+  # refresh may shift their appearance once and then stay stable.
+  screenshots-refresh:
+    name: Refresh committed screenshots (on release)
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+
+      - name: Ensure a Chrome/Chromium binary
+        run: |
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+
+      - name: Re-render into the repo
+        run: python3 scripts/build-screenshots.py
+
+      - name: Commit only if the render actually changed
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if git diff --quiet -- switchboard/docs/img; then
+            echo "screenshots unchanged — nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add switchboard/docs/img
+          # [skip ci] so this docs commit doesn't retrigger the workflow
+          git commit -m "docs: refresh screenshots for ${TAG} [skip ci]"
+          git push origin HEAD:main
