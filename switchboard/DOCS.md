@@ -680,7 +680,6 @@ it reads "µ-law".
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. |
 | LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
-| The web terminal shows a `ValueError` at start once | Harmless — the console-web service self-recovers on the next s6 restart; the port comes up on `8100`. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
 

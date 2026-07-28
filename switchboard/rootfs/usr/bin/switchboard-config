@@ -1709,7 +1709,7 @@ def main() -> None:
 
     # The AMI secret must exist on file for dialplan-System()-spawned consumers
     # (switchboard-mwi) to authenticate; it lives in tmpfs (/run, RAM-backed), is
-    # regenerated on every boot, and AMI itself binds 127.0.0.1 only. Created 0600
+    # regenerated on every boot, and AMI itself binds 127.0.0.1 only. Created 0640
     # atomically (os.open) so no default-umask window ever exposes it; asterisk
     # group gets read via the group chown below.
     env_path = RUN_DIR / "ami.env"

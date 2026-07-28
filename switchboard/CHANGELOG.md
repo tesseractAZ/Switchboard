@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.42.3
+
+Repository cleanup: unused code removed and documentation reconciled with the
+source. No add-on behaviour changes.
+
+- Removed three unused helpers with no callers — `ami.get_contacts`,
+  `ami.get_channels`, and `mwi_store.all_flags` — each superseded by
+  `ami.get_status_bundle` / `mwi_store.exts`. Their underlying `*_from_blocks`
+  parsers remain in use and are unaffected.
+- Dropped an obsolete `DOCS.md` §14 troubleshooting row describing a web-terminal
+  `ValueError` at start as harmless; that startup race was eliminated in 0.29.1, so
+  such a `ValueError` now indicates a genuine fault rather than a benign one.
+- Removed the inert `armv7` base image from `build.yaml`; the manifest, README, and
+  DOCS all declare `amd64`/`aarch64` only.
+- Corrected a stale `switchboard-config` comment that described the tmpfs AMI secret
+  file as `0600`; it is created `0640`, as `SECURITY.md` already documents.
+- Genericized the SIP-trunk POP hostname in the test fixtures to `losangeles.voip.ms`,
+  matching the documentation and completing the 0.42.2 hygiene pass.
+
 ## 0.42.2
 
 Public-repo hygiene: no real home network details or personal contact in the tree.

@@ -67,7 +67,7 @@ REGISTRATIONS = (
     "Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
     "Response: Success\r\nEventList: start\r\nMessage: Following are Registrations\r\n\r\n"
     "Event: OutboundRegistrationDetail\r\nObjectType: registration\r\nObjectName: trunk-reg\r\n"
-    "Status: Registered\r\nServerUri: sip:losangeles4.voip.ms\r\nNextReg: 95\r\n\r\n"
+    "Status: Registered\r\nServerUri: sip:losangeles.voip.ms\r\nNextReg: 95\r\n\r\n"
     "Event: OutboundRegistrationDetailComplete\r\nEventList: Complete\r\nListItems: 1\r\n\r\n"
 ).encode()
 

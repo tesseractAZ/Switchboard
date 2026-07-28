@@ -862,22 +862,6 @@ def get_endpoints() -> list[dict]:
     return endpoints_from_blocks(blocks)
 
 
-def get_contacts() -> dict[str, dict]:
-    try:
-        blocks = _ami_command(["Action: PJSIPShowContacts"])
-    except (OSError, AMIError):
-        return {}
-    return contacts_from_blocks(blocks)
-
-
-def get_channels() -> list[dict]:
-    try:
-        blocks = _ami_command(["Action: CoreShowChannels"])
-    except (OSError, AMIError):
-        return []
-    return channels_from_blocks(blocks)
-
-
 def registrations_from_blocks(blocks: list[dict]) -> dict[str, dict]:
     """Outbound SIP registration status keyed by registration id (ObjectName),
     from OutboundRegistrationDetail events. For this add-on the only id is

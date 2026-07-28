@@ -149,7 +149,7 @@ def test_outbound_rules_live_in_rooms_context() -> None:
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
     opts = {"rooms": rooms, "operator": {"enabled": True}, "automation_enabled": True,
             "page_enabled": True, "clock_enabled": True, "wakeup_enabled": True,
-            "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
+            "trunk": {"enabled": True, "provider_host": "losangeles.voip.ms",
                       "username": "100000_switchboard", "secret": "s", "dial_prefix": "9",
                       "outbound_caller_id": "2025550100", "inbound_ext": "19"}}
     e = sbc.render_extensions(opts)
@@ -173,7 +173,7 @@ def test_direct_dial_mode() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
     opts = {"rooms": rooms, "operator": {"enabled": True}, "directory_enabled": True,
-            "trunk": {"enabled": True, "provider_host": "losangeles4.voip.ms",
+            "trunk": {"enabled": True, "provider_host": "losangeles.voip.ms",
                       "username": "100000_switchboard", "secret": "s",
                       # dial_prefix present but direct_dial MUST override it.
                       "dial_prefix": "9", "direct_dial": True,
@@ -229,7 +229,7 @@ def test_trunk_codec_pinned_to_ulaw() -> None:
     # advertise ulaw ONLY (disallow=all) so the provider can't negotiate a
     # wideband codec and force a transcode against the analog FXS phones.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "100000_pi", "secret": "x", "dial_prefix": "9"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     ep = pj[pj.index("[trunk]\n"):pj.index("[trunk-identify]")]
@@ -263,13 +263,13 @@ def test_trunk_aor_not_qualified() -> None:
     # even while the registration (inbound) stays healthy. Room AORs keep qualify
     # (LAN ATAs answer OPTIONS fine) — this disable is trunk-only.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "100000_switchboard", "secret": "x", "dial_prefix": "9"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     aor = pj[pj.index("[trunk-aor]"):pj.index("[trunk]\n")]
     check("trunk AOR disables qualify (qualify_frequency=0)", "qualify_frequency = 0" in aor)
     check("trunk AOR keeps the static provider contact",
-          "contact = sip:losangeles4.voip.ms:5060" in aor)
+          "contact = sip:losangeles.voip.ms:5060" in aor)
     check("room AORs still qualify (trunk-only change)", "qualify_frequency = 60" in pj)
 
 
@@ -281,7 +281,7 @@ def test_trunk_registration_keepalive() -> None:
     # "Unreachable", and INBOUND calls insta-fail ("Channel not available") with
     # the INVITE never reaching us. expiration=120 keeps the pinhole warm.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "100000_switchboard", "secret": "x", "dial_prefix": "9",
              "registns": True}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
@@ -737,7 +737,7 @@ def test_trunk_from_user_domain_validated() -> None:
     # from_user/from_domain feed pjsip.conf directives; a bad explicit value must
     # fall back to the already-validated username/host, never emit unchecked.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "100000_switchboard", "secret": "x", "dial_prefix": "9",
              "from_user": "bad user;evil", "from_domain": "ok.example.com"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
@@ -752,7 +752,7 @@ def test_call_audio_qos_rtp_jitter() -> None:
     # zero-risk), an RTP watchdog on the NAT'd trunk, and an adaptive jitter
     # buffer on the public-internet trunk leg toward the answering handset.
     rooms = sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s2"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "100000_switchboard", "secret": "x", "dial_prefix": "9"}
     pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
     transport = pj[pj.index("[transport-udp]"):pj.index("[room-endpoint]")]
@@ -797,7 +797,7 @@ def test_transfer_toll_fraud_defense() -> None:
     # layers, ALL gated on trunk.enabled so non-trunk output is byte-identical.
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "19", "name": "Cordless", "secret": "s2"}])
-    trunk = {"enabled": True, "provider_host": "losangeles4.voip.ms",
+    trunk = {"enabled": True, "provider_host": "losangeles.voip.ms",
              "username": "u", "secret": "x", "dial_prefix": "9",
              "outbound_caller_id": "2025550100"}
     opts = {"rooms": rooms, "trunk": trunk, "operator": {"enabled": True}}

@@ -83,11 +83,6 @@ def _write(data: dict) -> None:
             os.unlink(tmp)
 
 
-def all_flags() -> dict:
-    with _Lock(PATH):
-        return _read()
-
-
 def is_set(ext: str) -> bool:
     with _Lock(PATH):
         return str(ext) in _read()
