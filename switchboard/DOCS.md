@@ -342,6 +342,16 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   hosts (a private-LAN URL — such as Home Assistant's own TTS — is allowed), does
   not follow redirects, caps the body at 5 MB, and transcodes to 8 kHz for the
   phone line.
+- **Busy-guard:** when the target phone is already on (or being offered) a call —
+  its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
+  call is **not** placed. A second INVITE cannot auto-answer mid-call and would
+  ring the handset as call waiting. The skip is logged and the response is
+  `{"ok": true, "skipped": "busy", "device_state": …}` (HTTP 200), so callers
+  treat the announcement as handled instead of re-queueing identical content
+  behind the call in progress. If the device state cannot be read, the call
+  proceeds (the guard fails open, so a state-read hiccup never suppresses an
+  alert). The guard applies only to this endpoint — ordinary inbound/outbound
+  calling, paging, and wake-up calls are unaffected.
 
 ---
 

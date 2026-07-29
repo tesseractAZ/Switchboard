@@ -57,6 +57,8 @@ from ami import (  # noqa: E402
     announce_to_ext,
     codecs_for_channels,
     connect_extensions,
+    device_busy,
+    get_device_state,
     get_endpoints,
     get_registrations,
     get_status_bundle,
@@ -449,7 +451,11 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     The ext is validated against the configured rooms (which include the cordless)
     AND the digit regex, so this can only play a local clip to a known endpoint,
     never place an outside call. Reachable from Supervisor/loopback, or over the LAN
-    with the X-Announce-Token header (see the middleware)."""
+    with the X-Announce-Token header (see the middleware).
+
+    When the target phone is already on (or being offered) a call, the originate is
+    SKIPPED and the response is {"ok": true, "skipped": "busy", "device_state": ...}
+    — see the busy-guard comment below."""
     opts = load_options()
     if ext not in configured_room_exts(opts) or not valid_ext(ext):
         return JSONResponse({"ok": False, "error": "unknown extension"}, status_code=404)
@@ -487,6 +493,19 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
 
     # Playback wants the path WITHOUT the extension (it resolves "<path>.wav").
     sound = path[:-4] if path.endswith(".wav") else path
+
+    # Busy-guard: if the phone is already on (or being offered) a call — e.g. an
+    # earlier announcement still playing — a second INVITE cannot auto-answer and
+    # would RING the handset as call waiting. An announcement queued behind an
+    # in-progress one adds nothing, so skip the originate and report the clip as
+    # handled ("ok" with a "skipped" marker, so callers don't retry-replay it once
+    # the line frees up). An unreadable state ("") is NOT busy — the guard fails
+    # open rather than ever silencing an alarm. Announce-path only: normal
+    # inbound/outbound calls to the ext are unaffected.
+    state = await asyncio.to_thread(get_device_state, ext)
+    if device_busy(state):
+        print(f"[switchboard-webui] announce {ext} skipped: device {state}", flush=True)
+        return JSONResponse({"ok": True, "skipped": "busy", "device_state": state})
     try:
         ok = await asyncio.to_thread(announce_to_ext, ext, sound)
     except (AMIError, OSError) as exc:
