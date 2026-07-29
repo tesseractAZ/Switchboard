@@ -546,6 +546,56 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
     )
 
 
+# Device states that mean the phone is ON (or being offered) a call: on such a
+# phone an announce INVITE cannot auto-answer (the intercom Call-Info header only
+# works on an idle device), so it would RING the handset as call waiting instead
+# of speaking. The announce path skips its originate on these. NOT_INUSE and the
+# offline/unknown states are deliberately absent: an idle phone should announce,
+# and an unreachable/unreadable one is the originate's own problem — the guard
+# fails OPEN so it can never silence an alarm on a state-read hiccup.
+_BUSY_DEVICE_STATES = frozenset({"inuse", "ringing", "ringinuse", "busy", "onhold"})
+
+
+def device_busy(state: str) -> bool:
+    """True when a device-state string means the phone is on/being offered a call.
+
+    Accepts both spellings Asterisk uses for the same states: the DEVICE_STATE()
+    function form ("INUSE", "NOT_INUSE", "RINGINUSE") and the PJSIPShowEndpoints
+    pretty form ("In use", "Not in use", "Ring+Inuse") — normalized by dropping
+    case, spaces, underscores and the '+'. Empty/unknown input is NOT busy (the
+    announce busy-guard fails open). Pure — unit-tested."""
+    norm = (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
+    return norm in _BUSY_DEVICE_STATES
+
+
+def get_device_state(ext: str) -> str:
+    """Read DEVICE_STATE(PJSIP/<ext>) via a channel-less AMI Getvar: NOT_INUSE,
+    INUSE, RINGING, RINGINUSE, BUSY, ONHOLD, UNAVAILABLE, INVALID or UNKNOWN.
+
+    Returns "" on any failure (AMI down, auth, bad ext) so callers treat an
+    unreadable state as unknown — for the announce busy-guard that means FAIL
+    OPEN and place the call. Getvar evaluates the dialplan function without a
+    channel (DEVICE_STATE needs none) using only the ``call`` privilege the AMI
+    account already holds, exactly like :func:`get_channel_codec`. ``ext`` is
+    digit-guarded before interpolation so a CRLF-bearing value can't inject
+    extra AMI lines."""
+    if not _EXT_RE.fullmatch(ext or ""):
+        return ""
+    action_id = _next_action_id()
+    try:
+        blocks = _ami_command(
+            ["Action: Getvar", f"Variable: DEVICE_STATE(PJSIP/{ext})"],
+            single_response=True,
+            action_id=action_id,
+        )
+    except (OSError, AMIError):
+        return ""
+    for b in blocks:
+        if b.get("actionid") == action_id and "value" in b:
+            return b.get("value", "")
+    return ""
+
+
 def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: int = 30) -> bool:
     """Originate an ANNOUNCEMENT to one ext: Asterisk calls the phone and, on
     answer, plays ``sound`` (a rendered TTS clip) straight out the handset.

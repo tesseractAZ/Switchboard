@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.43.0
+
+Busy-guard on the handset announce endpoint: an announcement is no longer
+originated to a phone that is already on a call.
+
+- `POST /api/announce/{ext}` now reads the target's device state
+  (`DEVICE_STATE(PJSIP/<ext>)` via a channel-less AMI `Getvar`) immediately
+  before the originate. When the phone is on or being offered a call
+  (`INUSE` / `RINGING` / `RINGINUSE` / `BUSY` / `ONHOLD`), the call is not
+  placed: an INVITE to a busy phone cannot auto-answer (the intercom
+  `Call-Info` header acts only on an idle device) and instead rings the
+  handset as call waiting — a phantom ring right after an alarm announcement
+  when a duplicate dispatch reaches a handset still in its announce call.
+- A skipped announcement is logged and reported as
+  `{"ok": true, "skipped": "busy", "device_state": …}` (HTTP 200), so callers
+  treat it as handled rather than re-queueing identical content behind the
+  call in progress.
+- The guard fails open — an unreadable device state (AMI hiccup) never blocks
+  an announcement — and applies only to the announce endpoint: ordinary
+  inbound/outbound calling, paging, test rings and wake-up calls are
+  unchanged.
+- New `ami.get_device_state` / `ami.device_busy` helpers, covered by
+  wire-level and truth-table tests in `tests/test_webui.py`.
+
 ## 0.42.3
 
 Repository cleanup: unused code removed and documentation reconciled with the

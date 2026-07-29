@@ -523,6 +523,47 @@ def test_get_channel_codec_reads_value() -> None:
         ami.AMI_SECRET = orig_secret
 
 
+def test_device_state_guards() -> None:
+    # A non-digit / CRLF-bearing ext is rejected before any socket use, so a bad
+    # value can neither inject AMI lines nor open a connection.
+    check("devstate: empty ext -> ''", ami.get_device_state("") == "")
+    check("devstate: CRLF ext -> ''", ami.get_device_state("19\r\nAction: Logoff") == "")
+    check("devstate: alpha ext -> ''", ami.get_device_state("trunk") == "")
+
+
+def test_device_state_reads_value() -> None:
+    # The channel-less Getvar of DEVICE_STATE(PJSIP/<ext>) round-trips the Value,
+    # and an auth failure degrades to "" (fail open) instead of raising.
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    try:
+        fake = _FakeGetvarSocket(value="INUSE")
+        ami.socket.create_connection = lambda *a, **k: fake
+        check("devstate: Getvar Value parsed as the state", ami.get_device_state("19") == "INUSE")
+        check("devstate: queries DEVICE_STATE(PJSIP/<ext>)",
+              b"Variable: DEVICE_STATE(PJSIP/19)" in fake.sent)
+        check("devstate: Getvar is channel-less", b"Channel:" not in fake.sent)
+        ami.socket.create_connection = lambda *a, **k: _FakeGetvarSocket(auth_ok=False)
+        check("devstate: auth failure degrades to '' (fail open)", ami.get_device_state("19") == "")
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
+def test_device_busy() -> None:
+    # The busy set is exactly "on (or being offered) a call" — where an announce
+    # INVITE can't auto-answer and would ring the handset. Both the DEVICE_STATE()
+    # spelling and the PJSIPShowEndpoints pretty spelling must count.
+    for s in ("INUSE", "In use", "RINGING", "Ringing", "RINGINUSE", "Ring+Inuse",
+              "BUSY", "ONHOLD", "On Hold"):
+        check(f"busy: {s!r} is busy", ami.device_busy(s))
+    # Idle, offline and unreadable states are NOT busy: an idle phone should
+    # announce, and the guard must fail OPEN on unknown/unreachable/error ("").
+    for s in ("NOT_INUSE", "Not in use", "UNAVAILABLE", "Unavailable",
+              "UNKNOWN", "INVALID", ""):
+        check(f"busy: {s!r} is not busy", not ami.device_busy(s))
+
+
 def test_actions_responded() -> None:
     # The Getvar batch terminates when every action has a RESPONSE (Getvar emits
     # no ...Complete event), unlike the list-action ...Complete terminator.
@@ -736,6 +777,9 @@ def main() -> None:
     test_codecs_for_channels_no_io()
     test_get_channel_codec_guards()
     test_get_channel_codec_reads_value()
+    test_device_state_guards()
+    test_device_state_reads_value()
+    test_device_busy()
     test_contacts()
     test_registrations()
     test_registered()
