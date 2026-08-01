@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.43.2
+
+Completes the 0.43.1 sample-config cleanup. No feature changes.
+
+- The generated `modules.conf` also noloads the stock voicemail family
+  (`app_voicemail` and its IMAP/ODBC variants, `app_minivm`): voicemail is not
+  part of this system — message-waiting is delivered via PJSIPNotify and no
+  dialplan line calls `VoiceMail()`. Loaded, these modules only parsed the
+  package's sample `voicemail.conf` and logged `Couldn't find mailbox 1234`
+  plus a duplicate-application warning at every boot.
+
 ## 0.43.1
 
 Attack-surface hardening and a documentation correction, from a full post-migration

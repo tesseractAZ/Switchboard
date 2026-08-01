@@ -674,6 +674,12 @@ def test_modules_conf() -> None:
     for mod in ("chan_iax2", "chan_unistim", "pbx_dundi", "pbx_ael", "pbx_lua"):
         check(f"modules: {mod} noloaded (unused legacy stack / no stray LAN listener)",
               f"noload = {mod}.so" in m)
+    # Voicemail family: MWI goes via PJSIPNotify and nothing dials VoiceMail();
+    # loaded, these only parse the sample voicemail.conf and log mailbox-1234
+    # noise + a duplicate-application warning at boot.
+    for mod in ("app_voicemail", "app_voicemail_imap", "app_voicemail_odbc", "app_minivm"):
+        check(f"modules: {mod} noloaded (voicemail unused; kills sample-config boot noise)",
+              f"noload = {mod}.so" in m)
 
 
 def test_logger_durable_persistent_file() -> None:
