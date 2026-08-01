@@ -11,8 +11,12 @@ if [ "$(bashio::config 'console_enabled')" = "false" ]; then
     exec sleep infinity
 fi
 
-PORT="$(bashio::config 'console_port')"
-BIND="$(bashio::config 'console_bind')"
+# Value reads via switchboard-opt (the post-overlay snapshot from
+# init-switchboard, a declared dependency) — bashio::config parses raw
+# options.json and would bypass an options overlay. The enable gate above
+# stays on bashio: its empty-read semantics are load-bearing.
+PORT="$(switchboard-opt console_port 2300)"
+BIND="$(switchboard-opt console_bind 0.0.0.0)"
 bashio::log.info "Starting Switchboard operator console on ${BIND}:${PORT} ..."
 bashio::log.notice "The operator console is UNAUTHENTICATED on the LAN and can ring/connect/hang up phones. Set console_bind to 127.0.0.1 to restrict it, or console_enabled:false to turn it off."
 

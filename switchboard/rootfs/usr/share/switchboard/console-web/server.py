@@ -37,10 +37,19 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import webauth  # noqa: E402
 import wsproto  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
+
+# Login gate (see webauth.py). CONSOLE_WEB_USERS is compact JSON exported by the
+# run script from the console_users option; an empty list disables the gate
+# (backward-compatible — the run script's NOTICE says which mode is live).
+_USERS = webauth.parse_users(os.environ.get("CONSOLE_WEB_USERS", ""))
+AUTH_REQUIRED = bool(_USERS)
+_SESSIONS = webauth.Sessions()
+_THROTTLE = webauth.LoginThrottle()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -149,6 +158,75 @@ def _send_simple(sock: socket.socket, code: int, reason: str, body: str = "") ->
         sock.sendall(head + payload)
     except OSError:
         pass
+
+
+def _send_html(sock: socket.socket, code: int, reason: str, html: str,
+               set_cookie: str = "") -> None:
+    payload = html.encode("utf-8")
+    cookie = f"Set-Cookie: {set_cookie}\r\n" if set_cookie else ""
+    head = (
+        f"HTTP/1.1 {code} {reason}\r\n"
+        f"Content-Type: text/html; charset=utf-8\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        f"Cache-Control: no-store\r\n"
+        f"{cookie}"
+        f"Connection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        sock.sendall(head + payload)
+    except OSError:
+        pass
+
+
+def _send_redirect(sock: socket.socket, location: str, set_cookie: str = "") -> None:
+    cookie = f"Set-Cookie: {set_cookie}\r\n" if set_cookie else ""
+    head = (
+        f"HTTP/1.1 303 See Other\r\n"
+        f"Location: {location}\r\n"
+        f"Content-Length: 0\r\n"
+        f"{cookie}"
+        f"Connection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        sock.sendall(head)
+    except OSError:
+        pass
+
+
+def _read_body(sock: socket.socket, headers: dict, leftover: bytes) -> bytes:
+    """Read a small request body (Content-Length-driven), starting from any
+    bytes already read past the head. Capped: a login form is tiny."""
+    try:
+        want = int(headers.get("content-length", "0") or "0")
+    except ValueError:
+        return b""
+    if want <= 0 or want > webauth.MAX_FORM_BYTES:
+        return b""
+    body = leftover[:want]
+    while len(body) < want:
+        try:
+            chunk = sock.recv(min(4096, want - len(body)))
+        except OSError:
+            return b""
+        if not chunk:
+            return b""
+        body += chunk
+    return body
+
+
+def _session_ok(headers: dict) -> bool:
+    """True when the request carries a valid session cookie (or the gate is off)."""
+    if not AUTH_REQUIRED:
+        return True
+    token = webauth.parse_cookies(headers.get("cookie", "")).get(webauth.COOKIE_NAME, "")
+    return _SESSIONS.valid(token)
+
+
+def _peer_ip(sock: socket.socket) -> str:
+    try:
+        return sock.getpeername()[0]
+    except OSError:
+        return "?"
 
 
 def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
@@ -357,10 +435,16 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
             except OSError:
                 pass
             return
-        # Drive-by / cross-site-WebSocket-hijack guard: this fronts an
-        # unauthenticated call-control console, so reject a cross-origin upgrade.
+        # Drive-by / cross-site-WebSocket-hijack guard: this fronts a
+        # call-control console, so reject a cross-origin upgrade.
         if not wsproto.origin_allowed(headers, _ALLOWED_ORIGINS):
             _send_simple(sock, 403, "Forbidden", "Cross-origin WebSocket rejected.")
+            return
+        # Login gate: the WS carries the actual console session, so it MUST be
+        # cookie-checked itself — gating only the HTML page would leave the
+        # terminal one hand-rolled upgrade away for anyone on the LAN.
+        if not _session_ok(headers):
+            _send_simple(sock, 403, "Forbidden", "Sign in first.")
             return
         if not slots.acquire(blocking=False):
             _send_simple(sock, 503, "Service Unavailable",
@@ -384,24 +468,60 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
         finally:
             slots.release()
         return
-    # Non-WS request: dispatch as a normal HTTP GET using the already-read head.
-    _dispatch_http(sock, method, path, headers)
+    # Non-WS request: dispatch as a normal HTTP request using the already-read head.
+    _dispatch_http(sock, method, path, headers, rest)
 
 
-def _dispatch_http(sock, method, path, headers) -> None:
+def _dispatch_http(sock, method, path, headers, leftover: bytes = b"") -> None:
+    if AUTH_REQUIRED and method == "POST" and path == "/login":
+        _handle_login(sock, headers, leftover)
+        return
     if method != "GET":
         _send_simple(sock, 405, "Method Not Allowed")
         return
+    if AUTH_REQUIRED and path == "/logout":
+        token = webauth.parse_cookies(headers.get("cookie", "")).get(webauth.COOKIE_NAME, "")
+        _SESSIONS.revoke(token)
+        _send_html(sock, 200, "OK", webauth.login_page("Signed out."),
+                   set_cookie=webauth.clear_cookie())
+        return
     if path in ("/", "/index.html"):
+        # The terminal page itself is gated: an unauthenticated visitor gets the
+        # sign-in form. (The real enforcement is on /ws above — this is UX.)
+        if not _session_ok(headers):
+            _send_html(sock, 200, "OK", webauth.login_page())
+            return
         _serve_static(sock, "/static/index.html")
         return
     if path in _STATIC_FILES:
+        # Vendored xterm.js/css only — public, harmless, and needed by the page
+        # the moment the login redirect lands.
         _serve_static(sock, path)
         return
     if path in ("/healthz", "/health"):
         _send_simple(sock, 200, "OK", "ok")
         return
     _send_simple(sock, 404, "Not Found")
+
+
+def _handle_login(sock, headers, leftover: bytes) -> None:
+    ip = _peer_ip(sock)
+    # Charge the throttle BEFORE verifying: a denied or failed attempt must
+    # never be free to retry (charging after the check races the window).
+    if not _THROTTLE.charge(ip):
+        log(f"login throttled for {ip}")
+        _send_html(sock, 429, "Too Many Requests",
+                   webauth.login_page("Too many attempts — wait a few minutes."))
+        return
+    username, password = webauth.parse_login_form(_read_body(sock, headers, leftover))
+    if webauth.check_credentials(_USERS, username, password):
+        _THROTTLE.clear(ip)
+        token = _SESSIONS.issue()
+        log(f"login ok for {username!r} from {ip}")
+        _send_redirect(sock, "/", set_cookie=webauth.session_cookie(token))
+        return
+    log(f"login FAILED from {ip}")
+    _send_html(sock, 200, "OK", webauth.login_page("Wrong username or password."))
 
 
 if __name__ == "__main__":

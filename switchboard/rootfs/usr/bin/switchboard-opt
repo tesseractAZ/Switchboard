@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Print one EFFECTIVE add-on option for the s6 run scripts.
+
+    switchboard-opt <dotted.key> [default]
+
+The run scripts historically read options with bashio::config, which parses
+/data/options.json directly — and therefore silently bypasses the admin
+options-overlay (/config/options-overlay.json) that switchboard-config merges
+at boot. This helper reads the post-overlay snapshot the init oneshot writes
+(/run/switchboard/options-effective.json; every console service depends on
+init-switchboard, so the snapshot always exists by the time a run script
+executes), falling back to raw options.json only if the snapshot is missing.
+
+Output conventions match what the run scripts already expect from bashio:
+scalars print bare, booleans print "true"/"false", dicts/lists print compact
+JSON, and a missing/null key prints the supplied default (empty string if
+none) — never a literal "null". Always exits 0: a run script must not die on
+an option read.
+"""
+
+import json
+import sys
+
+SNAPSHOT = "/run/switchboard/options-effective.json"
+FALLBACK = "/data/options.json"
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("")
+        return 0
+    key = sys.argv[1]
+    default = sys.argv[2] if len(sys.argv) > 2 else ""
+    for path in (SNAPSHOT, FALLBACK):
+        try:
+            with open(path) as fh:
+                val = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for part in key.split("."):
+            if not isinstance(val, dict) or part not in val:
+                val = None
+                break
+            val = val[part]
+        if val is None:
+            break  # the snapshot is a superset of options.json; don't re-search
+        if isinstance(val, bool):
+            print("true" if val else "false")
+        elif isinstance(val, (dict, list)):
+            print(json.dumps(val, separators=(",", ":")))
+        else:
+            print(val)
+        return 0
+    print(default)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -21,22 +21,34 @@ if [ "$(bashio::config 'console_enabled')" = "false" ]; then
     exec sleep infinity
 fi
 
-PORT="$(bashio::config 'console_web_port')"
-# bashio can hand back an empty string / "null" during a config reload; keep the
-# port sane so the log line and CONSOLE_WEB_PORT export are never empty (server.py
-# also guards this, but a blank ":${PORT}" in the log is just misleading).
+# Value reads go through switchboard-opt (the post-overlay snapshot written by
+# init-switchboard, which this service depends on) rather than bashio::config,
+# which parses raw options.json and would silently bypass an options overlay.
+# The enable-flag gates above deliberately STAY on bashio — their empty-read
+# semantics are load-bearing (see the comment at the top) and the overlay is
+# for values, not for turning services off.
+PORT="$(switchboard-opt console_web_port 8100)"
 if [ -z "${PORT}" ] || [ "${PORT}" = "null" ]; then
     PORT="8100"
 fi
 bashio::log.info "Starting Switchboard console web terminal on :${PORT} ..."
-bashio::log.notice "The console web terminal is UNAUTHENTICATED on the LAN and drives the operator console (ring/connect/hang up). It exposes the same surface as the telnet console on port 2300. Set console_web_enabled:false to turn it off."
+
+# Login gate: a non-empty console_users list requires a sign-in (and the WS
+# upgrade itself is cookie-checked). Empty = the historical open behavior.
+USERS_JSON="$(switchboard-opt console_users '[]')"
+export CONSOLE_WEB_USERS="${USERS_JSON}"
+if [ "${USERS_JSON}" = "[]" ] || [ -z "${USERS_JSON}" ]; then
+    bashio::log.notice "The console web terminal is UNAUTHENTICATED on the LAN and drives the operator console (ring/connect/hang up). Add console_users entries to require a sign-in, or set console_web_enabled:false to turn it off."
+else
+    bashio::log.info "Console web terminal login gate ACTIVE (console_users configured)."
+fi
 
 export CONSOLE_WEB_PORT="${PORT}"
 # Bind address: explicit console_web_bind wins; otherwise follow console_bind so
 # locking the telnet console to loopback also locks the web terminal.
-BIND="$(bashio::config 'console_web_bind')"
+BIND="$(switchboard-opt console_web_bind)"
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    BIND="$(bashio::config 'console_bind')"
+    BIND="$(switchboard-opt console_bind)"
 fi
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     BIND="0.0.0.0"
@@ -44,7 +56,7 @@ fi
 export CONSOLE_WEB_BIND="${BIND}"
 # Bridge to the operator console on loopback; mirror its configured port so a
 # non-default console_port still works.
-TARGET_PORT="$(bashio::config 'console_port')"
+TARGET_PORT="$(switchboard-opt console_port 2300)"
 if [ -z "${TARGET_PORT}" ] || [ "${TARGET_PORT}" = "null" ]; then
     TARGET_PORT="2300"
 fi

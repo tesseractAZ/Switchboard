@@ -23,6 +23,10 @@ def check(name: str, cond: bool) -> None:
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter alone are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still "pass" the test.
+    # Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 def _bare_dial_flags(dial_line: str) -> str:
@@ -1215,6 +1219,69 @@ def sbc_open_store_path() -> str:
     src = SBC_PATH.parents[1] / "share" / "switchboard" / "wakeup" / "store.py"
     return src.read_text()
 
+
+
+# ── options overlay (/config/options-overlay.json) ───────────────────────────
+
+def test_deep_merge_semantics() -> None:
+    base = {"a": 1, "trunk": {"user": "u", "secret": "s", "inbound_ext": "19"},
+            "rooms": [{"ext": "11"}]}
+    over = {"trunk": {"inbound_ext": "11,12,19"}, "rooms": [{"ext": "12"}], "b": 2}
+    got = sbc._deep_merge(base, over)
+    check("overlay: dicts merge recursively (trunk creds survive)",
+          got["trunk"] == {"user": "u", "secret": "s", "inbound_ext": "11,12,19"})
+    check("overlay: lists replace wholesale", got["rooms"] == [{"ext": "12"}])
+    check("overlay: untouched keys survive, new keys land",
+          got["a"] == 1 and got["b"] == 2)
+    check("overlay: base dict not mutated", base["trunk"]["inbound_ext"] == "19")
+
+
+def test_load_options_overlay(tmp_path) -> None:
+    import json
+    opts_p = tmp_path / "options.json"
+    over_p = tmp_path / "overlay.json"
+    saved = (sbc.OPTIONS_PATH, sbc.OVERLAY_PATH)
+    try:
+        sbc.OPTIONS_PATH, sbc.OVERLAY_PATH = opts_p, over_p
+        opts_p.write_text(json.dumps(
+            {"console_bind": "0.0.0.0", "trunk": {"username": "u", "inbound_ext": "19"}}))
+        # absent overlay = exact passthrough
+        check("overlay: absent file is a no-op",
+              sbc.load_options()["console_bind"] == "0.0.0.0")
+        # active overlay deep-merges
+        over_p.write_text(json.dumps(
+            {"console_bind": "127.0.0.1", "trunk": {"inbound_ext": "11,12,19"}}))
+        got = sbc.load_options()
+        check("overlay: scalar override applies", got["console_bind"] == "127.0.0.1")
+        check("overlay: nested override keeps sibling keys",
+              got["trunk"] == {"username": "u", "inbound_ext": "11,12,19"})
+        # malformed overlay: ignored loudly, base wins (never fail the boot)
+        over_p.write_text("{not json")
+        check("overlay: malformed file ignored, base options returned",
+              sbc.load_options()["console_bind"] == "0.0.0.0")
+        # non-object root: same fail-safe path
+        over_p.write_text("[1,2]")
+        check("overlay: non-object root ignored",
+              sbc.load_options()["console_bind"] == "0.0.0.0")
+    finally:
+        sbc.OPTIONS_PATH, sbc.OVERLAY_PATH = saved
+
+
+def test_write_effective_options(tmp_path) -> None:
+    import json, os, stat
+    saved = sbc.EFFECTIVE_PATH
+    try:
+        sbc.EFFECTIVE_PATH = tmp_path / "options-effective.json"
+        sbc.write_effective_options({"console_users": [{"username": "e", "password": "p"}]})
+        data = json.loads(sbc.EFFECTIVE_PATH.read_text())
+        check("effective: round-trips the options",
+              data["console_users"][0]["username"] == "e")
+        mode = stat.S_IMODE(os.stat(sbc.EFFECTIVE_PATH).st_mode)
+        check("effective: root-only 0600 (it carries secrets)", mode == 0o600)
+        check("effective: no .tmp left behind (atomic replace)",
+              not (tmp_path / "options-effective.tmp").exists())
+    finally:
+        sbc.EFFECTIVE_PATH = saved
 
 if __name__ == "__main__":
     test_status_announce_dialplan()

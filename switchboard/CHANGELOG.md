@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.44.0
+
+Console web terminal sign-in, and an administrator options overlay.
+
+- **Web terminal login** (`console_users`): a list of `{username, password}`
+  accounts (masked in the Configuration UI). When any account is configured the
+  web terminal shows a sign-in page and — the part that matters — the WebSocket
+  carrying the actual console session requires the signed-in cookie too.
+  Sessions are HttpOnly/SameSite=Strict with a 12-hour lifetime; failed
+  attempts are throttled per source address, charged before verification;
+  credential comparison is constant-shape. An empty list preserves the
+  historical open behavior, and the boot log states which mode is live. The
+  telnet console is unchanged — bind it to loopback where the LAN isn't fully
+  trusted.
+- **Options overlay** (`/config/options-overlay.json`, i.e.
+  `/addon_configs/<slug>/options-overlay.json` from the host): a JSON object
+  deep-merged over the saved options at every start, for administration when
+  the Supervisor options API is unavailable and for scripted config. Dicts
+  merge recursively, scalars/lists replace, every overridden key path is logged
+  at boot, and a malformed overlay is ignored loudly. The console services read
+  their values through the merged snapshot (new `switchboard-opt` helper); the
+  service enable flags deliberately stay on the Supervisor options only.
+- Test-harness hardening: the config test-suite's `check()` helper now asserts,
+  so a failing check fails the run under pytest as well as under the script
+  runner.
+
 ## 0.43.2
 
 Completes the 0.43.1 sample-config cleanup. No feature changes.

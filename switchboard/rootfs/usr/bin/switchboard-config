@@ -28,6 +28,16 @@ import string
 from pathlib import Path
 
 OPTIONS_PATH = Path("/data/options.json")
+# Optional admin overlay, deep-merged OVER options.json (see load_options). It
+# lives in the addon_config map (host: /addon_configs/<slug>/) precisely so an
+# administrator with shell access can change effective options when the
+# Supervisor options API isn't reachable (HA 2026.x rejects long-lived tokens on
+# the /api/hassio proxy). JSON, not YAML: the image has no YAML parser.
+OVERLAY_PATH = Path("/config/options-overlay.json")
+# The post-overlay options snapshot for the s6 run scripts (bashio::config reads
+# options.json directly and would silently bypass the overlay; switchboard-opt
+# reads this instead).
+EFFECTIVE_PATH = Path("/run/switchboard/options-effective.json")
 ASTERISK_ETC = Path("/etc/asterisk")
 RUN_DIR = Path("/run/switchboard")
 # Persistent JSON stores (wake-ups, MWI flags) that BOTH the root services AND
@@ -44,18 +54,74 @@ def log(msg: str) -> None:
     print(f"[switchboard-config] {msg}", flush=True)
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """dict-into-dict merges recurse (so an overlay {"trunk": {"inbound_ext": …}}
+    refines the trunk block without wiping its credentials); every other type —
+    scalars AND lists — is replaced wholesale."""
+    out = dict(base)
+    for key, val in overlay.items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], val)
+        else:
+            out[key] = val
+    return out
+
+
+def _overlay_paths(overlay: dict, prefix: str = "") -> list:
+    """Dotted key paths an overlay overrides, for the boot log."""
+    paths = []
+    for key, val in overlay.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(val, dict) and val:
+            paths.extend(_overlay_paths(val, dotted + "."))
+        else:
+            paths.append(dotted)
+    return paths
+
+
 def load_options() -> dict:
     if not OPTIONS_PATH.exists():
         log(f"WARNING: {OPTIONS_PATH} missing; using empty defaults")
-        return {}
-    try:
-        with OPTIONS_PATH.open() as fh:
-            return json.load(fh)
-    except (OSError, ValueError) as exc:
-        # A malformed options.json must not crash the init oneshot (which would
-        # silently take the whole add-on down); degrade to empty defaults + log.
-        log(f"ERROR: cannot read/parse {OPTIONS_PATH}: {exc}; using empty defaults")
-        return {}
+        opts: dict = {}
+    else:
+        try:
+            with OPTIONS_PATH.open() as fh:
+                opts = json.load(fh)
+        except (OSError, ValueError) as exc:
+            # A malformed options.json must not crash the init oneshot (which would
+            # silently take the whole add-on down); degrade to empty defaults + log.
+            log(f"ERROR: cannot read/parse {OPTIONS_PATH}: {exc}; using empty defaults")
+            opts = {}
+    # Admin overlay: deep-merged over the Supervisor-managed options. Absent =
+    # no-op; malformed = LOUD + ignored (never fail the boot over an overlay);
+    # active = every overridden key path is logged, because a value that the
+    # Configuration UI shows but the overlay overrides is otherwise invisible.
+    if OVERLAY_PATH.exists():
+        try:
+            with OVERLAY_PATH.open() as fh:
+                overlay = json.load(fh)
+            if not isinstance(overlay, dict):
+                raise ValueError("overlay root must be a JSON object")
+        except (OSError, ValueError) as exc:
+            log(f"ERROR: options overlay {OVERLAY_PATH} unreadable ({exc}); IGNORING it")
+        else:
+            if overlay:
+                log(f"options overlay ACTIVE ({OVERLAY_PATH}) — overriding: "
+                    + ", ".join(sorted(_overlay_paths(overlay))))
+                opts = _deep_merge(opts, overlay)
+    return opts
+
+
+def write_effective_options(opts: dict) -> None:
+    """Persist the post-overlay options for the s6 run scripts (switchboard-opt).
+
+    Root-only (0600): it carries the same secrets as options.json. Written
+    atomically so a run script started mid-write never reads a torn file."""
+    tmp = EFFECTIVE_PATH.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(opts, fh)
+    os.replace(tmp, EFFECTIVE_PATH)
 
 
 # --------------------------------------------------------------------------- #
@@ -1700,12 +1766,17 @@ def write_features_runtime(opts: dict) -> None:
 
 def main() -> None:
     opts = load_options()
+    # Snapshot the effective (post-overlay, pre-sanitize) options for the s6 run
+    # scripts before anything mutates opts — bashio reads options.json directly
+    # and would bypass the overlay, so switchboard-opt reads this instead.
+    effective = dict(opts)
     # Validate/sanitize/dedupe rooms once; both renderers consume the cleaned list.
     opts["rooms"] = valid_rooms(opts.get("rooms", []) or [])
     if not opts["rooms"]:
         log("WARNING: no valid rooms configured — no phones will register")
     ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    write_effective_options(effective)
     # Make /data/state asterisk-writable BEFORE Asterisk starts, so the dial-42
     # wake-up AGI and the dialplan's MWI-clear (both run as the asterisk user) can
     # write their JSON stores instead of crashing with EPERM.

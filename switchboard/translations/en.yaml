@@ -97,13 +97,16 @@ configuration:
     description: Interface the console listens on. '0.0.0.0' = all interfaces (LAN-reachable); set '127.0.0.1' to restrict it to the host only.
   console_web_enabled:
     name: Console Web Terminal
-    description: A browser-based version of the operator console (same ring/connect/hang-up powers). Also UNAUTHENTICATED on the LAN — turn off if you don't need the web terminal.
+    description: A browser-based version of the operator console (same ring/connect/hang-up powers). Open on the LAN unless Console Web Terminal Users are configured (then it requires a sign-in) — turn off if you don't need the web terminal.
   console_web_port:
     name: Console Web Terminal Port
     description: TCP port for the web terminal. Default 8100.
   console_web_bind:
     name: Console Web Terminal Bind Address
     description: Interface the web terminal listens on. Blank = all interfaces; '127.0.0.1' restricts it to the host.
+  console_users:
+    name: Console Web Terminal Users
+    description: "Sign-in accounts for the web terminal. Each entry has 'username' and 'password' (shown masked). Leave the list EMPTY to keep the web terminal open (no login) — its historical behavior. When any user is configured, both the page and the terminal connection require a sign-in; too many wrong attempts from one address are throttled for a few minutes."
 
   # ── Time, clock & wake-up ────────────────────────────────────────────
   timezone:
