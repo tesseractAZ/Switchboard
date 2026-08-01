@@ -1236,6 +1236,85 @@ def test_deep_merge_semantics() -> None:
     check("overlay: base dict not mutated", base["trunk"]["inbound_ext"] == "19")
 
 
+
+def test_deep_merge_type_guard() -> None:
+    # The overlay is hand-edited and bypasses the Supervisor schema, so a
+    # wrong-typed value must be REJECTED, not merged: passing it through would
+    # raise deep inside a renderer, fail the init oneshot, and take every
+    # service down (Asterisk included).
+    base = {"trunk": {"enabled": True, "port": 5060}, "rooms": [{"ext": "11"}],
+            "console_bind": "0.0.0.0", "console_web_port": 8100,
+            "operator_synonyms": []}
+    for bad, key in [({"trunk": "sip.example.com"}, "trunk"),
+                     ({"rooms": "x"}, "rooms"),
+                     ({"rooms": {"ext": "11"}}, "rooms"),
+                     ({"operator_synonyms": 42}, "operator_synonyms"),
+                     ({"console_bind": 5}, "console_bind"),
+                     ({"console_web_port": 8100.5}, "console_web_port"),
+                     ({"trunk": {"enabled": "yes"}}, "trunk.enabled")]:
+        rejected = []
+        got = sbc._deep_merge(base, bad, "", rejected)
+        check(f"overlay type-guard rejects {key}",
+              len(rejected) == 1 and rejected[0].startswith(key))
+        check(f"overlay type-guard leaves {key} unchanged",
+              got == base or got.get(key.split(".")[0]) == base[key.split(".")[0]])
+    # bool must not satisfy an int option (isinstance(True, int) is True)
+    rejected = []
+    sbc._deep_merge({"console_web_port": 8100}, {"console_web_port": True}, "", rejected)
+    check("overlay type-guard: bool is not an int", len(rejected) == 1)
+    # matching types still apply
+    rejected = []
+    got = sbc._deep_merge(base, {"console_bind": "127.0.0.1"}, "", rejected)
+    check("overlay type-guard passes a same-typed value",
+          got["console_bind"] == "127.0.0.1" and not rejected)
+    # a key absent from base has nothing to check against — passed through
+    rejected = []
+    got = sbc._deep_merge(base, {"brand_new": {"x": 1}}, "", rejected)
+    check("overlay: unknown key passes through", got["brand_new"] == {"x": 1} and not rejected)
+
+
+def test_changed_paths_only_reports_real_changes() -> None:
+    base = {"a": 1, "trunk": {"x": "1", "y": "2"}}
+    check("changed_paths: no-op restatement reports nothing",
+          sbc._changed_paths(base, sbc._deep_merge(base, {"a": 1})) == [])
+    check("changed_paths: empty dict override reports nothing",
+          sbc._changed_paths(base, sbc._deep_merge(base, {"trunk": {}})) == [])
+    check("changed_paths: real nested change is reported",
+          sbc._changed_paths(base, sbc._deep_merge(base, {"trunk": {"y": "9"}})) == ["trunk.y"])
+    check("changed_paths: new key is reported",
+          sbc._changed_paths(base, sbc._deep_merge(base, {"z": 3})) == ["z"])
+
+
+def test_load_options_never_raises_on_bad_overlay(tmp_path) -> None:
+    # Every overlay failure mode must degrade to "ignore the overlay" — the
+    # add-on's whole service tree hangs off this call's exit code.
+    import json
+    opts_p, over_p = tmp_path / "o.json", tmp_path / "ov.json"
+    saved = (sbc.OPTIONS_PATH, sbc.OVERLAY_PATH)
+    try:
+        sbc.OPTIONS_PATH, sbc.OVERLAY_PATH = opts_p, over_p
+        opts_p.write_text(json.dumps({"trunk": {"enabled": True}, "rooms": [{"ext": "11"}]}))
+        for payload in ['{"trunk": "a-string"}', '{"rooms": 42}', '{not json',
+                        '[1,2,3]', 'null', '""']:
+            over_p.write_text(payload)
+            got = sbc.load_options()          # must not raise
+            check(f"overlay {payload[:18]!r}: base options survive intact",
+                  got["trunk"] == {"enabled": True} and got["rooms"] == [{"ext": "11"}])
+    finally:
+        sbc.OPTIONS_PATH, sbc.OVERLAY_PATH = saved
+
+
+def test_write_effective_options_never_raises(tmp_path) -> None:
+    saved = sbc.EFFECTIVE_PATH
+    try:
+        # An unwritable destination must be logged, not raised (it runs inside
+        # the boot-critical oneshot).
+        sbc.EFFECTIVE_PATH = tmp_path / "nope" / "deep" / "options-effective.json"
+        sbc.write_effective_options({"a": 1})
+        check("effective: unwritable path degrades quietly", True)
+    finally:
+        sbc.EFFECTIVE_PATH = saved
+
 def test_load_options_overlay(tmp_path) -> None:
     import json
     opts_p = tmp_path / "options.json"
@@ -1284,52 +1363,24 @@ def test_write_effective_options(tmp_path) -> None:
         sbc.EFFECTIVE_PATH = saved
 
 if __name__ == "__main__":
-    test_status_announce_dialplan()
-    test_status_announce_collisions()
-    test_features_staging()
-    test_write_perms_tight()
-    test_voice_dirs_independent_of_operator()
-    test_rooms_map_staged_for_directory()
-    test_rtpqos_telemetry()
-    test_config_hardening_v018()
-    test_disabled_feature_frees_ext()
-    test_state_dir_setup()
-    test_state_dir_setup_failure_is_graceful()
-    test_hostile_inputs()
-    test_whitespace_dial_prefix()
-    test_outbound_toll_fraud_blocks()
-    test_outbound_rules_live_in_rooms_context()
-    test_direct_dial_mode()
-    test_direct_dial_off_keeps_prefix()
-    test_trunk_codec_pinned_to_ulaw()
-    test_rooms_are_ulaw_only()
-    test_trunk_aor_not_qualified()
-    test_trunk_registration_keepalive()
-    test_trunk_inbound_routing()
-    test_distinctive_ring_outside_calls()
-    test_inbound_dial_has_no_transfer_flags()
-    test_features_conf_transfer()
-    test_clean_config_unchanged()
-    test_operator_voice_dialplan()
-    test_operator_feature_routing()
-    test_talking_clock()
-    test_timezone_resolution()
-    test_wakeup_dialplan()
-    test_mwi_pjsip_notify()
-    test_confbridge_profiles()
-    test_page_intercom()
-    test_automation_dialplan()
-    test_operator_mwi_clear()
-    test_feature_code_collisions()
-    test_modules_conf()
-    test_logger_durable_persistent_file()
-    test_logger_durable_file_stays_low_volume_at_debug()
-    test_secret_semicolon_or_whitespace_rejected()
-    test_wakeup_does_not_collide_with_disabled_clock()
-    test_trunk_from_user_domain_validated()
-    test_call_audio_qos_rtp_jitter()
-    test_transfer_toll_fraud_defense()
-    test_operator_wakeup_route()
-    test_directory_dialplan()
+    # Auto-discover instead of listing every test by hand: the hand-maintained
+    # list silently skipped newly added tests (the overlay tests were invisible
+    # to this runner the day they landed). Tests that take pytest fixtures
+    # (tmp_path) can't run here — they are reported as skipped so the gap is
+    # visible rather than silent.
+    import inspect
+    import sys as _sys
+    _mod = _sys.modules[__name__]
+    _skipped = []
+    for _name, _fn in sorted(vars(_mod).items()):
+        if not _name.startswith("test_") or not callable(_fn):
+            continue
+        if inspect.signature(_fn).parameters:
+            _skipped.append(_name)
+            continue
+        _fn()
+    if _skipped:
+        print(f"\nSKIPPED (pytest fixtures required — run pytest for these): "
+              + ", ".join(_skipped))
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

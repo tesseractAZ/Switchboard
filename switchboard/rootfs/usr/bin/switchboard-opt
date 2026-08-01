@@ -31,6 +31,12 @@ def main() -> int:
         return 0
     key = sys.argv[1]
     default = sys.argv[2] if len(sys.argv) > 2 else ""
+    # Snapshot first, then the raw options as a FALLBACK — including when the
+    # snapshot exists but lacks the key. The snapshot is normally a superset,
+    # but switchboard-config degrades to empty defaults on a transient
+    # options.json read error and would then write an empty snapshot; without
+    # this fallback that single hiccup would silently drop real settings (e.g.
+    # disable the console login gate) for the whole container lifetime.
     for path in (SNAPSHOT, FALLBACK):
         try:
             with open(path) as fh:
@@ -43,7 +49,7 @@ def main() -> int:
                 break
             val = val[part]
         if val is None:
-            break  # the snapshot is a superset of options.json; don't re-search
+            continue
         if isinstance(val, bool):
             print("true" if val else "false")
         elif isinstance(val, (dict, list)):

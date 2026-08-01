@@ -176,10 +176,24 @@ also honors an **overlay file** the administrator can place at
 `/config/options-overlay.json`): a JSON object that is **deep-merged over the
 saved options at every start**. Dictionaries merge recursively (so
 `{"trunk": {"inbound_ext": "11,19"}}` refines the trunk without touching its
-credentials); scalars and lists replace. The boot log lists every key path an
-active overlay overrides — a value the Configuration tab shows but the overlay
-overrides would otherwise be invisible. A malformed overlay is logged loudly
-and ignored. Remove the file (and restart) to return to the saved options.
+credentials); scalars and lists replace.
+
+Because the overlay bypasses the add-on's schema, it is **type-checked against
+the saved options**: an entry whose JSON type differs from the value it would
+replace (a string where the trunk object belongs, `8100.5` for a port, `true`
+for a number) is rejected with a warning and the saved value is kept. Any other
+overlay problem — unparseable JSON, a non-object root — is logged and the
+overlay is ignored wholesale. The overlay can never fail the start: the whole
+add-on, Asterisk included, hangs off that step.
+
+The boot log lists every key path whose value actually **changes** (a no-op
+restatement is reported as changing nothing), so an override the Configuration
+tab can't show you is still visible. Remove the file and restart to return to
+the saved options.
+
+Services read the merged result, not `options.json` — the config renderer, the
+dashboard, the operator console, and the health monitors all consume the same
+effective view.
 
 ## 3. Extensions & feature codes
 

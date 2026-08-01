@@ -55,7 +55,7 @@ _THROTTLE = webauth.LoginThrottle()
 def _env_int(name: str, default: int) -> int:
     """int() of a config-derived env var, tolerating unset *or* set-but-empty.
 
-    These ports come from bashio::config in the s6 run script; during a config
+    These ports come from switchboard-opt in the s6 run script; during a config
     reload / options.json rewrite (e.g. an add-on schema migration) that export
     can momentarily be an empty string. The 2-arg ``os.environ.get(name, "8100")``
     default only covers the *absent* case, so ``int(get(...))`` still throws on
@@ -92,11 +92,16 @@ SEND_TIMEOUT = 30
 _ALLOWED_ORIGINS = [o for o in os.environ.get("CONSOLE_WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
 # Static assets we will serve, by URL path → (filesystem name, content type).
+# NOTE: index.html is deliberately NOT in this map. It is the terminal page and
+# is served only through the session-gated "/" route — listing it here would
+# publish an ungated second door to the same page (it did, before v0.44.0
+# shipped; the WS stayed gated, but the page itself must not leak either).
 _STATIC_FILES = {
-    "/static/index.html": ("index.html", "text/html; charset=utf-8"),
     "/static/xterm.js": ("xterm.js", "application/javascript; charset=utf-8"),
     "/static/xterm.css": ("xterm.css", "text/css; charset=utf-8"),
 }
+# Served by "/" only, after the session check.
+_INDEX_FILE = ("index.html", "text/html; charset=utf-8")
 
 
 def log(msg: str) -> None:
@@ -124,8 +129,8 @@ def _read_http_head(sock: socket.socket):
     return head + b"\r\n\r\n", rest
 
 
-def _serve_static(sock: socket.socket, path: str) -> None:
-    name, ctype = _STATIC_FILES[path]
+def _serve_static(sock: socket.socket, path: str, entry=None) -> None:
+    name, ctype = entry if entry is not None else _STATIC_FILES[path]
     full = os.path.join(STATIC_DIR, name)
     try:
         with open(full, "rb") as fh:
@@ -229,7 +234,7 @@ def _peer_ip(sock: socket.socket) -> str:
         return "?"
 
 
-def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
+def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     """Pump bytes between an upgraded browser WebSocket and the operator console.
 
     `leftover` is any bytes already read past the HTTP head (usually empty —
@@ -304,6 +309,14 @@ def _bridge_ws(sock: socket.socket, leftover: bytes) -> None:
         while open_:
             if time.monotonic() - last_input > IDLE_SECONDS:
                 break  # browser idle too long — reclaim the session slot
+            # Re-check the login session on every loop pass (<=30 s, the select
+            # timeout). Validating only at upgrade would leave a live console
+            # bridge fully usable after /logout or after the session's absolute
+            # TTL expired — there would be no way to kick a session short of
+            # restarting the service.
+            if AUTH_REQUIRED and not _SESSIONS.valid(token):
+                log("session ended (logout or expiry) — closing console bridge")
+                break
             try:
                 readable, _, _ = select.select([sock, console], [], [], 30)
             except (OSError, ValueError):
@@ -406,7 +419,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     log(f"console web terminal listening on {host}:{port} "
-        f"(bridging to {CONSOLE_HOST}:{CONSOLE_PORT})")
+        f"(bridging to {CONSOLE_HOST}:{CONSOLE_PORT}) — login gate "
+        f"{'ENABLED (' + str(len(_USERS)) + ' user(s))' if AUTH_REQUIRED else 'DISABLED (open on the LAN)'}")
     try:
         srv.serve_forever()
     finally:
@@ -464,7 +478,9 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
                 sock.settimeout(SEND_TIMEOUT)
             except OSError:
                 pass
-            _bridge_ws(sock, rest)
+            token = webauth.parse_cookies(
+                headers.get("cookie", "")).get(webauth.COOKIE_NAME, "")
+            _bridge_ws(sock, rest, token)
         finally:
             slots.release()
         return
@@ -491,7 +507,7 @@ def _dispatch_http(sock, method, path, headers, leftover: bytes = b"") -> None:
         if not _session_ok(headers):
             _send_html(sock, 200, "OK", webauth.login_page())
             return
-        _serve_static(sock, "/static/index.html")
+        _serve_static(sock, "/", _INDEX_FILE)
         return
     if path in _STATIC_FILES:
         # Vendored xterm.js/css only — public, harmless, and needed by the page
@@ -506,6 +522,12 @@ def _dispatch_http(sock, method, path, headers, leftover: bytes = b"") -> None:
 
 def _handle_login(sock, headers, leftover: bytes) -> None:
     ip = _peer_ip(sock)
+    # Same-origin gate, mirroring the WS upgrade. A cross-origin form POST can
+    # never read the response, but WITHOUT this any web page a household browser
+    # visits could burn this IP's login attempts and lock the console out.
+    if not wsproto.origin_allowed(headers, _ALLOWED_ORIGINS):
+        _send_simple(sock, 403, "Forbidden", "Cross-origin login rejected.")
+        return
     # Charge the throttle BEFORE verifying: a denied or failed attempt must
     # never be free to retry (charging after the check races the window).
     if not _THROTTLE.charge(ip):

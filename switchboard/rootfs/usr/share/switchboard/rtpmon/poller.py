@@ -233,12 +233,17 @@ def _notify_outage(event: str, summ: dict) -> None:
 
 
 def _load_options() -> dict:
-    try:
-        with open(OPTIONS_PATH) as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
+    # Post-overlay snapshot first, then the raw options as a fallback so a
+    # missing snapshot degrades to the saved config rather than to {}.
+    for path in (OPTIONS_PATH, "/data/options.json"):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            if isinstance(d, dict) and d:
+                return d
+        except Exception:
+            continue
+    return {}
 
 
 def _append_history(phones: list) -> None:

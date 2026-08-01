@@ -10,4 +10,8 @@ if [ -f /run/switchboard/ami.env ]; then
 fi
 
 cd /usr/share/switchboard/webui || exit 1
+# Read options from the post-overlay snapshot (init-switchboard writes it);
+# falls back to /data/options.json when absent. Keeps every consumer on ONE
+# effective view of the config.
+export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log

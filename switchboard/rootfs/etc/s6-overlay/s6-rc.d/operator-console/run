@@ -32,4 +32,8 @@ export CONSOLE_HOST="${BIND}"
 # but also export TZ so the board clock is right even if the symlink didn't take.
 export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
 cd /usr/share/switchboard/console || exit 1
+# Read options from the post-overlay snapshot (init-switchboard writes it);
+# falls back to /data/options.json when absent. Keeps every consumer on ONE
+# effective view of the config.
+export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 exec python3 console.py

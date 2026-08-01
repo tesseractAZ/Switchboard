@@ -24,7 +24,34 @@ Console web terminal sign-in, and an administrator options overlay.
   service enable flags deliberately stay on the Supervisor options only.
 - Test-harness hardening: the config test-suite's `check()` helper now asserts,
   so a failing check fails the run under pytest as well as under the script
-  runner.
+  runner, and its script runner auto-discovers tests instead of relying on a
+  hand-maintained list that silently skipped new ones.
+
+Hardening applied after an adversarial review of the above, before release:
+
+- The overlay is **type-checked** against the saved options. Previously a
+  syntactically valid but wrong-typed value (`{"trunk": "host"}`, a float port)
+  raised inside a renderer, failed the init step, and stopped every service —
+  Asterisk included. Mismatches are now rejected with a warning, and any other
+  overlay failure degrades to "ignore the overlay".
+- `GET /static/index.html` served the terminal page with no session, bypassing
+  the gate on `/`. The page is now reachable only through the gated route.
+- A live console session is re-validated continuously, so `/logout` and session
+  expiry now close an **already-open** terminal instead of only blocking new
+  ones.
+- `POST /login` is same-origin gated: without it, any page a household browser
+  visited could burn this address's login attempts and lock the console out.
+- The login throttle and session store are lock-protected (every request runs on
+  its own thread), and the boot log now derives "gate ACTIVE" from the same
+  parser the server uses — a `console_users` list of only invalid rows no longer
+  reports a gate that isn't running. The server also logs its true mode.
+- `switchboard-opt` falls back to `options.json` when the snapshot lacks a key,
+  and the snapshot write can no longer fail the start; the dashboard, console,
+  and monitors read the effective view with the same fallback, so a missing
+  snapshot degrades to the saved config rather than to nothing.
+- New route-level tests drive the real server over a socket (the helper-only
+  suite is what let the `/static/index.html` hole through); every fix above is
+  mutation-verified.
 
 ## 0.43.2
 

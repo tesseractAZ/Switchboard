@@ -182,12 +182,21 @@ def parse_input(buf: bytes):
 
 # ── Board model (shared snapshot, refreshed by a poller thread) ─────────────── #
 def load_options() -> dict:
-    """The full add-on options.json (rooms + trunk + feature toggles), or {}."""
-    try:
-        with open(OPTIONS_PATH) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
+    """The full add-on options (rooms + trunk + feature toggles), or {}.
+
+    Reads the post-overlay snapshot first (SWITCHBOARD_OPTIONS, written by
+    init-switchboard) and FALLS BACK to /data/options.json. The fallback is not
+    optional: if the snapshot is ever missing, returning {} here would empty the
+    board of every room."""
+    for path in (OPTIONS_PATH, "/data/options.json"):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and data:
+                return data
+        except (OSError, ValueError):
+            continue
+    return {}
 
 
 def load_rooms_cfg(opts: dict | None = None) -> dict:

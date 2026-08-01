@@ -27,6 +27,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+import threading
 import time
 from urllib.parse import parse_qs
 
@@ -103,22 +104,30 @@ class LoginThrottle:
         self._window = window
         self._now = now
         self._hits = {}  # ip -> [monotonic, ...]
+        # Every request runs on its own ThreadingTCPServer thread, and charge()
+        # is a read-modify-write: without this lock two concurrent attempts can
+        # both read the same pre-limit list and both write back, losing a count
+        # (i.e. more attempts than the limit allows).
+        self._lock = threading.Lock()
 
     def charge(self, ip: str) -> bool:
         t = self._now()
-        hits = [x for x in self._hits.get(ip, []) if t - x < self._window]
-        allowed = len(hits) < self._max
-        hits.append(t)
-        self._hits[ip] = hits
-        if len(self._hits) > _MAX_TRACKED_IPS:
-            # Bound memory under an address-spraying flood; dropping the oldest
-            # tracked IP only ever FORGIVES attempts, never blocks a fresh user.
-            self._hits.pop(next(iter(self._hits)))
+        with self._lock:
+            hits = [x for x in self._hits.get(ip, []) if t - x < self._window]
+            allowed = len(hits) < self._max
+            hits.append(t)
+            self._hits[ip] = hits
+            if len(self._hits) > _MAX_TRACKED_IPS:
+                # Bound memory under an address-spraying flood; dropping the
+                # oldest tracked IP only ever FORGIVES attempts, never blocks a
+                # fresh user.
+                self._hits.pop(next(iter(self._hits)))
         return allowed
 
     def clear(self, ip: str) -> None:
         """A successful login stops penalizing its source."""
-        self._hits.pop(ip, None)
+        with self._lock:
+            self._hits.pop(ip, None)
 
 
 class Sessions:
@@ -129,31 +138,36 @@ class Sessions:
         self._ttl = ttl
         self._now = now
         self._tok = {}  # token -> expiry (monotonic)
+        self._lock = threading.Lock()  # shared across request threads
 
     def issue(self) -> str:
-        if len(self._tok) >= _MAX_SESSIONS:
-            self._prune()
-            while len(self._tok) >= _MAX_SESSIONS:
-                self._tok.pop(next(iter(self._tok)))  # evict oldest-issued
         token = secrets.token_urlsafe(32)
-        self._tok[token] = self._now() + self._ttl
+        with self._lock:
+            if len(self._tok) >= _MAX_SESSIONS:
+                self._prune_locked()
+                while len(self._tok) >= _MAX_SESSIONS:
+                    self._tok.pop(next(iter(self._tok)))  # evict oldest-issued
+            self._tok[token] = self._now() + self._ttl
         return token
 
     def valid(self, token: str) -> bool:
         if not token:
             return False
-        expiry = self._tok.get(token)
-        if expiry is None:
-            return False
-        if self._now() > expiry:
-            self._tok.pop(token, None)
-            return False
+        with self._lock:
+            expiry = self._tok.get(token)
+            if expiry is None:
+                return False
+            if self._now() > expiry:
+                self._tok.pop(token, None)
+                return False
         return True
 
     def revoke(self, token: str) -> None:
-        self._tok.pop(token, None)
+        with self._lock:
+            self._tok.pop(token, None)
 
-    def _prune(self) -> None:
+    def _prune_locked(self) -> None:
+        """Caller holds self._lock."""
         t = self._now()
         for token in [k for k, exp in self._tok.items() if t > exp]:
             self._tok.pop(token, None)

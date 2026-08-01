@@ -22,4 +22,8 @@ fi
 LHI="$(bashio::config 'link_health_interval')"
 export LINK_HEALTH_INTERVAL="${LHI:-300}"
 
+# Read options from the post-overlay snapshot (init-switchboard writes it);
+# falls back to /data/options.json when absent. Keeps every consumer on ONE
+# effective view of the config.
+export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 exec python3 /usr/share/switchboard/rtpmon/poller.py
