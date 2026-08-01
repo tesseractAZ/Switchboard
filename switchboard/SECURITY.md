@@ -141,13 +141,20 @@ fit your network. Each logs a warning at start.
 
 ### The telnet operator console (`:2300`) and web terminal (`:8100`)
 
-Both are **unauthenticated on the LAN by design** and can ring, connect, hang up,
+Both can ring, connect, hang up,
 transfer, page, set message-waiting, and control lights. The blast radius is
 bounded — at most 5 concurrent sessions, a 15-minute idle reclaim, and (for the web
 terminal) a same-origin WebSocket gate that blocks cross-site drive-by hijacking —
 but anyone who can reach the port from a same-origin context can drive the board.
 
-**Mitigations you control:** set `console_bind: 127.0.0.1` (the web terminal
+The telnet console is **unauthenticated on the LAN by design**; the **web
+terminal supports a login** — configure `console_users` (username + masked
+password) and both its page and its WebSocket require a signed-in session, with
+per-address throttling of failed attempts. With an empty `console_users` the web
+terminal is as open as the telnet console.
+
+**Mitigations you control:** configure `console_users` for the web terminal;
+set `console_bind: 127.0.0.1` (the web terminal
 follows it) to make them host-local, or disable them with
 `console_enabled: false` / `console_web_enabled: false`. The Home Assistant Ingress
 dashboard remains the authenticated management surface.

@@ -21,4 +21,8 @@ export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
 WRS="$(bashio::config 'wakeup_ring_seconds')"
 export WAKEUP_RING_SECONDS="${WRS:-60}"
 
+# Read options from the post-overlay snapshot (init-switchboard writes it);
+# falls back to /data/options.json when absent. Keeps every consumer on ONE
+# effective view of the config.
+export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 exec python3 /usr/share/switchboard/wakeup/scheduler.py

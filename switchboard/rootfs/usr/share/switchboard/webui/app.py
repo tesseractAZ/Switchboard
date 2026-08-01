@@ -161,7 +161,11 @@ try:
 except ImportError:  # pragma: no cover
     ha_client = None
 
-OPTIONS_PATH = Path("/data/options.json")
+# Post-overlay snapshot (written by init-switchboard) first, then the raw
+# options as a fallback — one effective view of the config for every consumer.
+OPTIONS_PATH = Path(os.environ.get("SWITCHBOARD_OPTIONS",
+                                   "/run/switchboard/options-effective.json"))
+OPTIONS_FALLBACK = Path("/data/options.json")
 
 # A room extension is 2-6 digits. Every endpoint that interpolates an ext into an
 # AMI call validates it against BOTH the configured room set AND this regex, so a
@@ -313,11 +317,15 @@ def build_lights_payload(by_area: dict, available: bool) -> dict:
 
 
 def load_options() -> dict:
-    try:
-        with OPTIONS_PATH.open() as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
+    for path in (OPTIONS_PATH, OPTIONS_FALLBACK):
+        try:
+            with path.open() as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and data:
+                return data
+        except (OSError, ValueError):
+            continue
+    return {}
 
 
 def wakeups_list(rooms_by_ext: dict) -> list[dict]:

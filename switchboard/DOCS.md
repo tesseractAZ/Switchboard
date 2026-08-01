@@ -121,6 +121,7 @@ its default is fine.
 | `console_web_enabled` | `true` | Browser version of the console (xterm.js). Also unauthenticated on the LAN. Idles if `console_enabled` is off. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 | `console_web_bind` | `""` | Blank = follow `console_bind` (→ all interfaces); `127.0.0.1` restricts it to the host. |
+| `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
 
 ### Time, clock & wake-up
 
@@ -165,6 +166,34 @@ system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
 | `registns` | `true` | Register to the provider (most trunks need this). |
 
 ---
+
+### The options overlay (advanced)
+
+Everything above is normally edited in the add-on's **Configuration** tab. For
+automation (or when the Supervisor's options API is unreachable), the add-on
+also honors an **overlay file** the administrator can place at
+`/addon_configs/<slug>/options-overlay.json` (visible to the add-on as
+`/config/options-overlay.json`): a JSON object that is **deep-merged over the
+saved options at every start**. Dictionaries merge recursively (so
+`{"trunk": {"inbound_ext": "11,19"}}` refines the trunk without touching its
+credentials); scalars and lists replace.
+
+Because the overlay bypasses the add-on's schema, it is **type-checked against
+the saved options**: an entry whose JSON type differs from the value it would
+replace (a string where the trunk object belongs, `8100.5` for a port, `true`
+for a number) is rejected with a warning and the saved value is kept. Any other
+overlay problem — unparseable JSON, a non-object root — is logged and the
+overlay is ignored wholesale. The overlay can never fail the start: the whole
+add-on, Asterisk included, hangs off that step.
+
+The boot log lists every key path whose value actually **changes** (a no-op
+restatement is reported as changing nothing), so an override the Configuration
+tab can't show you is still visible. Remove the file and restart to return to
+the saved options.
+
+Services read the merged result, not `options.json` — the config renderer, the
+dashboard, the operator console, and the health monitors all consume the same
+effective view.
 
 ## 3. Extensions & feature codes
 
@@ -551,6 +580,9 @@ signals the Ingress dashboard surfaces. Two front-ends onto the same board:
 
 ![The full-screen operator console](docs/img/console.png)
 
+- **Browser sign-in** — when `console_users` is configured the web terminal
+  first shows a sign-in page; the terminal socket itself also requires the
+  signed-in session, and repeated failures from one address are throttled.
 - **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
