@@ -155,3 +155,40 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ── per-room wake-up scenes (v0.45.0) ────────────────────────────────────────
+
+import importlib.machinery as _mach  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_sp = _mach.SourceFileLoader(
+    "agi_speech_forscenes",
+    str(_Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+        / "switchboard" / "operator" / "agi_speech.py")).load_module()
+
+
+def test_channel_ext_parses_pjsip_channels() -> None:
+    assert _sp.channel_ext({"agi_channel": "PJSIP/12-0000000a"}) == "12"
+    assert _sp.channel_ext({"agi_channel": "PJSIP/19-00000001"}) == "19"
+    # Not a room endpoint → "" so the caller falls back instead of guessing.
+    assert _sp.channel_ext({"agi_channel": "Local/s@wakeup-deliver-0001;2"}) == ""
+    assert _sp.channel_ext({"agi_channel": "PJSIP/trunk-00000005"}) == ""
+    assert _sp.channel_ext({"agi_channel": ""}) == ""
+    assert _sp.channel_ext({}) == ""
+
+
+def test_wakeup_scene_for_prefers_room_then_falls_back() -> None:
+    wk = {"scene": "scene.house_default",
+          "scenes": {"12": "scene.wakeup_kitchen", "19": "scene.wakeup_master_bedroom"}}
+    assert _sp.wakeup_scene_for(wk, "12") == "scene.wakeup_kitchen"
+    assert _sp.wakeup_scene_for(wk, "19") == "scene.wakeup_master_bedroom"
+    # A room with no entry of its own keeps the whole-house scene: adding
+    # per-room scenes must never silently drop existing behavior.
+    assert _sp.wakeup_scene_for(wk, "13") == "scene.house_default"
+    assert _sp.wakeup_scene_for(wk, "") == "scene.house_default"
+    # No global scene configured and no per-room entry → nothing fires.
+    assert _sp.wakeup_scene_for({"scenes": {"12": "scene.k"}}, "13") == ""
+    assert _sp.wakeup_scene_for({}, "12") == ""
+    # Malformed 'scenes' must not raise.
+    assert _sp.wakeup_scene_for({"scene": "scene.a", "scenes": "nope"}, "12") == "scene.a"

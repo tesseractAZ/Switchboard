@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.45.0
+
+Per-room wake-up scenes.
+
+- New `wakeup_scenes` option: a list of `{ext, scene}` rows binding a Home
+  Assistant scene to a room extension. When a wake-up call rings that room, its
+  own scene fires — so a bedroom wake-up raises the bedroom, and a kitchen
+  wake-up raises the kitchen, instead of one whole-house scene firing for every
+  room.
+- `wakeup_scene` remains the fallback for rooms without an entry, so existing
+  installs keep their current behavior unchanged.
+- Rows are validated against the configured rooms: an unknown extension or a
+  non-`scene.` entity is logged and dropped rather than staged into a wake-up
+  that would silently fail at 6 a.m.
+- The delivering AGI derives its room from the channel it is running on
+  (`PJSIP/<ext>-…`) and falls back to the whole-house scene when the channel is
+  not a room endpoint.
+
 ## 0.44.0
 
 Console web terminal sign-in, and an administrator options overlay.

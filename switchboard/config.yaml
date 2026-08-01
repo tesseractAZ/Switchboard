@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.44.0"
+version: "0.45.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -79,6 +79,7 @@ options:
     - media_player.west_hallway
     - media_player.guest_thermostat
   wakeup_scene: ""
+  wakeup_scenes: []
   wakeup_weather: true
   wakeup_calendar: ""
   rooms:
@@ -156,6 +157,9 @@ schema:
   announce_players:
     - str?
   wakeup_scene: str?
+  wakeup_scenes:
+    - ext: "match(^[0-9]{2,6}$)"
+      scene: str
   wakeup_weather: bool?
   wakeup_calendar: str?
   rooms:

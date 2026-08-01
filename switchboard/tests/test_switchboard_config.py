@@ -962,7 +962,8 @@ def test_features_staging() -> None:
         })
         data = _json.loads((run / "features.json").read_text())
         check("features: wake-up scene/weather/calendar staged",
-              data["wakeup"] == {"scene": "scene.wake_up", "weather": True, "calendar": "calendar.family"})
+              data["wakeup"] == {"scene": "scene.wake_up", "weather": True,
+                                 "calendar": "calendar.family", "scenes": {}})
         check("features: announce players validated (malformed + wrong-domain dropped)",
               data["announce"]["players"] == ["media_player.homepod", "media_player.garage"])
         check("features: tts_engine no longer staged (dead announce_tts_engine option removed)",
@@ -1361,6 +1362,43 @@ def test_write_effective_options(tmp_path) -> None:
               not (tmp_path / "options-effective.tmp").exists())
     finally:
         sbc.EFFECTIVE_PATH = saved
+
+
+def test_wakeup_scene_map() -> None:
+    rooms = [{"ext": "11", "name": "Family Room", "secret": "s"},
+             {"ext": "12", "name": "Kitchen", "secret": "s"}]
+    opts = {"rooms": rooms, "wakeup_scenes": [
+        {"ext": "12", "scene": "scene.wakeup_kitchen"},
+        {"ext": "11", "scene": "scene.wakeup_family_room"},
+        {"ext": "99", "scene": "scene.ghost"},              # not a room → dropped
+        {"ext": "12", "scene": "light.not_a_scene"},        # wrong domain → dropped
+        {"ext": "", "scene": "scene.x"},                    # no ext → dropped
+        {"ext": "11", "scene": ""},                         # no scene → dropped
+        "not-a-dict",
+    ]}
+    got = sbc._wakeup_scene_map(opts)
+    check("wakeup_scenes: valid rows map ext→scene",
+          got == {"12": "scene.wakeup_kitchen", "11": "scene.wakeup_family_room"})
+    check("wakeup_scenes: unknown ext dropped", "99" not in got)
+    check("wakeup_scenes: empty option → empty map", sbc._wakeup_scene_map({"rooms": rooms}) == {})
+
+
+def test_features_runtime_carries_per_room_scenes(tmp_path) -> None:
+    import json
+    saved = sbc.RUN_DIR
+    try:
+        sbc.RUN_DIR = tmp_path
+        sbc.write_features_runtime({
+            "rooms": [{"ext": "12", "name": "Kitchen", "secret": "s"}],
+            "wakeup_scene": "scene.house",
+            "wakeup_scenes": [{"ext": "12", "scene": "scene.wakeup_kitchen"}],
+        })
+        wk = json.loads((tmp_path / "features.json").read_text())["wakeup"]
+        check("features.json: global scene staged", wk["scene"] == "scene.house")
+        check("features.json: per-room scenes staged",
+              wk["scenes"] == {"12": "scene.wakeup_kitchen"})
+    finally:
+        sbc.RUN_DIR = saved
 
 if __name__ == "__main__":
     # Auto-discover instead of listing every test by hand: the hand-maintained

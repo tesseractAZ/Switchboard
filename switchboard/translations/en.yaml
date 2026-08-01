@@ -130,6 +130,9 @@ configuration:
   wakeup_scene:
     name: Wake-Up Scene
     description: Optional Home Assistant scene entity to activate when a wake-up call fires (e.g. gently raise the lights). Leave blank for none.
+  wakeup_scenes:
+    name: Wake-up Scenes by Room
+    description: "Per-room wake-up scenes. Each entry has 'ext' (the room extension) and 'scene' (a scene entity id, e.g. scene.wakeup_master_bedroom). The room's own scene fires when that room's wake-up call rings; rooms with no entry fall back to the single Wake-up Scene above. Entries naming an extension that is not a configured room are ignored."
   wakeup_weather:
     name: Wake-Up Weather
     description: Speak a short local weather summary during the wake-up call.
