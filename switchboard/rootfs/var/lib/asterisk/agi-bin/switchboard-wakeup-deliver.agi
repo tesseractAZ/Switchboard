@@ -27,10 +27,12 @@ except Exception:  # noqa: BLE001
 
 
 def main() -> None:
-    sp.read_env()
+    env = sp.read_env()
     wk = (sp.load_features() or {}).get("wakeup", {}) or {}
 
-    scene = wk.get("scene", "")
+    # Per-room scene first (the room this wake-up is ringing), then the
+    # whole-house fallback.
+    scene = sp.wakeup_scene_for(wk, sp.channel_ext(env))
     if scene and ha_client:
         try:
             ha_client.call_service("scene", "turn_on", {"entity_id": scene})

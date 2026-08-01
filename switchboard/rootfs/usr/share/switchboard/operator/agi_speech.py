@@ -61,6 +61,34 @@ def load_features() -> dict:
         return {}
 
 
+def channel_ext(env: dict) -> str:
+    """The extension this AGI is running against, from the AGI environment.
+
+    ``agi_channel`` looks like ``PJSIP/12-0000000a`` — the technology, the
+    endpoint (our room extension), then Asterisk's per-channel suffix. Returns
+    "" when the channel isn't a recognizable PJSIP endpoint (Local/…, a bare
+    name), so callers fall back rather than guess."""
+    chan = str(env.get("agi_channel", "") or "")
+    if "/" not in chan:
+        return ""
+    endpoint = chan.split("/", 1)[1].rsplit("-", 1)[0]
+    return endpoint if endpoint.isdigit() else ""
+
+
+def wakeup_scene_for(wk: dict, ext: str) -> str:
+    """The HA scene to fire for a wake-up delivered to `ext`.
+
+    Per-room scene (``wakeup_scenes``) wins; the single ``wakeup_scene`` is the
+    fallback for rooms with no entry of their own — so adding per-room scenes
+    never silently drops the whole-house behavior an install already had."""
+    scenes = wk.get("scenes") or {}
+    if isinstance(scenes, dict) and ext:
+        per_room = scenes.get(str(ext), "")
+        if per_room:
+            return str(per_room)
+    return str(wk.get("scene", "") or "")
+
+
 def say(text: str, prefix: str = "sw-voice") -> bool:
     """Synthesize text with switchboard-tts and Playback it. True on success;
     never raises (caller falls back to a canned prompt)."""

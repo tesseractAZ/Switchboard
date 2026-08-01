@@ -1785,6 +1785,24 @@ def _clean_eid(val: str, domains: tuple = ()) -> str:
     return s
 
 
+def _wakeup_scene_map(opts: dict) -> dict:
+    """`wakeup_scenes` rows → {ext: scene}, validated against the room list."""
+    known = {str(r.get("ext")) for r in (opts.get("rooms") or []) if r.get("ext")}
+    out = {}
+    for row in (opts.get("wakeup_scenes") or []):
+        if not isinstance(row, dict):
+            continue
+        ext = str(row.get("ext", "") or "").strip()
+        scene = _clean_eid(row.get("scene", ""), ("scene",))
+        if not ext or not scene:
+            continue
+        if known and ext not in known:
+            log(f"wakeup_scenes: ext {ext!r} is not a configured room; dropping")
+            continue
+        out[ext] = scene
+    return out
+
+
 def write_features_runtime(opts: dict) -> None:
     """Stage the HA-integrated voice-feature settings (smart wake-up + announce)
     for the AGIs, which run as the asterisk user and CANNOT read root-only
@@ -1794,6 +1812,10 @@ def write_features_runtime(opts: dict) -> None:
     payload = {
         "wakeup": {
             "scene": _clean_eid(opts.get("wakeup_scene", ""), ("scene",)),
+            # Per-room scenes: {ext: scene_entity}. Only rows naming a REAL room
+            # and a valid scene id survive, so a stale ext can't strand a scene
+            # that never fires (and an invalid entity can't reach HA).
+            "scenes": _wakeup_scene_map(opts),
             "weather": bool(opts.get("wakeup_weather", True)),
             "calendar": _clean_eid(opts.get("wakeup_calendar", ""), ("calendar",)),
         },
