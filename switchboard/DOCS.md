@@ -1,6 +1,6 @@
 # Switchboard
 
-A self-hosted **Asterisk 21 + PJSIP** phone system for the analog phones in your
+A self-hosted **Asterisk 20 + PJSIP** phone system for the analog phones in your
 home, packaged as a Home Assistant add-on. Each FXS port on a **Grandstream
 GXW4216 V2** gateway becomes a room extension; every phone can call every other
 phone, reach a set of on-box voice features, and — optionally — an outside line
@@ -632,7 +632,7 @@ recovery notice when they return to normal.
 
 ## 12. How it's built
 
-- **Asterisk 21 + PJSIP** is the only telephony engine; `chan_sip` is not used.
+- **Asterisk 20 + PJSIP** is the only telephony engine; `chan_sip` is not used.
 - On every start, **`switchboard-config`** regenerates
   `/etc/asterisk/{pjsip,extensions,confbridge,modules,pjsip_notify,rtp,manager,logger,features}.conf`
   from your add-on options (`/data/options.json`). The options are the source of

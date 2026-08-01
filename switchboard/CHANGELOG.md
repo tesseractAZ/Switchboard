@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.43.1
+
+Attack-surface hardening and a documentation correction, from a full post-migration
+settings-and-logs audit. No feature changes.
+
+- The generated `modules.conf` now noloads the legacy protocol stacks that the
+  distro sample configs would otherwise autoload: `chan_iax2` (udp/4569),
+  `chan_unistim` (udp/5000), `pbx_dundi` (udp/4520), `pbx_ael`, and `pbx_lua`.
+  On a host-networked add-on each of those was an open, unused listener directly
+  on the LAN; the AEL/Lua demo dialplans (and their sample mailbox hints) also
+  spammed the boot log. This is a PJSIP-only system — the entire dialplan is
+  generated into `extensions.conf`.
+- Corrected the documented Asterisk major version: the add-on ships **Asterisk
+  20** (from the Home Assistant Alpine 3.21 base image), not 21, as the boot log
+  has always reported. README, DOCS, and the image comments now match the
+  runtime.
+
 ## 0.43.0
 
 Busy-guard on the handset announce endpoint: an announcement is no longer

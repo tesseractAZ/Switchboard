@@ -2,7 +2,7 @@
 
 **A self-hosted phone system for the analog phones in your home** — antique
 Western Electric sets, rotary desk phones, the wall phone in the kitchen — built on
-**Asterisk 21 + PJSIP** and packaged as a native **Home Assistant add-on** with an
+**Asterisk 20 + PJSIP** and packaged as a native **Home Assistant add-on** with an
 Ingress dashboard and an AppArmor profile.
 
 Analog handsets plug into a **Grandstream GXW4216 V2** FXS gateway; each port
@@ -141,7 +141,7 @@ only). The table shows the defaults.
 
 ## How it's built
 
-- **Asterisk 21 + PJSIP** is the only telephony engine (`chan_sip` is not used). On
+- **Asterisk 20 + PJSIP** is the only telephony engine (`chan_sip` is not used). On
   every start, `switchboard-config` regenerates the entire Asterisk configuration
   from your add-on options, so the running PBX always matches what you declared.
 - **Offline voice**: speech-to-text is **whisper.cpp** (English `base.en` model,
@@ -163,7 +163,7 @@ WP826 WiFi cordless ──────WiFi────────────�
                              Home Assistant host (LAN, host network)
                              ┌─────────────────────────────────────────┐
                              │  Add-on: Switchboard                     │
-                             │   • Asterisk 21 + PJSIP  (SIP / RTP)      │
+                             │   • Asterisk 20 + PJSIP  (SIP / RTP)      │
                              │   • Ingress dashboard (FastAPI ⇄ AMI)     │
                              │   • Voice: whisper.cpp STT + espeak TTS   │
                              │   • Health monitors → Home Assistant      │

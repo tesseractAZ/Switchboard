@@ -28,8 +28,10 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
 
 # --------------------------------------------------------------------------- #
 # Stage 2 — the add-on image.
-# Asterisk 21 (PJSIP ships inside the main `asterisk` package on Alpine; chan_sip
-# is dead). asterisk-sample-config provides modules.conf. libstdc++ is the only
+# Asterisk 20 (PJSIP ships inside the main `asterisk` package on Alpine; chan_sip
+# is dead). asterisk-sample-config supplies the stock config set Asterisk needs
+# to boot; the legacy stacks those samples would enable (IAX2/UNISTIM/DUNDi/
+# AEL/Lua) are noloaded by the generated modules.conf. libstdc++ is the only
 # extra runtime dep whisper-cli needs (built static, OpenMP off).
 # --------------------------------------------------------------------------- #
 FROM ${BUILD_FROM}
@@ -69,7 +71,7 @@ RUN apk add --no-cache ffmpeg 2>/dev/null \
 # Asterisk modules for the operator page-all intercom (ConfBridge / Page) and
 # message-waiting stutter tone (res_mwi_external). PJSIP, app_confbridge,
 # app_page and res_mwi_external all ship inside the main `asterisk` package on
-# Alpine 21; these explicit best-effort pulls are belt-and-suspenders for any
+# Alpine 3.21; these explicit best-effort pulls are belt-and-suspenders for any
 # release that splits them out, and never fail the build.
 RUN for p in asterisk-page asterisk-confbridge asterisk-mwi-external; do \
         apk add --no-cache "$p" 2>/dev/null || true; \
@@ -127,4 +129,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.43.0"
+    io.hass.version="0.43.1"

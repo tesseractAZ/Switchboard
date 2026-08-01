@@ -668,6 +668,12 @@ def test_modules_conf() -> None:
           "noload = cdr_csv.so" in m)
     check("modules: res_security_log noloaded (drops the ~97%-of-log per-REGISTER security flood)",
           "noload = res_security_log.so" in m)
+    # Legacy stacks from the distro sample configs: on host networking each one
+    # is an open LAN listener (IAX2 udp/4569, UNISTIM udp/5000, DUNDi udp/4520),
+    # and pbx_ael/pbx_lua load only the package demo dialplans.
+    for mod in ("chan_iax2", "chan_unistim", "pbx_dundi", "pbx_ael", "pbx_lua"):
+        check(f"modules: {mod} noloaded (unused legacy stack / no stray LAN listener)",
+              f"noload = {mod}.so" in m)
 
 
 def test_logger_durable_persistent_file() -> None:
