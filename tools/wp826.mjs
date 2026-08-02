@@ -5,6 +5,7 @@
 //   meta:   GET  /cgi-bin/metaconfig_get  -> [{pvalue,alias}]   (P-code -> alias name)
 // Requires Referer/Origin headers or the server 403s.
 import https from 'node:https';
+import tls from 'node:tls';
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 
@@ -14,6 +15,46 @@ const HOST = process.env.WP826_HOST || '192.168.1.84';
 const USER = 'admin';
 const PASS = readFileSync('/tmp/.wp_pass', 'utf8').trim();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+// ── Certificate pinning ─────────────────────────────────────────────────────
+// The handset serves its own self-signed certificate and cannot be given a
+// CA-signed one, so chain validation can never succeed and every request below
+// sets rejectUnauthorized:false. Trust comes instead from pinning the
+// certificate's SHA-256: verifyPin() runs ONCE, BEFORE login, so the admin
+// password is never sent to a peer presenting an unexpected certificate.
+// Set WP826_CERT_SHA256=<hex> (get it with: node tools/wp826.mjs fingerprint).
+// Unset => unverified, i.e. the previous behaviour, with a warning.
+const CERT_PIN = process.env.WP826_CERT_SHA256 || '';
+const normPin = (p) => String(p || '').trim().toLowerCase()
+  .replace(/^sha256:/, '').replace(/[^0-9a-f]/g, '');
+
+function peerFingerprint(host, port = 443) {
+  return new Promise((res, rej) => {
+    const sock = tls.connect({ host, port, rejectUnauthorized: false, servername: host }, () => {
+      const cert = sock.getPeerCertificate();
+      const fp = normPin(cert && cert.fingerprint256);
+      sock.end();
+      fp ? res(fp) : rej(new Error('no peer certificate'));
+    });
+    sock.setTimeout(8000, () => sock.destroy(new Error('TLS connect timed out')));
+    sock.on('error', rej);
+  });
+}
+
+async function verifyPin() {
+  const want = normPin(CERT_PIN);
+  if (!want) {
+    console.warn('WARN: WP826_CERT_SHA256 unset — the handset certificate is NOT verified. ' +
+      'Run `node tools/wp826.mjs fingerprint` and set it to pin.');
+    return;
+  }
+  const got = await peerFingerprint(HOST);
+  if (got !== want) {
+    console.error(`FATAL: WP826 certificate mismatch at ${HOST}\n  expected ${want}\n  got      ${got}\n` +
+      'Refusing to send credentials. If the handset was reset or replaced, re-pin with `fingerprint`.');
+    process.exit(3);
+  }
+}
 let cookies = {};
 
 function req(method, path, { body, json, sid } = {}) {
@@ -113,6 +154,17 @@ import { pathToFileURL } from 'node:url';
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 const cmd = process.argv[2];
 if (isMain) (async () => {
+  // `fingerprint` needs no credentials — it is how you OBTAIN the pin.
+  if (cmd === 'fingerprint') {
+    const fp = await peerFingerprint(HOST);
+    console.log(`WP826 ${HOST} certificate SHA-256:\n  ${fp}\n\n` +
+      'Pin it so the admin password is never sent to an impostor:\n' +
+      `  export WP826_CERT_SHA256=${fp}\n` +
+      '  add-on option: cordless_cert_sha256');
+    return;
+  }
+  // Verify the certificate BEFORE login() sends the password.
+  await verifyPin();
   const sid = await login();
   if (cmd === 'login') { console.log('LOGIN OK sid=' + sid.slice(0, 10) + '…'); return; }
   if (cmd === 'meta') {

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.46.0
+
+Certificate pinning for the WP826 cordless.
+
+- New `cordless_cert_sha256` option. The handset serves a self-signed
+  certificate that cannot be replaced, so the health monitor could not validate
+  it and connected unverified — while sending the **admin password** on every
+  poll. With a fingerprint set, the monitor now compares the presented
+  certificate **before** writing the login body and refuses to send credentials
+  on a mismatch, so a LAN device impersonating the cordless learns nothing.
+- `tools/wp826.mjs` gains the same check (`WP826_CERT_SHA256`), verified once
+  before login, plus a `fingerprint` command that prints the value to pin.
+- Pinning is opt-in: with the option blank, behaviour is unchanged and the
+  monitor logs a one-line note at start saying the certificate is unverified.
+- Fingerprints may be pasted in any usual shape — colon- or space-separated,
+  upper or lower case, with or without a `sha256:` prefix.
+
 ## 0.45.0
 
 Per-room wake-up scenes.

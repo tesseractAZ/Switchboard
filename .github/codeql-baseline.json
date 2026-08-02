@@ -23,7 +23,7 @@
       "paths": [
         "tools/wp826.mjs"
       ],
-      "reason": "The WP826 cordless serves a self-signed certificate that no CA can validate and the device offers no way to install one, so the maintenance tool sets rejectUnauthorized:false to reach it at all. Accepted risk: a LAN attacker positioned between this tool and the handset could capture the WP826 admin password. The tool is run by hand, on the home LAN, against a fixed device address. Pinning the certificate fingerprint would remove the risk and is the right follow-up."
+      "reason": "The WP826 serves a self-signed certificate it cannot be told to replace, so chain validation can never succeed and rejectUnauthorized must stay false to reach the device at all. Trust is established instead by PINNING: verifyPin() compares the certificate's SHA-256 against WP826_CERT_SHA256 before login() sends the password, and exits non-zero on a mismatch (the same pin guards the production health monitor). The rule still fires because the flag itself is unavoidable; the risk it describes is mitigated."
     },
     {
       "rule": "py/weak-sensitive-data-hashing",

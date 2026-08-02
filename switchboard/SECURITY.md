@@ -20,6 +20,16 @@ project; expect a best-effort response rather than a guaranteed SLA.
 Only the latest release on `main` is supported. There are no back-ported security
 fixes for older versions — update to the current release.
 
+### The cordless handset's certificate
+
+The WP826 presents a self-signed certificate that cannot be replaced, so the
+device-health monitor and the maintenance tool cannot validate it by chain.
+Set **`cordless_cert_sha256`** (obtain it with `node tools/wp826.mjs fingerprint`)
+and both will verify the exact certificate **before** transmitting the admin
+password, refusing to continue on a mismatch. Left blank, the connection still
+works but is unauthenticated: a LAN-positioned attacker could impersonate the
+handset and capture that password.
+
 ## Automated scanning
 
 Every push and pull request is analysed by **CodeQL** (`security-extended`) for
