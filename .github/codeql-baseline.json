@@ -38,6 +38,13 @@
         "tools/wp826.mjs"
       ],
       "reason": "That is the tool's purpose: `ring-upload` reads a local .wav and POSTs it to the handset's ringtone endpoint. The path is supplied by the maintainer on the command line, not by any untrusted input."
+    },
+    {
+      "rule": "py/log-injection",
+      "paths": [
+        "switchboard/rootfs/usr/share/switchboard/webui/ami.py"
+      ],
+      "reason": "Sanitized at the call site \u2014 CR/LF are stripped from the AMI message before it is logged (verified by execution) \u2014 but py/log-injection does not model a .replace() chain as a sanitizer on this path, so the alert survives the fix. Kept the sanitizer; baselined the unmodellable alert. Reach is limited anyway: the AMI socket is loopback-only with a per-boot random secret."
     }
   ]
 }
