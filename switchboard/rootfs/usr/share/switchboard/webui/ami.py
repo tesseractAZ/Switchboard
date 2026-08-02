@@ -796,7 +796,12 @@ def set_mwi(ext: str, on: bool) -> bool:
              if blk.get("actionid") == action_id and blk.get("response", "").lower() == "error"),
             "no matching response",
         )
-        logging.warning("set_mwi %s on=%s rejected by AMI: %s", ext, on, msg)
+        # Strip CR/LF before logging: the text comes off the AMI socket, so a
+        # message carrying newlines could otherwise forge extra log lines.
+        # (Explicit .replace() rather than a split()/join() — it is the form
+        # CodeQL's py/log-injection query recognises as a sanitizer.)
+        safe_msg = str(msg).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        logging.warning("set_mwi %s on=%s rejected by AMI: %s", ext, on, safe_msg)
     return ok
 
 
