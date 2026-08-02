@@ -7,23 +7,19 @@
 # upload files an alert but does NOT fail the build, so without
 # check-sarif.mjs a new high-severity finding would merge green.
 #
-# ── Why the "shim" step exists ───────────────────────────────────────────────
-# Most of this add-on's Python does not end in .py, and CodeQL's Python
-# extractor keys on the extension:
+# ── Why the ".agi shim" step exists ──────────────────────────────────────────
+# MEASURED against a real run (not assumed): CodeQL's Python extractor DOES
+# pick up the extensionless scripts in switchboard/rootfs/usr/bin (it reads the
+# `#!` line), so those need no help. It does NOT pick up the 8 `.agi` voice
+# flows — a non-Python extension wins over the shebang, and they were extracted
+# only via the shim.
 #
-#   * switchboard/rootfs/usr/bin/*      — switchboard-config (renders the whole
-#     Asterisk config, mints the AMI secret, builds the toll-fraud dialplan),
-#     switchboard-stt, switchboard-callqos, switchboard-mwi, switchboard-tts,
-#     switchboard-opt. Executed by name from s6/dialplan, so they CANNOT be
-#     renamed.
-#   * switchboard/rootfs/var/lib/asterisk/agi-bin/*.agi — the voice flows
-#     Asterisk invokes per call.
+# So the step below is scoped to `.agi` ONLY. Shimming the bin scripts as well
+# (the first cut of this workflow) made CodeQL analyse each of them twice and
+# report every finding twice — 16 real results arrived as 28.
 #
-# Skipping them would leave the most security-relevant file in the repo
-# unscanned while the badge said "code scanning enabled". The step below copies
-# each to a sibling `<name>.py` in the CI checkout ONLY (never committed, never
-# shipped in the image) so the extractor sees them. An alert then points at e.g.
-# `switchboard-config.py`, which maps to `switchboard-config` by name.
+# The copies exist in the CI checkout only: never committed, never in the image.
+# An alert against `switchboard-operator.py` refers to `switchboard-operator.agi`.
 name: CodeQL
 
 on:
@@ -58,21 +54,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Stage extensionless Python for the extractor
+      - name: Stage .agi voice flows for the extractor
         if: matrix.language == 'python'
         run: |
           set -euo pipefail
           shimmed=0
-          for f in switchboard/rootfs/usr/bin/* \
-                   switchboard/rootfs/var/lib/asterisk/agi-bin/*.agi; do
+          for f in switchboard/rootfs/var/lib/asterisk/agi-bin/*.agi; do
             [ -f "$f" ] || continue
-            # Only real Python — these directories also hold shell scripts.
             head -1 "$f" | grep -qE '^#!.*python' || continue
             cp "$f" "${f%.agi}.py"
             shimmed=$((shimmed + 1))
           done
-          echo "staged $shimmed extensionless Python file(s) for analysis"
-          test "$shimmed" -gt 0   # a silent 0 here would mean a hollow scan
+          echo "staged $shimmed .agi file(s) for analysis"
+          test "$shimmed" -gt 0   # a silent 0 here would mean the AGIs go unscanned
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3

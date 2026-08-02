@@ -43,7 +43,7 @@ class _Lock:
         # AGI can both open it (append mode needs write on the file). Best-effort:
         # only the file's owner can chmod, which is whoever created it.
         try:
-            os.chmod(self.path, 0o664)
+            os.chmod(self.path, 0o664)  # codeql[py/overly-permissive-file] — root services AND the asterisk-user AGIs share this file; group access is required
         except OSError:
             pass
         fcntl.flock(self.fh, fcntl.LOCK_EX)
@@ -78,7 +78,7 @@ def _write(data: dict) -> None:
         # the asterisk-user AGI, same group via the setgid /data/state dir) can
         # rewrite it next time. Best-effort — the writer owns the file here.
         try:
-            os.chmod(PATH, 0o664)
+            os.chmod(PATH, 0o664)  # codeql[py/overly-permissive-file] — root services AND the asterisk-user AGIs share this file; group access is required
         except OSError:
             pass
     finally:

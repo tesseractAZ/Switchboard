@@ -41,7 +41,7 @@ class _Lock:
         # Group-writable so the root webui and the asterisk-user switchboard-mwi
         # (dialplan System()) can both open the lock. Best-effort (owner-only chmod).
         try:
-            os.chmod(self.path, 0o664)
+            os.chmod(self.path, 0o664)  # codeql[py/overly-permissive-file] — root services AND the asterisk-user AGIs share this file; group access is required
         except OSError:
             pass
         fcntl.flock(self.fh, fcntl.LOCK_EX)
@@ -75,7 +75,7 @@ def _write(data: dict) -> None:
         # Widen mkstemp's 0600 so the other writer (root webui vs asterisk-user
         # switchboard-mwi, same group via the setgid /data/state dir) can rewrite.
         try:
-            os.chmod(PATH, 0o664)
+            os.chmod(PATH, 0o664)  # codeql[py/overly-permissive-file] — root services AND the asterisk-user AGIs share this file; group access is required
         except OSError:
             pass
     finally:
