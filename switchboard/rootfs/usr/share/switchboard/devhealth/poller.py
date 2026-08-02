@@ -27,6 +27,8 @@ Env (bridged by the s6 run script from config.yaml):
   DEVICE_HEALTH_INTERVAL   poll seconds (default 120, floor 30)
   CORDLESS_IP              WP826 IP (default 192.168.1.71); '' disables cordless checks
   CORDLESS_PASSWORD        WP826 admin password; '' -> cordless API checks skipped
+  CORDLESS_CERT_SHA256     SHA-256 fingerprint the WP826's certificate must match;
+                           '' -> unverified (previous behaviour)
                            (reachability + registration still covered by rtpmon)
   GATEWAY_PORTS            comma ext range for the GXW ports (default '11,12,...,18')
   CORDLESS_BATTERY_CRIT    battery %% considered critical when discharging (default 15)
@@ -38,6 +40,7 @@ Env (bridged by the s6 run script from config.yaml):
 from __future__ import annotations
 
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -59,15 +62,45 @@ _SHA = lambda s: hashlib.sha256(s.encode()).hexdigest()  # noqa: E731
 
 
 def _ctx() -> ssl.SSLContext:
+    # The handset serves its OWN self-signed certificate and offers no way to
+    # install one signed by a CA, so chain/hostname validation cannot succeed.
+    # Trust is established instead by pinning the certificate's fingerprint —
+    # see _check_pin, which runs BEFORE any credential is sent.
     c = ssl.create_default_context()
     c.check_hostname = False
     c.verify_mode = ssl.CERT_NONE
     return c
 
 
+def cert_fingerprint(der: bytes) -> str:
+    """Lower-case hex SHA-256 of a DER certificate (what we pin on)."""
+    return hashlib.sha256(der).hexdigest()
+
+
+def normalize_pin(pin: str) -> str:
+    """Accept the fingerprint in any of the shapes a human might paste:
+    colon- or space-separated, upper or lower case, optional 'sha256:' prefix."""
+    p = str(pin or "").strip().lower()
+    if p.startswith("sha256:"):
+        p = p[7:]
+    return "".join(ch for ch in p if ch in "0123456789abcdef")
+
+
+def pin_matches(expected: str, actual_der: bytes) -> bool:
+    """Constant-time compare of a configured pin against the presented cert.
+    An EMPTY pin returns True: pinning is opt-in, and an install that has not
+    set one keeps working exactly as before (documented in SECURITY.md)."""
+    want = normalize_pin(expected)
+    if not want:
+        return True
+    return hmac.compare_digest(want, cert_fingerprint(actual_der))
+
+
 class _WP:
-    def __init__(self, ip: str, password: str, user: str = "admin", timeout: float = 6.0):
+    def __init__(self, ip: str, password: str, user: str = "admin", timeout: float = 6.0,
+                 cert_pin: str = ""):
         self.ip, self.pw, self.user, self.timeout = ip, password, user, timeout
+        self.cert_pin = cert_pin
         self.cookies: dict[str, str] = {}
         self.sid = None
 
@@ -83,6 +116,17 @@ class _WP:
         if body is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         try:
+            # Establish TLS first and check the pin BEFORE writing the request:
+            # the login body carries the admin password, so it must never reach
+            # a peer whose certificate we did not expect.
+            conn.connect()
+            if self.cert_pin:
+                der = conn.sock.getpeercert(True) if conn.sock else None
+                if der is None or not pin_matches(self.cert_pin, der):
+                    got = cert_fingerprint(der) if der else "(none)"
+                    raise ssl.SSLCertVerificationError(
+                        f"WP826 certificate does not match cordless_cert_sha256 "
+                        f"(got {got[:16]}...); refusing to send credentials")
             conn.request(method, "/cgi-bin" + path, body, headers)
             resp = conn.getresponse()
             for k, v in resp.getheaders():
@@ -120,14 +164,14 @@ class _WP:
             return None
 
 
-def probe_cordless(ip: str, password: str) -> dict:
+def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     """Return a raw device-health snapshot for the WP826, best-effort. Keys:
     reachable(bool: TCP:443 open), api_ok(bool: logged in + read), and — when api_ok —
     battery_pct/charging/battery_health, wifi_connected/wifi_signal/wifi_ssid, last_mos."""
     out = {"reachable": _tcp_open(ip, 443), "api_ok": False}
     if not password:
         return out
-    wp = _WP(ip, password)
+    wp = _WP(ip, password, cert_pin=cert_pin)
     if not wp.login():
         return out
     out["api_ok"] = True
@@ -396,6 +440,11 @@ def run() -> None:
     cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
     cordless_pw = os.environ.get("CORDLESS_PASSWORD", "")
+    cordless_cert_pin = os.environ.get("CORDLESS_CERT_SHA256", "")
+    if cordless_pw and not normalize_pin(cordless_cert_pin):
+        print("[devhealth] NOTE: cordless_cert_sha256 is unset — the WP826's "
+              "self-signed certificate is not verified. Set it (see DOCS §8) so "
+              "the admin password cannot be captured by a LAN impostor.", flush=True)
     gw_exts = [e.strip() for e in os.environ.get("GATEWAY_PORTS", "11,12,13,14,15,16,17,18").split(",") if e.strip()]
     th = _thresholds()
     cst: dict = {}
@@ -414,7 +463,7 @@ def run() -> None:
             last_ip = probe_ip
         if probe_ip:
             try:
-                snap = probe_cordless(probe_ip, cordless_pw)
+                snap = probe_cordless(probe_ip, cordless_pw, cordless_cert_pin)
                 level, reasons = classify_cordless(snap, th)
                 _publish_cordless(level, reasons, snap)
                 ev = health_transition(level, cst)

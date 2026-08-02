@@ -58,6 +58,9 @@ configuration:
   cordless_password:
     name: Cordless Admin Password
     description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
+  cordless_cert_sha256:
+    name: Cordless Certificate Fingerprint
+    description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the admin password, which stops a device on your LAN impersonating the cordless to capture it. Get the value with: node tools/wp826.mjs fingerprint. Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
   gateway_ports:
     name: Gateway Port Extensions
     description: Comma-separated extensions served by the GXW FXS gateway (the 8 wired ports), used to derive gateway health. Default 11–18 matches the standard wiring; edit if you re-mapped ports.

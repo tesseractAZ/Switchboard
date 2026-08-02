@@ -180,3 +180,70 @@ if __name__ == "__main__":
     test_resolve_cordless_ip()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
+
+
+# ── WP826 certificate pinning (v0.46.0) ──────────────────────────────────────
+
+def test_normalize_pin_accepts_pasted_shapes() -> None:
+    want = "ab" * 32
+    for shape in (want, want.upper(), "sha256:" + want,
+                  ":".join(want[i:i + 2] for i in range(0, 64, 2)),
+                  " ".join(want[i:i + 2] for i in range(0, 64, 2)),
+                  f"  {want}  "):
+        assert dh.normalize_pin(shape) == want, shape
+    assert dh.normalize_pin("") == ""
+    assert dh.normalize_pin(None) == ""
+
+
+def test_cert_fingerprint_is_sha256_of_der() -> None:
+    import hashlib
+    der = b"\x30\x82 not a real cert, but bytes are bytes"
+    assert dh.cert_fingerprint(der) == hashlib.sha256(der).hexdigest()
+
+
+def test_pin_matches() -> None:
+    der = b"the-handset-certificate"
+    good = dh.cert_fingerprint(der)
+    assert dh.pin_matches(good, der)
+    assert dh.pin_matches(good.upper(), der)                  # case-insensitive
+    assert dh.pin_matches("sha256:" + good, der)              # prefixed
+    assert dh.pin_matches(":".join(good[i:i+2] for i in range(0, 64, 2)), der)
+    # A DIFFERENT certificate must not satisfy the pin — this is the whole point.
+    assert not dh.pin_matches(good, b"an-impostor-certificate")
+    assert not dh.pin_matches("0" * 64, der)
+    # Pinning is opt-in: an empty pin keeps existing installs working.
+    assert dh.pin_matches("", der)
+    assert dh.pin_matches("   ", der)
+
+
+def test_probe_cordless_refuses_wrong_cert_before_sending_password(monkeypatch) -> None:
+    """The pin must be checked BEFORE the login body (which carries the admin
+    password) is written — a mismatched handset must receive no credentials."""
+    sent: list = []
+
+    class FakeSock:
+        def getpeercert(self, binary_form=False):
+            return b"an-impostor-certificate"
+
+    class FakeConn:
+        def __init__(self, *a, **kw):
+            self.sock = None
+
+        def connect(self):
+            self.sock = FakeSock()
+
+        def request(self, method, path, body=None, headers=None):
+            sent.append((path, body))          # must never run for a bad pin
+
+        def getresponse(self):
+            raise AssertionError("unreachable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(dh.http.client, "HTTPSConnection", FakeConn)
+    monkeypatch.setattr(dh, "_tcp_open", lambda ip, port: True)
+    good_pin = dh.cert_fingerprint(b"the-real-certificate")
+    snap = dh.probe_cordless("192.168.1.71", "hunter2", good_pin)
+    assert snap["api_ok"] is False, "must not report a successful API session"
+    assert sent == [], f"credentials were sent to an unpinned certificate: {sent}"

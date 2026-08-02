@@ -97,6 +97,7 @@ its default is fine.
 | `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
 | `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
 | `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
+| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
 | `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
@@ -514,6 +515,29 @@ reference at [`tools/wp826.mjs`](../tools/wp826.mjs) and
 [`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md).
 
 ---
+
+### Pinning the cordless certificate
+
+The WP826 serves its **own self-signed certificate** and offers no way to install
+a CA-signed one, so ordinary TLS validation can never succeed against it. Both
+the health monitor and `tools/wp826.mjs` therefore skip chain validation — which
+means, unpinned, a device on your LAN could impersonate the handset and capture
+the **admin password** the monitor sends every poll.
+
+Pinning the certificate closes that. Read the fingerprint:
+
+```
+WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint
+```
+
+Set the value as `cordless_cert_sha256` (and, for the tool,
+`export WP826_CERT_SHA256=<fingerprint>`). From then on the monitor compares the
+presented certificate **before** the login body is written, and refuses to send
+credentials on a mismatch; the tool exits non-zero before logging in. Colons,
+spaces, upper case and a `sha256:` prefix are all accepted.
+
+A factory reset regenerates the certificate — re-run `fingerprint` and re-pin
+after one, or the monitor will (correctly) stop authenticating.
 
 ## 9. Adding an outside line (SIP trunk)
 
