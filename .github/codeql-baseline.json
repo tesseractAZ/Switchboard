@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Findings reviewed and accepted, so CI does not block on them. They REMAIN",
+    "visible in the Security tab — this file only stops the build gate firing.",
+    "A match needs BOTH the rule id and the exact path: the same rule appearing",
+    "in any other file still fails the build. GitHub code scanning does not",
+    "honour in-source suppression comments for CodeQL, which is why this is a",
+    "file rather than annotations at the code sites."
+  ],
+  "accepted": [
+    {
+      "rule": "py/overly-permissive-file",
+      "paths": [
+        "switchboard/rootfs/usr/bin/switchboard-config",
+        "switchboard/rootfs/usr/bin/switchboard-callqos",
+        "switchboard/rootfs/usr/share/switchboard/wakeup/store.py",
+        "switchboard/rootfs/usr/share/switchboard/webui/mwi_store.py"
+      ],
+      "reason": "By design, not an oversight. Asterisk runs as the 'asterisk' user while the add-on's services run as root, and they SHARE state: the AMI secret (0640 root:asterisk) must be readable by the asterisk group, and the wake-up / MWI / callqos files are written by both sides (0664 under a setgid dir). Tightening these would break the voice features. The container holds only root and asterisk, and none of these paths leaves it."
+    },
+    {
+      "rule": "js/disabling-certificate-validation",
+      "paths": ["tools/wp826.mjs"],
+      "reason": "The WP826 cordless serves a self-signed certificate that no CA can validate and the device offers no way to install one, so the maintenance tool sets rejectUnauthorized:false to reach it at all. Accepted risk: a LAN attacker positioned between this tool and the handset could capture the WP826 admin password. The tool is run by hand, on the home LAN, against a fixed device address. Pinning the certificate fingerprint would remove the risk and is the right follow-up."
+    }
+  ]
+}

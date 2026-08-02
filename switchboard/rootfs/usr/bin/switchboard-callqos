@@ -241,7 +241,7 @@ def append_record(rec: dict) -> None:
         if fcntl is not None:
             fh = open(lock_path, "a+")
             try:
-                os.chmod(lock_path, 0o664)
+                os.chmod(lock_path, 0o664)  # intentional: root services AND the asterisk-user AGIs share this file; group access is required
             except OSError:
                 pass
             fcntl.flock(fh, fcntl.LOCK_EX)
@@ -259,7 +259,7 @@ def append_record(rec: dict) -> None:
                 f.write("\n".join(lines) + "\n")
             os.replace(tmp, PATH)
             try:
-                os.chmod(PATH, 0o664)
+                os.chmod(PATH, 0o664)  # intentional: root services AND the asterisk-user AGIs share this file; group access is required
             except OSError:
                 pass
         finally:
