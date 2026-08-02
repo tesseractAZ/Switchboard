@@ -1,0 +1,112 @@
+# CodeQL security scanning.
+#
+# The repo is PUBLIC, so GitHub code scanning is available at no cost and the
+# results are UPLOADED to the Security tab alongside the Dependabot alerts.
+#
+# The SARIF artifact and the hard CI gate are DELIBERATE, not redundant: the
+# upload files an alert but does NOT fail the build, so without
+# check-sarif.mjs a new high-severity finding would merge green.
+#
+# ── Why the "shim" step exists ───────────────────────────────────────────────
+# Most of this add-on's Python does not end in .py, and CodeQL's Python
+# extractor keys on the extension:
+#
+#   * switchboard/rootfs/usr/bin/*      — switchboard-config (renders the whole
+#     Asterisk config, mints the AMI secret, builds the toll-fraud dialplan),
+#     switchboard-stt, switchboard-callqos, switchboard-mwi, switchboard-tts,
+#     switchboard-opt. Executed by name from s6/dialplan, so they CANNOT be
+#     renamed.
+#   * switchboard/rootfs/var/lib/asterisk/agi-bin/*.agi — the voice flows
+#     Asterisk invokes per call.
+#
+# Skipping them would leave the most security-relevant file in the repo
+# unscanned while the badge said "code scanning enabled". The step below copies
+# each to a sibling `<name>.py` in the CI checkout ONLY (never committed, never
+# shipped in the image) so the extractor sees them. An alert then points at e.g.
+# `switchboard-config.py`, which maps to `switchboard-config` by name.
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '41 5 * * 2'   # weekly, Tuesday 05:41 UTC
+
+permissions:
+  contents: read
+  actions: read            # CodeQL reads the workflow run for its analysis summary
+  security-events: write   # REQUIRED to upload SARIF; without it the upload 403s
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            sarif: python.sarif
+          - language: javascript-typescript
+            sarif: javascript.sarif
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Stage extensionless Python for the extractor
+        if: matrix.language == 'python'
+        run: |
+          set -euo pipefail
+          shimmed=0
+          for f in switchboard/rootfs/usr/bin/* \
+                   switchboard/rootfs/var/lib/asterisk/agi-bin/*.agi; do
+            [ -f "$f" ] || continue
+            # Only real Python — these directories also hold shell scripts.
+            head -1 "$f" | grep -qE '^#!.*python' || continue
+            cp "$f" "${f%.agi}.py"
+            shimmed=$((shimmed + 1))
+          done
+          echo "staged $shimmed extensionless Python file(s) for analysis"
+          test "$shimmed" -gt 0   # a silent 0 here would mean a hollow scan
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended   # broader than default: more CodeQL-class rules
+          config: |
+            paths-ignore:
+              # Vendored third-party asset, committed so the add-on needs no CDN.
+              # Not our code to fix, and it dominates the JS corpus.
+              - switchboard/rootfs/usr/share/switchboard/console-web/static/xterm.js
+              # Test code is not attack surface, and treating it as a taint
+              # SOURCE yields findings about production paths that cannot occur
+              # in production (fixtures feed values no caller can supply).
+              - switchboard/tests/**
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+
+      - name: Perform CodeQL Analysis (uploads to the Security tab)
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          # `always` also writes the SARIF locally, so the artifact + the CI
+          # gate below keep working.
+          upload: always
+          output: sarif-results
+
+      - name: Publish SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results
+          if-no-files-found: warn
+
+      - name: Fail on actionable CodeQL findings
+        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }}

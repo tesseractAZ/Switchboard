@@ -20,6 +20,21 @@ project; expect a best-effort response rather than a guaranteed SLA.
 Only the latest release on `main` is supported. There are no back-ported security
 fixes for older versions — update to the current release.
 
+## Automated scanning
+
+Every push and pull request is analysed by **CodeQL** (`security-extended`) for
+both Python and JavaScript, and by **Dependabot** for dependency advisories.
+Findings surface in the repository's Security tab, and CI additionally **fails**
+on any error-level or high-severity (>= 7.0) result — an upload alone files an
+alert but would not stop a merge.
+
+Most of the add-on's Python is executed by name and therefore has no `.py`
+extension (`switchboard-config` and its siblings, the `.agi` voice flows). CodeQL's
+extractor keys on the extension, so the workflow stages an analysis-only `.py`
+copy of each before scanning — those files are covered, not skipped, and the copies
+exist solely in CI. An alert against `switchboard-config.py` refers to
+`switchboard-config`.
+
 ---
 
 ## Security model
