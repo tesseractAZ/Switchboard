@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Findings reviewed and accepted, so CI does not block on them. They REMAIN",
-    "visible in the Security tab — this file only stops the build gate firing.",
+    "visible in the Security tab \u2014 this file only stops the build gate firing.",
     "A match needs BOTH the rule id and the exact path: the same rule appearing",
     "in any other file still fails the build. GitHub code scanning does not",
     "honour in-source suppression comments for CodeQL, which is why this is a",
@@ -20,8 +20,24 @@
     },
     {
       "rule": "js/disabling-certificate-validation",
-      "paths": ["tools/wp826.mjs"],
+      "paths": [
+        "tools/wp826.mjs"
+      ],
       "reason": "The WP826 cordless serves a self-signed certificate that no CA can validate and the device offers no way to install one, so the maintenance tool sets rejectUnauthorized:false to reach it at all. Accepted risk: a LAN attacker positioned between this tool and the handset could capture the WP826 admin password. The tool is run by hand, on the home LAN, against a fixed device address. Pinning the certificate fingerprint would remove the risk and is the right follow-up."
+    },
+    {
+      "rule": "py/weak-sensitive-data-hashing",
+      "paths": [
+        "switchboard/rootfs/usr/share/switchboard/devhealth/poller.py"
+      ],
+      "reason": "Not our choice of algorithm: this implements the WP826 handset's OWN login wire protocol, which specifies sha256(password + server-salt). The device rejects anything else, so a slow KDF is not an option here. No password is stored by this code; the digest exists only to satisfy the device's challenge on the LAN."
+    },
+    {
+      "rule": "js/file-access-to-http",
+      "paths": [
+        "tools/wp826.mjs"
+      ],
+      "reason": "That is the tool's purpose: `ring-upload` reads a local .wav and POSTs it to the handset's ringtone endpoint. The path is supplied by the maintainer on the command line, not by any untrusted input."
     }
   ]
 }

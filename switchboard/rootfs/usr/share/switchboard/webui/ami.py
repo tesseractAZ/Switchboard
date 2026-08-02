@@ -796,7 +796,10 @@ def set_mwi(ext: str, on: bool) -> bool:
              if blk.get("actionid") == action_id and blk.get("response", "").lower() == "error"),
             "no matching response",
         )
-        logging.warning("set_mwi %s on=%s rejected by AMI: %s", ext, on, msg)
+        # Collapse newlines before logging: the text comes off the AMI socket,
+        # so a message carrying CR/LF could otherwise forge extra log lines.
+        logging.warning("set_mwi %s on=%s rejected by AMI: %s", ext, on,
+                        " ".join(str(msg).split()))
     return ok
 
 
