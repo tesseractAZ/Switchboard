@@ -13,6 +13,20 @@
 // Usage: node check-sarif.mjs <path-to-sarif> [--fail-threshold <float>]
 import { readFileSync } from 'node:fs';
 
+// Reviewed + accepted findings (see .github/codeql-baseline.json). Matching is
+// on BOTH rule id and exact path, so the same rule in a new file still fails.
+// Absent/unreadable baseline = match nothing, i.e. fail closed.
+let BASELINE = [];
+try {
+  BASELINE = JSON.parse(
+    readFileSync(new URL('../codeql-baseline.json', import.meta.url), 'utf8'),
+  ).accepted ?? [];
+} catch {
+  BASELINE = [];
+}
+const isBaselined = (ruleId, path) =>
+  BASELINE.some((e) => e.rule === ruleId && (e.paths ?? []).includes(path));
+
 const args = process.argv.slice(2);
 const thrIdx = args.indexOf('--fail-threshold');
 const FAIL_SEVERITY = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 7.0; // HIGH
@@ -89,9 +103,11 @@ for (const run of runs) {
     process.exit(2);
   }
   for (const res of run.results ?? []) {
-    if (isSuppressed(res)) {
-      // Reviewed + justified at the code site; count it so the summary can
-      // never read "clean" when it merely means "all silenced".
+    const resPath =
+      res.locations?.[0]?.physicalLocation?.artifactLocation?.uri ?? '';
+    if (isSuppressed(res) || isBaselined(res.ruleId, resPath)) {
+      // Reviewed + justified (in-source, or in codeql-baseline.json). Counted
+      // so the summary can never read "clean" when it means "all silenced".
       suppressed += 1;
       continue;
     }
@@ -114,7 +130,7 @@ for (const run of runs) {
 
 console.log(
   `\nCodeQL results: ${total} total  (error:${byLevel.error} warning:${byLevel.warning} note:${byLevel.note})` +
-    (suppressed ? `  [+${suppressed} suppressed in-source]` : '')
+    (suppressed ? `  [+${suppressed} accepted via baseline/suppression]` : '')
 );
 
 if (failing.length) {

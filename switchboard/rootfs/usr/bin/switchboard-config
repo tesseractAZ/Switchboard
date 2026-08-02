@@ -319,11 +319,11 @@ def write(path: Path, content: str, mode: int = 0o640) -> None:
     never a window where the default umask leaves the file world-readable. Group
     read goes to the asterisk group (Asterisk runs -U asterisk -G asterisk)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
     with os.fdopen(fd, "w") as fh:
         fh.write(content)
     try:
-        os.chmod(path, mode)  # O_CREAT mode only applies on create; pin on rewrite  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+        os.chmod(path, mode)  # O_CREAT mode only applies on create; pin on rewrite  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
         import shutil
         shutil.chown(path, group="asterisk")
     except (PermissionError, LookupError, KeyError, OSError):
@@ -1674,10 +1674,10 @@ def ensure_state_dir() -> None:
                 lock.write_text("")
         # chmod FIRST (always works as root) so an absent asterisk user off-box can't
         # leave the modes unset; then hand the dir + files to the asterisk user.
-        os.chmod(STATE_DIR, 0o2775)  # setgid → children inherit the asterisk group  # codeql[py/overly-permissive-file] — shared state dir; the asterisk user needs it (setgid keeps the group)
+        os.chmod(STATE_DIR, 0o2775)  # setgid → children inherit the asterisk group  # intentional: shared state dir; the asterisk user needs it (setgid keeps the group)
         for f in STATE_DIR.iterdir():
             try:
-                os.chmod(f, 0o664)  # codeql[py/overly-permissive-file] — root services AND the asterisk-user AGIs share this file; group access is required
+                os.chmod(f, 0o664)  # intentional: root services AND the asterisk-user AGIs share this file; group access is required
             except OSError:
                 pass
         try:
@@ -1742,7 +1742,7 @@ def write_operator_runtime(opts: dict) -> None:
     try:
         import shutil
         shutil.chown(op_path, user="asterisk", group="asterisk")
-        os.chmod(op_path, 0o640)  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+        os.chmod(op_path, 0o640)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
     except (PermissionError, LookupError, KeyError, OSError) as exc:
         # The init oneshot runs as root before Asterisk starts, so this normally
         # succeeds; warn (don't crash) if the asterisk user isn't present yet.
@@ -1763,9 +1763,9 @@ def ensure_voice_dirs() -> None:
         asr_dir.mkdir(parents=True, exist_ok=True)
         announce_dir.mkdir(parents=True, exist_ok=True)
         shutil.chown(asr_dir, user="asterisk", group="asterisk")
-        os.chmod(asr_dir, 0o750)  # codeql[py/overly-permissive-file] — shared state dir; the asterisk user needs it (setgid keeps the group)
+        os.chmod(asr_dir, 0o750)  # intentional: shared state dir; the asterisk user needs it (setgid keeps the group)
         shutil.chown(announce_dir, user="asterisk", group="asterisk")
-        os.chmod(announce_dir, 0o755)  # codeql[py/overly-permissive-file] — shared state dir; the asterisk user needs it (setgid keeps the group)
+        os.chmod(announce_dir, 0o755)  # intentional: shared state dir; the asterisk user needs it (setgid keeps the group)
     except (PermissionError, LookupError, KeyError, OSError) as exc:
         log(f"WARNING: could not prepare asterisk voice dirs: {exc}")
 
@@ -1834,7 +1834,7 @@ def write_features_runtime(opts: dict) -> None:
     try:
         import shutil
         shutil.chown(fp, user="asterisk", group="asterisk")
-        os.chmod(fp, 0o640)  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+        os.chmod(fp, 0o640)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
     except (PermissionError, LookupError, KeyError, OSError) as exc:
         log(f"WARNING: could not set asterisk ownership on features runtime: {exc}")
     w = payload["wakeup"]
@@ -1886,12 +1886,12 @@ def main() -> None:
     # atomically (os.open) so no default-umask window ever exposes it; asterisk
     # group gets read via the group chown below.
     env_path = RUN_DIR / "ami.env"
-    fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+    fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
     with os.fdopen(fd, "w") as fh:
         fh.write(f"AMI_USER={ami_user}\nAMI_SECRET={ami_secret}\n")
     try:
         import shutil
-        os.chmod(env_path, 0o640)  # codeql[py/overly-permissive-file] — 0640 root:asterisk — the asterisk group MUST read it (that is the point)
+        os.chmod(env_path, 0o640)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
         shutil.chown(env_path, group="asterisk")
     except (PermissionError, LookupError, KeyError, OSError):
         pass
