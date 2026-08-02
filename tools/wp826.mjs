@@ -28,9 +28,15 @@ const CERT_PIN = process.env.WP826_CERT_SHA256 || '';
 const normPin = (p) => String(p || '').trim().toLowerCase()
   .replace(/^sha256:/, '').replace(/[^0-9a-f]/g, '');
 
+const isIp = (h) => /^[0-9.]+$/.test(h) || h.includes(':');
+
 function peerFingerprint(host, port = 443) {
   return new Promise((res, rej) => {
-    const sock = tls.connect({ host, port, rejectUnauthorized: false, servername: host }, () => {
+    // SNI must NOT be set to an IP literal — Node rejects it outright, and the
+    // cordless is normally reached by address.
+    const opts = { host, port, rejectUnauthorized: false };
+    if (!isIp(host)) opts.servername = host;
+    const sock = tls.connect(opts, () => {
       const cert = sock.getPeerCertificate();
       const fp = normPin(cert && cert.fingerprint256);
       sock.end();
