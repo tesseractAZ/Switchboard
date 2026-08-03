@@ -1,0 +1,99 @@
+name: Tag released version
+
+# Post-merge half of the release pipeline (mirrors zwave-tui and ecoflow-panel,
+# so all three add-ons release the same way).
+#
+# Until now Switchboard had no release automation at all: every version through
+# v0.46.1 was tagged and released by hand. That is a step which LOOKS automatic
+# until the day someone forgets, and then a version sits on main untagged with
+# no release and no manual attached.
+#
+# Now: when a commit whose subject starts with "Release v" lands on main AND it
+# touches switchboard/config.yaml, this reads the version out of config.yaml,
+# creates the matching tag, and starts the release.
+#
+# Why it dispatches publish-release.yml rather than relying on the tag push:
+# a tag pushed with the default GITHUB_TOKEN does NOT trigger other workflows
+# (GitHub's recursion guard). `workflow_dispatch` via the API is exempt, so the
+# tag is created and the release started explicitly. Miss this and the tag
+# appears but no release ever runs — a silent half-failure.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'switchboard/config.yaml'
+
+permissions:
+  contents: write   # create + push the tag
+  actions: write    # dispatch publish-release.yml
+
+jobs:
+  tag:
+    name: Tag + start the release
+    # Only act on a release commit. Any other config.yaml edit (a new option, a
+    # description tweak) must NOT cut a release.
+    if: startsWith(github.event.head_commit.message, 'Release v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Create the tag and start the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          v=$(grep -E '^version:' switchboard/config.yaml \
+            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' \
+            | tr -d '[:space:]')
+          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not parse version from switchboard/config.yaml (got '$v')"
+            exit 1
+          fi
+
+          # config.yaml and the Dockerfile's io.hass.version LABEL are two
+          # hand-edited copies of the same number. CI checks this on every PR;
+          # re-check here anyway, because THIS workflow is what turns a version
+          # into a public release, and shipping a tag whose payload disagrees
+          # with itself is worse than not shipping.
+          lbl=$(grep -oE 'io\.hass\.version="[^"]+"' switchboard/Dockerfile \
+            | head -1 | cut -d'"' -f2)
+          if [[ "$lbl" != "$v" ]]; then
+            echo "::error::config.yaml ($v) and Dockerfile io.hass.version ($lbl) disagree — refusing to tag."
+            exit 1
+          fi
+
+          tag="v${v}"
+
+          # Idempotent: a re-run, or a "Release v" commit that did not actually
+          # change the number, must be a no-op rather than a failure.
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::notice::Tag ${tag} already exists — nothing to do."
+            exit 0
+          fi
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "${tag}" -m "Release ${tag}"
+          git push origin "${tag}"
+          echo "Tagged ${tag}."
+
+          # See the header: the tag push above cannot trigger publish-release.yml
+          # by itself, so start it here.
+          gh workflow run publish-release.yml -f version="${v}"
+          echo "Dispatched publish-release.yml for ${v}."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 🏷️ Tag-release"
+            echo
+            echo "If a new \`v*\` tag was created above, **\`publish-release.yml\`** is now"
+            echo "building the amd64 + aarch64 images and cutting the GitHub Release."
+            echo "\`docs.yml\` then attaches the .docx/.pdf manual on \`release: published\`."
+          } >> "$GITHUB_STEP_SUMMARY"
