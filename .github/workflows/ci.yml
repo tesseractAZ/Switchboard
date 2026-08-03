@@ -1,0 +1,154 @@
+name: CI
+
+# Run the test suite and smoke-build the add-on container on every push and PR.
+#
+# This did not exist until now, and the gap was not theoretical: the suite has
+# grown to 273 tests that ran ONLY on a maintainer's laptop. Every release up to
+# v0.46.1 merged with the tests unexecuted in CI — the only automated gates were
+# the docs build and CodeQL, neither of which runs a single test. A green PR
+# meant "the manual converts and no new CodeQL finding", not "the code works".
+#
+# Mirrors the sibling add-ons (zwave-tui, ecoflow-panel) so all three repos gate
+# the same way: tests + a per-architecture container build.
+#
+# Renaming a job here silently drops it from any branch-protection required set —
+# those rules match on the job NAME.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege: every job only reads the repo. The buildx GHA cache uses the
+# runtime token, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # The suite is deliberately near-stdlib: it never imports fastapi/uvicorn
+      # (the webui's HTML is extracted by regex, not by importing the app), so
+      # only the test runner and the YAML parser used by test_translations are
+      # needed. Keeping this list short is what lets the tests run anywhere.
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest pyyaml
+
+      - name: Run the suite
+        working-directory: switchboard
+        run: python3 -m pytest tests/ -q
+
+      # test_switchboard_config.py doubles as a standalone script (documented in
+      # its header as `python3 switchboard/tests/test_switchboard_config.py`).
+      # Run it that way too: its __main__ runner auto-discovers tests, and this
+      # is the only thing that proves that entry point still works.
+      - name: Run the standalone config-test runner
+        working-directory: switchboard
+        run: python3 tests/test_switchboard_config.py
+
+  docker-smoke:
+    # Build the add-on container for EVERY architecture config.yaml declares.
+    # The build context is ./switchboard — HA Supervisor builds an add-on from
+    # ITS OWN directory, not the repository root.
+    #
+    # Each architecture builds on a NATIVE runner: this image compiles
+    # whisper.cpp from source, and doing that for aarch64 under QEMU user-mode
+    # emulation on an x86 runner takes tens of minutes. `ubuntu-24.04-arm` is
+    # free for public repositories, so the emulation layer buys nothing.
+    #
+    # The first run is slow (whisper.cpp + a ~150 MB model download); the buildx
+    # GHA cache makes repeats short.
+    name: Dockerfile smoke build (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Read BUILD_FROM from build.yaml rather than hardcoding it: duplicating
+      # the base image with nothing checking the two agree lets CI go on
+      # smoke-building an image the add-on no longer uses.
+      # ARCH goes through the environment, never straight into the script body —
+      # `${{ }}` is expanded before bash sees the line, so interpolating an input
+      # directly into `run:` splices text into the script.
+      - name: Resolve BUILD_FROM from build.yaml
+        id: base
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          img=$(awk -v arch="$ARCH" '
+            /^build_from:/      { inblock = 1; next }
+            inblock && /^[^[:space:]]/ { inblock = 0 }
+            inblock && $1 == arch":" { print $2; found = 1; exit }
+            END { if (!found) exit 1 }
+          ' switchboard/build.yaml) || {
+            echo "::error::no build_from entry for '$ARCH' in switchboard/build.yaml"
+            exit 1
+          }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+          echo "BUILD_FROM($ARCH) = $img"
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ./switchboard
+          file: ./switchboard/Dockerfile
+          platforms: linux/${{ matrix.arch == 'aarch64' && 'arm64' || 'amd64' }}
+          push: false
+          load: false
+          build-args: |
+            BUILD_FROM=${{ steps.base.outputs.image }}
+            BUILD_ARCH=${{ matrix.arch }}
+            BUILD_DATE=ci
+            BUILD_DESCRIPTION=Switchboard (smoke)
+            BUILD_NAME=Switchboard
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=ci
+          # ignore-error=true so a flaky GHA cache never fails the smoke build.
+          cache-from: type=gha,scope=docker-smoke-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-smoke-${{ matrix.arch }},ignore-error=true
+
+  version-consistency:
+    # config.yaml and the Dockerfile's io.hass.version LABEL must agree. They are
+    # two hand-edited copies of the same number, and tag-release.yml refuses to
+    # tag when they disagree — catching it here means the PR fails, not the
+    # release.
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: config.yaml == Dockerfile label
+        run: |
+          set -euo pipefail
+          cfg=$(grep -E '^version:' switchboard/config.yaml \
+            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' | tr -d '[:space:]')
+          lbl=$(grep -oE 'io\.hass\.version="[^"]+"' switchboard/Dockerfile \
+            | head -1 | cut -d'"' -f2)
+          echo "config.yaml=$cfg  Dockerfile=$lbl"
+          if [ "$cfg" != "$lbl" ]; then
+            echo "::error::version mismatch — config.yaml ($cfg) vs Dockerfile io.hass.version ($lbl)"
+            exit 1
+          fi
+          if ! grep -qE "^## ${cfg//./\\.}\$" switchboard/CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $cfg' section for the current version"
+            exit 1
+          fi
+          echo "OK: $cfg is consistent across config.yaml, Dockerfile and CHANGELOG."
