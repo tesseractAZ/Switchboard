@@ -19,7 +19,7 @@ if [ -f /run/switchboard/ami.env ]; then
     export AMI_USER AMI_SECRET
 fi
 
-LHI="$(bashio::config 'link_health_interval')"
+LHI="$(switchboard-opt link_health_interval)"
 export LINK_HEALTH_INTERVAL="${LHI:-300}"
 
 # Read options from the post-overlay snapshot (init-switchboard writes it);

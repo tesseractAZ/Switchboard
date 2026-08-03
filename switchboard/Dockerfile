@@ -130,4 +130,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.46.0"
+    io.hass.version="0.46.1"
