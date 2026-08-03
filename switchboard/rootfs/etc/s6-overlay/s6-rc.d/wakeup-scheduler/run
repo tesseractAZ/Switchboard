@@ -18,7 +18,7 @@ fi
 
 # Local time for next-occurrence math (matches the talking-clock TZ handling).
 export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
-WRS="$(bashio::config 'wakeup_ring_seconds')"
+WRS="$(switchboard-opt wakeup_ring_seconds)"
 export WAKEUP_RING_SECONDS="${WRS:-60}"
 
 # Read options from the post-overlay snapshot (init-switchboard writes it);

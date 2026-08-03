@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.46.1
+
+Fixes the options overlay being silently ignored for most service settings.
+
+- The s6 run scripts read their VALUES with `bashio::config`, which parses
+  `/data/options.json` directly and therefore **bypassed the overlay**: an
+  overlay setting e.g. `cordless_battery_warn_pct` merged cleanly, was logged as
+  "overriding", and then changed nothing at all. Ten reads across `devhealth`,
+  `rtpmon`, and `wakeup-scheduler` now go through `switchboard-opt`, which reads
+  the post-overlay snapshot.
+- Service enable **gates** deliberately stay on `bashio::config` — their
+  empty-read semantics are load-bearing against a boot race.
+- A new test scans every run script and fails on any value read that still uses
+  `bashio::config`, so this cannot silently return.
+
 ## 0.46.0
 
 Certificate pinning for the WP826 cordless.

@@ -90,3 +90,28 @@ if __name__ == "__main__":
     test_no_unsafe_idle_gates()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     sys.exit(1 if _failures else 0)
+
+
+# A VALUE read must go through switchboard-opt, never bashio::config: bashio
+# parses /data/options.json directly and therefore BYPASSES the options overlay.
+# This shipped as a real defect — devhealth read the cordless battery thresholds
+# with bashio, so an overlay that set them merged cleanly, logged as "overriding",
+# and changed nothing. Enable GATES deliberately stay on bashio (see above).
+_VALUE_READ = re.compile(r"""^(?:export\s+)?[A-Z_]+="\$\(bashio::config\s+'([a-z_]+)'\)\"""")
+
+
+def test_value_reads_use_switchboard_opt_not_bashio():
+    offenders = []
+    for run in sorted(_S6.glob("*/run")):
+        for i, line in enumerate(run.read_text().splitlines(), 1):
+            m = _VALUE_READ.match(line.strip())
+            if m:
+                offenders.append(f"{run.parent.name}/run:{i} reads '{m.group(1)}' via bashio::config")
+    check(
+        "run scripts: every VALUE read goes through switchboard-opt "
+        f"(so the options overlay applies) — {len(offenders)} offender(s)",
+        not offenders,
+    )
+    for o in offenders:
+        print("   ", o)
+    assert not offenders, "value reads bypassing the overlay: " + "; ".join(offenders)

@@ -12,15 +12,15 @@ fi
 
 bashio::log.info "Starting Switchboard device-health monitor ..."
 
-export DEVICE_HEALTH_INTERVAL="$(bashio::config 'device_health_interval')"
-export CORDLESS_IP="$(bashio::config 'cordless_ip')"
-export CORDLESS_EXT="$(bashio::config 'cordless_ext')"
-export CORDLESS_PASSWORD="$(bashio::config 'cordless_password')"
+export DEVICE_HEALTH_INTERVAL="$(switchboard-opt device_health_interval)"
+export CORDLESS_IP="$(switchboard-opt cordless_ip)"
+export CORDLESS_EXT="$(switchboard-opt cordless_ext)"
+export CORDLESS_PASSWORD="$(switchboard-opt cordless_password)"
 export CORDLESS_CERT_SHA256="$(switchboard-opt cordless_cert_sha256)"
-export GATEWAY_PORTS="$(bashio::config 'gateway_ports')"
-export CORDLESS_BATTERY_CRIT="$(bashio::config 'cordless_battery_crit_pct')"
-export CORDLESS_BATTERY_WARN="$(bashio::config 'cordless_battery_warn_pct')"
-export CORDLESS_WIFI_MIN="$(bashio::config 'cordless_wifi_min_signal')"
+export GATEWAY_PORTS="$(switchboard-opt gateway_ports)"
+export CORDLESS_BATTERY_CRIT="$(switchboard-opt cordless_battery_crit_pct)"
+export CORDLESS_BATTERY_WARN="$(switchboard-opt cordless_battery_warn_pct)"
+export CORDLESS_WIFI_MIN="$(switchboard-opt cordless_wifi_min_signal)"
 if bashio::config.true 'device_health_alerts'; then
     export DEVICE_HEALTH_ALERTS=true
 else
