@@ -186,7 +186,14 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
         out["wifi_connected"] = bool(wifi.get("connected"))
         out["wifi_signal"] = _int(wifi.get("signal"))
         out["wifi_ssid"] = (wifi.get("connection") or {}).get("ssid")
-    rtp = (wp.get("/api-get_rtp_status") or {}).get("rtpStatus") or {}
+    # `or {}` alone is not enough: it catches None/"" but NOT a non-empty
+    # string, and the handset does sometimes answer with rtpStatus as a plain
+    # string. That reached last_call_mos().values() and raised
+    # "'str' object has no attribute 'values'", aborting the WHOLE cordless poll
+    # cycle (seen live 2026-08-03) — so battery/Wi-Fi went unpublished until the
+    # next cycle. Accept only a mapping.
+    _rtp_raw = (wp.get("/api-get_rtp_status") or {}).get("rtpStatus")
+    rtp = _rtp_raw if isinstance(_rtp_raw, dict) else {}
     mos, age = last_call_mos(rtp, now=time.time())
     if mos is not None:
         out["last_mos"] = mos           # the phone's own conversational MOS for its leg
@@ -203,7 +210,15 @@ def last_call_mos(rtp_status: dict, now: float | None = None):
     record carries a MOS. moscq is the phone's own conversational MOS for its leg —
     the callee-side quality Asterisk cannot measure."""
     best = None  # (stop_ts, mos)
-    for rec in (rtp_status or {}).values():
+    # Defence in depth beside the caller's isinstance check: the handset can
+    # answer with rtpStatus as a plain STRING, and `or {}` does not catch a
+    # non-empty one. Reaching .values() with a str raised
+    # "'str' object has no attribute 'values'" and killed the whole poll cycle.
+    if not isinstance(rtp_status, dict):
+        return None, None
+    for rec in rtp_status.values():
+        if not isinstance(rec, dict):
+            continue
         try:
             m = float(rec.get("moscq"))
         except (TypeError, ValueError):
@@ -270,24 +285,45 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
         if m is not None and m < th["mos_min"] and age is not None and age <= th["mos_window"]:
             reasons.append(f"last call quality poor (MOS {m:.1f}, {age}s ago)")
     elif snap.get("reachable"):
-        reasons.append("cordless answers on the network but its admin API is unreadable (wrong password?)")
+        reasons.append("cordless answers on the network but its admin API is unreadable "
+                       "(wrong cordless_password, or a cordless_cert_sha256 mismatch)")
 
     if any("battery" in r and "will drop" in r for r in reasons):
         return "critical", reasons
     return ("degraded", reasons) if reasons else ("ok", [])
 
 
-def classify_gateway(down_exts: list[str], gw_exts: list[str]) -> tuple[str, list[str]]:
+# After THIS add-on restarts, Asterisk drops every registration and the GXW
+# re-REGISTERs its ports on its own timer — measured at ~4.5 minutes for all 8.
+# During that window "all ports down" is the expected state, not an outage, so
+# the all-down CRITICAL is held back until the window passes. Anything still
+# down afterwards alerts normally, and a PARTIAL outage is never suppressed.
+# Without this, every add-on restart fired "the GXW gateway likely lost power or
+# its uplink" (observed repeatedly on 2026-08-03) — an alarm that names the
+# wrong component and trains the reader to ignore it.
+GATEWAY_STARTUP_GRACE_S = 360
+
+
+def classify_gateway(down_exts: list[str], gw_exts: list[str],
+                     uptime_s: float | None = None) -> tuple[str, list[str]]:
     """(level, reasons) for the GXW, DERIVED from which of its FXS-port extensions
     are currently down per rtpmon's rollup. All ports down = the gateway itself
     dropped (critical); some down = degraded (a handset unplugged or a partial
-    fault); none = ok."""
+    fault); none = ok.
+
+    `uptime_s` is this service's own age. Inside GATEWAY_STARTUP_GRACE_S an
+    all-down reading is reported as 'degraded' (still visible, still published)
+    rather than a critical "the gateway lost power" claim."""
     if not gw_exts:
         return "ok", []
     down = [e for e in gw_exts if e in set(down_exts or [])]
     if not down:
         return "ok", []
     if len(down) >= len(gw_exts):
+        if uptime_s is not None and uptime_s < GATEWAY_STARTUP_GRACE_S:
+            return "degraded", [
+                f"all {len(gw_exts)} gateway ports still unregistered "
+                f"{int(uptime_s)}s after start — normal while the GXW re-registers"]
         return "critical", [f"all {len(gw_exts)} gateway ports unregistered — the GXW gateway likely lost power or its uplink"]
     return "degraded", [f"{len(down)} of {len(gw_exts)} gateway ports down (exts {', '.join(down)})"]
 
@@ -439,6 +475,10 @@ def run() -> None:
     interval = max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
     cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
+    # This service's own start, used to hold back the gateway all-down CRITICAL
+    # while the GXW is merely re-registering after our restart (see
+    # GATEWAY_STARTUP_GRACE_S). monotonic: immune to wall-clock/NTP steps.
+    _started = time.monotonic()
     cordless_pw = os.environ.get("CORDLESS_PASSWORD", "")
     cordless_cert_pin = os.environ.get("CORDLESS_CERT_SHA256", "")
     if cordless_pw and not normalize_pin(cordless_cert_pin):
@@ -476,7 +516,7 @@ def run() -> None:
         try:
             down = gateway_down_exts_from_rollup()
             if down is not None:
-                level, reasons = classify_gateway(down, gw_exts)
+                level, reasons = classify_gateway(down, gw_exts, time.monotonic() - _started)
                 _publish_gateway(level, reasons, down, gw_exts)
                 ev = health_transition(level, gst)
                 if ev:

@@ -247,3 +247,49 @@ def test_probe_cordless_refuses_wrong_cert_before_sending_password(monkeypatch) 
     snap = dh.probe_cordless("192.168.1.71", "hunter2", good_pin)
     assert snap["api_ok"] is False, "must not report a successful API session"
     assert sent == [], f"credentials were sent to an unpinned certificate: {sent}"
+
+
+# ── v0.46.2: three defects found by live log analysis ────────────────────────
+
+def test_last_call_mos_survives_a_string_rtpstatus() -> None:
+    """The handset sometimes answers with rtpStatus as a plain STRING. That used
+    to reach .values() and raise "'str' object has no attribute 'values'",
+    aborting the whole cordless poll cycle (observed live 2026-08-03)."""
+    assert dh.last_call_mos({}) == (None, None)
+    assert dh.last_call_mos(None) == (None, None)
+    # The regression itself: a non-empty string must not raise.
+    for bad in ("none", "no records", "0"):
+        assert dh.last_call_mos(bad) == (None, None), bad
+    # A real mapping still works.
+    got = dh.last_call_mos({"a": {"moscq": "4.3", "stopTimeSecond": "100"}}, now=160)
+    assert got[0] == 4.3 and got[1] == 60
+
+
+def test_gateway_all_down_is_not_critical_during_startup_grace() -> None:
+    """After OUR restart the GXW re-registers on its own timer (~4.5 min), so
+    'all ports down' is expected, not an outage. Claiming the gateway 'lost
+    power' then is both wrong and alarm-fatiguing."""
+    gw = ["11", "12", "13", "14", "15", "16", "17", "18"]
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=30)
+    assert lvl == "degraded", lvl
+    assert "re-registers" in why[0]
+    # Past the window the same reading IS critical.
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=dh.GATEWAY_STARTUP_GRACE_S + 1)
+    assert lvl == "critical" and "lost power" in why[0]
+    # No uptime supplied (older callers / tests) keeps the strict behaviour.
+    assert dh.classify_gateway(gw, gw)[0] == "critical"
+    # A PARTIAL outage is never suppressed, even one second after start.
+    lvl, why = dh.classify_gateway(["11", "12"], gw, uptime_s=1)
+    assert lvl == "degraded" and "2 of 8" in why[0].replace("2/8", "2 of 8") or lvl == "degraded"
+    # Healthy stays healthy.
+    assert dh.classify_gateway([], gw, uptime_s=1)[0] == "ok"
+
+
+def test_api_unreadable_reason_names_the_cert_pin_too() -> None:
+    """Since v0.46.0 an unreadable admin API can also mean a certificate-pin
+    mismatch, not only a wrong password — the message must not mis-diagnose."""
+    snap = {"reachable": True, "api_ok": False}
+    _, reasons = dh.classify_cordless(snap, {"battery_crit": 20, "battery_warn": 35,
+                                             "wifi_min": 2, "mos_min": 3.4, "mos_window": 3600})
+    joined = " ".join(reasons)
+    assert "cordless_password" in joined and "cordless_cert_sha256" in joined, joined

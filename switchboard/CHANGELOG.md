@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.46.2
+
+Three defects found by analysing the live logs. No feature changes.
+
+- **Cordless poll cycle could abort entirely.** The handset sometimes answers
+  with `rtpStatus` as a plain string; `or {}` catches `None`/`""` but not a
+  non-empty string, so it reached `.values()` and raised `'str' object has no
+  attribute 'values'`. That killed the whole cycle, leaving battery, Wi-Fi and
+  MOS unpublished until the next one. Guarded at the call site and inside
+  `last_call_mos` (which also now skips non-dict records).
+- **Every add-on restart raised a false gateway alarm.** After a restart the GXW
+  re-registers its ports on its own timer (~4.5 minutes measured), during which
+  "all ports down" is expected — but it was reported as *"the GXW gateway likely
+  lost power or its uplink"*, naming the wrong component. An all-down reading in
+  the first 6 minutes is now `degraded` with an accurate reason; after that it
+  is critical as before, and a partial outage is never suppressed.
+- **"wrong password?" became a mis-diagnosis in v0.46.0.** An unreadable admin
+  API can now equally mean a `cordless_cert_sha256` mismatch, so the reason
+  names both causes.
+
 ## 0.46.1
 
 Fixes the options overlay being silently ignored for most service settings.
