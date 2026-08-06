@@ -143,17 +143,48 @@ def build_phone_health(endpoints: list, contacts: dict, names: dict) -> list:
     return sorted(rows, key=lambda r: r["ext"])
 
 
-def summarize(phones: list) -> dict:
+def _median(vals: list):
+    """Median of a list of numbers, or None. Median, not mean: one handset waking
+    from Wi-Fi power-save produces a single huge sample that would drag a mean."""
+    xs = sorted(v for v in vals if v is not None)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else round((xs[mid - 1] + xs[mid]) / 2.0, 2)
+
+
+def summarize(phones: list, wired_exts: list | None = None) -> dict:
     """Rollup for the summary sensor: reachable/unreachable/offline split + worst RTT.
     'offline' (configured but de-registered) is called out separately from merely
     'unreachable' (registered but its qualify is failing) — a dropped cordless is
-    the actionable case."""
+    the actionable case.
+
+    `worst_rtt_ms` (the sensor's state) is a WORST-CASE across the whole fleet, so
+    the Wi-Fi cordless dominates it: its idle RTT sits around 250 ms under power
+    save while its CALLS run 7-18 ms. That is honest as a worst case but useless
+    as a trend, and it MASKS the wired fleet — an 8-port gateway degrading from
+    2 ms to 40 ms would not move a number pinned at 256 by one handset.
+
+    So the wired ports (`wired_exts`, i.e. the gateway_ports option) are also
+    summarised on their own: median + max + count. The median is the number worth
+    graphing."""
     reachable = [p for p in phones if p["reachable"]]
     unreachable = [p for p in phones if not p["reachable"]]
     offline = [p for p in phones if not p["registered"]]
     rtts = [(p["rtt_ms"], p) for p in reachable if p["rtt_ms"] is not None]
     worst = max(rtts, key=lambda t: t[0]) if rtts else None
+
+    wired_set = {str(e).strip() for e in (wired_exts or []) if str(e).strip()}
+    wired_rtts = [p["rtt_ms"] for p in reachable
+                  if p["rtt_ms"] is not None and str(p["ext"]) in wired_set]
+    other_rtts = [(str(p["ext"]), p["rtt_ms"]) for p in reachable
+                  if p["rtt_ms"] is not None and str(p["ext"]) not in wired_set]
     return {
+        "wired_median_rtt_ms": _median(wired_rtts),
+        "wired_max_rtt_ms": max(wired_rtts) if wired_rtts else None,
+        "wired_count": len(wired_rtts),
+        # Everything not on the gateway — in practice the Wi-Fi cordless.
+        "other_rtt_ms": {e: v for e, v in other_rtts} or None,
         "total": len(phones),
         "reachable": len(reachable),
         "unreachable": len(unreachable),
@@ -303,12 +334,44 @@ def _publish(phones: list, summ: dict) -> None:
              "reachable": summ["reachable"], "unreachable": summ["unreachable"],
              "unreachable_exts": summ["unreachable_exts"],
              "offline": summ["offline"], "offline_exts": summ["offline_exts"],
-             "worst_ext": summ["worst_ext"], "total_phones": summ["total"]})
+             "worst_ext": summ["worst_ext"], "total_phones": summ["total"],
+             # The wired fleet, apart from the cordless — see the sensor below.
+             "wired_median_rtt_ms": summ.get("wired_median_rtt_ms"),
+             "wired_max_rtt_ms": summ.get("wired_max_rtt_ms"),
+             "wired_count": summ.get("wired_count"),
+             "other_rtt_ms": summ.get("other_rtt_ms")})
+    except Exception:
+        pass
+    # Dedicated wired sensor. The rollup above is a fleet WORST CASE, which the
+    # Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so a wired
+    # gateway degrading from 2 ms to 40 ms would never move it. This is the
+    # number to graph and alert on for the 8 analog ports.
+    try:
+        wm = summ.get("wired_median_rtt_ms")
+        ha_client.set_state(
+            "sensor.switchboard_wired_link_health",
+            wm if wm is not None else "unknown",
+            {"friendly_name": "Switchboard wired link health",
+             "unit_of_measurement": "ms",
+             "icon": "mdi:lan-connect",
+             "state_class": "measurement",
+             "median_rtt_ms": wm,
+             "max_rtt_ms": summ.get("wired_max_rtt_ms"),
+             "ports_measured": summ.get("wired_count"),
+             "excludes": "Wi-Fi cordless and any non-gateway extension"})
     except Exception:
         pass
 
 
-def poll_once(names: dict) -> tuple:
+def wired_exts(opts: dict) -> list:
+    """The gateway's FXS-port extensions, from the `gateway_ports` option — the
+    same list devhealth derives gateway health from. These are the WIRED phones,
+    summarised apart from the Wi-Fi cordless (see summarize)."""
+    raw = str(opts.get("gateway_ports", "") or "")
+    return [e.strip() for e in raw.split(",") if e.strip()]
+
+
+def poll_once(names: dict, wired: list | None = None) -> tuple:
     """One measurement cycle. Returns (phones, summary) or (None, None) if AMI is
     down this cycle (caller just skips — no publish, no crash)."""
     import ami
@@ -319,7 +382,7 @@ def poll_once(names: dict) -> tuple:
     if not endpoints:
         return None, None  # AMI up but no roster -> skip (don't blank the sensors)
     phones = build_phone_health(endpoints, contacts, names)
-    return phones, summarize(phones)
+    return phones, summarize(phones, wired)
 
 
 def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int) -> bool:
@@ -347,7 +410,7 @@ def run() -> int:
     while True:
         opts = _load_options()
         names = room_names(opts)
-        phones, summ = poll_once(names)
+        phones, summ = poll_once(names, wired_exts(opts))
         reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)

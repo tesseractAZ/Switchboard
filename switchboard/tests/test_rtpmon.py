@@ -282,3 +282,60 @@ if __name__ == "__main__":
     test_outage_notify_routing()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
+
+
+# ── v0.47.0: report the wired fleet apart from the Wi-Fi cordless ────────────
+
+def _ph(ext, rtt, reachable=True, registered=True):
+    return {"ext": ext, "name": f"Room {ext}", "rtt_ms": rtt,
+            "reachable": reachable, "registered": registered}
+
+
+def test_median_helper() -> None:
+    assert pm._median([]) is None
+    assert pm._median([None, None]) is None
+    assert pm._median([5]) == 5
+    assert pm._median([1, 3]) == 2.0            # even → mean of the middle pair
+    assert pm._median([9, 1, 3]) == 3           # unsorted input
+    # A single huge sample must NOT drag it (the whole point vs a mean).
+    assert pm._median([2, 2, 3, 3, 256]) == 3
+
+
+def test_wired_summary_is_not_masked_by_the_cordless() -> None:
+    """THE REGRESSION THIS EXISTS FOR: the rollup state is a fleet worst case, so
+    the cordless idling at ~256 ms pins it and hides the wired ports entirely."""
+    wired = ["11", "12", "13", "14", "15", "16", "17", "18"]
+    phones = [_ph(e, r) for e, r in zip(wired, [2.0, 2.4, 2.3, 2.5, 2.4, 2.5, 2.0, 4.2])]
+    phones.append(_ph("19", 256.6))             # the Wi-Fi cordless, idle
+    s = pm.summarize(phones, wired)
+    assert s["worst_rtt_ms"] == 256.6 and s["worst_ext"] == "19"   # unchanged
+    assert s["wired_median_rtt_ms"] == 2.4, s["wired_median_rtt_ms"]
+    assert s["wired_max_rtt_ms"] == 4.2
+    assert s["wired_count"] == 8
+    assert s["other_rtt_ms"] == {"19": 256.6}
+    # And the wired figure MOVES when the gateway degrades, even though the
+    # cordless still pins the rollup — which is exactly what was impossible before.
+    worse = [_ph(e, 40.0) for e in wired] + [_ph("19", 256.6)]
+    s2 = pm.summarize(worse, wired)
+    assert s2["worst_rtt_ms"] == 256.6, "rollup still pinned by the cordless"
+    assert s2["wired_median_rtt_ms"] == 40.0, "wired median must react"
+
+
+def test_wired_summary_edge_cases() -> None:
+    wired = ["11", "12"]
+    # No wired list configured → no wired figures, rollup unaffected.
+    s = pm.summarize([_ph("19", 12.0)], None)
+    assert s["wired_median_rtt_ms"] is None and s["wired_count"] == 0
+    assert s["worst_rtt_ms"] == 12.0
+    # Unreachable wired ports contribute no RTT.
+    s = pm.summarize([_ph("11", None, reachable=False), _ph("12", 3.0)], wired)
+    assert s["wired_median_rtt_ms"] == 3.0 and s["wired_count"] == 1
+    # Nothing but wired → other_rtt_ms is None, not an empty dict.
+    assert pm.summarize([_ph("11", 3.0)], wired)["other_rtt_ms"] is None
+
+
+def test_wired_exts_parses_the_gateway_ports_option() -> None:
+    assert pm.wired_exts({"gateway_ports": "11,12,13"}) == ["11", "12", "13"]
+    assert pm.wired_exts({"gateway_ports": " 11 , 12 ,, "}) == ["11", "12"]
+    assert pm.wired_exts({}) == []
+    assert pm.wired_exts({"gateway_ports": None}) == []
