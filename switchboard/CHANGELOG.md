@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.47.0
+
+Reports the wired phones' latency separately from the Wi-Fi cordless.
+
+- New **`sensor.switchboard_wired_link_health`** — the median round-trip latency
+  of the gateway's FXS ports alone (`gateway_ports`), with `max_rtt_ms` and
+  `ports_measured` attributes. The same figures also appear as attributes on
+  `sensor.switchboard_link_health`.
+- Why: the existing rollup is a fleet **worst case**, and the cordless idles
+  around 250 ms under Wi-Fi power save while its *calls* run 7–18 ms. That is
+  honest as a worst case but useless as a trend, and it masked the wired fleet —
+  eight ports degrading from 2 ms to 40 ms would not have moved a number pinned
+  at 256 by one handset.
+- Median rather than mean, so a single handset waking from power save cannot
+  drag the figure.
+- `sensor.switchboard_link_health` keeps its existing state and meaning, so
+  history and any automations built on it are unaffected.
+
 ## 0.46.2
 
 Three defects found by analysing the live logs. No feature changes.

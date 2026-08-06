@@ -678,6 +678,7 @@ recovery notice when they return to normal.
 |--------|-------------------|
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) |
+| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so the wired ports could degrade from 2 ms to 40 ms without moving it. This is the number to graph and alert on for the analog phones. |
 | `sensor.switchboard_last_call` | Last call's audio quality (MES) + details |
 | `sensor.switchboard_cordless_health` | Cordless battery / WiFi / call quality |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
