@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.48.0"
+version: "0.48.1"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -24,7 +24,10 @@ ingress_port: 8099
 panel_icon: mdi:phone-classic
 panel_title: Switchboard
 map:
-  - type: addon_config
+  # 'app_config' is the current name for the add-on's own config dir (host:
+  # /addon_configs/<slug>/) — the Supervisor warns on the legacy 'addon_config'
+  # spelling ("uses legacy map type 'addon_config'; use 'app_config' instead").
+  - type: app_config
     read_only: false
   - type: share
     read_only: false
