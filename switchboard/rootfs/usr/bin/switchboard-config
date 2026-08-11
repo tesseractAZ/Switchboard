@@ -29,7 +29,7 @@ from pathlib import Path
 
 OPTIONS_PATH = Path("/data/options.json")
 # Optional admin overlay, deep-merged OVER options.json (see load_options). It
-# lives in the addon_config map (host: /addon_configs/<slug>/) precisely so an
+# lives in the app_config map (host: /addon_configs/<slug>/) precisely so an
 # administrator with shell access can change effective options when the
 # Supervisor options API isn't reachable (HA 2026.x rejects long-lived tokens on
 # the /api/hassio proxy). JSON, not YAML: the image has no YAML parser.

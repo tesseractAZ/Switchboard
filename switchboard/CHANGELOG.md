@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.48.1
+
+- The config-directory mapping now uses the Supervisor's current `app_config`
+  map type. The old `addon_config` spelling still worked but logged
+  "App 'Switchboard' uses legacy map type 'addon_config'; use 'app_config'
+  instead" on every load — and legacy spellings eventually stop working.
+  Same directory, same permissions; the options overlay is unaffected.
+
 ## 0.48.0
 
 Closes every defect from the August log audit — headlined by the one that
