@@ -58,7 +58,11 @@ bashio::log.info "Starting resident whisper-server on 127.0.0.1:${PORT} (model $
 # unauthenticated inference server on the LAN. Run as the unprivileged asterisk
 # uid (only reads a world-readable model + binds a high loopback port). s6
 # auto-restarts on crash; the gap is covered by the whisper-cli fallback.
-exec s6-setuidgid asterisk \
+# nice 10: inference bursts all 4 cores for seconds at a time, and measured RTP
+# jitter on concurrent calls rises while it runs — Asterisk's media threads must
+# always win that contention. STT latency is the callqos read-timeout's problem
+# (24 s budget), not the scheduler's.
+exec nice -n 10 s6-setuidgid asterisk \
     /usr/bin/whisper-server \
         --model "${MODEL}" \
         --host 127.0.0.1 \

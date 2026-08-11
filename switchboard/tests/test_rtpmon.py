@@ -27,6 +27,10 @@ def check(name: str, cond: bool) -> None:
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still 'pass' the
+    # test. Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 # Contacts as ami.contacts_from_blocks returns them (rtt = RoundtripUsec µs). Only
@@ -246,6 +250,60 @@ def test_outage_transition() -> None:
           pm.outage_transition(big, st2) == "" and pm.outage_transition(ok, st2) == "")
 
 
+def test_outage_transition_warmup_never_counts() -> None:
+    # During startup warm-up, polls run every WARMUP_DELAY=15s — the
+    # consecutive-cycle gate (sized for the 300s steady cadence) would be
+    # satisfiable ~30s after any restart, so a GXW taking a minute to
+    # re-register would false-alarm as a fleet outage. Warm-up cycles must
+    # NEVER count toward 'down'; recovery must still clear promptly.
+    big = {"total": 10, "unreachable": 8, "unreachable_exts": ["11", "12"], "reachable": 2}
+    ok = {"total": 10, "unreachable": 1, "reachable": 9}
+    st = {"cycles": 0, "alerted": False}
+    for _ in range(8):  # a full warm-up's worth of mass-outage samples
+        check("warmup: outage cycles never fire during warm-up",
+              pm.outage_transition(big, st, settled=False) == "")
+    check("warmup: cycle counter untouched by warm-up samples", st["cycles"] == 0)
+    # Settling with the outage ongoing: the gate starts fresh — still 2 cycles.
+    check("warmup: 1st settled cycle silent", pm.outage_transition(big, st, settled=True) == "")
+    check("warmup: 2nd settled cycle fires", pm.outage_transition(big, st, settled=True) == "down")
+    # An alert latched before a restart must clear during warm-up, not wait it out.
+    st2 = {"cycles": 0, "alerted": True}
+    check("warmup: recovery clears even while warming up",
+          pm.outage_transition(ok, st2, settled=False) == "up")
+
+
+def test_trunk_transition() -> None:
+    # Mirrors the outage state machine: 2 consecutive settled bad cycles fire
+    # once; recovery fires once; warm-up never counts; a MISSING registration
+    # object ('') is bad — a trunk configured to register that reports nothing
+    # is exactly the silent-death shape found live 2026-08-09.
+    st = {"cycles": 0, "alerted": False}
+    check("trunk: 1st Rejected cycle silent", pm.trunk_transition("Rejected", st) == "")
+    check("trunk: 2nd Rejected cycle fires", pm.trunk_transition("Rejected", st) == "down")
+    check("trunk: sustained Rejected does not re-page", pm.trunk_transition("Rejected", st) == "")
+    check("trunk: recovery fires 'up' once", pm.trunk_transition("Registered", st) == "up")
+    check("trunk: steady Registered silent", pm.trunk_transition("Registered", st) == "")
+    st2 = {"cycles": 0, "alerted": False}
+    check("trunk: missing registration object is bad",
+          pm.trunk_transition("", st2) == "" and st2["cycles"] == 1)
+    check("trunk: Unregistered counts as bad too", pm.trunk_transition("Unregistered", st2) == "down")
+    st3 = {"cycles": 0, "alerted": False}
+    for _ in range(5):
+        check("trunk: warm-up cycles never count",
+              pm.trunk_transition("Rejected", st3, settled=False) == "")
+    check("trunk: warm-up left the counter at zero", st3["cycles"] == 0)
+    st4 = {"cycles": 0, "alerted": False}
+    check("trunk: single bad cycle then recovery never pages",
+          pm.trunk_transition("Rejected", st4) == "" and pm.trunk_transition("Registered", st4) == "")
+
+
+def test_trunk_enabled_parses_options() -> None:
+    check("trunk: enabled dict", pm.trunk_enabled({"trunk": {"enabled": True}}))
+    check("trunk: disabled dict", not pm.trunk_enabled({"trunk": {"enabled": False}}))
+    check("trunk: absent key", not pm.trunk_enabled({}))
+    check("trunk: non-dict trunk value", not pm.trunk_enabled({"trunk": "yes"}))
+
+
 def test_outage_notify_routing() -> None:
     calls = []
 
@@ -279,6 +337,9 @@ if __name__ == "__main__":
     test_history_append_caps()
     test_is_mass_outage()
     test_outage_transition()
+    test_outage_transition_warmup_never_counts()
+    test_trunk_transition()
+    test_trunk_enabled_parses_options()
     test_outage_notify_routing()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)

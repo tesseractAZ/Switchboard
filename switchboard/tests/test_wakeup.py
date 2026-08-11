@@ -23,6 +23,10 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still 'pass' the
+    # test. Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 def eq(spoken, expected):

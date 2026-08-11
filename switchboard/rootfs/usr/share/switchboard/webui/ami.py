@@ -949,6 +949,27 @@ def get_registrations() -> dict[str, dict]:
     return registrations_from_blocks(blocks)
 
 
+def send_register(reg_name: str = "trunk-reg") -> bool:
+    """Kick an outbound registration NOW (CLI ``pjsip send register`` over the AMI
+    Command bridge). This is the recovery action for a registration stuck in the
+    TERMINAL "Rejected" state Asterisk enters after max_retries — nothing inside
+    Asterisk ever retries it (a 75-min WAN blip left the trunk dead 24h that way,
+    2026-08-09). True = Asterisk accepted the command; the REGISTER itself
+    completes asynchronously, so the caller re-reads status next cycle rather
+    than trusting this return."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", reg_name or ""):
+        return False  # our own section ids only — never splice into a CLI line
+    try:
+        blocks = _ami_command(
+            ["Action: Command", f"Command: pjsip send register {reg_name}"],
+            single_response=True,
+        )
+    except (OSError, AMIError):
+        return False
+    return any((b.get("response") or "").lower() in ("success", "follows")
+               for b in blocks)
+
+
 def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
     """The whole dashboard/console status read — endpoints, contacts, channels —
     over ONE AMI connection. Returns ``(endpoints, contacts, channels)``.

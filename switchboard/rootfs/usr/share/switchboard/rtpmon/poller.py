@@ -220,12 +220,21 @@ def is_mass_outage(summ: dict) -> bool:
     return total > 0 and down >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
 
 
-def outage_transition(summ: dict, st: dict) -> str:
+def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     """Pure state machine for the availability alert. `st` carries
     {'cycles', 'alerted'} across calls. Returns 'down' (fire the outage alert, once,
     after OUTAGE_MIN_CYCLES consecutive mass-outage cycles), 'up' (fire recovery,
-    once, when it clears after having alerted), or '' (nothing to do)."""
+    once, when it clears after having alerted), or '' (nothing to do).
+
+    `settled=False` (startup warm-up) must NOT count outage cycles: warm-up polls
+    run every WARMUP_DELAY=15 s, so the "consecutive cycles" gate — sized for the
+    300 s steady cadence — would otherwise be satisfiable ~30 s after any restart,
+    turning a GXW that takes a minute to re-register into a false fleet-outage
+    alarm. Recovery ('up') still fires during warm-up: a real pre-restart outage
+    that heals while warming up must clear its notification promptly."""
     if is_mass_outage(summ):
+        if not settled:
+            return ""
         st["cycles"] = st.get("cycles", 0) + 1
         if st["cycles"] >= OUTAGE_MIN_CYCLES and not st.get("alerted"):
             st["alerted"] = True
@@ -261,6 +270,104 @@ def _notify_outage(event: str, summ: dict) -> None:
                              title="Switchboard: phones recovered", notification_id=nid)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# Trunk registration watchdog.
+#
+# Found live 2026-08-09: a 75-minute WAN outage exhausted Asterisk's default
+# max_retries and the trunk registration entered its TERMINAL "Rejected" state —
+# inbound calling was dead for 24 hours and NOTHING alerted, because this poller
+# deliberately tracks only the digit-named phone endpoints and no other component
+# watches registrations at all. Two defenses now exist: switchboard-config sets
+# max_retries=10000 (so the terminal state ~never arises), and this watchdog
+# publishes the status as a sensor, auto-kicks a Rejected registration
+# (`pjsip send register`), and notifies if it stays down.
+# --------------------------------------------------------------------------- #
+TRUNK_REG_NAME = "trunk-reg"
+TRUNK_MIN_CYCLES = 2       # consecutive bad settled cycles before notifying
+
+
+def trunk_enabled(opts: dict) -> bool:
+    t = opts.get("trunk")
+    return bool(t.get("enabled")) if isinstance(t, dict) else False
+
+
+def trunk_transition(status: str, st: dict, settled: bool = True) -> str:
+    """Pure state machine for the trunk-registration alert. `status` is the
+    OutboundRegistrationDetail status (Registered / Unregistered / Rejected /
+    Stopped) or '' when AMI had no registration to report. Only 'Registered'
+    counts as healthy; '' is treated as bad (a trunk configured to register that
+    reports NO registration object is exactly the silent-death shape). Mirrors
+    outage_transition's discipline: warm-up cycles never count toward the alert,
+    recovery always clears promptly."""
+    if (status or "").strip().lower() == "registered":
+        st["cycles"] = 0
+        if st.get("alerted"):
+            st["alerted"] = False
+            return "up"
+        return ""
+    if not settled:
+        return ""
+    st["cycles"] = st.get("cycles", 0) + 1
+    if st["cycles"] >= TRUNK_MIN_CYCLES and not st.get("alerted"):
+        st["alerted"] = True
+        return "down"
+    return ""
+
+
+def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
+    """One watchdog cycle: read status, auto-kick if Rejected, publish, notify.
+    Every step best-effort — the link-health loop must never die on trunk work."""
+    try:
+        import ami
+        regs = ami.get_registrations()
+    except Exception:
+        return  # AMI down this cycle: skip entirely (don't blank the sensor)
+    reg = regs.get(TRUNK_REG_NAME) or {}
+    status = (reg.get("status") or "").strip()
+    kicked = False
+    if status.lower() in ("rejected", "stopped"):
+        # Terminal states: Asterisk will never retry on its own. Kick first,
+        # then let next cycle's status read tell us whether it worked.
+        try:
+            import ami
+            kicked = ami.send_register(TRUNK_REG_NAME)
+        except Exception:
+            kicked = False
+        st["kicks"] = st.get("kicks", 0) + (1 if kicked else 0)
+    try:
+        import ha_client
+        ha_client.set_state(
+            "sensor.switchboard_trunk_health",
+            status if status else "unknown",
+            {"friendly_name": "Switchboard trunk registration",
+             "icon": "mdi:phone-voip" if status.lower() == "registered"
+                     else "mdi:phone-alert",
+             "next_reg": reg.get("next_reg") or None,
+             "auto_reregister_attempts": st.get("kicks", 0),
+             "last_kick_sent": kicked or None})
+    except Exception:
+        pass
+    event = trunk_transition(status, st, settled)
+    if not (event and alerts_on):
+        return
+    try:
+        import ha_client
+        nid = "switchboard_trunk_registration"
+        if event == "down":
+            ha_client.notify(
+                f"The outside line's SIP registration is {status or 'missing'} — "
+                "inbound calls will fail until it recovers. An automatic "
+                "re-register has been sent; if this alert does not clear within "
+                "a few minutes, check the WAN link and the VoIP.ms portal.",
+                title="Switchboard: outside line down", notification_id=nid)
+        elif event == "up":
+            ha_client.notify("The outside line re-registered — inbound calling is back.",
+                             title="Switchboard: outside line recovered",
+                             notification_id=nid)
+    except Exception:
+        pass
 
 
 def _load_options() -> dict:
@@ -407,6 +514,7 @@ def run() -> int:
     polls = 0
     prev_reachable = -1
     outage_st = {"cycles": 0, "alerted": False}
+    trunk_st = {"cycles": 0, "alerted": False}
     while True:
         opts = _load_options()
         names = room_names(opts)
@@ -418,9 +526,11 @@ def run() -> int:
             # Fleet-outage alert. Advance the state machine every cycle (so the
             # consecutive-cycle gate and one-shot latch stay correct even when
             # alerts are muted); only the notification itself honors the opt-out.
-            event = outage_transition(summ, outage_st)
+            event = outage_transition(summ, outage_st, settled)
             if event and opts.get("link_health_alerts", True):
                 _notify_outage(event, summ)
+        if trunk_enabled(opts):
+            _trunk_check(trunk_st, settled, opts.get("link_health_alerts", True))
         polls += 1
         settled = warmup_done(settled, prev_reachable, reachable, polls)
         prev_reachable = reachable

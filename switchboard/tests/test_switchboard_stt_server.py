@@ -9,6 +9,7 @@ timeout-budget contract that keeps server-timeout + CLI-fallback under the AGI's
 ~25s hard kill: a connect-phase miss falls back to whisper-cli, but a POST-connect
 read hang returns '' (the AGI re-records) instead of stacking a 20s CLI run.
 """
+import os
 import socket
 import tempfile
 import types
@@ -30,6 +31,10 @@ def check(name: str, cond: bool) -> None:
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still 'pass' the
+    # test. Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 def _fake_conn(behavior: str, sink: dict):
@@ -155,6 +160,29 @@ def test_normalize_identical_on_server_path() -> None:
           "[" not in r and r == "Cordless.")
 
 
+def test_read_timeout_default_and_override() -> None:
+    # REGRESSION (live, 11/68 operator requests — 33% on the worst day): the old
+    # 8s read budget expired while whisper-server was still legitimately decoding
+    # a full 10s recording under load, forcing the caller into a re-record loop.
+    # Default is now 24 (~3x the worst observed decode); env override must win.
+    # Reload the module fresh both ways — the constant binds at import time.
+    orig = os.environ.pop("SW_WHISPER_READ_TIMEOUT", None)
+    try:
+        fresh = SourceFileLoader("switchboard_stt_default", str(STT)).load_module()
+        check("timeout: default read budget is 24s", fresh.WHISPER_READ_TIMEOUT == 24.0)
+        os.environ["SW_WHISPER_READ_TIMEOUT"] = "6"
+        fresh2 = SourceFileLoader("switchboard_stt_env", str(STT)).load_module()
+        check("timeout: SW_WHISPER_READ_TIMEOUT env override wins",
+              fresh2.WHISPER_READ_TIMEOUT == 6.0)
+    finally:
+        if orig is None:
+            os.environ.pop("SW_WHISPER_READ_TIMEOUT", None)
+        else:
+            os.environ["SW_WHISPER_READ_TIMEOUT"] = orig
+        sys.modules.pop("switchboard_stt_default", None)
+        sys.modules.pop("switchboard_stt_env", None)
+
+
 def test_server_disabled_uses_cli() -> None:
     orig = stt.WHISPER_SERVER
     stt.WHISPER_SERVER = False
@@ -175,6 +203,7 @@ if __name__ == "__main__":
     test_empty_transcript_not_double_charged()
     test_multipart_prompt_only_when_bias_set()
     test_normalize_identical_on_server_path()
+    test_read_timeout_default_and_override()
     test_server_disabled_uses_cli()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
