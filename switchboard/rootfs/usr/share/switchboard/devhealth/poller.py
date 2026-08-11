@@ -194,7 +194,10 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     # next cycle. Accept only a mapping.
     _rtp_raw = (wp.get("/api-get_rtp_status") or {}).get("rtpStatus")
     rtp = _rtp_raw if isinstance(_rtp_raw, dict) else {}
-    mos, age = last_call_mos(rtp, now=time.time())
+    # Ledger-gated: only RTP records matching a real dialplan call may drive
+    # health — HA "announce" playback legs leave low-MOS records that are not
+    # calls (see last_call_mos).
+    mos, age = last_call_mos(rtp, now=time.time(), ledger_ts=load_callqos_ts())
     if mos is not None:
         out["last_mos"] = mos           # the phone's own conversational MOS for its leg
         if age is not None:
@@ -202,13 +205,57 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     return out
 
 
-def last_call_mos(rtp_status: dict, now: float | None = None):
+# A ledger leg's `ts` (hangup epoch, PBX clock) and the phone's stopTimeSecond
+# (handset clock) describe the same hangup; 90 s absorbs their skew plus the
+# ledger's write latency without letting a neighbouring call match instead.
+CALLQOS_MATCH_WINDOW_S = 90
+
+
+def load_callqos_ts(path: str | None = None, max_bytes: int = 65536) -> list[float]:
+    """Epoch hangup times (`ts`) of recent call-ledger legs, for gating the
+    phone's RTP records to REAL dialplan calls (see last_call_mos). Reads only
+    the file's tail — the ledger is append-only and unbounded; the partial
+    first line a mid-file seek can produce is dropped by the malformed-line
+    skip. Missing/unreadable ledger -> [] (nothing can be confirmed)."""
+    p = path or os.environ.get("SWITCHBOARD_CALLQOS") or "/data/state/callqos.jsonl"
+    try:
+        with open(p, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read()
+    except OSError:
+        return []
+    out: list[float] = []
+    for line in data.splitlines():
+        # AttributeError: a syntactically-valid line that isn't an object
+        # (e.g. a bare number) has no .get — skipped like any malformed line.
+        try:
+            out.append(float(json.loads(line).get("ts")))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return out
+
+
+def last_call_mos(rtp_status: dict, now: float | None = None,
+                  ledger_ts: list[float] | None = None):
     """(moscq, age_seconds) for the MOST RECENT call in the phone's retained RTP
     records — NOT the min across history (an old bad call must not pin the sensor
     'degraded' forever). Picked by the latest stopTimeSecond. age is seconds since
     that call ended (None if `now` not given / no timestamp). (None, None) if no
     record carries a MOS. moscq is the phone's own conversational MOS for its leg —
-    the callee-side quality Asterisk cannot measure."""
+    the callee-side quality Asterisk cannot measure.
+
+    `ledger_ts` (recent legs' hangup epochs, see load_callqos_ts) restricts
+    candidates to REAL dialplan calls: HA "announce" playback to the handset
+    leaves phone-side RTP records with low moscq (2.2-2.9 observed) that appear
+    nowhere in the call ledger — three false 'degraded' episodes fired
+    2026-08-05/06. A record qualifies only if some leg lands within
+    CALLQOS_MATCH_WINDOW_S of its stopTimeSecond. None -> no gating (legacy
+    callers); [] -> ledger readable but no legs, so NO record qualifies. When
+    the ledger cannot confirm a call the MOS is SKIPPED: a false 'degraded'
+    costs alert trust, and genuinely poor real calls already notify separately
+    via the callqos path."""
     best = None  # (stop_ts, mos)
     # Defence in depth beside the caller's isinstance check: the handset can
     # answer with rtpStatus as a plain STRING, and `or {}` does not catch a
@@ -223,10 +270,20 @@ def last_call_mos(rtp_status: dict, now: float | None = None):
             m = float(rec.get("moscq"))
         except (TypeError, ValueError):
             continue
+        # The WP826 emits moscq 0.0 as a NO-MEASUREMENT sentinel — the real MOS
+        # scale floors at 1.0 — and one reached a live alert as "MOS 0.0"
+        # (2026-08-05). Below-scale is not a measurement: the record is ignored
+        # as a candidate (an older valid record may still win), exactly like an
+        # unparseable moscq.
+        if m < 1.0:
+            continue
         try:
             ts = int(rec.get("stopTimeSecond"))
         except (TypeError, ValueError):
             ts = 0
+        if ledger_ts is not None and not any(
+                abs(ts - lt) <= CALLQOS_MATCH_WINDOW_S for lt in ledger_ts):
+            continue
         if best is None or ts > best[0]:
             best = (ts, m)
     if best is None:
@@ -427,15 +484,20 @@ def _publish_cordless(level: str, reasons: list[str], snap: dict) -> None:
         "icon": "mdi:phone-in-talk" if level == "ok" else ("mdi:phone-alert" if level == "critical" else "mdi:phone-cog"),
         "reasons": reasons,
         "reachable": bool(snap.get("reachable") or snap.get("api_ok")),
+        # kept even though it now equals the state: consumers keyed on
+        # attributes.health while the state was the battery %.
+        "health": level,
     }
     for k in ("battery_pct", "charging", "battery_health", "wifi_connected", "wifi_signal", "wifi_ssid", "last_mos"):
         if snap.get(k) is not None:
             attrs[k] = snap[k]
-    if snap.get("battery_pct") is not None:
-        attrs["unit_of_measurement"] = "%"
-        ha_client.set_state("sensor.switchboard_cordless_health", snap["battery_pct"], {**attrs, "health": level})
-    else:
-        ha_client.set_state("sensor.switchboard_cordless_health", level, attrs)
+    # The state is ALWAYS the level word. It used to be the battery % whenever
+    # the battery read succeeded, which made a battery-driven 'critical'
+    # invisible in the state itself (live 2026-08-03: battery 3% discharging
+    # still showed state '3'; 'critical' only appeared once the handset died
+    # and the read failed). The % remains as the battery_pct attribute; no
+    # unit_of_measurement, since the state is no longer numeric.
+    ha_client.set_state("sensor.switchboard_cordless_health", level, attrs)
 
 
 def _publish_gateway(level: str, reasons: list[str], down: list[str], gw_exts: list[str]) -> None:

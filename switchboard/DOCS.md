@@ -590,6 +590,24 @@ layered on automatically (details in [SECURITY.md](SECURITY.md#toll-fraud-the-tr
   (many providers, e.g. VoIP.ms, don't answer keep-alive OPTIONS reliably, so the
   AOR is deliberately not qualified).
 
+### Registration resilience
+
+The REGISTER refresh is the trunk's lifeline (§ NAT note above) — and losing it
+used to be permanent: Asterisk's default `max_retries=10` means a WAN outage
+longer than ~10 minutes drove the registration into a **terminal** "Rejected"
+state that nothing ever retried. That exact failure occurred live: a 75-minute
+WAN blip silently killed inbound calling for 24 hours (outbound was unaffected —
+it authenticates per-INVITE). v0.48.0 closes it from three sides:
+
+1. the generated `[trunk-reg]` sets `max_retries = 10000` (≈ 7 days of retrying)
+   plus fatal/forbidden retry intervals, so the terminal state effectively
+   cannot arise;
+2. the link-health poller watches the registration every cycle, publishes
+   `sensor.switchboard_trunk_health`, and **auto-sends a re-register** if it
+   ever sees Rejected/Stopped;
+3. if the registration stays down for 2 consecutive cycles, a persistent
+   notification fires (and clears itself on recovery).
+
 ---
 
 ## 10. The operator console (telnet + browser)
@@ -680,7 +698,8 @@ recovery notice when they return to normal.
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so the wired ports could degrade from 2 ms to 40 ms without moving it. This is the number to graph and alert on for the analog phones. |
 | `sensor.switchboard_last_call` | Last call's audio quality (MES) + details |
-| `sensor.switchboard_cordless_health` | Cordless battery / WiFi / call quality |
+| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
+| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant

@@ -23,6 +23,10 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still 'pass' the
+    # test. Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 TH = {"battery_crit": 15, "battery_warn": 30, "wifi_min": 2, "mos_min": 3.4, "mos_window": 900}
@@ -293,3 +297,100 @@ def test_api_unreadable_reason_names_the_cert_pin_too() -> None:
                                              "wifi_min": 2, "mos_min": 3.4, "mos_window": 3600})
     joined = " ".join(reasons)
     assert "cordless_password" in joined and "cordless_cert_sha256" in joined, joined
+
+
+# ── MOS sentinel + call-ledger gate + level-string state (live defects) ──────
+
+def test_last_call_mos_skips_no_measurement_sentinel() -> None:
+    """The WP826 emits moscq 0.0 as a no-measurement sentinel (real MOS floors
+    at 1.0); it reached a live alert as "MOS 0.0" on 2026-08-05."""
+    assert dh.last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"}}, now=150) == (None, None)
+    assert dh.last_call_mos({"a": {"moscq": "0.99", "stopTimeSecond": "100"}}, now=150) == (None, None)
+    # Exactly 1.0 is the scale floor — a real (terrible) measurement.
+    assert dh.last_call_mos({"a": {"moscq": "1.0", "stopTimeSecond": "100"}}, now=150) == (1.0, 50)
+    # A sentinel NEWEST record is ignored as a candidate, so an older valid
+    # record within the window is picked — it must neither win nor shadow.
+    got = dh.last_call_mos({"old": {"moscq": "4.1", "stopTimeSecond": "100"},
+                            "new": {"moscq": "0.0", "stopTimeSecond": "200"}}, now=260)
+    assert got == (4.1, 160)
+    # All records sentinel -> nothing at all.
+    assert dh.last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"},
+                             "b": {"moscq": "0.0", "stopTimeSecond": "200"}}, now=260) == (None, None)
+
+
+def test_last_call_mos_requires_a_ledger_matched_call() -> None:
+    """HA announce playback legs leave low-MOS phone RTP records that are NOT
+    calls (nowhere in the call ledger) — three false 'degraded' episodes fired
+    2026-08-05/06. Only a ledger-confirmed record may drive health."""
+    rtp = {"a": {"moscq": "2.5", "stopTimeSecond": "1000"}}
+    # A leg within the window confirms the record (90 s inclusive).
+    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1080]) == (2.5, 100)
+    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1000 + dh.CALLQOS_MATCH_WINDOW_S]) == (2.5, 100)
+    # No leg near it (announce playback) -> skipped entirely.
+    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1091]) == (None, None)
+    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[2000]) == (None, None)
+    # Ledger readable but empty -> NO record qualifies.
+    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[]) == (None, None)
+    # ledger_ts=None keeps the legacy ungated behaviour.
+    assert dh.last_call_mos(rtp, now=1100) == (2.5, 100)
+    # An unconfirmed NEWER record (the announce leg) must not shadow the
+    # confirmed real call before it.
+    rtp2 = {"announce": {"moscq": "2.2", "stopTimeSecond": "2000"},
+            "call": {"moscq": "4.0", "stopTimeSecond": "1000"}}
+    assert dh.last_call_mos(rtp2, now=2100, ledger_ts=[1005]) == (4.0, 1100)
+
+
+def test_load_callqos_ts(tmp_path) -> None:
+    # Missing / unreadable ledger -> [] (and downstream, no MOS drives health).
+    assert dh.load_callqos_ts(str(tmp_path / "nope.jsonl")) == []
+    p = tmp_path / "callqos.jsonl"
+    p.write_text('{"ts": 100, "ext": "19"}\n'
+                 'not json at all\n'
+                 '{"no_ts_field": true}\n'
+                 '[1, 2]\n'
+                 '{"ts": "wat"}\n'
+                 '{"ts": 200.5}\n')
+    assert dh.load_callqos_ts(str(p)) == [100.0, 200.5]
+    # Only the tail is read (the ledger is append-only and unbounded): a leg
+    # older than the tail window is not returned, the newest still is.
+    big = tmp_path / "big.jsonl"
+    filler = "".join('{"pad": "%s"}\n' % ("x" * 120) for _ in range(700))
+    big.write_text('{"ts": 1}\n' + filler + '{"ts": 2}\n')
+    got = dh.load_callqos_ts(str(big), max_bytes=65536)
+    assert 2.0 in got and 1.0 not in got
+
+
+def test_publish_cordless_state_is_always_the_level_string() -> None:
+    """The state used to be the battery % when the battery read succeeded and
+    the level word otherwise, so a battery-driven 'critical' was invisible in
+    the state itself (live 2026-08-03: 3% discharging showed state '3')."""
+    class _FakeHA:
+        calls: list = []
+        @staticmethod
+        def set_state(eid, state, attrs):
+            _FakeHA.calls.append((eid, state, attrs))
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        # Battery readable: the state must STILL be the level word.
+        dh._publish_cordless("ok", [], {"reachable": True, "api_ok": True,
+                                        "battery_pct": 80, "charging": True})
+        eid, state, attrs = _FakeHA.calls[-1]
+        assert eid == "sensor.switchboard_cordless_health"
+        assert state == "ok"
+        assert attrs["battery_pct"] == 80 and attrs["health"] == "ok"
+        # Battery unreadable: same shape, no phantom battery attribute.
+        dh._publish_cordless("degraded", ["Wi-Fi disconnected"], {"reachable": True, "api_ok": True})
+        _, state, attrs = _FakeHA.calls[-1]
+        assert state == "degraded" and "battery_pct" not in attrs
+        assert attrs["reasons"] == ["Wi-Fi disconnected"]
+        # The regression end-to-end: 3% discharging on a live handset must SHOW
+        # critical in the state BEFORE the handset dies.
+        snap = {"reachable": True, "api_ok": True, "battery_pct": 3, "charging": False,
+                "wifi_connected": True, "wifi_signal": 4}
+        lvl, reasons = dh.classify_cordless(snap, TH)
+        dh._publish_cordless(lvl, reasons, snap)
+        _, state, attrs = _FakeHA.calls[-1]
+        assert state == "critical"
+        assert attrs["battery_pct"] == 3 and attrs["health"] == "critical"
+    finally:
+        sys.modules.pop("ha_client", None)

@@ -26,6 +26,10 @@ def check(name: str, cond: bool) -> None:
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         _failures += 1
+    # Under pytest the print + counter are DECORATIVE — only the __main__
+    # runner reads _failures, so a failing check would still 'pass' the
+    # test. Assert too, so both harnesses actually enforce every check.
+    assert cond, name
 
 
 class _Args:
@@ -203,6 +207,71 @@ def test_one_way_audio() -> None:
           and any("transmit" in r for r in rec["reasons"]))
 
 
+def test_short_leg_never_one_way() -> None:
+    # REGRESSION (2 live false alarms, Aug 7-8): a sub-second abandoned call to the
+    # operator — the dialplan does Answer -> Wait(1), the caller hangs up during the
+    # greeting — has a LEGITIMATELY silent transmit side (rx>50, tx<10, hcause 16,
+    # billsec <=1). Must not read as one-way / poor / notify.
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/12-a1",
+                                cid="12", billsec="1", hcause="16",
+                                rxcount="2600", txcount="5"))
+    check("shortleg: 1s abandoned call is NOT one-way",
+          not any("one-way" in r for r in rec["reasons"]))
+    check("shortleg: not poor, notify False",
+          rec["quality"] != "poor" and not rec["notify"])
+    # The same packet shape on a normal-length call is a REAL dead transmit.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-a2",
+                                cid="12", billsec="30", hcause="16",
+                                rxcount="2600", txcount="5"))
+    check("shortleg: same stats at 30s -> one-way still detected",
+          rec["quality"] == "poor" and rec["notify"]
+          and any("one-way" in r and "transmit" in r for r in rec["reasons"]))
+    # Boundary: exactly 5s is long enough to trust the dead side.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-a3",
+                                cid="12", billsec="5", hcause="16",
+                                rxcount="2600", txcount="5"))
+    check("shortleg: boundary billsec=5 still allows one-way",
+          any("one-way" in r for r in rec["reasons"]))
+
+
+def test_rtp_outranks_mangled_billsec() -> None:
+    # REGRESSION (live): operator sessions that loop through STT re-records reset
+    # the CDR, so billsec covers only the last segment — legs stored dur=2 while
+    # the packet counters showed ~75s of RTP (ulaw 20ms ptime = 50 pkts/s). The
+    # monotonic RTP evidence wins; the mangled value is kept as billsec_raw.
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/12-b1",
+                                cid="12", billsec="2", rxcount="3750", txcount="3700",
+                                rxmes="88", txmes="88"))
+    check("rtpdur: billsec 2 on 75s of RTP -> dur corrected to 75", rec["dur"] == 75)
+    check("rtpdur: original billsec preserved as billsec_raw", rec["billsec_raw"] == 2)
+    # A coherent billsec (20s of RTP on a 20s call) is left alone.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-b2",
+                                cid="12", billsec="20", rxcount="1000", txcount="990",
+                                rxmes="88", txmes="88"))
+    check("rtpdur: coherent billsec kept verbatim", rec["dur"] == 20)
+    check("rtpdur: no billsec_raw when uncorrected", rec["billsec_raw"] is None)
+
+
+def test_ext_prefers_channel_endpoint() -> None:
+    # REGRESSION (live, 30/95 ledger records): the dialplan rewrites CALLERID(num)
+    # to the public DID before an outbound Dial, so the h-extension's --cid on a
+    # trunk call is the DID, not the room. The channel name carries the true
+    # originating endpoint.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-00000055",
+                                cid="5205550100", billsec="30",
+                                rxcount="1500", txcount="1500", rxmes="88", txmes="88"))
+    check("ext: outbound leg attributes to the channel's room endpoint",
+          rec["ext"] == "12")
+    # Inbound trunk leg: PJSIP/trunk-... is not a digit endpoint -> cid stays the
+    # PSTN caller (the old, correct behavior).
+    rec = cq.build_record(_Args(source="dialplan", tag="from-trunk",
+                                chan="PJSIP/trunk-00000056", cid="15551234567",
+                                billsec="30", rxcount="1500", txcount="1500",
+                                rxmes="88", txmes="88"))
+    check("ext: inbound trunk leg keeps the PSTN caller id",
+          rec["ext"] == "15551234567")
+
+
 def test_mes_zero_is_no_data() -> None:
     # Asterisk returns MES=0.0 for a direction it couldn't score (short call / no
     # RTCP). A real 4s/6s call must NOT be scored "poor" off that sentinel.
@@ -344,6 +413,9 @@ if __name__ == "__main__":
     test_ledger_append_and_cap()
     test_ha_routing()
     test_one_way_audio()
+    test_short_leg_never_one_way()
+    test_rtp_outranks_mangled_billsec()
+    test_ext_prefers_channel_endpoint()
     test_mes_zero_is_no_data()
     test_incoherent_low_mes_filtered()
     test_argv_sanitizes_nonfinite()

@@ -294,6 +294,31 @@ def test_trunk_registration_keepalive() -> None:
     check("trunk re-REGISTER every 120s (NAT keepalive, NOT the 3600s default)",
           "expiration = 120" in reg)
     check("trunk registration keeps retry_interval", "retry_interval = 60" in reg)
+    # Asterisk's default max_retries=10 is a trapdoor: exceeded once, the
+    # registration enters a TERMINAL "Rejected" state nothing ever retries —
+    # a 75-min WAN outage on 2026-08-09 left inbound dead 24h that way. The
+    # fatal/forbidden intervals keep retrying through provider 4xx/5xx while
+    # it is mid-recovery.
+    check("trunk registration never gives up (max_retries huge, not default 10)",
+          "max_retries = 10000" in reg)
+    check("trunk registration retries through fatal responses",
+          "fatal_retry_interval = 120" in reg)
+    check("trunk registration retries through 403s",
+          "forbidden_retry_interval = 300" in reg)
+
+
+def test_rtpqos_passes_extended_telemetry_flags() -> None:
+    # The callqos sink has always accepted --maxrtt/--stdevrtt/--rxmaxjitter/
+    # --rxoctet/--txoctet, but the dialplan never passed them: the fields were
+    # null in 100% of ledger records through v0.47.0. local_maxjitter is the
+    # max jitter of the RECEIVED stream measured locally (the sink's
+    # "rxmaxjitter"); the octet counters give real per-leg byte volumes.
+    ctx = "\n".join(sbc.render_rtpqos_context())
+    for flag, field in (("--maxrtt", "maxrtt"), ("--stdevrtt", "stdevrtt"),
+                        ("--rxmaxjitter", "local_maxjitter"),
+                        ("--rxoctet", "rxoctetcount"), ("--txoctet", "txoctetcount")):
+        check(f"rtpqos: {flag} wired to CHANNEL(rtcp,{field})",
+              f'{flag} "${{CHANNEL(rtcp,{field})}}"' in ctx)
 
 
 def test_trunk_inbound_routing() -> None:
@@ -702,6 +727,28 @@ def test_logger_durable_persistent_file() -> None:
     file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
     check("logger: durable file excludes verbose (keeps it low-volume)", "verbose" not in file_line)
     check("logger: no legacy ephemeral 'messages' file channel", "messages =>" not in lg)
+
+
+def test_logger_channels_live_under_logfiles() -> None:
+    # Asterisk's logger reads channel definitions ONLY from the [logfiles]
+    # section. v0.47.0 and earlier emitted them under [general] — Asterisk
+    # configured ZERO channels, "logger show channels" was empty, and the
+    # durable /data/state/asterisk.log never existed (found live 2026-08).
+    lg = sbc.render_logger({})
+    check("logger: has a [logfiles] section", "[logfiles]" in lg)
+    lines = lg.splitlines()
+    section = None
+    placement = {}
+    for l in lines:
+        s = l.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s
+        elif "=>" in s:
+            placement[s.split("=>")[0].strip()] = section
+    check("logger: console channel is under [logfiles], not [general]",
+          placement.get("console") == "[logfiles]")
+    check("logger: durable file channel is under [logfiles], not [general]",
+          placement.get("/data/state/asterisk.log") == "[logfiles]")
 
 
 def test_logger_durable_file_stays_low_volume_at_debug() -> None:

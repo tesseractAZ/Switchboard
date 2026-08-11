@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -181,6 +182,22 @@ def build_record(a) -> dict:
 
     label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms)
 
+    rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
+
+    # Duration: billsec, unless the monotonic packet counters say the leg ran far
+    # longer — the operator's re-record loops reset the CDR, so billsec can cover
+    # only the LAST segment (seen live: billsec 2 on ~75s of RTP). ulaw at 20ms
+    # ptime streams 50 pkts/s, so max(rx, tx)/50 is the leg's true wall time; when
+    # it exceeds double billsec (+5s slack so short calls never trip it) the RTP
+    # evidence wins and the mangled value is preserved as billsec_raw.
+    billsec = _int(a.billsec)
+    rtp_secs = max(rxc, txc) / 50.0
+    billsec_raw = None
+    dur = billsec
+    if billsec is not None and rtp_secs > 2 * billsec + 5:
+        billsec_raw = billsec
+        dur = round(rtp_secs)
+
     # One-way audio: one direction carried real traffic while the other was fully
     # dead. Worst-direction MES scoring alone MISSES this — the dead side reports
     # no MES, so min() ignores it and a dead-receive call scores "excellent". This
@@ -191,22 +208,36 @@ def build_record(a) -> dict:
     # live) must not read as healthy. Require ~1s (>50 pkts) on the LIVE side so a
     # tiny call-setup blip (both sides near-zero) still isn't a false alarm.
     DEAD_PKTS = 10  # < ~0.2s of audio over a whole call == effectively dead
-    rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
     rx_dead = rxc < DEAD_PKTS
     tx_dead = txc < DEAD_PKTS
-    one_way = (rxc > 50 and tx_dead) or (txc > 50 and rx_dead)
+    # ...but never on a sub-5s leg (2 live false alarms: a caller abandoning during
+    # the operator greeting — Answer -> Wait(1) keeps the transmit side legitimately
+    # silent while rx accrues, hcause 16, billsec <=1). Gate on billsec as REPORTED,
+    # not the RTP-corrected dur, which reads long on exactly those abandoned legs;
+    # with no billsec at all the packet counters are the only duration evidence.
+    long_enough = (billsec if billsec is not None else rtp_secs) >= 5
+    one_way = long_enough and ((rxc > 50 and tx_dead) or (txc > 50 and rx_dead))
     if one_way:
         reasons = [f"one-way audio ({'receive' if rx_dead else 'transmit'} dead)"] + reasons
         label, notify = "poor", True
+
+    # ext: prefer the channel name's digit endpoint — the dialplan rewrites
+    # CALLERID(num) to the household's public DID before an outbound Dial, so the
+    # --cid the h-extension passes mis-attributes those legs (seen live: 30/95
+    # ledger records). A non-digit endpoint (PJSIP/trunk-... inbound) keeps the
+    # cid: there it IS the PSTN caller and the old behavior is correct.
+    m = re.match(r"PJSIP/(\d{2,6})-", a.chan or "")
+    ext = m.group(1) if m else (a.cid or "").strip()
 
     rec = {
         "ts": int(time.time()),
         "source": a.source,
         "tag": a.tag or "",
         "chan": a.chan or "",
-        "ext": (a.cid or "").strip(),
+        "ext": ext,
         "codec": (a.codec or "").strip(),
-        "dur": _int(a.billsec),
+        "dur": dur,
+        "billsec_raw": billsec_raw,
         "hcause": _int(a.hcause),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,

@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.48.0
+
+Closes every defect from the August log audit — headlined by the one that
+silently killed inbound calling for 24 hours.
+
+**The outside line can no longer die silently.**
+
+- A 75-minute WAN outage on Aug 9 exhausted Asterisk's default registration
+  retry budget (`max_retries=10`), which is a **terminal** state: nothing ever
+  retries, and inbound calling stayed dead for 24 hours with zero alerts
+  (outbound was unaffected — it authenticates per call). Three fixes:
+  - the generated `[trunk-reg]` now sets `max_retries = 10000` plus
+    fatal/forbidden retry intervals — the terminal state effectively cannot
+    arise;
+  - the link-health poller now watches the registration, publishes a new
+    **`sensor.switchboard_trunk_health`**, and auto-sends a re-register if it
+    ever sees Rejected/Stopped;
+  - a persistent notification fires after 2 consecutive bad cycles and clears
+    itself on recovery.
+
+**Logging actually logs now.**
+
+- The generated `logger.conf` declared its channels under `[general]`, but
+  Asterisk only reads them from `[logfiles]` — so the add-on has been running
+  with **zero** configured log channels and the durable
+  `/data/state/asterisk.log` never existed (console output survived only via a
+  block-buffered stdout fallback). Fixed; the file appears on first boot of
+  this version.
+
+**Fewer false alarms.**
+
+- The fleet-outage alert's consecutive-cycle gate is sized for the 300 s steady
+  cadence, but startup warm-up polls every 15 s — so any restart where the
+  gateway took >30 s to re-register could page a false outage. Warm-up cycles
+  no longer count.
+- Sub-5-second abandoned calls (caller hangs up during the operator greeting)
+  no longer classify as "one-way audio" — the transmit side is legitimately
+  silent during Answer→Wait(1). Two false pages, since audited, came from this.
+- The cordless monitor no longer treats the handset's `moscq: 0.0`
+  no-measurement sentinel as a real MOS (scale floor is 1.0), and phone-side
+  MOS records now count only when they match a real call in the ledger —
+  Home Assistant announce playbacks to the handset were driving false
+  "degraded (last call quality poor)" episodes.
+
+**Truer data.**
+
+- `sensor.switchboard_cordless_health` state is now always the health level
+  (`ok`/`degraded`/`critical`); it previously flipped between the battery
+  number and level strings, which made a battery-driven critical invisible in
+  the state. Battery % stays in `battery_pct`. **Breaking** if you graphed the
+  state as battery — repoint that graph at the attribute.
+- Outbound trunk calls are now attributed to the room that dialed, not the
+  outbound caller-ID the dialplan stamps on them.
+- Call legs mangled by CDR resets store their RTP-derived duration (a 75 s
+  operator session no longer logs as 2 s); the raw value is kept in
+  `billsec_raw`.
+- The dialplan now passes the extended RTCP telemetry (max/stdev RTT, max rx
+  jitter, octet counts) the ledger has carried null columns for since they
+  were added.
+
+**Speech that waits its turn.**
+
+- The operator's speech-to-text read budget rises 8 s → 24 s: 16 % of voice
+  requests (33 % on the worst day) were timing out mid-decode and forcing
+  re-record loops.
+- whisper-server now runs at `nice 10` so inference bursts can't inflate RTP
+  jitter on concurrent calls.
+
+**Test integrity.**
+
+- 17 of 18 test files used a print-only `check()` helper, so under pytest —
+  what CI runs — their checks could never fail the suite. Every `check()` now
+  asserts. (Arming them surfaced zero hidden failures.) Tests 276 → 293.
+
 ## 0.47.0
 
 Reports the wired phones' latency separately from the Wi-Fi cordless.
