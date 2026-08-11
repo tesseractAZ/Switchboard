@@ -39,8 +39,9 @@ LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
    the Grandstream port will use to register). **Replace the `change-me-…`
    placeholder secrets.**
 3. **Start** the add-on. Watch the **Log** tab; you should see
-   `switchboard-config` render the configuration (ending with
-   `codecs: u-law only (no transcoding)`), then Asterisk start.
+   `switchboard-config` render the configuration (look for
+   `codecs: u-law only (no transcoding)` near the end, closing with
+   `done: N room(s), trunk=…`), then Asterisk start.
 4. **Provision the gateway** ([§7](#7-grandstream-gxw4216-v2-provisioning)) so
    each FXS port registers.
 5. Open the **Switchboard** panel in the Home Assistant sidebar (Ingress) — each
@@ -228,8 +229,11 @@ Dial these from any room phone. All are configurable (`*_ext`) and can be disabl
 | `411` | **Directory assistance** | [§4](#4-the-voice-operator--directory-assistance) |
 
 A feature's dial code is skipped (with a log line) if it collides with a room
-extension or another code, but the underlying feature still works via the
-operator, the scheduler, or the dashboard.
+extension or another code, but the underlying feature usually still works via
+the operator, the scheduler, or the dashboard. Two exceptions: the talking
+clock is fully disabled on a collision, and a collided page code stays
+reachable only from the dashboard/console (the operator's "page" route is
+dropped with it).
 
 ### In-call transfer (analog phones)
 
@@ -323,7 +327,7 @@ back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
 - **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
 
 You can also set and cancel wake-ups from the **dashboard** (the ⏰ box on each room
-card). The operator console *displays* pending wake-ups read-only.
+card) and from the operator console (**W** to set, **X** to cancel — §10).
 
 ### Talking clock — dial `41`
 
@@ -551,7 +555,7 @@ after one, or the monitor will (correctly) stop authenticating.
      username: "100000_sub"
      secret: "provider-password"
      from_domain: losangeles.voip.ms
-     outbound_caller_id: "15205551234"
+     outbound_caller_id: "12135550123"
      inbound_ext: "19"        # ring one room, or "19,20", or "" for the whole house
      dial_prefix: "9"         # or set direct_dial: true to drop the prefix (below)
      registns: true
@@ -699,7 +703,7 @@ recovery notice when they return to normal.
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so the wired ports could degrade from 2 ms to 40 ms without moving it. This is the number to graph and alert on for the analog phones. |
 | `sensor.switchboard_last_call` | Last call's audio quality (MES) + details |
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
-| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. |
+| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant
@@ -760,6 +764,7 @@ it reads "µ-law".
 |--------|-------|
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
+| Investigating something that happened **before** a restart/reboot | Notices, warnings, and errors are also written durably to `/data/state/asterisk.log` on the persistent data volume — it survives restarts and reboots, unlike the Log tab, whose buffer rotates within hours. Registration flaps, trunk timeouts, and RTP errors from before a crash live there. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |

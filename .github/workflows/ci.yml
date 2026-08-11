@@ -3,7 +3,7 @@ name: CI
 # Run the test suite and smoke-build the add-on container on every push and PR.
 #
 # This did not exist until now, and the gap was not theoretical: the suite has
-# grown to 273 tests that ran ONLY on a maintainer's laptop. Every release up to
+# grown to 273 tests (293 as of v0.48.0) that ran ONLY on a maintainer's laptop. Every release up to
 # v0.46.1 merged with the tests unexecuted in CI — the only automated gates were
 # the docs build and CodeQL, neither of which runs a single test. A green PR
 # meant "the manual converts and no new CodeQL finding", not "the code works".

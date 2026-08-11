@@ -86,7 +86,7 @@ configuration:
     description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.west_hallway). Add one entity ID per line.
   announce_token:
     name: Announce API Token
-    description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / the ecoflow-panel to speak alerts on the cordless). Leave blank to allow LAN calls without a token. Masked on entry.
+    description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / another add-on to speak alerts on the cordless). Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.
 
   # ── Operator console (telnet + web terminal) ─────────────────────────
   console_enabled:
@@ -106,7 +106,7 @@ configuration:
     description: TCP port for the web terminal. Default 8100.
   console_web_bind:
     name: Console Web Terminal Bind Address
-    description: Interface the web terminal listens on. Blank = all interfaces; '127.0.0.1' restricts it to the host.
+    description: Interface the web terminal listens on. Blank = follow the telnet console's bind address (so restricting that to 127.0.0.1 also restricts the web terminal); set a value only to override it.
   console_users:
     name: Console Web Terminal Users
     description: "Sign-in accounts for the web terminal. Each entry has 'username' and 'password' (shown masked). Leave the list EMPTY to keep the web terminal open (no login) — its historical behavior. When any user is configured, both the page and the terminal connection require a sign-in; too many wrong attempts from one address are throttled for a few minutes."
