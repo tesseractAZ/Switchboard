@@ -196,9 +196,10 @@ source that built any release — see
 The Ingress dashboard is reachable only from the Home Assistant Supervisor; the
 Asterisk Manager socket is loopback-only with a fresh random secret each boot and no
 shell-command privilege; the SIP trunk blocks international/premium prefixes and
-confines every transfer to internal destinations. The telnet operator console and
-its browser terminal are **unauthenticated on your LAN by design** — keep them on a
-trusted network or bind them to `127.0.0.1`. Change the default room secrets before
+confines every transfer to internal destinations. The telnet operator console is
+**unauthenticated on your LAN by design**; its browser terminal takes a sign-in
+(`console_users`) and is only as open as telnet when no users are configured —
+keep both on a trusted network or bind them to `127.0.0.1`. Change the default room secrets before
 your phones register. Full details in [SECURITY.md](switchboard/SECURITY.md).
 
 ## License

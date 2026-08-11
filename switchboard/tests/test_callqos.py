@@ -258,7 +258,7 @@ def test_ext_prefers_channel_endpoint() -> None:
     # trunk call is the DID, not the room. The channel name carries the true
     # originating endpoint.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-00000055",
-                                cid="5205550100", billsec="30",
+                                cid="2135550100", billsec="30",
                                 rxcount="1500", txcount="1500", rxmes="88", txmes="88"))
     check("ext: outbound leg attributes to the channel's room endpoint",
           rec["ext"] == "12")

@@ -20,16 +20,6 @@ project; expect a best-effort response rather than a guaranteed SLA.
 Only the latest release on `main` is supported. There are no back-ported security
 fixes for older versions — update to the current release.
 
-### The cordless handset's certificate
-
-The WP826 presents a self-signed certificate that cannot be replaced, so the
-device-health monitor and the maintenance tool cannot validate it by chain.
-Set **`cordless_cert_sha256`** (obtain it with `node tools/wp826.mjs fingerprint`)
-and both will verify the exact certificate **before** transmitting the admin
-password, refusing to continue on a mismatch. Left blank, the connection still
-works but is unauthenticated: a LAN-positioned attacker could impersonate the
-handset and capture that password.
-
 ## Automated scanning
 
 Every push and pull request is analysed by **CodeQL** (`security-extended`) for
@@ -38,12 +28,13 @@ Findings surface in the repository's Security tab, and CI additionally **fails**
 on any error-level or high-severity (>= 7.0) result — an upload alone files an
 alert but would not stop a merge.
 
-Most of the add-on's Python is executed by name and therefore has no `.py`
-extension (`switchboard-config` and its siblings, the `.agi` voice flows). CodeQL's
-extractor keys on the extension, so the workflow stages an analysis-only `.py`
-copy of each before scanning — those files are covered, not skipped, and the copies
-exist solely in CI. An alert against `switchboard-config.py` refers to
-`switchboard-config`.
+Most of the add-on's Python is executed by name. CodeQL's Python extractor
+reads the shebang, so the extensionless scripts (`switchboard-config` and its
+siblings) are analysed under their own names. Only the `.agi` voice flows need
+help — a non-Python extension wins over the shebang — so the workflow stages an
+analysis-only `.py` copy of each `.agi` before scanning; those copies exist
+solely in CI. An alert against `switchboard-operator.py` refers to
+`switchboard-operator.agi`.
 
 ---
 
@@ -91,6 +82,22 @@ respectively). Every extension is validated against the configured room set befo
 the call, so an origination can only ever ring an internal phone — it cannot be
 steered into an outside call even with the privilege.
 
+### The SIP listener (`5060/udp`) and the resident recognizer
+
+The largest LAN surface is Asterisk's SIP listener on `5060/udp` (the add-on
+runs with host networking). Every endpoint is a named room with its own secret
+— a REGISTER must authenticate against that room's `secret`, there is no
+anonymous or guest context, and the dial plan only exists for authenticated
+endpoints. Live call audio uses the `rtp_start`–`rtp_end` UDP range. This is a
+LAN-only surface by deployment (nothing here should ever be port-forwarded);
+the per-room secrets are the authentication boundary, which is why the
+placeholder `change-me-…` secrets must actually be changed.
+
+The resident speech recognizer (`whisper-server`) binds `127.0.0.1:8126`
+loopback-only and runs unprivileged — with host networking, a LAN-visible bind
+would expose an unauthenticated inference server, so the bind address is the
+control.
+
 ### 3. Secret handling & scrubbing
 
 - Generated config files that contain cleartext secrets (SIP passwords, the AMI
@@ -103,8 +110,11 @@ steered into an outside call even with the privilege.
   whole trunk is skipped) on the same risks. Display names are stripped of control
   characters, `"`, and `;` before entering quoted caller-ID/comments.
 - **No secrets in logs.** Validation failures log the extension only, never the
-  secret. Logging goes to the console channel captured by journald — there is no
-  persistent on-disk log file.
+  secret. Logging goes to the console channel captured by journald, plus a durable
+  notice/warning/error copy at `/data/state/asterisk.log` for post-incident
+  forensics — that file carries no verbose/debug output and (with
+  `res_security_log` not loaded) no per-REGISTER security flood, so no secrets
+  and negligible growth.
 - `/data/options.json` (which holds the SIP secrets, trunk secret, and announce
   token) stays root-only; runtime state that the voice AGIs need is written to a
   separate `asterisk`-owned `/data/state` directory instead.
@@ -190,6 +200,16 @@ The add-on runs under a named AppArmor profile that mediates the container (no h
 escape), but the profile grants broad file/signal/capability/network access — the
 documented Home Assistant add-on pattern for an s6 + Asterisk workload. Treat it as
 container mediation, not a least-privilege sandbox.
+
+### The cordless handset's certificate
+
+The WP826 presents a self-signed certificate that cannot be replaced, so the
+device-health monitor and the maintenance tool cannot validate it by chain.
+Set **`cordless_cert_sha256`** (obtain it with `node tools/wp826.mjs fingerprint`)
+and both will verify the exact certificate **before** transmitting the admin
+password, refusing to continue on a mismatch. Left blank, the connection still
+works but is unauthenticated: a LAN-positioned attacker could impersonate the
+handset and capture that password.
 
 ### Device tooling accepts a self-signed certificate
 
