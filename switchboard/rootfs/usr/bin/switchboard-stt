@@ -56,9 +56,12 @@ WHISPER_SERVER_PORT = int(os.environ.get("SW_WHISPER_PORT", "8126") or "8126")
 # (~instant + 20s); a POST-connect READ hang returns '' instead (the AGI attempt
 # loop re-records) and never stacks a 20s CLI run on top.
 WHISPER_CONNECT_TIMEOUT = float(os.environ.get("SW_WHISPER_CONNECT_TIMEOUT", "2"))
-# 24 ≈ 3x the worst observed decode of a full 10s recording under load; the old
-# 8 expired MID-DECODE on 11/68 live operator requests (33% on the worst day),
-# forcing re-record loops. A genuine hang still returns '' with no CLI stacked.
+# The old 8 expired MID-DECODE on 11/68 live operator requests (33% on the worst
+# day), forcing re-record loops. 24 is ~1.5x the worst decode MEASURED IN
+# PRODUCTION since: 16s for a full 10s recording (2026-08-12 18:17:33->18:17:49).
+# That is real headroom but NOT the 3x originally claimed here — if a future
+# measurement approaches ~20s, raise this rather than assume margin that is not
+# there. A genuine hang still returns '' with no CLI stacked.
 WHISPER_READ_TIMEOUT = float(os.environ.get("SW_WHISPER_READ_TIMEOUT", "24"))
 
 # transcribe() dispatch sentinels (not transcripts).
@@ -199,8 +202,9 @@ def _transcribe_server(wav16: str, prompt: str):
         # A hung / reset (ConnectionResetError, RemoteDisconnected) / truncated
         # (IncompleteRead) server returns '' so the AGI's re-record loop handles
         # it. The CLI fallback is ONLY for a server unreachable at CONNECT (above,
-        # ~instant, so the CLI keeps its full budget). Worst observed decode ~8s
-        # « the 24s read budget, so a real slow decode is not this path.
+        # ~instant, so the CLI keeps its full budget). A slow decode is NOT ruled
+        # out as a cause here: production has measured 16s against the 24s budget,
+        # so this path can legitimately be a decode that ran long.
         log(f"whisper-server post-connect failure ({exc}); returning empty (re-record)")
         return _GIVE_UP
     finally:

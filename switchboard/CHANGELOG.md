@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.49.0
+
+Fixes four defects that the v0.48.0 durable log and three days of production
+telemetry exposed — including one in v0.48.0 itself.
+
+**The new log caught a bug in the release that shipped it.**
+
+- v0.48.0 asked Asterisk for `CHANNEL(rtcp,rxoctetcount)` / `txoctetcount` to
+  fill the ledger's `rx_octets` / `tx_octets`. PJSIP in Asterisk 20.11.1 does
+  not expose those names: both fields stayed null in **100%** of records and
+  every call leg wrote four `Unrecognized argument 'rxoctetcount' for 'rtcp'`
+  warnings into the brand-new durable log. The flags are dropped — byte volume
+  is derivable from the packet counts, which do populate. The old test passed
+  the entire time because asserting that a *string was rendered* proves only
+  that we asked, never that Asterisk answered; the replacement test asserts we
+  never ask for the rejected names again.
+
+**The gateway no longer reads "degraded" after a restart.**
+
+- The link-health poller left its startup warm-up as soon as the reachable
+  count stopped growing. On 2026-08-11 that count sat flat at 6 across two
+  consecutive 15 s polls while three FXS ports were still re-registering — a
+  false plateau. The poller settled early, froze that stale down-list for a
+  full 300 s interval, and the device-health monitor (which reads the rollup)
+  reported **"GXW gateway degraded" for ~4 minutes, twice in one day**.
+  Warm-up now ends on the precise condition — every *wired* gateway port
+  reachable — with the existing poll cap still bounding the wait. The cordless
+  and the unused softphone are excluded, since neither is expected to register.
+
+**An unreachable AMI is no longer reported as a dead outside line.**
+
+- `get_registrations()` returned an empty dict for BOTH "AMI unreachable" and
+  "no registration configured", so the trunk watchdog's documented skip guard
+  was unreachable code: an AMI-down cycle blanked
+  `sensor.switchboard_trunk_health` to `unknown` (seen on 6 of 6 restarts) and,
+  once settled, would have counted toward the alert and fired a false "outside
+  line down". A new `get_registrations_or_none()` distinguishes the two;
+  the watchdog now skips the cycle for real.
+
+**Honest margins.**
+
+- The speech-to-text read budget's comments claimed 24 s was ~3× the worst
+  observed decode. Production has since measured a **16 s** decode of a 10 s
+  recording — the real margin is 1.5×, and a slow decode can no longer be ruled
+  out as a cause of a post-connect failure. The budget itself is vindicated:
+  that request would have failed outright under the old 8 s limit.
+
+**Emergency calls now fail loudly instead of quietly wrong.**
+
+- This PBX has no E911 service, which the docs have always said — but nothing
+  in the dial plan matched `911`. In the default **prefix** mode the outbound
+  pattern `_9.` matched it and dialed the remainder, `11`, out to the PSTN: a
+  wrong call placed during an emergency. In direct-dial mode it fell through to
+  an unexplained congestion tone. Both modes now match `911` (and the prefixed
+  `9911`) explicitly and answer with a spoken "this line cannot reach emergency
+  services — hang up and use a mobile" before any trunk pattern can match.
+
+**The trunk auto-re-register was inert and is now real.**
+
+- v0.48.0's recovery kick used `Action: Command` ("pjsip send register"). The
+  add-on grants its AMI account `command` for READ but deliberately withholds
+  it from WRITE, and Command is authorised against WRITE — so every kick would
+  have been rejected "Permission denied", silently, on the only path that
+  recovers a dead outside line. It now uses the native `PJSIPRegister` action,
+  authorised against `system`, which the account already holds: the recovery
+  works with **no widening of AMI privilege**. A new test ties the chosen action
+  to the granted classes, so neither half can drift again.
+
+All four fixes are mutation-verified: reintroducing each defect fails its test.
+
 ## 0.48.1
 
 - The config-directory mapping now uses the Supervisor's current `app_config`

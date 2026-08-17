@@ -198,6 +198,40 @@ def test_warmup_done() -> None:
           pm.warmup_done(True, 8, 0, 1) is True)
 
 
+def test_warmup_waits_for_every_wired_port() -> None:
+    # THE Aug-11 BUG: warm-up ended on a false plateau. The reachable count sat
+    # flat at 6 across two consecutive 15s polls while exts 15/17/18 were still
+    # re-registering, so `reachable <= prev_reachable` said "stable", the poller
+    # settled, and then FROZE that stale down-list for a full 300s interval —
+    # devhealth read the rollup and the GXW falsely showed "degraded" for ~4
+    # minutes, twice in one day. The precise gate is the wired ports themselves.
+    check("warmup: count plateaued BUT wired ports still down -> keep warming",
+          pm.warmup_done(False, 6, 6, 2, 3) is False)
+    check("warmup: every wired port back -> settle (even on the first poll)",
+          pm.warmup_done(False, -1, 8, 1, 0) is True)
+    check("warmup: cap still wins over a permanently dead port (bounded wait)",
+          pm.warmup_done(False, 6, 6, pm.WARMUP_MAX_POLLS, 3) is True)
+    check("warmup: latch still wins",
+          pm.warmup_done(True, 6, 6, 2, 3) is True)
+    # wired_down=None must preserve the old heuristic for a caller with no roster.
+    check("warmup: no wired roster -> falls back to the count heuristic",
+          pm.warmup_done(False, 8, 8, 4, None) is True)
+
+
+def test_wired_down_count() -> None:
+    wired = ["11", "12", "13", "14", "15", "16", "17", "18"]
+    # The cordless (19) sleeping and the never-registered softphone (20) must NOT
+    # hold warm-up open — only real gateway ports count.
+    summ = {"unreachable_exts": ["19", "20"], "offline_exts": ["19", "20"]}
+    check("wired_down: cordless + softphone ignored", pm.wired_down_count(summ, wired) == 0)
+    summ2 = {"unreachable_exts": ["15", "17"], "offline_exts": ["18", "20"]}
+    check("wired_down: counts the 3 real gateway ports", pm.wired_down_count(summ2, wired) == 3)
+    check("wired_down: de-dupes across both lists",
+          pm.wired_down_count({"unreachable_exts": ["15"], "offline_exts": ["15"]}, wired) == 1)
+    check("wired_down: no roster -> 0", pm.wired_down_count(summ2, []) == 0)
+    check("wired_down: no summary -> 0", pm.wired_down_count(None, wired) == 0)
+
+
 def test_history_append_caps() -> None:
     d = tempfile.mkdtemp()
     pm.STATE_PATH, orig = os.path.join(d, "lh.jsonl"), pm.STATE_PATH
@@ -297,6 +331,50 @@ def test_trunk_transition() -> None:
           pm.trunk_transition("Rejected", st4) == "" and pm.trunk_transition("Registered", st4) == "")
 
 
+def test_trunk_check_skips_an_ami_down_cycle() -> None:
+    # v0.48.0's documented guard was DEAD CODE: get_registrations() returned {}
+    # for BOTH "AMI unreachable" and "no trunk registration exists", so an
+    # AMI-down cycle fell through and blanked the sensor to "unknown" — observed
+    # on 6/6 restarts. Once settled it would also have counted toward the
+    # down-alert and fired a false "outside line down".
+    sets, notes = [], []
+
+    class _HA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, state)); return True
+        @staticmethod
+        def notify(msg, title="", notification_id=""):
+            notes.append(title); return True
+
+    class _AmiDown:
+        @staticmethod
+        def get_registrations_or_none():
+            return None            # AMI unreachable
+
+    class _AmiUpNoTrunk:
+        @staticmethod
+        def get_registrations_or_none():
+            return {}              # AMI answered; nothing registered
+
+    sys.modules["ha_client"] = _HA
+    try:
+        sys.modules["ami"] = _AmiDown
+        st = {"cycles": 0, "alerted": False}
+        pm._trunk_check(st, settled=True, alerts_on=True)
+        check("trunk: AMI-down cycle publishes NOTHING", sets == [])
+        check("trunk: AMI-down cycle never notifies", notes == [])
+        check("trunk: AMI-down cycle does not count toward the alert", st["cycles"] == 0)
+
+        sys.modules["ami"] = _AmiUpNoTrunk
+        pm._trunk_check(st, settled=True, alerts_on=True)
+        check("trunk: AMI-up-but-unregistered DOES publish (real signal)",
+              any(e == "sensor.switchboard_trunk_health" for e, _ in sets))
+        check("trunk: AMI-up-but-unregistered counts toward the alert", st["cycles"] == 1)
+    finally:
+        sys.modules.pop("ami", None); sys.modules.pop("ha_client", None)
+
+
 def test_trunk_enabled_parses_options() -> None:
     check("trunk: enabled dict", pm.trunk_enabled({"trunk": {"enabled": True}}))
     check("trunk: disabled dict", not pm.trunk_enabled({"trunk": {"enabled": False}}))
@@ -334,11 +412,14 @@ if __name__ == "__main__":
     test_poll_once_ami_down()
     test_publish_routing()
     test_warmup_done()
+    test_warmup_waits_for_every_wired_port()
+    test_wired_down_count()
     test_history_append_caps()
     test_is_mass_outage()
     test_outage_transition()
     test_outage_transition_warmup_never_counts()
     test_trunk_transition()
+    test_trunk_check_skips_an_ami_down_cycle()
     test_trunk_enabled_parses_options()
     test_outage_notify_routing()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")

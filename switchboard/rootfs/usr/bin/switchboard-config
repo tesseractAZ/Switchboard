@@ -897,6 +897,27 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         # the single outbound pattern. Number dialed as-is (${EXTEN}).
         return [
             "",
+            "",
+            ";; ----- Emergency numbers are NOT carried (see below) -----",
+            ";; This PBX has no E911 service: the trunk provider has no address",
+            ";; registered for it, so an emergency call could not be routed to the",
+            ";; right dispatcher even if it completed. Rather than let 911 fall",
+            ";; through to a pattern that would place a WRONG call (in prefix mode",
+            ";; _9. matches '911' and would dial the remainder, '11', out the",
+            ";; trunk), match it EXPLICITLY and say so out loud, immediately. A",
+            ";; caller in an emergency must learn in one second to use a mobile,",
+            ";; not listen to ringback for a number that cannot help them.",
+            "exten = 911,1,NoOp(EMERGENCY 911 attempted — not carried)",
+            " same = n,Answer()",
+            " same = n,Playback(switchboard/sw-no-emergency)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "exten = 933,1,NoOp(EMERGENCY 933 test — not carried)",
+            " same = n,Answer()",
+            " same = n,Playback(switchboard/sw-no-emergency)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+            "",
             ";; ----- Blocked destinations (toll-fraud guard) — direct-dial -----",
             ";; International (011) and premium 1-900 are denied. More specific",
             ";; than the outbound pattern below, so matched first.",
@@ -918,6 +939,22 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
     # Prefix mode.
     plen = len(prefix)  # strip the whole prefix, not a hardcoded single char
     return [
+        "",
+        "",
+        ";; ----- Emergency numbers are NOT carried -----",
+        ";; MUST precede the outbound pattern: _9. matches '911' and would dial",
+        ";; the remainder ('11') out the trunk — a wrong call placed during an",
+        ";; emergency. Both the bare 911 and the prefixed form are caught.",
+        "exten = 911,1,NoOp(EMERGENCY 911 attempted — not carried)",
+        " same = n,Answer()",
+        " same = n,Playback(switchboard/sw-no-emergency)",
+        " same = n,Congestion(5)",
+        " same = n,Hangup()",
+        f"exten = {prefix}911,1,NoOp(EMERGENCY {prefix}911 attempted — not carried)",
+        " same = n,Answer()",
+        " same = n,Playback(switchboard/sw-no-emergency)",
+        " same = n,Congestion(5)",
+        " same = n,Hangup()",
         "",
         ";; ----- Blocked destinations (toll-fraud guard) -----",
         ";; International (011) and premium-rate (900 / 1-900) are denied. These",
@@ -1016,13 +1053,21 @@ def render_rtpqos_context() -> list:
         f' --rxjitter {q("rxjitter")} --txjitter {q("txjitter")} --rtt {q("rtt")}'
         f' --rxmes {q("rxmes")} --txmes {q("txmes")}'
         # Extended fields the sink has always accepted but never received (null
-        # in 100% of records until v0.48.0). local_maxjitter = max jitter of the
-        # RECEIVED stream measured locally (the "rxmaxjitter" the sink expects);
-        # an unknown field renders as "unknown/unavailable" and _num() maps it
-        # to None, so a runtime without one of these degrades to the old nulls.
+        # in 100% of records until v0.48.0). local_maxjitter is Asterisk's
+        # maxrxjitter: the max of the interarrival estimate sampled at RTCP
+        # report instants — NOT a bound on --rxjitter, which is read once at
+        # hangup, so it can legitimately be the smaller number.
+        #
+        # NO OCTET COUNTERS: v0.48.0 also passed --rxoctet/--txoctet as
+        # CHANNEL(rtcp,rxoctetcount)/txoctetcount, but PJSIP in Asterisk
+        # 20.11.1 does not expose those names — every call logged four
+        # "Unrecognized argument 'rxoctetcount' for 'rtcp'" WARNINGs into the
+        # durable log and both fields stayed null in 100% of records. Byte
+        # volume is derivable from rxcount/txcount and the codec anyway, so
+        # the flags are dropped rather than renamed. (The sink still accepts
+        # them, for a future Asterisk that exposes the counters.)
         f' --maxrtt {q("maxrtt")} --stdevrtt {q("stdevrtt")}'
-        f' --rxmaxjitter {q("local_maxjitter")}'
-        f' --rxoctet {q("rxoctetcount")} --txoctet {q("txoctetcount")} &)'
+        f' --rxmaxjitter {q("local_maxjitter")} &)'
     )
     return [
         "",
