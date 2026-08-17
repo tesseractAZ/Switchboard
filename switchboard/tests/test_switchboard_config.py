@@ -424,6 +424,70 @@ def test_status_power_entities_are_staged_from_options(tmp_path) -> None:
         sbc.RUN_DIR = saved
 
 
+def test_modules_conf_silences_the_boot_noise_modules() -> None:
+    # The shipped static rootfs/etc/asterisk/modules.conf used to noload six
+    # modules that decline to load anyway — but this generator OVERWRITES
+    # modules.conf, so those noloads were silently lost and each cost an
+    # ERROR/WARNING line on EVERY boot of the durable log (~6 of the 26-line
+    # per-boot block). The static file is gone; the generator owns the list.
+    m = sbc.render_modules({})
+    for mod in ("cdr_sqlite3_custom.so", "cel_sqlite3_custom.so", "chan_dahdi.so",
+                "res_adsi.so", "app_adsiprog.so", "app_getcpeid.so",
+                "res_hep_rtcp.so", "res_hep_pjsip.so"):
+        check(f"modules: {mod} noloaded (keeps the durable log readable)",
+              f"noload = {mod}" in m)
+    # And the load-bearing ones must still be there.
+    for mod in ("chan_iax2.so", "chan_unistim.so", "res_security_log.so", "cdr_csv.so"):
+        check(f"modules: {mod} still noloaded", f"noload = {mod}" in m)
+    check("modules: autoload still on", "autoload = yes" in m)
+    # res_http_media_cache is deliberately NOT silenced: its decline reports a
+    # real missing dependency, and a forensic log should keep signals it might
+    # need. Silencing it would trade a diagnostic for two fewer lines.
+    check("modules: res_http_media_cache left loadable (its decline is a signal)",
+          "noload = res_http_media_cache.so" not in m)
+
+
+def test_no_dead_static_asterisk_config_shadows_the_generator() -> None:
+    # Every /etc/asterisk file this add-on cares about is GENERATED at boot.
+    # A static copy in the image is dead weight that drifts: modules.conf sat
+    # there for months with a noload list the generator did not have, so it
+    # looked authoritative while changing nothing.
+    etc = (Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "asterisk")
+    generated = {"modules.conf", "pjsip.conf", "extensions.conf", "rtp.conf",
+                 "manager.conf", "logger.conf", "features.conf", "confbridge.conf",
+                 "asterisk.conf"}
+    shadowed = sorted(p.name for p in etc.glob("*.conf")) if etc.is_dir() else []
+    clash = sorted(set(shadowed) & generated)
+    check(f"no static file shadows a generated one (found: {clash})", clash == [])
+
+
+def test_gateway_ports_mismatch_is_flagged() -> None:
+    # gateway_ports drives BOTH gateway health and wired link health. Nothing
+    # checked it against the real rooms, so the 1xx numbering the docs suggest
+    # (rooms 101/102) plus the default ports (11-18) leaves gateway health
+    # permanently "ok" and wired link health permanently "unknown" — two
+    # monitors that look healthy precisely because they are watching nothing.
+    docs_numbering = {"rooms": [{"ext": "101", "name": "Kitchen", "secret": "s"},
+                                {"ext": "102", "name": "Living", "secret": "s"}],
+                      "gateway_ports": "11,12,13,14,15,16,17,18"}
+    stray = sbc.check_gateway_ports(docs_numbering)
+    check("gateway_ports: 1xx rooms vs 1x ports flags every port", len(stray) == 8)
+    matching = {"rooms": [{"ext": "11", "name": "A", "secret": "s"},
+                          {"ext": "12", "name": "B", "secret": "s"}],
+                "gateway_ports": "11,12"}
+    check("gateway_ports: matching numbering is clean",
+          sbc.check_gateway_ports(matching) == [])
+    partial = {"rooms": [{"ext": "11", "name": "A", "secret": "s"}],
+               "gateway_ports": "11,12"}
+    check("gateway_ports: flags only the missing one",
+          sbc.check_gateway_ports(partial) == ["12"])
+    check("gateway_ports: blank option is clean",
+          sbc.check_gateway_ports({"rooms": [], "gateway_ports": ""}) == [])
+    check("gateway_ports: whitespace tolerated",
+          sbc.check_gateway_ports({"rooms": [{"ext": "11", "name": "A", "secret": "s"}],
+                                   "gateway_ports": " 11 , 11"}) == [])
+
+
 def test_trunk_inbound_routing() -> None:
     # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
     # empty rings the whole house; an ext that isn't a room is ignored (rings

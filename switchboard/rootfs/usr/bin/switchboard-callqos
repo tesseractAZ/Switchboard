@@ -2,15 +2,19 @@
 """Switchboard per-call quality sink — turns raw RTP numbers into a durable record,
 a Home Assistant sensor, and a proactive "that call was rough" notification.
 
-Two producers feed this one script:
+ONE producer feeds this script today:
 
   * the dialplan ``[switchboard-rtpqos]`` h-extension (source=dialplan) — fires on
     hangup with the EXACT final ``CHANNEL(rtcp,*)`` stats for the leg that DIALED
     (the initiating phone / inbound trunk). Authoritative.
-  * the ``switchboard-rtpmon`` AMI poller (source=poll) — supplies the far/answering
-    leg (the one that never ran a context, so has no h-extension) and is allowed to
-    be a few seconds stale. Cumulative RTP counters are monotonic, so a near-hangup
-    snapshot is a faithful summary.
+
+``--source`` exists because a second producer was designed — an AMI poller
+supplying the far/ANSWERING leg, which never runs a context and so has no
+h-extension. It was never built: every record in the ledger to date is
+``source=dialplan``. **So every quality number here describes the CALLER's leg
+only**; the answering phone's receive quality (notably the cordless on an inbound
+trunk call) is not measured. Do not read a clean ledger as "both directions were
+fine". If that producer is ever added, ``source=poll`` is the reserved value.
 
 Keeping the quality logic HERE (not in the dialplan or the poller) means one place
 to test and tune. Everything is wrapped so this can NEVER take down a call leg: the
@@ -356,8 +360,12 @@ def push_ha(rec: dict) -> None:
         except Exception:
             pass
 
-    # Proactive alert on a rough call. notification_id keyed by channel => a
-    # dialplan+poll double-report of the same leg REPLACES, never duplicates.
+    # Proactive alert on a rough call. The id is keyed by channel AND the leg's
+    # timestamp: Asterisk restarts its channel counter at boot, so
+    # "PJSIP/12-00000003" recurs after every restart — keyed on the channel alone,
+    # a later bad call would silently REPLACE an earlier unread alert about a
+    # different call. The timestamp keeps distinct calls distinct while a repeat
+    # report of the SAME leg still collapses onto one entry.
     if rec["notify"] and _alerts_enabled():
         who = rec["ext"] or "a phone"
         leg = f" ({rec['tag']})" if rec["tag"] else ""
@@ -366,7 +374,8 @@ def push_ha(rec: dict) -> None:
             + ", ".join(rec["reasons"])
             + f". Duration {rec['dur']}s, codec {rec['codec'] or '?'}."
         )
-        nid = "switchboard_callqos_" + (rec["chan"] or who).replace("/", "_")
+        nid = (f"switchboard_callqos_{rec['ts']}_"
+               + (rec["chan"] or who).replace("/", "_"))
         try:
             ha_client.notify(body, title="Switchboard call quality", notification_id=nid)
         except Exception:

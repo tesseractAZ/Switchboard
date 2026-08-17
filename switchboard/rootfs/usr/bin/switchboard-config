@@ -802,8 +802,12 @@ def render_directory_context(joined: str, trunk_on: bool = False) -> list[str]:
 
 
 def render_status_context() -> list[str]:
-    """The [status] context: the dial-a-status voice menu AGI (say power / weather
-    / house, or press 1/2/3, and hear live Home Assistant state spoken back)."""
+    """The [status] context: the dial-a-status voice menu AGI — SAY "power",
+    "weather" or "house" and hear live Home Assistant state spoken back.
+
+    Voice only: there is no DTMF path. (This docstring used to offer "or press
+    1/2/3"; the AGI has never read digits, so anyone taking that literally on a
+    touch-tone phone got nothing.)"""
     return [
         ";; ----- Dial-a-status voice menu -----",
         "[status]",
@@ -1536,6 +1540,28 @@ def render_modules(opts: dict) -> str:
         ";; pbx_lua only load the package's demo dialplans (whose sample contexts",
         ";; and mailbox-1234 hints also spam the boot log); the entire dialplan is",
         ";; generated into extensions.conf.",
+        ";; Modules that decline to load anyway and cost an ERROR/WARNING line",
+        ";; each on EVERY boot of the durable log (/data/state/asterisk.log).",
+        ";; They were noloaded by the shipped static modules.conf, which this",
+        ";; generator OVERWRITES — so that silencing was silently lost. Doing it",
+        ";; here restores it and removes ~6 lines per boot from a forensic log",
+        ";; whose whole value is signal density: there is no local SQLite CDR/CEL",
+        ";; consumer, no DAHDI hardware on a Pi, and the ADSI screen-phone stack",
+        ";; is deprecated in Asterisk 20 (it warns loudly, then does nothing).",
+        "noload = cdr_sqlite3_custom.so",
+        "noload = cel_sqlite3_custom.so",
+        "noload = chan_dahdi.so",
+        "noload = res_adsi.so",
+        "noload = app_adsiprog.so",
+        "noload = app_getcpeid.so",
+        ";; HEP (Homer) capture agents. res_hep itself is disabled, so both",
+        ";; agents decline on every boot with a WARNING + an ERROR apiece —",
+        ";; four lines to report that a packet-capture protocol we do not run",
+        ";; is not running. (res_http_media_cache is deliberately NOT noloaded:",
+        ";; its decline is a genuine dependency signal, not a choice of ours.)",
+        "noload = res_hep_rtcp.so",
+        "noload = res_hep_pjsip.so",
+        "",
         "noload = chan_iax2.so",
         "noload = chan_unistim.so",
         "noload = pbx_dundi.so",
@@ -1874,6 +1900,22 @@ def _wakeup_scene_map(opts: dict) -> dict:
     return out
 
 
+def check_gateway_ports(opts: dict) -> list:
+    """Gateway ports that are NOT configured rooms. Returns the offending list.
+
+    `gateway_ports` names the FXS extensions the health monitors treat as "the
+    wired gateway". Nothing validated it against the actual rooms, so the 1xx
+    numbering the docs themselves suggest (rooms 101/102 with the default
+    gateway_ports 11-18) leaves the two health features quietly inert: gateway
+    health sees zero of its ports in the fleet and stays "ok" forever, and
+    wired link health has nothing to take a median of and reads "unknown".
+    Both look healthy, which is the worst possible failure for a monitor."""
+    room_exts = {str(r.get("ext", "")).strip() for r in (opts.get("rooms") or [])}
+    raw = str(opts.get("gateway_ports", "") or "")
+    ports = [e.strip() for e in raw.split(",") if e.strip()]
+    return [p for p in ports if p not in room_exts]
+
+
 def write_features_runtime(opts: dict) -> None:
     """Stage the HA-integrated voice-feature settings (smart wake-up + announce)
     for the AGIs, which run as the asterisk user and CANNOT read root-only
@@ -1937,6 +1979,11 @@ def main() -> None:
     opts["rooms"] = valid_rooms(opts.get("rooms", []) or [])
     if not opts["rooms"]:
         log("WARNING: no valid rooms configured — no phones will register")
+    stray = check_gateway_ports(opts)
+    if stray:
+        log(f"WARNING: gateway_ports lists {', '.join(stray)}, which are not configured "
+            "rooms — gateway health and wired link health cover only real room "
+            "extensions, so they will under-report (or read 'unknown') until this matches")
     ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     write_effective_options(effective)

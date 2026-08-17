@@ -68,7 +68,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical`. Drop to `debug`/`trace` only to diagnose, then set back (`trace` is very noisy). |
+| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — but only **three** of the seven behave differently. The Asterisk console channel always carries `notice,warning,error`; `info` adds `verbose`; `debug` and `trace` add `verbose` **and** `debug` and are identical to each other. `notice`, `warning`, `error` and `critical` all produce the same bare `notice,warning,error` — this is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose, then set back (it is very noisy). The durable `/data/state/asterisk.log` copy stays at `notice,warning,error` whatever you pick. |
 | `rtp_start` | `10000` | First UDP port for live call audio (RTP). Must be below `rtp_end`. |
 | `rtp_end` | `10200` | Last RTP port. The default 200-port window is far more than a home needs (~2 ports per call). |
 
@@ -122,7 +122,7 @@ its default is fine.
 | `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **Unauthenticated on the LAN** — keep it trusted or bind to loopback, or disable. |
 | `console_port` | `2300` | TCP port for the telnet console. |
 | `console_bind` | `0.0.0.0` | Interface it listens on. `127.0.0.1` restricts it to the host. |
-| `console_web_enabled` | `true` | Browser version of the console (xterm.js). Also unauthenticated on the LAN. Idles if `console_enabled` is off. |
+| `console_web_enabled` | `true` | Browser version of the console (xterm.js). Unauthenticated on the LAN **only while `console_users` is empty** — configure a user and both the page and the terminal socket require a sign-in (see below). Idles if `console_enabled` is off. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 | `console_web_bind` | `""` | Blank = follow `console_bind` (→ all interfaces); `127.0.0.1` restricts it to the host. |
 | `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
@@ -196,9 +196,33 @@ restatement is reported as changing nothing), so an override the Configuration
 tab can't show you is still visible. Remove the file and restart to return to
 the saved options.
 
-Services read the merged result, not `options.json` — the config renderer, the
-dashboard, the operator console, and the health monitors all consume the same
-effective view.
+Services read the merged result for **values**, not `options.json` — the config
+renderer, the dashboard, the operator console, and the health monitors all read
+the post-overlay snapshot (via `switchboard-opt`), so they share one effective
+view.
+
+**The overlay cannot turn a service on or off.** Each s6 `run` script decides
+whether to start or idle by reading its enable flag with `bashio::config`, which
+parses the saved `options.json` directly and never sees the overlay. That is
+deliberate — `bashio::config` can momentarily return an empty string during a
+config reload, and the run scripts' literal `= "false"` comparison is what stops
+a blank read from permanently idling an enabled service (s6 treats an idle
+process as "started" and never restarts it) — but it means these keys are read
+from the **saved** options even when the overlay names them:
+
+- `console_enabled`, `console_web_enabled` (telnet console, web terminal),
+- `link_health_enabled`, `device_health_enabled` (the two pollers),
+- `wakeup_enabled` (the wake-up scheduler),
+- `stt_resident` and the six speech-feature flags the resident recognizer gates
+  its RAM on (`operator.enabled`, `wakeup_enabled`, `automation_enabled`,
+  `status_enabled`, `announce_enabled`, `directory_enabled`),
+- `device_health_alerts`.
+
+Note the asymmetry: an overlay `{"link_health_enabled": false}` still leaves the
+poller running, while an overlay `{"link_health_interval": 60}` does take effect.
+The boot log reports the first one as an applied override anyway — it lists what
+the **merge** changed, not what each consumer honored. Turn a service off in the
+Configuration tab, not in the overlay.
 
 ## 3. Extensions & feature codes
 
@@ -270,19 +294,48 @@ Say what you want:
 - **"Announce"** / **"over the speakers"** — jumps to announce ([§6](#6-paging--announcements)).
 - **"Page everyone"** / **"intercom"** / **"all call"** — jumps to page-all ([§6](#6-paging--announcements)).
 
-A **room name always wins** over a feature word, so a handset named "Office" or
-"Garage" still connects normally. A feature you name but have disabled falls
-through to a polite goodbye. If it can't understand you after two tries, it says
-so and hangs up. Room-name matching is deliberately forgiving of narrowband
-tail-clipping ("Base" → "Basement"), and refuses to guess between two similar
-names.
+A **confident** room match wins over a feature word — an exact name, a configured
+synonym, a full-word hit, or a recognizer-clipped prefix (all score ≥ 0.9) — so a
+handset named "Office", "Garage", even "Weather", still connects normally. A
+weaker, merely-fuzzy room match does *not* win: the feature word takes it. That
+ordering exists because neither pure precedence is right — a spoken "page" scores
+0.67 against a room named "Garage", clearing the 0.6 room threshold, so
+room-first would send the caller to the Garage phone instead of the intercom.
+The two exceptions sit *ahead* of room matching entirely: "wake me up" and
+"lights"/"automation" are tested first, so a room you literally name "Lights"
+would be shadowed by the automation flow.
+
+A feature you name but have disabled falls through to a polite goodbye. If it
+can't understand you after two tries, it says so and hangs up. Room-name matching
+is deliberately forgiving of narrowband tail-clipping ("Base" → "Basement"), and
+refuses to guess between two similar names.
+
+Dialing `0` also **clears the caller's own message-waiting indicator** — the
+stutter tone means "call the operator", and they just did. It is cleared after
+the call is answered and in the background, so it never delays the greeting; it
+applies only to callers whose caller ID is a configured room (an outside caller
+transferred to `0` is skipped), and only while `mwi_enabled` is on.
 
 ### Directory assistance — dial `411`
 
 Say a room name to be connected, or say **"list"** to hear every room and its
-extension read out. Saying "list" doesn't burn a retry, and a mis-heard "list"
-never accidentally dials a room — directory assistance only connects on a
-confident match.
+extension read out. Resolution is ordered so a mishearing degrades safely:
+
+1. an **unambiguous** room match (score ≥ 0.9 — exact name, synonym, or a
+   recognizer-clipped prefix) connects outright, so a room genuinely called
+   "List" or "Cancel" is still reachable by name;
+2. otherwise a cancel word ("goodbye", "never mind", "stop") ends the call;
+3. otherwise a fuzzy "list" reads the directory — the narrowband line turns
+   *list* into *lift* / *least* / *last*, and those used to clear the room
+   threshold and dial a bedroom;
+4. otherwise a **weaker but above-threshold** room match connects.
+
+So it does connect on a less-than-confident match — step 4 is the point of the
+service. What it will not do is connect on a name the matcher rejected outright
+or found ambiguous between two similar rooms; those re-prompt. It speaks the room
+name and extension before connecting, which is your cue to hang up if it guessed
+wrong. Saying "list" doesn't burn a retry (capped at three read-outs); three
+unresolved replies end the call.
 
 ### Home-automation voice menu — dial `43` (or say "lights" to the operator)
 
@@ -300,7 +353,11 @@ A looping voice menu that speaks live Home Assistant readings on demand. Say:
   using your Home Assistant location).
 - **"house"** — thermostats and a light count.
 
-It keeps asking "anything else?" until you say "goodbye".
+It re-asks "anything else?" after each answer, but the loop is bounded: it stops
+after **8 answers**, and it gives up (with "okay, goodbye") as soon as **two
+replies in a row** go unrecognized at the same prompt. Say "goodbye" to leave
+early. The cap is a backstop against a noisy or wedged line holding a channel
+open indefinitely.
 
 ---
 
@@ -344,8 +401,24 @@ Assistant timezone if blank).
 
 ### Page all — dial `44`
 
-Dial the paging code to talk out of **every registered handset at once** — a
-house-wide intercom, built on Asterisk ConfBridge with no join/leave beeps.
+Dial the paging code to talk out of **every configured room phone at once** — a
+house-wide intercom, duplex, so anyone paged can answer back.
+
+Paging has **two implementations**, and which one you get depends on where you
+start it:
+
+- **Dialing `44`** runs Asterisk's `Page()` application against every room
+  endpoint at once. `Page()` assembles its own conference.
+- **The dashboard's and console's page buttons** instead Originate each phone
+  into the add-on's `[page]` dialplan context, which answers the line and joins
+  it to a ConfBridge under the generated `switchboard_bridge` /
+  `switchboard_user` profiles.
+
+Those ConfBridge profiles (in the generated `confbridge.conf`: no music-on-hold,
+no join/leave name announcements, no "you are the only person in this
+conference") therefore shape the **dashboard/console** page only — the dial-`44`
+path does not read them, so the two can behave slightly differently on prompts
+and tones.
 
 ### Announcements — dial `46` (phone → Home Assistant speakers)
 
@@ -477,8 +550,15 @@ reference home's `11`–`20` extensions:
 - `1[2-9]xxxxxxxxx` = 1 + 10-digit direct dial. This **overlaps** rooms 12–19
   (each is both a complete room *and* the start of an 11-digit number), so those
   extensions send only after the **No Key Entry Timeout** (`P85`) — or immediately
-  if you press `#` (`P72` is enabled). Room 11, `20`, `0`, and feature codes are
-  unambiguous and send instantly.
+  if you press `#` (`P72` is enabled). Room 11, `20`, `0`, and feature codes
+  `42`–`46` are unambiguous and send instantly.
+- **`41` is the one feature code that is not instant.** With the talking clock on
+  `41` and directory assistance on `411`, `41` is both a complete code and the
+  first two digits of a longer one, so the gateway cannot know you are finished
+  and waits out `P85` exactly like rooms 12–19 (press `#` to send at once). `411`
+  itself is unambiguous once the third digit lands. If that pause on the clock
+  bothers you, move one of the two off the collision — `clock_ext: 47` keeps the
+  clock instant, or a `directory_ext` that isn't a `41…` prefix does the same.
 - **`P85 = 3` seconds** is the reference value: it trims that 12–19 pause from the
   firmware default of 4 s while staying above a **rotary/pulse** phone's
   inter-digit gap, so a slow rotary dial of a long number isn't cut off mid-number.
@@ -489,6 +569,9 @@ For **pulse/rotary** phones, enable the **Pulse Dialing** option on that FXS por
 
 If you're not using direct dial, a simpler prefix-mode plan works:
 `{ 1x | 20 | 4[1-6] | 411 | 0 | 9xxxxxxxxxx }` (dial `9` for an outside line).
+Here rooms `11`–`19` send instantly (nothing longer starts with `1`), but the
+`41`/`411` overlap above is unchanged — it comes from the feature codes
+themselves, not from direct dial.
 
 ### 7.5 Verify
 
@@ -502,11 +585,24 @@ On the **Switchboard** panel, each provisioned room shows **Registered** within
 A Grandstream **WP826** WiFi cordless can join as an ordinary room extension —
 register it to the add-on the same way (SIP server = your Home Assistant IP, user
 ID / auth ID = its extension, password = its `secret`). Beyond being a phone, the
-cordless integrates in two extra ways:
+cordless integrates in three extra ways:
 
 - **Home Assistant announce endpoint** — with `POST /api/announce/{ext}` targeting
   the cordless's extension, Home Assistant can speak alerts on it hands-free
   ([§6](#6-paging--announcements)).
+- **Remote phonebook** — the add-on serves your rooms as a Grandstream GS
+  Phonebook XML document at `http://<ha-host>:8099/phonebook.xml` (one `<Contact>`
+  per room: the room `name`, the `ext` as its number). Point the handset's
+  **Remote/XML Phonebook** at that URL — `P330 = 1` (HTTP) and
+  `P331 = <ha-host>:8099/phonebook.xml`, see
+  [`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md) — and it shows every room by
+  name, on caller ID and in its own directory. It is rendered from your live
+  `rooms` option on each fetch, so renaming a room needs no re-upload; rooms whose
+  `ext` fails validation are skipped and names are XML-escaped. This one URL is
+  **LAN-reachable and unauthenticated**: everything else on `:8099` is restricted
+  to the Home Assistant Supervisor, but the handset cannot ride Ingress, so this
+  read-only GET is exempted. It exposes room names and internal extensions only —
+  the same directory already printed on every handset — and no secrets.
 - **Device-health monitoring** — set `cordless_ext` (its extension) and
   `cordless_password` and the add-on polls the phone's own API for battery, WiFi
   signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
@@ -542,8 +638,11 @@ presented certificate **before** the login body is written, and refuses to send
 credentials on a mismatch; the tool exits non-zero before logging in. Colons,
 spaces, upper case and a `sha256:` prefix are all accepted.
 
-A factory reset regenerates the certificate — re-run `fingerprint` and re-pin
-after one, or the monitor will (correctly) stop authenticating.
+A factory reset regenerates the certificate — re-run the
+`WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint` command above and
+re-pin after one, or the monitor will (correctly) stop authenticating. The
+`WP826_HOST=` prefix is not optional: without it the tool falls back to a
+built-in default address and would fingerprint whatever answers there.
 
 ## 9. Adding an outside line (SIP trunk)
 
@@ -629,7 +728,11 @@ it authenticates per-INVITE). v0.48.0 closes it from three sides:
    is deliberately not authorised to run, so that recovery was inert until
    v0.49.0);
 3. if the registration stays down for 2 consecutive cycles, a persistent
-   notification fires (and clears itself on recovery).
+   notification fires. Recovery does **not** dismiss it: the poller posts a
+   *second* notification ("the outside line re-registered") under the same
+   `notification_id`, which **replaces** the outage entry in the notification
+   list. So the bell is never left showing a stale "outside line down", but you
+   are left with a recovery notice to dismiss yourself.
 
 ---
 
@@ -660,14 +763,25 @@ signals the Ingress dashboard surfaces. Two front-ends onto the same board:
   with `console_web_enabled` / `console_web_port`. It idles if `console_enabled` is
   off (nothing to bridge to).
 
-> **Security:** both the telnet console and the web terminal are **unauthenticated
-> on the LAN** and can ring/connect/hang up phones. The web terminal's WebSocket
-> upgrade is same-origin-gated (a cross-origin drive-by page is rejected), sessions
-> are capped (5) and idle-timed-out (15 min), and the bind follows `console_bind` —
-> but anyone who can reach the port from a same-origin page can drive the board.
-> Keep it on a trusted LAN, or bind it to `127.0.0.1`, or disable it. Home
-> Assistant's own Ingress dashboard (sidebar **Switchboard**) remains the
-> authenticated management surface. See [SECURITY.md](SECURITY.md).
+> **Security:** the two front-ends are *not* equally exposed, and both can
+> ring/connect/hang up phones.
+>
+> - **Telnet (2300) is unauthenticated on the LAN, by design.** There is no login
+>   and no `console_users` equivalent; anyone who can reach the port drives the
+>   board. Bind it to `127.0.0.1` or disable it if your LAN isn't trusted.
+> - **The web terminal (8100) takes a sign-in** as soon as `console_users` has an
+>   entry: the page redirects to a login form, the `/ws` upgrade re-checks the
+>   session cookie (so a saved socket URL is no way around it), sessions are
+>   256-bit tokens with a 12-hour lifetime and are dropped on restart, and failed
+>   attempts are throttled per source address. With `console_users` **empty** the
+>   gate is off and the terminal is exactly as open as telnet — that is the
+>   historical default, and the start-up log says which mode is live.
+>
+> Independently of the login, the WebSocket upgrade is same-origin-gated (a
+> cross-origin drive-by page is rejected), sessions are capped (5) and
+> idle-timed-out (15 min), and the bind follows `console_bind`. Home Assistant's
+> own Ingress dashboard (sidebar **Switchboard**) remains the authenticated
+> management surface. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -700,8 +814,11 @@ a call ever drops. Publishes:
 
 It raises **one** notification on a mass outage — at least half the fleet *and* at
 least 3 phones unreachable for 2 consecutive cycles — so a shared-gateway failure
-(e.g. the GXW loses power) can't go unnoticed, and a recovery notice when it
-clears.
+(e.g. the GXW loses power) can't go unnoticed. Recovery posts a second
+notification ("phones recovered") under the **same** `notification_id`, which
+replaces the outage entry rather than dismissing it; the same replace-on-recovery
+pattern is used by the trunk watchdog ([§9](#9-adding-an-outside-line-sip-trunk))
+and by device health below.
 
 ### Per-call quality (`call_quality_alerts`)
 
@@ -709,6 +826,19 @@ After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
 — low score, high loss, high latency (RTT over 400 ms), or **one-way audio**.
+
+**Not every call updates the sensor.** Each leg is appended to the durable JSONL
+ledger, but the sensor is only pushed when the leg produced a *credible* MES, and
+only from the authoritative hangup record written by the dialplan
+(`source=dialplan`). A reading is discarded as not credible when Asterisk reports
+`0.0` for a direction it could not score — a short call, or RTCP that never
+converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
+alongside ~0 % loss, packetization-only jitter and a low RTT, which is the
+signature of a re-INVITE/transfer glitch rather than of bad audio. If neither
+direction is credible there is no score to publish and the sensor simply keeps
+its previous value; the raw per-direction numbers are still in the ledger. The
+alerting is independent of this: a call with no credible MES can still notify on
+loss, latency, or one-way audio, since one-way is detected from packet counts.
 
 ### Device health (`device_health_*`)
 
@@ -723,14 +853,15 @@ Covers the two blind spots the above can't see:
   lost power or its uplink.
 
 Both use a 2-cycle hysteresis so a transient blip doesn't alert, and fire a
-recovery notice when they return to normal.
+recovery notice when they return to normal — again under that device's shared
+`notification_id`, so the recovery replaces the alert rather than removing it.
 
 | Sensor | What it tells you |
 |--------|-------------------|
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so the wired ports could degrade from 2 ms to 40 ms without moving it. This is the number to graph and alert on for the analog phones. |
-| `sensor.switchboard_last_call` | Last call's audio quality (MES) + details |
+| `sensor.switchboard_last_call` | Last call's audio quality (MES) + details. Updated only for legs whose MES was credible — see above |
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
@@ -815,8 +946,8 @@ asterisk -rx "pjsip show registrations"   # trunk registration
 
 ## 15. Security
 
-The security model, the toll-fraud threat model, the two **unauthenticated
-LAN** services and their mitigations, secret handling, and the short list of things
+The security model, the toll-fraud threat model, the **LAN-exposed** console
+services and their mitigations, secret handling, and the short list of things
 **you** must configure are documented in **[SECURITY.md](SECURITY.md)**. The
 essentials:
 
@@ -826,8 +957,13 @@ essentials:
 - The trunk blocks international/premium prefixes and confines transfers to
   internal destinations.
 - **Change the default room secrets** before your phones register.
-- The telnet console and web terminal are **unauthenticated on your LAN by
-  design** — bind them to `127.0.0.1` or disable them if the LAN isn't trusted.
+- The telnet console is **unauthenticated on your LAN by design**. The web
+  terminal takes a sign-in once `console_users` is configured, and is exactly as
+  open as telnet until then. Bind them to `127.0.0.1` or disable them if the LAN
+  isn't trusted.
+- `GET /phonebook.xml` on port 8099 is deliberately reachable from the LAN
+  without authentication so the cordless can fetch its remote phonebook; it
+  exposes room names and internal extensions only ([§8](#8-the-wp826-wifi-cordless-optional)).
 
 ---
 

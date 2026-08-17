@@ -146,8 +146,14 @@ def test_ha_routing() -> None:
         cq.push_ha(poor)
         check("ha: dialplan poor call sets sensor.switchboard_last_call",
               any(e == "sensor.switchboard_last_call" for e, _ in calls["set_state"]))
-        check("ha: dialplan poor call notifies, id keyed by channel",
-              calls["notify"] and calls["notify"][-1] == "switchboard_callqos_PJSIP_12-2")
+        # The id carries the leg TIMESTAMP as well as the channel: Asterisk
+        # recycles channel names after a restart, so a channel-only id would let
+        # a later bad call silently replace an earlier unread alert.
+        check("ha: dialplan poor call notifies, id keyed by ts + channel",
+              calls["notify"]
+              and calls["notify"][-1].startswith("switchboard_callqos_")
+              and calls["notify"][-1].endswith("_PJSIP_12-2")
+              and str(poor["ts"]) in calls["notify"][-1])
 
         # Poll (far leg) must NOT drive the headline sensor (avoids stale flicker).
         calls["set_state"].clear()
@@ -404,6 +410,51 @@ def test_main_never_raises() -> None:
         check("main: still wrote a record", os.path.exists(cq.PATH))
     finally:
         cq.PATH = orig
+
+
+def test_alert_id_distinguishes_calls_across_a_restart() -> None:
+    """Asterisk restarts its channel counter at boot, so a name like
+    PJSIP/12-00000003 recurs after every restart. Keyed on the channel alone, a
+    later bad call would silently REPLACE an earlier unread alert about a
+    DIFFERENT call (Home Assistant collapses same-id notifications). The leg's
+    timestamp keeps distinct calls distinct."""
+    ids = []
+
+    class _Fake:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            return True
+
+        @staticmethod
+        def notify(msg, title="", notification_id=""):
+            ids.append(notification_id); return True
+
+    sys.modules["ha_client"] = _Fake
+    orig = cq._alerts_enabled
+    cq._alerts_enabled = lambda: True
+    try:
+        def poor_leg(ts):
+            rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-00000003",
+                                        cid="12", rxcount="2689", txcount="2131",
+                                        rxploss="0", txploss="30", rxmes="59", txmes="88"))
+            rec["ts"] = ts          # same recycled channel name, different calls
+            return rec
+        cq.push_ha(poor_leg(1786700000))          # before a restart
+        cq.push_ha(poor_leg(1786786400))          # a day later, channel name reused
+        check("alert id: notified for both legs", len(ids) == 2)
+        check("alert id: recycled channel name still yields distinct ids", ids[0] != ids[1])
+        check("alert id: both namespaced to callqos",
+              all(i.startswith("switchboard_callqos_") for i in ids))
+        check("alert id: both carry the channel", all(i.endswith("_PJSIP_12-00000003") for i in ids))
+        # A repeat report of the SAME leg must still collapse onto one entry.
+        ids.clear()
+        same = poor_leg(1786700000)
+        cq.push_ha(same); cq.push_ha(same)
+        check("alert id: the same leg reported twice collapses to one id",
+              len(ids) == 2 and ids[0] == ids[1])
+    finally:
+        cq._alerts_enabled = orig
+        sys.modules.pop("ha_client", None)
 
 
 if __name__ == "__main__":

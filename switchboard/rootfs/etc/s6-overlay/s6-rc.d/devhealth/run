@@ -21,10 +21,17 @@ export GATEWAY_PORTS="$(switchboard-opt gateway_ports)"
 export CORDLESS_BATTERY_CRIT="$(switchboard-opt cordless_battery_crit_pct)"
 export CORDLESS_BATTERY_WARN="$(switchboard-opt cordless_battery_warn_pct)"
 export CORDLESS_WIFI_MIN="$(switchboard-opt cordless_wifi_min_signal)"
-if bashio::config.true 'device_health_alerts'; then
-    export DEVICE_HEALTH_ALERTS=true
-else
+# Disable alerts ONLY on an explicit `false`. `bashio::config.true` also returns
+# false for an EMPTY read, which bashio can momentarily return during a config
+# reload or at boot — and this export is read once, at start, so a single
+# transient blank would silence every cordless/gateway alert for the whole life
+# of the container with nothing to indicate it. This was the last gate in the
+# add-on still using the unsafe convention; every other one (`console_enabled`,
+# `link_health_enabled`, `stt_resident`, …) already tests `= "false"`.
+if [ "$(bashio::config 'device_health_alerts')" = "false" ]; then
     export DEVICE_HEALTH_ALERTS=false
+else
+    export DEVICE_HEALTH_ALERTS=true
 fi
 
 # Read options from the post-overlay snapshot (init-switchboard writes it);
