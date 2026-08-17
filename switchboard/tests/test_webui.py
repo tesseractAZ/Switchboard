@@ -812,5 +812,70 @@ def main() -> None:
     print("all webui AMI tests passed")
 
 
+def test_send_register_uses_an_action_the_ami_account_is_allowed_to_run() -> None:
+    """The trunk auto-re-register must use an action our OWN manager.conf permits.
+
+    v0.48.0 shipped `Action: Command` ("pjsip send register"). That could never
+    have worked: switchboard-config grants the AMI account `command` in READ but
+    deliberately withholds it from WRITE, and Command is authorised against the
+    WRITE class — so every recovery kick would have been rejected "Permission
+    denied", silently, on the ONLY path that recovers a dead outside line. The
+    bug survived because nothing tied the chosen action to the granted classes.
+    This test ties them together: capture the action we send, then check the
+    class it needs against the write list the generator actually emits."""
+    sent = {}
+
+    def _fake(action_lines, timeout=4.0, single_response=False, action_id=""):
+        sent["lines"] = list(action_lines)
+        return [{"response": "success"}]
+
+    real = ami._ami_command
+    ami._ami_command = _fake
+    try:
+        ok = ami.send_register("trunk-reg")
+    finally:
+        ami._ami_command = real
+
+    check("send_register: reports success", ok is True)
+    action = next((l.split(":", 1)[1].strip() for l in sent["lines"]
+                   if l.lower().startswith("action:")), "")
+    check("send_register: uses the native PJSIPRegister action",
+          action == "PJSIPRegister")
+    check("send_register: does NOT use the Command CLI bridge", action != "Command")
+    check("send_register: names the registration section",
+          any(l.strip() == "Registration: trunk-reg" for l in sent["lines"]))
+
+    # Now the coupling: what the action needs vs what we grant.
+    sbc_path = Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "bin" / "switchboard-config"
+    sbc = SourceFileLoader("sbc_for_ami_test", str(sbc_path)).load_module()
+    mgr = sbc.render_manager("switchboard", "secret")
+    write = next(l.split("=", 1)[1] for l in mgr.splitlines() if l.startswith("write ="))
+    write_classes = {c.strip() for c in write.split(",")}
+    # PJSIPRegister is registered by res_pjsip_outbound_registration with
+    # EVENT_FLAG_SYSTEM; Command needs the `command` class.
+    check("manager.conf grants `system` (what PJSIPRegister needs)",
+          "system" in write_classes)
+    check("manager.conf withholds `command` from WRITE — so Command is unusable "
+          "and send_register must not depend on it",
+          "command" not in write_classes)
+
+
+def test_send_register_rejects_a_bogus_section_name() -> None:
+    calls = []
+
+    def _fake(action_lines, timeout=4.0, single_response=False, action_id=""):
+        calls.append(action_lines)
+        return [{"response": "success"}]
+
+    real = ami._ami_command
+    ami._ami_command = _fake
+    try:
+        for bad in ("", "trunk reg", "trunk;reg", "a" * 65, "trunk\nAction: Command"):
+            check(f"send_register: refuses {bad!r}", ami.send_register(bad) is False)
+    finally:
+        ami._ami_command = real
+    check("send_register: never sent anything for a bogus name", calls == [])
+
+
 if __name__ == "__main__":
     main()

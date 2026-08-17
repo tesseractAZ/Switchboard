@@ -205,9 +205,16 @@ def test_direct_dial_mode() -> None:
           '$["${CHANNEL(endpoint)}" = "trunk"]?blocked' in e)
     check("direct: outbound CID set before the trunk Dial",
           e.index("CALLERID(num)=2025550100") < e.index("@trunk"))
-    # 911 is deliberately NOT routed (E911 unconfigured): no literal 911 rule, so
-    # it falls through _X. -> not-a-room -> Congestion rather than the trunk.
-    check("direct: 911 not routed to trunk", "exten = 911," not in e)
+    # 911 is deliberately NOT carried (E911 unconfigured) — but as of v0.49.0 it
+    # is matched EXPLICITLY and answered with a spoken "use a mobile" prompt,
+    # instead of falling through to an unexplained congestion tone. The property
+    # that matters is that the call never reaches the trunk, so assert THAT
+    # rather than the absence of the string (the old proxy assertion would have
+    # failed this safety improvement).
+    check("direct: 911 handled explicitly", "exten = 911,1," in e)
+    _emg = e[e.index("exten = 911,1,"):]
+    _emg = _emg[:_emg.index("Hangup()")]
+    check("direct: 911 never routed to trunk", "@trunk" not in _emg)
     # SECURITY: a transferred-in outside caller still can't reach the trunk — the
     # [internal-xfer] context has NO outbound (length) pattern.
     xfer = e[e.index("[internal-xfer]"):] if "[internal-xfer]" in e else ""
@@ -308,17 +315,73 @@ def test_trunk_registration_keepalive() -> None:
 
 
 def test_rtpqos_passes_extended_telemetry_flags() -> None:
-    # The callqos sink has always accepted --maxrtt/--stdevrtt/--rxmaxjitter/
-    # --rxoctet/--txoctet, but the dialplan never passed them: the fields were
-    # null in 100% of ledger records through v0.47.0. local_maxjitter is the
-    # max jitter of the RECEIVED stream measured locally (the sink's
-    # "rxmaxjitter"); the octet counters give real per-leg byte volumes.
+    # The callqos sink accepts --maxrtt/--stdevrtt/--rxmaxjitter; the dialplan
+    # never passed them before v0.48.0, so those fields were null in 100% of
+    # ledger records. local_maxjitter is Asterisk's maxrxjitter (the interarrival
+    # estimate sampled at RTCP instants).
     ctx = "\n".join(sbc.render_rtpqos_context())
     for flag, field in (("--maxrtt", "maxrtt"), ("--stdevrtt", "stdevrtt"),
-                        ("--rxmaxjitter", "local_maxjitter"),
-                        ("--rxoctet", "rxoctetcount"), ("--txoctet", "txoctetcount")):
+                        ("--rxmaxjitter", "local_maxjitter")):
         check(f"rtpqos: {flag} wired to CHANNEL(rtcp,{field})",
               f'{flag} "${{CHANNEL(rtcp,{field})}}"' in ctx)
+
+
+def test_rtpqos_never_asks_asterisk_for_the_octet_counters() -> None:
+    # REGRESSION GUARD. v0.48.0 passed --rxoctet/--txoctet as
+    # CHANNEL(rtcp,rxoctetcount)/txoctetcount. PJSIP in Asterisk 20.11.1 does
+    # not expose those names: every call leg logged four "Unrecognized argument
+    # 'rxoctetcount' for 'rtcp'" WARNINGs into the durable log and both fields
+    # stayed null in 100% of records — the previous version of this test passed
+    # the whole time, because asserting that a STRING was rendered proves only
+    # that we asked, never that Asterisk answered. Byte volume is derivable from
+    # rxcount/txcount, so the flags are dropped rather than renamed.
+    ctx = "\n".join(sbc.render_rtpqos_context())
+    for bad in ("rxoctetcount", "txoctetcount"):
+        check(f"rtpqos: never requests CHANNEL(rtcp,{bad}) (Asterisk 20 rejects it)",
+              bad not in ctx)
+
+
+def test_emergency_numbers_are_explicitly_answered_in_both_dial_modes() -> None:
+    # SAFETY. This PBX has no E911 service. Before v0.49.0 nothing matched 911:
+    # in PREFIX mode the outbound pattern `_9.` MATCHED "911" and dialed the
+    # remainder — "11" — out the trunk, i.e. a wrong call placed during an
+    # emergency; in direct-dial mode it fell through to "not a room" congestion
+    # with no explanation. Both modes must now match 911 EXPLICITLY and say so.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Family", "secret": "s1"}])
+    for label, direct in (("prefix", False), ("direct", True)):
+        trunk = {"enabled": True, "provider_host": "x.voip.ms", "username": "u",
+                 "secret": "x", "dial_prefix": "9", "direct_dial": direct,
+                 "registns": True}
+        e = sbc.render_extensions({"rooms": rooms, "trunk": trunk})
+        check(f"{label}: bare 911 is matched explicitly", "exten = 911,1," in e)
+        check(f"{label}: 911 plays the no-emergency prompt",
+              "Playback(switchboard/sw-no-emergency)" in e)
+        # The prompt must come BEFORE any trunk Dial for that extension.
+        blk = e[e.index("exten = 911,1,"):]
+        blk = blk[:blk.index("Hangup()")]
+        check(f"{label}: 911 never reaches the trunk", "@trunk" not in blk)
+    # Prefix mode additionally catches the prefixed form the user may dial.
+    trunk = {"enabled": True, "provider_host": "x.voip.ms", "username": "u",
+             "secret": "x", "dial_prefix": "9", "direct_dial": False, "registns": True}
+    e = sbc.render_extensions({"rooms": rooms, "trunk": trunk})
+    check("prefix: 9911 is caught too", "exten = 9911,1," in e)
+
+
+def test_emergency_prompt_asset_exists_and_is_asterisk_format() -> None:
+    # A Playback of a missing file is a silent no-op — the caller would hear
+    # nothing and then congestion, which is exactly the confusion this fix
+    # exists to prevent. Pin the asset AND its format (Asterisk .wav = 8 kHz
+    # mono 16-bit signed linear).
+    import wave
+    p = (Path(__file__).resolve().parents[1] / "rootfs" / "var" / "lib" / "asterisk"
+         / "sounds" / "en" / "switchboard" / "sw-no-emergency.wav")
+    check("emergency prompt asset is shipped", p.is_file())
+    with wave.open(str(p)) as w:
+        check("emergency prompt is mono", w.getnchannels() == 1)
+        check("emergency prompt is 8 kHz", w.getframerate() == 8000)
+        check("emergency prompt is 16-bit", w.getsampwidth() == 2)
+        check("emergency prompt is a real recording (> 1s)",
+              w.getnframes() / w.getframerate() > 1.0)
 
 
 def test_trunk_inbound_routing() -> None:

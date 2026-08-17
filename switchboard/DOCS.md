@@ -594,6 +594,20 @@ layered on automatically (details in [SECURITY.md](SECURITY.md#toll-fraud-the-tr
   (many providers, e.g. VoIP.ms, don't answer keep-alive OPTIONS reliably, so the
   AOR is deliberately not qualified).
 
+### Emergency calls are not carried
+
+**This PBX cannot reach 911.** The trunk provider has no service address
+registered for it, so an emergency call could not be routed to the correct
+dispatcher even if it completed. Dial `911` from any house phone and Switchboard
+answers immediately with a spoken notice telling the caller to hang up and use a
+mobile — in **both** dial modes, and before any trunk pattern can match.
+
+That explicit handling matters: in prefix mode the outbound pattern `_9.` also
+matches `911`, and before v0.49.0 it would strip the prefix and dial the
+remainder (`11`) out to the PSTN — a wrong call placed during an emergency.
+Anyone relying on these phones should be told to keep a mobile for emergencies;
+the printable guest card in the repo says exactly that.
+
 ### Registration resilience
 
 The REGISTER refresh is the trunk's lifeline (§ NAT note above) — and losing it
@@ -608,7 +622,10 @@ it authenticates per-INVITE). v0.48.0 closes it from three sides:
    cannot arise;
 2. the link-health poller watches the registration every cycle, publishes
    `sensor.switchboard_trunk_health`, and **auto-sends a re-register** if it
-   ever sees Rejected/Stopped;
+   ever sees Rejected/Stopped (via the native `PJSIPRegister` AMI action —
+   v0.48.0 used the `Command` CLI bridge, which the add-on's own AMI account
+   is deliberately not authorised to run, so that recovery was inert until
+   v0.49.0);
 3. if the registration stays down for 2 consecutive cycles, a persistent
    notification fires (and clears itself on recovery).
 

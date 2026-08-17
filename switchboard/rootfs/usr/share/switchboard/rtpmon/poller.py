@@ -321,9 +321,15 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
     Every step best-effort — the link-health loop must never die on trunk work."""
     try:
         import ami
-        regs = ami.get_registrations()
+        regs = ami.get_registrations_or_none()
     except Exception:
         return  # AMI down this cycle: skip entirely (don't blank the sensor)
+    if regs is None:
+        # AMI unreachable — NOT the same as "the trunk has no registration".
+        # Publishing here would blank the sensor to "unknown" (observed on 6/6
+        # restarts before this distinction existed) and, once settled, would
+        # count toward the down-alert and fire a false "outside line down".
+        return
     reg = regs.get(TRUNK_REG_NAME) or {}
     status = (reg.get("status") or "").strip()
     kicked = False
@@ -492,14 +498,39 @@ def poll_once(names: dict, wired: list | None = None) -> tuple:
     return phones, summarize(phones, wired)
 
 
-def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int) -> bool:
+def wired_down_count(summ: dict, wired: list | None) -> int:
+    """How many WIRED gateway ports are not currently reachable. The cordless and
+    the unused softphone are deliberately excluded: the cordless is often asleep
+    and ext 20 never registers, so counting them would hold warm-up open forever."""
+    if not summ or not wired:
+        return 0
+    down = {str(e) for e in (summ.get("unreachable_exts") or [])}
+    down |= {str(e) for e in (summ.get("offline_exts") or [])}
+    return len({str(e) for e in wired} & down)
+
+
+def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int,
+                wired_down: int | None = None) -> bool:
     """True once the poller should switch from the startup fast cadence to the steady
-    interval: the set of registered phones has STABILIZED (reachable count stopped
-    growing) or the warm-up cap elapsed. Settling on the FIRST reachable phone would
-    freeze stragglers still re-registering after a restart as 'offline' for a whole
-    interval — e.g. one GXW FXS port lagging its siblings. Latches once true."""
+    interval. Settling on the FIRST reachable phone would freeze stragglers still
+    re-registering after a restart as 'offline' for a whole interval — e.g. one GXW
+    FXS port lagging its siblings. Latches once true.
+
+    `wired_down` (count of gateway ports still not reachable) is the PRECISE gate:
+    stay in warm-up until every wired port is back. The old heuristic — settle as
+    soon as the reachable COUNT stops growing — mistook a plateau for stability:
+    on 2026-08-11 the count sat flat at 6 across two 15 s polls while exts 15/17/18
+    were still re-registering, so the poller settled early and then froze that
+    stale down-list for a full 300 s interval. devhealth reads this rollup, so the
+    GXW falsely read "degraded" for ~4 minutes, twice. WARMUP_MAX_POLLS still caps
+    the wait, so a genuinely dead port cannot hold warm-up open forever.
+
+    `wired_down=None` keeps the old count-plateau heuristic, for a caller that has
+    no gateway_ports list to check against."""
     if settled or polls >= WARMUP_MAX_POLLS:
         return True
+    if wired_down is not None:
+        return wired_down == 0
     return reachable > 0 and reachable <= prev_reachable
 
 
@@ -518,7 +549,8 @@ def run() -> int:
     while True:
         opts = _load_options()
         names = room_names(opts)
-        phones, summ = poll_once(names, wired_exts(opts))
+        wired = wired_exts(opts)
+        phones, summ = poll_once(names, wired)
         reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)
@@ -532,7 +564,10 @@ def run() -> int:
         if trunk_enabled(opts):
             _trunk_check(trunk_st, settled, opts.get("link_health_alerts", True))
         polls += 1
-        settled = warmup_done(settled, prev_reachable, reachable, polls)
+        # A cycle where AMI was down (summ is None) tells us nothing about the
+        # fleet — don't let it end warm-up on a phantom "all wired ports up".
+        settled = warmup_done(settled, prev_reachable, reachable, polls,
+                              wired_down_count(summ, wired) if summ else None)
         prev_reachable = reachable
         time.sleep(interval if settled else WARMUP_DELAY)
 

@@ -941,33 +941,55 @@ def registrations_from_blocks(blocks: list[dict]) -> dict[str, dict]:
 
 def get_registrations() -> dict[str, dict]:
     """Outbound registration status keyed by section id (e.g. ``trunk-reg``).
-    Empty dict on AMI failure OR when no outbound registration is configured."""
+    Empty dict on AMI failure OR when no outbound registration is configured —
+    the two are INDISTINGUISHABLE here. A caller that must tell them apart (the
+    trunk watchdog: "AMI is down" is not the same alarm as "the outside line is
+    unregistered") must use :func:`get_registrations_or_none`."""
+    return get_registrations_or_none() or {}
+
+
+def get_registrations_or_none() -> dict[str, dict] | None:
+    """Like :func:`get_registrations`, but returns ``None`` when AMI could not be
+    reached, versus ``{}`` for "AMI answered; no outbound registration exists".
+
+    The trunk watchdog blanked sensor.switchboard_trunk_health to "unknown" on
+    every AMI-down cycle because it could not make that distinction — its skip
+    guard was unreachable, since the failure path returned the same empty dict a
+    healthy no-trunk system returns."""
     try:
         blocks = _ami_command(["Action: PJSIPShowRegistrationsOutbound"])
     except (OSError, AMIError):
-        return {}
+        return None
     return registrations_from_blocks(blocks)
 
 
 def send_register(reg_name: str = "trunk-reg") -> bool:
-    """Kick an outbound registration NOW (CLI ``pjsip send register`` over the AMI
-    Command bridge). This is the recovery action for a registration stuck in the
-    TERMINAL "Rejected" state Asterisk enters after max_retries — nothing inside
-    Asterisk ever retries it (a 75-min WAN blip left the trunk dead 24h that way,
-    2026-08-09). True = Asterisk accepted the command; the REGISTER itself
-    completes asynchronously, so the caller re-reads status next cycle rather
-    than trusting this return."""
+    """Kick an outbound registration NOW. This is the recovery action for a
+    registration stuck in the TERMINAL "Rejected" state Asterisk enters after
+    max_retries — nothing inside Asterisk ever retries it (a 75-min WAN blip
+    left the trunk dead 24h that way, 2026-08-09). True = Asterisk accepted the
+    action; the REGISTER itself completes asynchronously, so the caller re-reads
+    status next cycle rather than trusting this return.
+
+    Uses the NATIVE ``PJSIPRegister`` action, not the ``Command`` CLI bridge.
+    v0.48.0 shipped the CLI form and it could never have worked: this add-on
+    grants the AMI account ``command`` in READ but deliberately withholds it
+    from WRITE (see render_manager + SECURITY.md), and ``Action: Command``
+    is authorised against the WRITE class — so every kick would have been
+    rejected "Permission denied", silently, on the one path that exists to
+    recover a dead outside line. PJSIPRegister is authorised against ``system``,
+    which the account already holds, so the recovery works with no widening of
+    AMI privilege."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", reg_name or ""):
-        return False  # our own section ids only — never splice into a CLI line
+        return False  # our own section ids only
     try:
         blocks = _ami_command(
-            ["Action: Command", f"Command: pjsip send register {reg_name}"],
+            ["Action: PJSIPRegister", f"Registration: {reg_name}"],
             single_response=True,
         )
     except (OSError, AMIError):
         return False
-    return any((b.get("response") or "").lower() in ("success", "follows")
-               for b in blocks)
+    return any((b.get("response") or "").lower() == "success" for b in blocks)
 
 
 def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
