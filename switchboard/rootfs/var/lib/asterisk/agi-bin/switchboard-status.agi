@@ -35,7 +35,10 @@ def speak_status(cat: str) -> None:
     report = ""
     try:
         if cat == "power":
-            report = ha_reports.power_report()
+            # The entities are per-install options, staged for the asterisk user
+            # in features.json (this AGI cannot read root-only options.json).
+            power = ((sp.load_features().get("status") or {}).get("power") or {})
+            report = ha_reports.power_report(power)
         elif cat == "weather":
             report = ha_reports.weather_report()
         else:

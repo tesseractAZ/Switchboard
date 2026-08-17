@@ -25,8 +25,12 @@ fixes for older versions — update to the current release.
 Every push and pull request is analysed by **CodeQL** (`security-extended`) for
 both Python and JavaScript, and by **Dependabot** for dependency advisories.
 Findings surface in the repository's Security tab, and CI additionally **fails**
-on any error-level or high-severity (>= 7.0) result — an upload alone files an
-alert but would not stop a merge.
+on any error-level or high-severity (>= 7.0) result that is not listed in
+`.github/codeql-baseline.json` — a small, explicit exemption file (currently 5
+rules, each pinned to specific paths) for findings that were reviewed and
+accepted, such as the developer-only WP826 tool's `rejectUnauthorized: false`.
+The gate fails closed if that file is unreadable, and reports how many findings
+it silenced. An upload alone files an alert but would not stop a merge.
 
 Most of the add-on's Python is executed by name. CodeQL's Python extractor
 reads the shebang, so the extensionless scripts (`switchboard-config` and its
@@ -172,7 +176,10 @@ these defenses are generated automatically:
 ## Accepted LAN-local risks
 
 These are deliberate design choices, documented here so you can decide whether they
-fit your network. Each logs a warning at start.
+fit your network. Where the add-on can flag one at start-up it does — the console
+bind logs a notice, and a blank `cordless_cert_sha256` prints a NOTE — but the
+AppArmor and developer-tool items are structural and emit no start-up line, so
+this list is the record of them.
 
 ### The telnet operator console (`:2300`) and web terminal (`:8100`)
 

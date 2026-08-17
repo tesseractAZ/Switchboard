@@ -253,12 +253,24 @@ def pick_light(area: str, lights: list[dict]) -> dict | None:
 
 
 def ask_action() -> str | None:
-    """Speak the action prompt, listen, return 'on' | 'off' | None (cancel)."""
-    for attempt in range(MAX_ATTEMPTS):
-        say_or("Say turn on, turn off, or cancel.", PROMPT_BEEP)
+    """Speak the action prompt, listen, return 'on' | 'off' | None (cancel).
+
+    'list' re-prompts for free, exactly like pick_area/pick_light: the docs
+    promise "say list at any step", and this step used to be the one that broke
+    it — 'list' matched no branch, fell through, burned an attempt, and after
+    two tries hung up on a caller who had only asked to hear their options."""
+    # attempt only advances on a real mis-match (see pick_area for the same shape).
+    attempt = 0
+    while attempt < MAX_ATTEMPTS:
+        if attempt == 0:
+            say_or("Say turn on, turn off, or cancel.", PROMPT_BEEP)
+        else:
+            say_or("I didn't catch that. Say turn on, turn off, or cancel.", PROMPT_BEEP)
         # The action stage previously listened with NO bias at all — prime the
-        # recognizer with exactly the three commands the prompt just offered.
-        text = listen("action", attempt, bias="turn on turn off cancel")
+        # recognizer with exactly the commands the prompt just offered. "list"
+        # needs a prior too, or a spoken "list" returns a sound-alike that
+        # matches nothing (the bug pick_area's comment already records).
+        text = listen("action", attempt, bias="turn on turn off cancel list")
         if lights_match is None:
             return None
         intent = lights_match.match_intent(text)
@@ -266,6 +278,10 @@ def ask_action() -> str | None:
             return intent
         if intent == "cancel":
             return None
+        if intent == "list":
+            say("Your choices are: turn on, turn off, or cancel.")
+            continue          # free re-prompt — does NOT advance `attempt`
+        attempt += 1
     return None
 
 

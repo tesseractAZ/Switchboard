@@ -50,6 +50,8 @@ LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
 
 ![The Switchboard dashboard in the Home Assistant sidebar](docs/img/dashboard.png)
 
+The dashboard also carries a **Lights panel**: every Home Assistant light the add-on can see, grouped by area, with on/off toggles — the same control the voice menu on `43` offers, for when you would rather tap than talk.
+
 Changing options and restarting the add-on regenerates the entire Asterisk
 configuration — **the add-on options are the source of truth.** Editing
 `/etc/asterisk/*.conf` by hand is pointless; every file is overwritten on start.
@@ -144,7 +146,7 @@ its default is fine.
 |--------|---------|-------|
 | `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
 | `page_enabled` / `page_ext` | `true` / `44` | All-call paging / intercom and its dial code. |
-| `mwi_enabled` | `true` | Message-waiting indicator (stutter dial-tone). |
+| `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
 | `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 
@@ -163,7 +165,7 @@ system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
 | `from_user` | `""` | Outbound `From` user (defaults to `username`). |
 | `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
 | `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
-| `inbound_ext` | `""` | Which extension(s) an inbound call rings — a single ext (`19`), a comma-separated list (`19,20`), or blank = **ring the whole house**. |
+| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings. Blank rings the default group. **Fails open on a typo:** an extension that is not a configured room is ignored (logged at start) and the call rings the whole house instead — check the start-up log after changing it. |
 | `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
 | `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes (2–3 digits) still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps feature codes (41–46) and extension 20 dialing instantly on analog phones — without it, they look like the start of a phone number. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
 | `registns` | `true` | Register to the provider (most trunks need this). |
@@ -671,9 +673,19 @@ signals the Ingress dashboard surfaces. Two front-ends onto the same board:
 
 ## 11. Health monitoring & Home Assistant sensors
 
-Three independent monitors watch different things and publish Home Assistant
-sensors. Sensors are always published; the **alert** toggles only control the
-pop-up notifications.
+Three monitors watch different things and publish Home Assistant
+sensors. Within each monitor the **alert** toggles only control the pop-up
+notifications — the sensors keep publishing either way.
+
+> **They are not independent.** The link-health poller is the only component
+> with AMI access, so three things it publishes are inputs to the others:
+> `sensor.switchboard_gateway_health` is *derived* from the link-health rollup,
+> the cordless's IP auto-follow reads `contact_ip` off the per-phone sensors,
+> and the trunk watchdog runs inside the same poller. Setting
+> **`link_health_enabled: false` therefore also silences gateway health, the
+> trunk sensor and its auto-recovery, and the cordless half of device health** —
+> with no alert to tell you so. Leave it on unless you mean to turn all of that
+> off.
 
 ### Link health (`link_health_*`)
 

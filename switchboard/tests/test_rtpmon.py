@@ -380,6 +380,16 @@ def test_trunk_enabled_parses_options() -> None:
     check("trunk: disabled dict", not pm.trunk_enabled({"trunk": {"enabled": False}}))
     check("trunk: absent key", not pm.trunk_enabled({}))
     check("trunk: non-dict trunk value", not pm.trunk_enabled({"trunk": "yes"}))
+    # registns:false is a SUPPORTED setup (auth per-INVITE, no REGISTER) and the
+    # generator emits no [trunk-reg] for it. Watching a registration that by
+    # design does not exist published `unknown` forever and fired a persistent,
+    # never-clearing "outside line down" on a perfectly healthy trunk.
+    check("trunk: registns false -> nothing to watch",
+          not pm.trunk_enabled({"trunk": {"enabled": True, "registns": False}}))
+    check("trunk: registns true -> watched",
+          pm.trunk_enabled({"trunk": {"enabled": True, "registns": True}}))
+    check("trunk: registns absent defaults to watched (generator's default)",
+          pm.trunk_enabled({"trunk": {"enabled": True}}))
 
 
 def test_outage_notify_routing() -> None:

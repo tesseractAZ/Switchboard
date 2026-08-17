@@ -158,13 +158,25 @@ configuration:
     description: Dial this to page all phones. 2–6 digits. Default 44.
   mwi_enabled:
     name: Message-Waiting Indicator
-    description: Enable the stutter dial-tone / indicator that tells a handset it has a waiting voicemail or missed-call message.
+    description: Dial-0 auto-clear for the message-waiting indicator — when on, a room that dials 0 has its own indicator cleared. This does NOT switch the indicator feature off; the dashboard button, the console M key and the stutter-tone NOTIFY all keep working either way. Note there is no voicemail and no missed-call detection in this system, so the indicator is set by you or another integration.
   status_enabled:
     name: Status Voice Menu
     description: Enable the dial-a-status menu (extension below) that speaks live Home Assistant states (power, doors, etc.) on demand.
   status_ext:
     name: Status Extension
     description: Dial this for the spoken status menu. 2–6 digits. Default 45.
+  status_power_grid:
+    name: Status Menu — Grid Power Entity
+    description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.
+  status_power_battery:
+    name: Status Menu — Battery Level Entity
+    description: Numeric entity for stored battery energy or state of charge, spoken by the "power" branch of the status menu. Blank omits it.
+  status_power_runway:
+    name: Status Menu — Battery Runway Entity
+    description: Numeric entity for how many hours of battery run time remain, spoken by the "power" branch of the status menu. Blank omits it.
+  status_power_solar:
+    name: Status Menu — Solar Fraction Entity
+    description: Numeric entity for the fraction of current load being met by solar, spoken by the "power" branch of the status menu. Blank omits it.
   directory_enabled:
     name: Voice Directory (411)
     description: Enable the spoken room directory — dial the extension below and say (or hear) a room name to be connected, like calling 411.

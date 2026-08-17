@@ -289,8 +289,18 @@ TRUNK_MIN_CYCLES = 2       # consecutive bad settled cycles before notifying
 
 
 def trunk_enabled(opts: dict) -> bool:
+    """True only when there IS an outbound registration to watch.
+
+    `registns: false` is a documented, supported setup (a trunk authenticated
+    per-INVITE with no REGISTER). switchboard-config emits no [trunk-reg]
+    section for it, so AMI reports no registration object — which this watchdog
+    read as "the outside line is down", publishing `unknown` forever and firing
+    a persistent, never-clearing "outside line down" notification on a perfectly
+    healthy trunk. Gate on registns too: nothing to watch, nothing to alarm."""
     t = opts.get("trunk")
-    return bool(t.get("enabled")) if isinstance(t, dict) else False
+    if not isinstance(t, dict) or not t.get("enabled"):
+        return False
+    return bool(t.get("registns", True))
 
 
 def trunk_transition(status: str, st: dict, settled: bool = True) -> str:

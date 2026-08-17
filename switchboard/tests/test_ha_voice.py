@@ -243,5 +243,29 @@ def main() -> None:
     print("all HA-voice foundation tests passed")
 
 
+def test_power_entities_have_no_built_in_defaults() -> None:
+    """The dial-a-status power branch must query only what THIS install configured.
+
+    ha_reports used to ship one particular home's EcoFlow entity ids as
+    DEFAULT_POWER, behind a comment claiming they were "overridable via
+    features.json" — nothing implemented that override, so every other install
+    silently queried entities that did not exist and got a blank report. The
+    entity ids are per-install options now; a default here would resurrect the
+    bug for anyone who leaves them unset."""
+    check("ha_reports: no built-in power entity defaults",
+          ha_reports.DEFAULT_POWER == {})
+    # With nothing configured the caller must SAY so, not return "" (which the
+    # AGI would voice as the generic "that status is unavailable right now").
+    msg = ha_reports.power_report({})
+    check("power_report: unconfigured says so explicitly", "isn't set up" in msg)
+    check("power_report: unconfigured points at the add-on configuration",
+          "configuration" in msg.lower())
+    msg_none = ha_reports.power_report(None)
+    check("power_report: None behaves like empty", msg_none == msg)
+    # A blank entity id must be dropped rather than queried.
+    check("power_report: blank ids are dropped, not queried",
+          ha_reports.power_report({"grid": "", "battery": ""}) == msg)
+
+
 if __name__ == "__main__":
     main()
