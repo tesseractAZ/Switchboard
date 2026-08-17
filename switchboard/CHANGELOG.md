@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.51.0
+
+Clears the remaining backlog from the log review and the documentation-parity
+audit — the items that were real but not urgent enough to hold up v0.49/v0.50.
+
+**Monitors can no longer look healthy while blind.**
+
+- A pushed Home Assistant sensor never expires, so if the link-health poller
+  died while Home Assistant stayed up, its rollup froze at the last good
+  reading and everything downstream kept reporting it as current. The rollup
+  now carries `measured_at` and `poll_interval_s`, and the device-health
+  monitor **refuses to derive gateway health from a stale rollup** rather than
+  republishing a frozen snapshot as live. (This is the same mechanism that
+  turned a transient warm-up snapshot into a 4-minute false "gateway degraded"
+  twice on 2026-08-11.)
+- `gateway_ports` is now validated against the configured rooms at start-up.
+  It never was, so the 1xx room numbering the docs themselves suggest left
+  gateway health permanently "ok" and wired link health permanently "unknown"
+  — two monitors reporting healthy precisely because they were watching
+  nothing. A mismatch now logs exactly what is wrong.
+- `device_health_alerts` was the last option still read with
+  `bashio::config.true`, which treats an empty read as false. Bashio can return
+  blank transiently at boot, and this value is exported once — so a single
+  blank read would silence every cordless and gateway alert for the life of the
+  container. It now tests `= "false"` like every other gate.
+
+**The durable log gets denser.**
+
+- Nine lines of per-boot noise are gone. The shipped static `modules.conf`
+  noloaded six modules that decline to load anyway, but the generator
+  **overwrites** that file, so the silencing was silently lost — the dead
+  static copy is deleted and the generator owns the list, plus the two HEP
+  capture agents for a protocol this box does not run. `res_http_media_cache`
+  is deliberately left alone: its decline reports a genuine missing
+  dependency, and a forensic log should keep a signal it might need.
+
+**Alerts identify the right call.**
+
+- A poor-call notification's id was keyed on the Asterisk channel name, which
+  restarts its counter at boot — so a later bad call could silently replace an
+  earlier unread alert about a different call. The id now carries the leg's
+  timestamp; a repeat report of the same leg still collapses to one entry.
+- `next_reg` is published as `next_reg_s` and only when it is a real countdown.
+  AMI reports "0" whenever no refresh is scheduled, which read like "overdue".
+
+**Documentation now matches the build.**
+
+- Both consoles were described as unauthenticated; the web terminal takes a
+  sign-in whenever `console_users` is set (§10, §15, and a §2 row that
+  contradicted the row below it).
+- `/phonebook.xml` — the cordless handset's remote directory, and the one
+  unauthenticated LAN GET on the ingress port — is documented for the first
+  time, with the handset settings that point at it.
+- `log_level` documents its three real outcomes: four of the seven values are
+  identical to each other.
+- The options overlay changes **values**, not the six service enable gates
+  (those read `bashio::config`, deliberately, for blank-read safety).
+- Corrected: 411 does connect on a weaker-but-above-threshold match; dial-a-
+  status is capped, not unbounded; dialing 0 clears that room's message-waiting
+  indicator; recovery notifications *replace* rather than "clear"; `41` waits
+  out the interdigit timer because it is a prefix of `411`; dialing 44 and
+  paging from the dashboard are two different implementations; only a
+  *confident* room match beats a feature word; `sensor.switchboard_last_call`
+  skips calls whose MES is not credible; the fingerprint command needs
+  `WP826_HOST=`; and the status/automation labels no longer promise doors or
+  "other entities".
+
+Every code change is mutation-verified.
+
 ## 0.50.0
 
 A documentation-vs-reality audit compared every promise in the README, the

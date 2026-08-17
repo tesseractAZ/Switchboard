@@ -8,7 +8,7 @@ configuration:
   # ── Core ──────────────────────────────────────────────────────────────
   log_level:
     name: Log Level
-    description: How much detail the add-on writes to its log. 'info' is right for normal use; drop to 'debug'/'trace' only when diagnosing a problem, then set back (trace is very noisy).
+    description: How much detail Asterisk writes to the add-on log. Only three of the seven values differ — 'debug' and 'trace' are identical (both add debug + verbose detail), 'info' adds verbose detail, and 'notice', 'warning', 'error' and 'critical' all behave the same (notices, warnings and errors only). It is not a severity filter, so picking 'error' does not silence notices. 'info' is right for normal use; drop to 'debug' only when diagnosing a problem, then set it back — it is very noisy.
   rtp_start:
     name: RTP Port Range — Start
     description: First UDP port for live call audio (RTP). The default 10000–10200 gives ~100 simultaneous call legs. Only change if another service needs these ports; must be below the End value.
@@ -60,7 +60,7 @@ configuration:
     description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
   cordless_cert_sha256:
     name: Cordless Certificate Fingerprint
-    description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the admin password, which stops a device on your LAN impersonating the cordless to capture it. Get the value with: node tools/wp826.mjs fingerprint. Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
+    description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the admin password, which stops a device on your LAN impersonating the cordless to capture it. Get the value with: WP826_HOST=<the cordless's IP> node tools/wp826.mjs fingerprint (without WP826_HOST the tool fingerprints its built-in default address, not your handset). Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
   gateway_ports:
     name: Gateway Port Extensions
     description: Comma-separated extensions served by the GXW FXS gateway (the 8 wired ports), used to derive gateway health. Default 11–18 matches the standard wiring; edit if you re-mapped ports.
@@ -146,7 +146,7 @@ configuration:
   # ── Extra feature codes ──────────────────────────────────────────────
   automation_enabled:
     name: Home-Automation Voice Menu
-    description: Enable the voice home-automation menu (dial the extension below) to control and query lights and other entities by voice.
+    description: Enable the voice home-automation menu (dial the extension below) — it asks for a room, then a light in that room, tells you whether it is on or off, and turns it on or off on your word. Lights only; it does not control any other kind of entity.
   automation_ext:
     name: Home-Automation Extension
     description: Dial this for the automation voice menu. 2–6 digits. Default 43.
@@ -161,7 +161,7 @@ configuration:
     description: Dial-0 auto-clear for the message-waiting indicator — when on, a room that dials 0 has its own indicator cleared. This does NOT switch the indicator feature off; the dashboard button, the console M key and the stutter-tone NOTIFY all keep working either way. Note there is no voicemail and no missed-call detection in this system, so the indicator is set by you or another integration.
   status_enabled:
     name: Status Voice Menu
-    description: Enable the dial-a-status menu (extension below) that speaks live Home Assistant states (power, doors, etc.) on demand.
+    description: Enable the dial-a-status menu (extension below) that speaks live Home Assistant readings on demand. Three answers only — say 'power' (grid/battery/solar, from the entities configured below), 'weather' (a short local forecast) or 'house' (thermostats and a count of the lights that are on).
   status_ext:
     name: Status Extension
     description: Dial this for the spoken status menu. 2–6 digits. Default 45.

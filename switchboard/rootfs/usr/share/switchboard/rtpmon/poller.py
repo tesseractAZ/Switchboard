@@ -31,6 +31,7 @@ unit-tested; only run()'s loop does AMI/HA I/O.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -288,6 +289,16 @@ TRUNK_REG_NAME = "trunk-reg"
 TRUNK_MIN_CYCLES = 2       # consecutive bad settled cycles before notifying
 
 
+def _positive_int(v):
+    """A positive int, or None. AMI reports NextReg as "0" when no refresh is
+    scheduled/counting; publishing that 0 reads like "due now" on a dashboard."""
+    try:
+        n = int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 def trunk_enabled(opts: dict) -> bool:
     """True only when there IS an outbound registration to watch.
 
@@ -360,7 +371,11 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
             {"friendly_name": "Switchboard trunk registration",
              "icon": "mdi:phone-voip" if status.lower() == "registered"
                      else "mdi:phone-alert",
-             "next_reg": reg.get("next_reg") or None,
+             # AMI reports NextReg as seconds-until-refresh, and it reads "0"
+             # whenever the registration is not currently counting down — which
+             # is most of the time we look at it. Publish it only when it is a
+             # real countdown, so the attribute never implies "refresh overdue".
+             "next_reg_s": _positive_int(reg.get("next_reg")),
              "auto_reregister_attempts": st.get("kicks", 0),
              "last_kick_sent": kicked or None})
     except Exception:
@@ -421,6 +436,17 @@ def _append_history(phones: list) -> None:
         pass
 
 
+def _poll_interval() -> int:
+    try:
+        return max(30, int(os.environ.get("LINK_HEALTH_INTERVAL", "300") or "300"))
+    except ValueError:
+        return 300
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
 def _publish(phones: list, summ: dict) -> None:
     try:
         import ha_client
@@ -462,7 +488,15 @@ def _publish(phones: list, summ: dict) -> None:
              "wired_median_rtt_ms": summ.get("wired_median_rtt_ms"),
              "wired_max_rtt_ms": summ.get("wired_max_rtt_ms"),
              "wired_count": summ.get("wired_count"),
-             "other_rtt_ms": summ.get("other_rtt_ms")})
+             "other_rtt_ms": summ.get("other_rtt_ms"),
+             # A pushed sensor has NO expiry: if this poller dies while Home
+             # Assistant stays up, every value below freezes at its last good
+             # reading and the fleet reads healthy forever. Stamp each publish
+             # so a consumer can tell "measured just now" from "frozen since".
+             # devhealth uses this to refuse to derive gateway health from a
+             # stale rollup; a template alert can use it the same way.
+             "measured_at": _now_iso(),
+             "poll_interval_s": _poll_interval()})
     except Exception:
         pass
     # Dedicated wired sensor. The rollup above is a fleet WORST CASE, which the

@@ -176,6 +176,40 @@ def test_resolve_cordless_ip():
         sys.modules.pop("ha_client", None)
 
 
+def test_rollup_staleness_gate() -> None:
+    """A pushed HA sensor never expires — if rtpmon dies while HA stays up, the
+    link-health rollup freezes at its last reading and every consumer keeps
+    treating it as current. Gateway health is DERIVED from that rollup, so a
+    snapshot frozen mid-restart is republished as a live 'degraded' gateway
+    (exactly what produced two false 4-minute alarms on 2026-08-11)."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    def stamped(age_s, interval=300):
+        return {"measured_at": (now - _dt.timedelta(seconds=age_s)).isoformat(timespec="seconds"),
+                "poll_interval_s": interval}
+
+    check("stale: a just-published rollup is fresh", dh.rollup_is_stale(stamped(0)) is False)
+    check("stale: 2 intervals old is still fresh (one missed poll is normal)",
+          dh.rollup_is_stale(stamped(600)) is False)
+    check("stale: beyond 2.5 intervals is stale", dh.rollup_is_stale(stamped(800)) is True)
+    check("stale: hours old is stale", dh.rollup_is_stale(stamped(20000)) is True)
+    # Judged against the rollup's OWN advertised interval, so changing
+    # link_health_interval can't silently disable the gate.
+    check("stale: honours a faster advertised interval",
+          dh.rollup_is_stale(stamped(400, interval=60)) is True)
+    check("stale: honours a slower advertised interval",
+          dh.rollup_is_stale(stamped(400, interval=3600)) is False)
+    # Backward/forward compatibility: never refuse to work with a rollup that
+    # simply has no stamp (an older rtpmon), and never crash on a bad one.
+    check("stale: unstamped rollup treated as fresh (old rtpmon)",
+          dh.rollup_is_stale({}) is False)
+    check("stale: unparseable stamp treated as fresh, not a crash",
+          dh.rollup_is_stale({"measured_at": "not-a-date"}) is False)
+    check("stale: bad poll_interval falls back to the default",
+          dh.rollup_is_stale(stamped(800, interval="nonsense")) is True)
+
+
 if __name__ == "__main__":
     test_classify_cordless()
     test_classify_gateway()

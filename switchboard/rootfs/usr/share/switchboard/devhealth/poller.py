@@ -39,6 +39,7 @@ Env (bridged by the s6 run script from config.yaml):
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import hmac
 import http.client
@@ -424,9 +425,46 @@ def health_transition(level: str, st: dict, min_cycles: int = 2) -> str:
 # --------------------------------------------------------------------------- #
 # I/O helpers.
 # --------------------------------------------------------------------------- #
+def rollup_is_stale(attrs: dict, now: float | None = None,
+                    tolerance: float = 2.5) -> bool:
+    """True when rtpmon's rollup is too old to derive gateway health from.
+
+    A pushed Home Assistant sensor never expires: if rtpmon dies (or its AMI
+    wedges) while HA stays up, `sensor.switchboard_link_health` keeps its last
+    good attributes forever. Deriving gateway health from that frozen snapshot
+    reports whatever the fleet looked like when the poller stopped — green if it
+    was green, and permanently 'degraded' if it stopped mid-restart, which is
+    how a transient warm-up snapshot became a 4-minute false 'degraded' twice on
+    2026-08-11.
+
+    Staleness is judged against the rollup's OWN advertised poll interval
+    (`poll_interval_s`), so changing link_health_interval cannot silently break
+    this. A rollup with no timestamp is treated as fresh: an older rtpmon did
+    not stamp it, and refusing to work with it would be a regression rather
+    than a safety net."""
+    stamped = attrs.get("measured_at")
+    if not stamped:
+        return False
+    try:
+        when = datetime.datetime.fromisoformat(str(stamped))
+    except (TypeError, ValueError):
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    try:
+        interval = float(attrs.get("poll_interval_s") or 300)
+    except (TypeError, ValueError):
+        interval = 300.0
+    now_ts = now if now is not None else datetime.datetime.now(
+        datetime.timezone.utc).timestamp()
+    return (now_ts - when.timestamp()) > max(60.0, interval * tolerance)
+
+
 def gateway_down_exts_from_rollup() -> list[str] | None:
     """Read rtpmon's rollup sensor for the currently-down extensions (the reliable,
-    already-gathered registration signal). None if unavailable (HA down / rtpmon off)."""
+    already-gathered registration signal). None if unavailable (HA down / rtpmon
+    off) OR if the rollup is stale — a frozen snapshot is worse than no reading,
+    because the caller republishes it as current gateway health."""
     try:
         import ha_client
         s = ha_client.get_state("sensor.switchboard_link_health")
@@ -435,6 +473,11 @@ def gateway_down_exts_from_rollup() -> list[str] | None:
     if not s:
         return None
     a = s.get("attributes", {}) if isinstance(s, dict) else {}
+    if rollup_is_stale(a):
+        sys.stderr.write("[switchboard-devhealth] link-health rollup is stale "
+                         f"(measured_at={a.get('measured_at')}); skipping gateway "
+                         "health this cycle\n")
+        return None
     exts = list(a.get("unreachable_exts", []) or []) + list(a.get("offline_exts", []) or [])
     return [str(e) for e in dict.fromkeys(exts)]  # de-dup, stringify
 

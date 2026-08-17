@@ -212,7 +212,7 @@ container mediation, not a least-privilege sandbox.
 
 The WP826 presents a self-signed certificate that cannot be replaced, so the
 device-health monitor and the maintenance tool cannot validate it by chain.
-Set **`cordless_cert_sha256`** (obtain it with `node tools/wp826.mjs fingerprint`)
+Set **`cordless_cert_sha256`** (obtain it with `WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint`)
 and both will verify the exact certificate **before** transmitting the admin
 password, refusing to continue on a mismatch. Left blank, the connection still
 works but is unauthenticated: a LAN-positioned attacker could impersonate the
