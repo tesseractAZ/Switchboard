@@ -1899,6 +1899,20 @@ def write_features_runtime(opts: dict) -> None:
         "callqos": {
             "alerts": bool(opts.get("call_quality_alerts", True)),
         },
+        # Dial-a-status "power" entities. These used to be hardcoded to THIS
+        # author's EcoFlow sensor ids with a comment claiming they were
+        # overridable here — they were not: nothing ever passed an override, so
+        # on any other install the branch silently read entities that do not
+        # exist. Now they are options, staged like everything else the AGIs need.
+        "status": {
+            "power": {
+                "grid": _clean_eid(opts.get("status_power_grid", ""),
+                                   ("input_boolean", "binary_sensor", "sensor", "switch")),
+                "battery": _clean_eid(opts.get("status_power_battery", ""), ("sensor",)),
+                "runway": _clean_eid(opts.get("status_power_runway", ""), ("sensor",)),
+                "solar": _clean_eid(opts.get("status_power_solar", ""), ("sensor",)),
+            },
+        },
     }
     fp = RUN_DIR / "features.json"
     fp.write_text(json.dumps(payload))

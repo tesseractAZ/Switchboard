@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.50.0
+
+A documentation-vs-reality audit compared every promise in the README, the
+reference, the security model and the Configuration-tab labels against what the
+code actually does. Where they disagreed, this release fixes whichever side was
+wrong — usually the code.
+
+**Dial-a-status "power" worked on exactly one installation: this author's.**
+
+- The power branch of the status menu was hardwired to four EcoFlow entity IDs
+  from one particular home, behind a source comment claiming they were
+  "overridable via features.json". Nothing implemented that override, so on any
+  other install the branch silently queried entities that do not exist and read
+  back an empty report. There are now four real options —
+  `status_power_grid` / `_battery` / `_runway` / `_solar` — staged to the voice
+  flows like every other entity setting, with **no built-in defaults**, and an
+  explicit spoken "power reporting isn't set up" when none are configured.
+
+**A supported trunk setup produced a permanent false alarm.**
+
+- `trunk.registns: false` (a trunk that authenticates per-INVITE and never
+  REGISTERs) is a documented option, and the generator correctly emits no
+  registration section for it. The v0.48.0 watchdog gated only on
+  `trunk.enabled`, read "no registration object" as failure, published
+  `unknown` forever and fired a persistent, never-clearing "outside line down"
+  on a perfectly healthy trunk. It now checks `registns` too.
+
+**"Say list at any step" now works at every step.**
+
+- The lights menu's final prompt (turn on / turn off / cancel) had no `list`
+  handler: saying it matched nothing, burned a retry, and after two tries hung
+  up on a caller who had only asked to hear their options. It now re-speaks the
+  choices for free, matching the two earlier steps exactly.
+
+**Documentation corrected where the code was right.**
+
+- The three health monitors are **not** independent, and the reference now says
+  so plainly: gateway health is derived from the link-health rollup, the
+  cordless IP auto-follow reads a link-health sensor, and the trunk watchdog
+  runs inside that poller — so `link_health_enabled: false` silently disables
+  all of it.
+- `mwi_enabled` only controls the dial-0 auto-clear; it never switched the
+  message-waiting indicator off. The Configuration-tab label also promised a
+  "voicemail or missed-call" indicator — this system has neither.
+- `inbound_ext` fails open: a typo rings the whole house rather than nothing.
+- SECURITY.md no longer claims every accepted LAN-local risk logs a start-up
+  warning (two of four do), and now names `.github/codeql-baseline.json`, the
+  exemption file the CI gate consults before failing a build.
+- The dashboard's Lights panel is documented in both the README and the
+  reference for the first time.
+
+Every code change is mutation-verified, including the tempting wrong fixes.
+
 ## 0.49.0
 
 Fixes four defects that the v0.48.0 durable log and three days of production

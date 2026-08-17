@@ -7,6 +7,7 @@ Run with plain Python (no pytest needed):
 Exercises the input-validation / config-injection defenses so a regression that
 re-opens an injection or drops a guard fails loudly.
 """
+import json
 import re
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -382,6 +383,45 @@ def test_emergency_prompt_asset_exists_and_is_asterisk_format() -> None:
         check("emergency prompt is 16-bit", w.getsampwidth() == 2)
         check("emergency prompt is a real recording (> 1s)",
               w.getnframes() / w.getframerate() > 1.0)
+
+
+def test_status_power_entities_are_staged_from_options(tmp_path) -> None:
+    # The dial-a-status "power" branch used to be hardcoded to ONE home's
+    # EcoFlow entity ids, behind a comment claiming they were "overridable via
+    # features.json" — nothing implemented that, so every other install silently
+    # queried entities that did not exist. They are options now, and the AGIs
+    # (which cannot read root-only options.json) get them through features.json.
+    saved = sbc.RUN_DIR
+    try:
+        sbc.RUN_DIR = tmp_path
+        sbc.write_features_runtime({
+            "status_power_grid": "input_boolean.grid_available",
+            "status_power_battery": "sensor.my_battery",
+            "status_power_runway": "sensor.my_runway",
+            "status_power_solar": "sensor.my_solar",
+        })
+        power = json.loads((tmp_path / "features.json").read_text())["status"]["power"]
+        check("features: grid staged", power["grid"] == "input_boolean.grid_available")
+        check("features: battery staged", power["battery"] == "sensor.my_battery")
+        check("features: runway staged", power["runway"] == "sensor.my_runway")
+        check("features: solar staged", power["solar"] == "sensor.my_solar")
+
+        # Unset options must stage as blank, NOT as somebody else's entity ids.
+        sbc.write_features_runtime({})
+        power = json.loads((tmp_path / "features.json").read_text())["status"]["power"]
+        check("features: unset power entities stage blank (no inherited defaults)",
+              power == {"grid": "", "battery": "", "runway": "", "solar": ""})
+
+        # Wrong-domain / injection-shaped values must be rejected by _clean_eid.
+        sbc.write_features_runtime({
+            "status_power_battery": "light.not_a_sensor",
+            "status_power_solar": "sensor.bad;rm -rf /",
+        })
+        power = json.loads((tmp_path / "features.json").read_text())["status"]["power"]
+        check("features: wrong-domain entity rejected", power["battery"] == "")
+        check("features: injection-shaped entity rejected", power["solar"] == "")
+    finally:
+        sbc.RUN_DIR = saved
 
 
 def test_trunk_inbound_routing() -> None:

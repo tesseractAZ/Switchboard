@@ -64,8 +64,9 @@ telnet or in the browser:
   needs no trunk.
 - **A live dashboard** in the Home Assistant sidebar (Ingress): every phone's
   registration and call state, the trunk's registration and the speech engine's
-  health, per-phone latency, and one-click test-ring, patch-two-rooms, hang-up,
-  transfer, page, message-waiting, and wake-up controls.
+  health, per-phone latency, one-click test-ring, patch-two-rooms, hang-up,
+  transfer, page, message-waiting, and wake-up controls, and a **Lights panel**
+  with per-area on/off toggles for every Home Assistant light.
 - **A full-screen operator console** — a switchboard board you drive by keystroke,
   over telnet and in the browser, mirroring the same live signals.
 - **Proactive health monitoring** — the add-on watches every phone's registration

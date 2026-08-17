@@ -16,15 +16,14 @@ import re
 import ha_client
 import weather
 
-# This home's EcoFlow power entities (discovered live). Overridable via the staged
-# features.json so another install can point at its own sensors; a missing/blank
-# entity is just skipped in the spoken summary.
-DEFAULT_POWER = {
-    "grid": "input_boolean.grid_available",
-    "battery": "sensor.ecoflow_panel_ecoflow_backup_pool",
-    "runway": "sensor.ecoflow_panel_ecoflow_runway_to_reserve",
-    "solar": "sensor.ecoflow_panel_ecoflow_solar_fraction_of_load",
-}
+# The dial-a-status "power" branch reads whatever entities the INSTALL points it
+# at (the status_power_* options, staged into features.json). There are no
+# built-in defaults on purpose: this map previously hardcoded one particular
+# home's EcoFlow sensor ids behind a comment claiming they were "overridable",
+# which nothing implemented — so every other install silently queried entities
+# that did not exist and got an empty report with no explanation. A blank entity
+# is skipped; if ALL of them are blank the report says so out loud.
+DEFAULT_POWER: dict[str, str] = {}
 
 
 def _num(state):
@@ -83,7 +82,12 @@ def format_power(grid, batt, runway, solar) -> str:
 
 
 def power_report(entities: dict | None = None) -> str:
-    e = {**DEFAULT_POWER, **(entities or {})}
+    e = {k: v for k, v in {**DEFAULT_POWER, **(entities or {})}.items() if v}
+    if not e:
+        # Nothing configured — say so rather than returning an empty string that
+        # the caller would voice as the generic "unavailable right now".
+        return ("Power reporting isn't set up. Add the power entities in the "
+                "Switchboard add-on configuration.")
 
     def st(key):
         eid = e.get(key)
