@@ -515,6 +515,10 @@ def _publish(phones: list, summ: dict) -> None:
              "unreachable_exts": summ["unreachable_exts"],
              "offline": summ["offline"], "offline_exts": summ["offline_exts"],
              "worst_ext": summ["worst_ext"], "total_phones": summ["total"],
+             # True when any phone is missing from the sample the state was
+             # computed over — see summarize(). Without this, a consumer cannot
+             # tell an improving fleet from a shrinking one.
+             "worst_rtt_is_partial": summ.get("worst_rtt_is_partial", False),
              # The wired fleet, apart from the cordless — see the sensor below.
              "wired_median_rtt_ms": summ.get("wired_median_rtt_ms"),
              "wired_max_rtt_ms": summ.get("wired_max_rtt_ms"),

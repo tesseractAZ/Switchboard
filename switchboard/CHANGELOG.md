@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.52.1
+
+- `worst_rtt_is_partial` shipped **dead** in v0.52.0. It was computed,
+  unit-tested and mutation-verified in `summarize()` — and never added to the
+  attribute payload `_publish()` actually sends, so Home Assistant showed
+  nothing. Caught by live verification minutes after the deploy: the sensor
+  reported `None` while a phone was demonstrably unreachable. Now wired to the
+  publisher, with a test that asserts the **published** attribute rather than
+  the computed one, because those are two different things and only the second
+  is visible to anyone.
+
 ## 0.52.0
 
 Four defects the 2026-08-19 log audit confirmed against 2¼ days of v0.51.0 in
