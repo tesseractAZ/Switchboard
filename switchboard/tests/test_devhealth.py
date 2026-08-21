@@ -210,6 +210,50 @@ def test_rollup_staleness_gate() -> None:
           dh.rollup_is_stale(stamped(800, interval="nonsense")) is True)
 
 
+def test_blind_gateway_publishes_unknown_not_silence() -> None:
+    """When the rollup is stale/absent the sensor must SAY unknown.
+
+    v0.51.0 added the staleness check but then simply skipped the publish — and
+    for a PUSHED Home Assistant sensor, not publishing means the last value
+    stands. A monitor that has gone blind kept showing green, which is the exact
+    fail-open shape the staleness check was written to close."""
+    sets = []
+
+    class _HA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, state, attrs or {})); return True
+
+    import sys as _sys
+    _sys.modules["ha_client"] = _HA
+    try:
+        dh._publish_gateway_unknown("rollup stale", ["11", "12", "13"])
+        check("blind: publishes exactly one state", len(sets) == 1)
+        eid, state, attrs = sets[0]
+        check("blind: to the gateway sensor", eid == "sensor.switchboard_gateway_health")
+        check("blind: state is the literal 'unknown'", state == "unknown")
+        check("blind: health attribute agrees", attrs.get("health") == "unknown")
+        check("blind: carries the reason", "stale" in " ".join(attrs.get("reasons") or []))
+        check("blind: does NOT claim ports are up", "ports_up" not in attrs)
+        check("blind: keeps the port total for context", attrs.get("ports_total") == 3)
+    finally:
+        _sys.modules.pop("ha_client", None)
+
+
+def test_blind_reset_keeps_the_alert_latch_so_recovery_still_fires() -> None:
+    # Going blind must not silently clear an outstanding alert: if we paged
+    # 'degraded' and then lost sight of the fleet, the eventual return to ok
+    # still owes the user a 'recovered'.
+    st = {"cycles": 0, "level": None, "alerted": None}
+    for _ in range(2):
+        dh.health_transition("degraded", st)
+    check("latch: degraded alerted", st.get("alerted") == "degraded")
+    st["level"] = None; st["cycles"] = 0          # what the blind branch does
+    check("latch: survives the blind reset", st.get("alerted") == "degraded")
+    check("latch: recovery still fires after blindness",
+          dh.health_transition("ok", st) == "recovered")
+
+
 if __name__ == "__main__":
     test_classify_cordless()
     test_classify_gateway()

@@ -216,10 +216,16 @@ def build_record(a) -> dict:
     tx_dead = txc < DEAD_PKTS
     # ...but never on a sub-5s leg (2 live false alarms: a caller abandoning during
     # the operator greeting — Answer -> Wait(1) keeps the transmit side legitimately
-    # silent while rx accrues, hcause 16, billsec <=1). Gate on billsec as REPORTED,
-    # not the RTP-corrected dur, which reads long on exactly those abandoned legs;
-    # with no billsec at all the packet counters are the only duration evidence.
-    long_enough = (billsec if billsec is not None else rtp_secs) >= 5
+    # silent while rx accrues, hcause 16, billsec <= 1).
+    #
+    # "Long" means long by EITHER measure. Gating on billsec alone (v0.48.0) left a
+    # hole precisely where this release knows billsec lies: a CDR reset can report
+    # 2 s for a leg whose packet counters show 75 s (both seen live on 2026-08-08),
+    # so a genuinely long one-way call with a mangled billsec was silently exempt
+    # from the very check that exists to catch it. Taking the max closes that
+    # without re-opening the false alarms: the two real abandoned legs measured
+    # ~1.1 s and ~1.2 s by BOTH billsec and RTP, so neither reaches 5 either way.
+    long_enough = max(billsec or 0, rtp_secs) >= 5
     one_way = long_enough and ((rxc > 50 and tx_dead) or (txc > 50 and rx_dead))
     if one_way:
         reasons = [f"one-way audio ({'receive' if rx_dead else 'transmit'} dead)"] + reasons
