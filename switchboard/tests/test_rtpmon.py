@@ -306,6 +306,43 @@ def test_outage_transition_warmup_never_counts() -> None:
           pm.outage_transition(ok, st2, settled=False) == "up")
 
 
+def test_partial_flag_actually_reaches_home_assistant() -> None:
+    """Test the PUBLISHED attribute, not just summarize()'s return value.
+
+    v0.52.0 shipped this flag computed, unit-tested and mutation-proven — and
+    dead, because _publish()'s attribute literal never mentioned it, so Home
+    Assistant showed nothing. Computing a value and publishing it are two
+    different things; only the second one a user can see."""
+    sets = []
+
+    class _Fake:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, state, attrs or {})); return True
+
+    sys.modules["ha_client"] = _Fake
+    try:
+        # ext 19 configured but de-registered => a partial sample.
+        phones = pm.build_phone_health(ENDPOINTS, CONTACTS, NAMES)
+        pm._publish(phones, pm.summarize(phones))
+        rollup = next(a for eid, _, a in sets if eid == "sensor.switchboard_link_health")
+        check("published: the partial flag is present as an attribute",
+              "worst_rtt_is_partial" in rollup)
+        check("published: and it is True when phones are missing",
+              rollup["worst_rtt_is_partial"] is True)
+
+        # A whole-fleet-reachable snapshot must publish it as False, not omit it.
+        sets.clear()
+        healthy = [{"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4,
+                    "reachable": True, "registered": True}]
+        pm._publish(healthy, pm.summarize(healthy))
+        rollup = next(a for eid, _, a in sets if eid == "sensor.switchboard_link_health")
+        check("published: False on a complete sample (not omitted)",
+              rollup.get("worst_rtt_is_partial") is False)
+    finally:
+        sys.modules.pop("ha_client", None)
+
+
 def test_worst_rtt_is_flagged_partial_when_phones_are_missing() -> None:
     """The rollup state is a max over REACHABLE phones only, so it is NOT
     monotonic in fleet health: when the slowest phone drops off entirely it
@@ -498,6 +535,7 @@ if __name__ == "__main__":
     test_is_mass_outage()
     test_outage_transition()
     test_outage_transition_warmup_never_counts()
+    test_partial_flag_actually_reaches_home_assistant()
     test_worst_rtt_is_flagged_partial_when_phones_are_missing()
     test_history_is_written_atomically()
     test_trunk_transition()
