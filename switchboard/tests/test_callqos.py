@@ -216,15 +216,38 @@ def test_one_way_audio() -> None:
 def test_short_leg_never_one_way() -> None:
     # REGRESSION (2 live false alarms, Aug 7-8): a sub-second abandoned call to the
     # operator — the dialplan does Answer -> Wait(1), the caller hangs up during the
-    # greeting — has a LEGITIMATELY silent transmit side (rx>50, tx<10, hcause 16,
-    # billsec <=1). Must not read as one-way / poor / notify.
+    # greeting — has a LEGITIMATELY silent transmit side (hcause 16, billsec <= 1).
+    # PACKET COUNTS ARE THE REAL ONES from those two production records
+    # (rx=58/tx=6 and rx=55/tx=2). The previous fixture used rxcount=2600 with
+    # billsec=1, which is physically impossible: at ulaw/20 ms, 2600 packets is
+    # 52 SECONDS of received audio, so that fixture described a genuine one-way
+    # call while asserting it must not be flagged — it only "passed" because the
+    # gate read billsec alone.
     rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/12-a1",
                                 cid="12", billsec="1", hcause="16",
-                                rxcount="2600", txcount="5"))
+                                rxcount="58", txcount="6"))
     check("shortleg: 1s abandoned call is NOT one-way",
           not any("one-way" in r for r in rec["reasons"]))
     check("shortleg: not poor, notify False",
           rec["quality"] != "poor" and not rec["notify"])
+    # The other live false alarm, same family.
+    rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/11-a1",
+                                cid="11", billsec="1", hcause="16",
+                                rxcount="55", txcount="2"))
+    check("shortleg: the second live abandoned call is NOT one-way",
+          not any("one-way" in r for r in rec["reasons"]) and not rec["notify"])
+    # THE HOLE THIS RELEASE CLOSES: a CDR reset reports 2s for a leg whose packet
+    # counters show 75s (both shapes seen live 2026-08-08). Gating on billsec
+    # alone exempted exactly the legs this release already knows lie about
+    # duration — a genuinely long one-way call went unflagged.
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/13-a1",
+                                cid="13", billsec="2", hcause="16",
+                                rxcount="3750", txcount="5"))
+    check("shortleg: CDR-reset long one-way IS detected (billsec lied, RTP did not)",
+          rec["quality"] == "poor" and rec["notify"]
+          and any("one-way" in r and "transmit" in r for r in rec["reasons"]))
+    check("shortleg: and its duration is RTP-corrected, with the raw value kept",
+          rec["dur"] == 75 and rec["billsec_raw"] == 2)
     # The same packet shape on a normal-length call is a REAL dead transmit.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-a2",
                                 cid="12", billsec="30", hcause="16",

@@ -559,6 +559,27 @@ def _publish_gateway(level: str, reasons: list[str], down: list[str], gw_exts: l
     })
 
 
+def _publish_gateway_unknown(reason: str, gw_exts: list[str]) -> None:
+    """Publish gateway health as an explicit ``unknown``.
+
+    A pushed Home Assistant sensor never expires, so simply NOT publishing keeps
+    the last value on the dashboard — green stays green while the monitor has
+    gone blind. v0.51.0 added the staleness check but then just skipped the
+    cycle, which is the same fail-open shape the check was written to close.
+    Saying "unknown" out loud is the whole point."""
+    try:
+        import ha_client
+    except Exception:
+        return
+    ha_client.set_state("sensor.switchboard_gateway_health", "unknown", {
+        "friendly_name": "GXW gateway health",
+        "icon": "mdi:router-network-off",
+        "ports_total": len(gw_exts),
+        "reasons": [reason],
+        "health": "unknown",
+    })
+
+
 def _notify(device: str, event: str, reasons: list[str]) -> None:
     if os.environ.get("DEVICE_HEALTH_ALERTS", "true").lower() in ("false", "0", "no"):
         return
@@ -627,6 +648,17 @@ def run() -> None:
                 if ev:
                     print(f"[devhealth] gateway {ev}: {'; '.join(reasons) or ev}", flush=True)
                     _notify("gateway", ev, reasons)
+            else:
+                # No usable rollup (link-health poller down, stale, or HA
+                # unreadable). Publish the blindness instead of leaving the last
+                # reading standing — and reset the transition state so recovery
+                # re-announces cleanly rather than comparing against a level we
+                # can no longer vouch for.
+                _publish_gateway_unknown(
+                    "link-health rollup unavailable or stale — gateway health "
+                    "cannot be derived", gw_exts)
+                gst["level"] = None
+                gst["cycles"] = 0
         except Exception as e:
             print(f"[devhealth] gateway poll error: {e}", flush=True)
         time.sleep(interval)

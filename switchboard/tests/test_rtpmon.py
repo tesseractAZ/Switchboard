@@ -306,6 +306,76 @@ def test_outage_transition_warmup_never_counts() -> None:
           pm.outage_transition(ok, st2, settled=False) == "up")
 
 
+def test_worst_rtt_is_flagged_partial_when_phones_are_missing() -> None:
+    """The rollup state is a max over REACHABLE phones only, so it is NOT
+    monotonic in fleet health: when the slowest phone drops off entirely it
+    leaves the sample and the number IMPROVES. The state is kept as-is (its
+    recorder history must keep one meaning) but the partial-sample condition is
+    published so an automation can refuse to threshold on it."""
+    healthy = [
+        {"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4, "reachable": True, "registered": True},
+        {"ext": "19", "name": "Cordless", "status": "Avail", "rtt_ms": 250.0, "reachable": True, "registered": True},
+    ]
+    s_ok = pm.summarize(healthy, ["11"])
+    check("partial: full sample -> worst is the slow phone", s_ok["worst_rtt_ms"] == 250.0)
+    check("partial: full sample is not flagged partial", s_ok["worst_rtt_is_partial"] is False)
+
+    # The slow phone DROPS OFF: the fleet got worse, but the number gets better.
+    degraded = [dict(healthy[0]),
+                {"ext": "19", "name": "Cordless", "status": "Unregistered", "rtt_ms": None,
+                 "reachable": False, "registered": False}]
+    s_bad = pm.summarize(degraded, ["11"])
+    check("partial: losing the slow phone IMPROVES the state (the trap)",
+          s_bad["worst_rtt_ms"] == 2.4 and s_bad["worst_rtt_ms"] < s_ok["worst_rtt_ms"])
+    check("partial: ...but the sample is flagged partial",
+          s_bad["worst_rtt_is_partial"] is True)
+    check("partial: and the missing phone is still named",
+          s_bad["unreachable_exts"] == ["19"])
+
+
+def test_history_is_written_atomically() -> None:
+    # The one durable ledger in /data/state that used to truncate-in-place and
+    # rewrite ~1.6 MB every poll. A reader must see the old file or the new one,
+    # never a half-written one, and no temp file may be left behind.
+    import tempfile as _tf
+    d = _tf.mkdtemp()
+    saved = pm.STATE_PATH
+    try:
+        pm.STATE_PATH = os.path.join(d, "linkhealth.jsonl")
+        phones = [{"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4,
+                   "reachable": True, "registered": True}]
+        for _ in range(3):
+            pm._append_history(phones)
+        recs = [json.loads(l) for l in open(pm.STATE_PATH) if l.strip()]
+        check("atomic: every record landed", len(recs) == 3)
+        check("atomic: no temp files left behind",
+              [f for f in os.listdir(d) if f.startswith(".linkhealth-")] == [])
+        check("atomic: records are well-formed", all("ts" in r and "phones" in r for r in recs))
+
+        # THE property, not just the happy path: a failure at the COMMIT point
+        # must leave the existing ledger intact. The old in-place rewrite
+        # truncated the destination BEFORE writing, so a crash, a full disk, or
+        # a container stop inside that window destroyed 1.6 MB of history. Force
+        # the commit to fail and prove the ledger survives untouched.
+        real_replace = os.replace
+
+        def _boom(*a, **k):
+            raise OSError("simulated crash at commit")
+
+        os.replace = _boom
+        try:
+            pm._append_history(phones)          # must fail SAFELY (errors swallowed)
+        finally:
+            os.replace = real_replace
+        after = [json.loads(l) for l in open(pm.STATE_PATH) if l.strip()]
+        check("atomic: a failed commit loses nothing — ledger still intact",
+              len(after) == 3 and after == recs)
+        check("atomic: and leaves no temp turd behind",
+              [f for f in os.listdir(d) if f.startswith(".linkhealth-")] == [])
+    finally:
+        pm.STATE_PATH = saved
+
+
 def test_trunk_transition() -> None:
     # Mirrors the outage state machine: 2 consecutive settled bad cycles fire
     # once; recovery fires once; warm-up never counts; a MISSING registration
@@ -428,6 +498,8 @@ if __name__ == "__main__":
     test_is_mass_outage()
     test_outage_transition()
     test_outage_transition_warmup_never_counts()
+    test_worst_rtt_is_flagged_partial_when_phones_are_missing()
+    test_history_is_written_atomically()
     test_trunk_transition()
     test_trunk_check_skips_an_ami_down_cycle()
     test_trunk_enabled_parses_options()

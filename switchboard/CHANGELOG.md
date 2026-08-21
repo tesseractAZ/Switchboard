@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.52.0
+
+Four defects the 2026-08-19 log audit confirmed against 2¼ days of v0.51.0 in
+production — including one in v0.51.0 itself.
+
+**A monitor that goes blind now says so.**
+
+- v0.51.0 taught the device-health monitor to reject a stale link-health
+  rollup, but it then simply *skipped* the publish — and for a **pushed** Home
+  Assistant sensor, not publishing means the last value stands. A monitor that
+  had gone blind kept showing green, which is the same fail-open shape the
+  staleness check was written to close. It now publishes an explicit `unknown`
+  with the reason, and resets its transition state while keeping the alert
+  latch so a later recovery still announces itself.
+
+**One-way audio detection no longer trusts a number the code knows is wrong.**
+
+- The gate required a leg to be ≥ 5 s by `billsec` — the very field this
+  release corrects elsewhere, because a CDR reset can report 2 s for a leg
+  whose packet counters show 75 s (both shapes seen live on 2026-08-08). A
+  genuinely long one-way call with a mangled `billsec` was therefore exempt
+  from the check that exists to catch it. The gate now takes the max of
+  `billsec` and the RTP-derived duration. The two real abandoned-call false
+  alarms measured ~1.1 s and ~1.2 s by *both* measures, so they stay
+  suppressed. The regression test's old fixture claimed 2,600 received packets
+  on a 1-second call — physically impossible, 2,600 packets is 52 seconds of
+  audio — and has been replaced with the actual packet counts from the two
+  production records.
+
+**The fleet rollup admits when its sample is partial.**
+
+- `sensor.switchboard_link_health`'s state is a max over *reachable* phones, so
+  when the slowest phone drops off entirely it leaves the sample and the number
+  **improves** — the sensor's all-time minimum can be its worst moment. The
+  state is deliberately unchanged so its recorder history keeps one meaning;
+  a new `worst_rtt_is_partial` attribute is `true` whenever any phone is
+  missing, so an automation can refuse to threshold on a partial sample.
+
+**The link-health ledger is written atomically.**
+
+- `linkhealth.jsonl` was truncated in place and rewritten (~1.6 MB) on every
+  poll — the one durable ledger in `/data/state` that skipped the temp-file +
+  `os.replace` idiom `switchboard-callqos` already used. A crash, a full disk,
+  or a container stop inside that window left a half-written file. Its test now
+  proves the property rather than the happy path: it forces a failure at the
+  commit point and asserts the existing ledger survives intact.
+
+**Documentation caught up with the hardware.**
+
+- The "~250 ms cordless idle under Wi-Fi power save" premise — the stated
+  justification for splitting wired link health out of the rollup — is stale by
+  roughly 30×: the handset now lives on its charger and idles near 9 ms. The
+  gap narrowed; the masking did not, so the split stands and the reasoning now
+  says why honestly.
+
+All four code changes are mutation-verified.
+
 ## 0.51.0
 
 Clears the remaining backlog from the log review and the documentation-parity

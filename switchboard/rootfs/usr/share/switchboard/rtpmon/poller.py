@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, "/usr/share/switchboard/webui")
@@ -161,10 +162,17 @@ def summarize(phones: list, wired_exts: list | None = None) -> dict:
     the actionable case.
 
     `worst_rtt_ms` (the sensor's state) is a WORST-CASE across the whole fleet, so
-    the Wi-Fi cordless dominates it: its idle RTT sits around 250 ms under power
-    save while its CALLS run 7-18 ms. That is honest as a worst case but useless
-    as a trend, and it MASKS the wired fleet — an 8-port gateway degrading from
-    2 ms to 40 ms would not move a number pinned at 256 by one handset.
+    the slowest handset dominates it — in practice the Wi-Fi cordless, whose idle
+    RTT is both higher and far more variable than the wired ports'. When this
+    split was introduced the cordless idled around 250 ms under Wi-Fi power save
+    (its CALLS ran 7-18 ms); since it started living on its charger it idles
+    around 9 ms with an occasional spike, so the gap is smaller than it was —
+    but the SHAPE is unchanged and so is the argument: one handset's variance
+    still sets the number, and it MASKS the wired fleet, which could degrade
+    from 2 ms to 40 ms without moving a state pinned by the cordless.
+
+    NOTE `worst_rtt_ms` is a max over REACHABLE phones only, so it is not
+    monotonic in fleet health — see `worst_rtt_is_partial` below.
 
     So the wired ports (`wired_exts`, i.e. the gateway_ports option) are also
     summarised on their own: median + max + count. The median is the number worth
@@ -194,6 +202,15 @@ def summarize(phones: list, wired_exts: list | None = None) -> dict:
         "offline_exts": [p["ext"] for p in offline],
         "worst_rtt_ms": worst[0] if worst else None,
         "worst_ext": worst[1]["ext"] if worst else None,
+        # worst_rtt_ms is a max over REACHABLE phones only, so it is NOT monotonic
+        # in fleet health: when the slowest phone (in practice the Wi-Fi cordless)
+        # drops off entirely, it leaves the sample and the number IMPROVES even
+        # though the fleet just got worse — the sensor's all-time minimum can be
+        # its worst moment. The state is left as-is so its recorder history keeps
+        # one meaning, and this flag is published so an automation can refuse to
+        # threshold on a partial sample. For latency use wired_link_health; for
+        # availability use unreachable_exts.
+        "worst_rtt_is_partial": len(unreachable) > 0,
     }
 
 
@@ -420,6 +437,13 @@ def _append_history(phones: list) -> None:
            "phones": {p["ext"]: {"rtt_ms": p["rtt_ms"], "reachable": p["reachable"],
                                  "registered": p["registered"], "status": p["status"]}
                       for p in phones}}
+    # Rewrite ATOMICALLY (temp file + os.replace), the same idiom
+    # switchboard-callqos.append_record() uses on its ledger. This function used
+    # to truncate STATE_PATH in place and rewrite ~1.6 MB every poll: a crash,
+    # a full disk, or a container stop landing inside that window would leave a
+    # half-written file, and a read error midway silently dropped every record
+    # it had not reached yet. os.replace() is atomic on the same filesystem, so
+    # a reader sees either the old file or the new one, never a partial one.
     try:
         d = os.path.dirname(STATE_PATH) or "."
         os.makedirs(d, exist_ok=True)
@@ -430,8 +454,15 @@ def _append_history(phones: list) -> None:
         except OSError:
             lines = []
         lines.append(json.dumps(rec, separators=(",", ":")))
-        with open(STATE_PATH, "w") as f:
-            f.write("\n".join(lines[-MAX_RECORDS:]) + "\n")
+        lines = lines[-MAX_RECORDS:]
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".linkhealth-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, STATE_PATH)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     except Exception:
         pass
 
@@ -500,7 +531,7 @@ def _publish(phones: list, summ: dict) -> None:
     except Exception:
         pass
     # Dedicated wired sensor. The rollup above is a fleet WORST CASE, which the
-    # Wi-Fi cordless pins near its idle power-save latency (~250 ms) — so a wired
+    # Wi-Fi cordless pins with its far larger latency variance — so a wired
     # gateway degrading from 2 ms to 40 ms would never move it. This is the
     # number to graph and alert on for the 8 analog ports.
     try:
