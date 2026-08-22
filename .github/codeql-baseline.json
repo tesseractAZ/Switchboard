@@ -1,50 +1,51 @@
 {
-  "_comment": [
-    "Findings reviewed and accepted, so CI does not block on them. They REMAIN",
-    "visible in the Security tab \u2014 this file only stops the build gate firing.",
-    "A match needs BOTH the rule id and the exact path: the same rule appearing",
-    "in any other file still fails the build. GitHub code scanning does not",
-    "honour in-source suppression comments for CodeQL, which is why this is a",
-    "file rather than annotations at the code sites."
-  ],
-  "accepted": [
-    {
-      "rule": "py/overly-permissive-file",
-      "paths": [
-        "switchboard/rootfs/usr/bin/switchboard-config",
-        "switchboard/rootfs/usr/bin/switchboard-callqos",
-        "switchboard/rootfs/usr/share/switchboard/wakeup/store.py",
-        "switchboard/rootfs/usr/share/switchboard/webui/mwi_store.py"
-      ],
-      "reason": "By design, not an oversight. Asterisk runs as the 'asterisk' user while the add-on's services run as root, and they SHARE state: the AMI secret (0640 root:asterisk) must be readable by the asterisk group, and the wake-up / MWI / callqos files are written by both sides (0664 under a setgid dir). Tightening these would break the voice features. The container holds only root and asterisk, and none of these paths leaves it."
-    },
-    {
-      "rule": "js/disabling-certificate-validation",
-      "paths": [
-        "tools/wp826.mjs"
-      ],
-      "reason": "The WP826 serves a self-signed certificate it cannot be told to replace, so chain validation can never succeed and rejectUnauthorized must stay false to reach the device at all. Trust is established instead by PINNING: verifyPin() compares the certificate's SHA-256 against WP826_CERT_SHA256 before login() sends the password, and exits non-zero on a mismatch (the same pin guards the production health monitor). The rule still fires because the flag itself is unavoidable; the risk it describes is mitigated."
-    },
-    {
-      "rule": "py/weak-sensitive-data-hashing",
-      "paths": [
-        "switchboard/rootfs/usr/share/switchboard/devhealth/poller.py"
-      ],
-      "reason": "Not our choice of algorithm: this implements the WP826 handset's OWN login wire protocol, which specifies sha256(password + server-salt). The device rejects anything else, so a slow KDF is not an option here. No password is stored by this code; the digest exists only to satisfy the device's challenge on the LAN."
-    },
-    {
-      "rule": "js/file-access-to-http",
-      "paths": [
-        "tools/wp826.mjs"
-      ],
-      "reason": "That is the tool's purpose: `ring-upload` reads a local .wav and POSTs it to the handset's ringtone endpoint. The path is supplied by the maintainer on the command line, not by any untrusted input."
-    },
-    {
-      "rule": "py/log-injection",
-      "paths": [
-        "switchboard/rootfs/usr/share/switchboard/webui/ami.py"
-      ],
-      "reason": "Sanitized at the call site \u2014 CR/LF are stripped from the AMI message before it is logged (verified by execution) \u2014 but py/log-injection does not model a .replace() chain as a sanitizer on this path, so the alert survives the fix. Kept the sanitizer; baselined the unmodellable alert. Reach is limited anyway: the AMI socket is loopback-only with a per-boot random secret."
-    }
-  ]
+ "_comment": [
+  "Findings reviewed and accepted, so CI does not block on them. They REMAIN",
+  "visible in the Security tab \u2014 this file only stops the build gate firing.",
+  "A match needs BOTH the rule id and the exact path: the same rule appearing",
+  "in any other file still fails the build. GitHub code scanning does not",
+  "honour in-source suppression comments for CodeQL, which is why this is a",
+  "file rather than annotations at the code sites."
+ ],
+ "accepted": [
+  {
+   "rule": "py/overly-permissive-file",
+   "paths": [
+    "switchboard/rootfs/usr/bin/switchboard-config",
+    "switchboard/rootfs/usr/bin/switchboard-callqos",
+    "switchboard/rootfs/usr/share/switchboard/wakeup/store.py",
+    "switchboard/rootfs/usr/share/switchboard/webui/mwi_store.py",
+    "switchboard/rootfs/usr/share/switchboard/rtpmon/poller.py"
+   ],
+   "reason": "By design, not an oversight. Asterisk runs as the 'asterisk' user while the add-on's services run as root, and they SHARE state: the AMI secret (0640 root:asterisk) must be readable by the asterisk group, and the wake-up / MWI / callqos files are written by both sides (0664 under a setgid dir). Tightening these would break the voice features. The container holds only root and asterisk, and none of these paths leaves it. rtpmon's linkhealth.jsonl joined this set in v0.53.0: v0.52.0's atomic rewrite (mkstemp + os.replace) dropped the destination's mode, silently making a shared ledger root-only 0600. It is chmod'd back to 0640 \u2014 TIGHTER than the 0664 siblings, because this ledger has exactly one writer (rtpmon, as root) and only needs to be READ by group asterisk. The group read bit is the requirement itself, so the finding cannot be resolved by tightening further without recreating the regression."
+  },
+  {
+   "rule": "js/disabling-certificate-validation",
+   "paths": [
+    "tools/wp826.mjs"
+   ],
+   "reason": "The WP826 serves a self-signed certificate it cannot be told to replace, so chain validation can never succeed and rejectUnauthorized must stay false to reach the device at all. Trust is established instead by PINNING: verifyPin() compares the certificate's SHA-256 against WP826_CERT_SHA256 before login() sends the password, and exits non-zero on a mismatch (the same pin guards the production health monitor). The rule still fires because the flag itself is unavoidable; the risk it describes is mitigated."
+  },
+  {
+   "rule": "py/weak-sensitive-data-hashing",
+   "paths": [
+    "switchboard/rootfs/usr/share/switchboard/devhealth/poller.py"
+   ],
+   "reason": "Not our choice of algorithm: this implements the WP826 handset's OWN login wire protocol, which specifies sha256(password + server-salt). The device rejects anything else, so a slow KDF is not an option here. No password is stored by this code; the digest exists only to satisfy the device's challenge on the LAN."
+  },
+  {
+   "rule": "js/file-access-to-http",
+   "paths": [
+    "tools/wp826.mjs"
+   ],
+   "reason": "That is the tool's purpose: `ring-upload` reads a local .wav and POSTs it to the handset's ringtone endpoint. The path is supplied by the maintainer on the command line, not by any untrusted input."
+  },
+  {
+   "rule": "py/log-injection",
+   "paths": [
+    "switchboard/rootfs/usr/share/switchboard/webui/ami.py"
+   ],
+   "reason": "Sanitized at the call site \u2014 CR/LF are stripped from the AMI message before it is logged (verified by execution) \u2014 but py/log-injection does not model a .replace() chain as a sanitizer on this path, so the alert survives the fix. Kept the sanitizer; baselined the unmodellable alert. Reach is limited anyway: the AMI socket is loopback-only with a per-boot random secret."
+  }
+ ]
 }
