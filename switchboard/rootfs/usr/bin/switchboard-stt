@@ -267,8 +267,17 @@ def _recording_to_text(infile: str, prompt: str) -> str:
 
 
 # Time vocabulary to bias whisper for the wake-up flow.
+# The caller is offered "say a new time, or say cancel" (sw-wakeup-change), and
+# the parser below accepts cancel/clear/remove/delete/never mind/stop/forget —
+# but whisper needs a PRIOR for those words or it returns a sound-alike. Observed
+# live 2026-08-21 05:58: a caller said "cancel" twice at the change prompt and got
+# 'Campbell.' then 'Campful.', so nothing matched, both attempts burned, and the
+# 06:00 wake-up they were trying to call off stayed set. This is the identical
+# failure the lights menu already documents for "list" ('Left'/'Lift'); priming
+# the vocabulary is the same fix. Times still win — timeparse runs first.
 _TIME_PROMPT = ("A time of day, for example: seven a.m., six thirty, "
-                "quarter past seven, ten forty five, half past six, noon, midnight.")
+                "quarter past seven, ten forty five, half past six, noon, midnight. "
+                "Or say cancel to clear it.")
 
 # Above this match score a room result is treated as CONFIDENT and wins over the
 # feature words; below it (but still >= the room threshold) the feature words get

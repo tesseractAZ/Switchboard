@@ -460,6 +460,16 @@ def _append_history(phones: list) -> None:
             with os.fdopen(fd, "w") as f:
                 f.write("\n".join(lines) + "\n")
             os.replace(tmp, STATE_PATH)
+            try:
+                # mkstemp creates 0600 owned by THIS process (root), and
+                # os.replace keeps the TEMP file's mode/owner — not the
+                # destination's. v0.52.0 copied callqos's atomic idiom but
+                # dropped this chmod, silently turning a 0664 asterisk-readable
+                # ledger into 0600 root-only. /data/state is the asterisk-owned
+                # directory precisely so non-root components can read it.
+                os.chmod(STATE_PATH, 0o664)
+            except OSError:
+                pass
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
@@ -550,6 +560,12 @@ def _publish(phones: list, summ: dict) -> None:
              "median_rtt_ms": wm,
              "max_rtt_ms": summ.get("wired_max_rtt_ms"),
              "ports_measured": summ.get("wired_count"),
+             # DOCS designates THIS sensor as the one to graph and alert on, so
+             # it needs the same self-describing freshness the rollup got in
+             # v0.51.0 — a pushed sensor never expires, and an alert built on a
+             # frozen value is worse than no alert.
+             "measured_at": _now_iso(),
+             "poll_interval_s": _poll_interval(),
              "excludes": "Wi-Fi cordless and any non-gateway extension"})
     except Exception:
         pass
