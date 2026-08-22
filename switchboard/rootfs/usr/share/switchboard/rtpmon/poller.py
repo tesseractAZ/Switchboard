@@ -155,7 +155,40 @@ def _median(vals: list):
     return xs[mid] if len(xs) % 2 else round((xs[mid - 1] + xs[mid]) / 2.0, 2)
 
 
-def summarize(phones: list, wired_exts: list | None = None) -> dict:
+def _sample_is_partial(reachable: list, phones: list,
+                       measured_before: set | None) -> bool:
+    """True when a phone we HAVE measured is missing from the RTT sample.
+
+    The distinction that matters is "dropped" vs "never there". v0.52.0 used
+    `unreachable > 0`, which conflated them: ext 20 is a configured softphone
+    that never registers BY DESIGN, so it is permanently unreachable and the
+    flag was True in 100% of samples — informationally dead, and it pinned the
+    rollup's icon to "disconnected" on a perfectly healthy fleet.
+
+    `measured_before` is the set of extensions this process has actually seen
+    answer a qualify. A phone that has never answered cannot have "dropped out"
+    of the sample, so it can never raise the flag; the cordless, which does
+    answer, still raises it the moment it disappears — which is the whole point,
+    since losing the slowest phone makes worst_rtt_ms IMPROVE.
+
+    Falling back (measured_before=None) to "any REGISTERED phone missing" keeps
+    a sensible answer for a caller with no history to offer."""
+    contributing = {p["ext"] for p in reachable if p["rtt_ms"] is not None}
+    # An EMPTY set falls back too, not just None. If the caller's wiring ever
+    # stops feeding this (the loop that maintains it is not unit-testable), an
+    # empty expectation would make the flag silently False FOREVER — the same
+    # inert-but-green failure this fix exists to remove. The heuristic is
+    # strictly weaker, not equivalent: it catches a REGISTERED phone that
+    # stopped answering, but a phone that de-registered entirely looks exactly
+    # like one that never registered, so only the measured-before set separates
+    # the cordless dropping off from the softphone that was never there.
+    expected = set(measured_before) if measured_before else {
+        p["ext"] for p in phones if p.get("registered")}
+    return bool(expected - contributing)
+
+
+def summarize(phones: list, wired_exts: list | None = None,
+              measured_before: set | None = None) -> dict:
     """Rollup for the summary sensor: reachable/unreachable/offline split + worst RTT.
     'offline' (configured but de-registered) is called out separately from merely
     'unreachable' (registered but its qualify is failing) — a dropped cordless is
@@ -210,7 +243,7 @@ def summarize(phones: list, wired_exts: list | None = None) -> dict:
         # one meaning, and this flag is published so an automation can refuse to
         # threshold on a partial sample. For latency use wired_link_health; for
         # availability use unreachable_exts.
-        "worst_rtt_is_partial": len(unreachable) > 0,
+        "worst_rtt_is_partial": _sample_is_partial(reachable, phones, measured_before),
     }
 
 
@@ -527,7 +560,9 @@ def _publish(phones: list, summ: dict) -> None:
             summ["worst_rtt_ms"] if summ["worst_rtt_ms"] is not None else "unknown",
             {"friendly_name": "Switchboard link health",
              "unit_of_measurement": "ms",
-             "icon": "mdi:lan-connect" if not summ["unreachable"] else "mdi:lan-disconnect",
+             # Same conflation as the flag: keyed on `unreachable` this showed
+             # "disconnected" forever, because ext 20 never registers by design.
+             "icon": "mdi:lan-disconnect" if summ["worst_rtt_is_partial"] else "mdi:lan-connect",
              "reachable": summ["reachable"], "unreachable": summ["unreachable"],
              "unreachable_exts": summ["unreachable_exts"],
              "offline": summ["offline"], "offline_exts": summ["offline_exts"],
@@ -586,7 +621,8 @@ def wired_exts(opts: dict) -> list:
     return [e.strip() for e in raw.split(",") if e.strip()]
 
 
-def poll_once(names: dict, wired: list | None = None) -> tuple:
+def poll_once(names: dict, wired: list | None = None,
+              measured_before: set | None = None) -> tuple:
     """One measurement cycle. Returns (phones, summary) or (None, None) if AMI is
     down this cycle (caller just skips — no publish, no crash)."""
     import ami
@@ -597,7 +633,7 @@ def poll_once(names: dict, wired: list | None = None) -> tuple:
     if not endpoints:
         return None, None  # AMI up but no roster -> skip (don't blank the sensors)
     phones = build_phone_health(endpoints, contacts, names)
-    return phones, summarize(phones, wired)
+    return phones, summarize(phones, wired, measured_before)
 
 
 def wired_down_count(summ: dict, wired: list | None) -> int:
@@ -648,11 +684,19 @@ def run() -> int:
     prev_reachable = -1
     outage_st = {"cycles": 0, "alerted": False}
     trunk_st = {"cycles": 0, "alerted": False}
+    # Extensions this process has actually seen answer a qualify. A phone that
+    # has never answered cannot have "dropped out" of the RTT sample, so it must
+    # not raise worst_rtt_is_partial — see _sample_is_partial. Grows only; a
+    # restart deliberately starts empty rather than trusting stale history.
+    measured_before: set = set()
     while True:
         opts = _load_options()
         names = room_names(opts)
         wired = wired_exts(opts)
-        phones, summ = poll_once(names, wired)
+        phones, summ = poll_once(names, wired, measured_before)
+        if phones:
+            measured_before |= {p["ext"] for p in phones
+                                if p["reachable"] and p["rtt_ms"] is not None}
         reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)

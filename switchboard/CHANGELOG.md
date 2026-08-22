@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.53.1
+
+`worst_rtt_is_partial` shipped in v0.52.0 as dead information, and took the
+rollup's icon with it.
+
+- The flag keyed on `unreachable > 0`, which conflates **"dropped out"** with
+  **"never there"**. Extension 20 is a configured softphone that never
+  registers by design, so it is permanently unreachable — the flag was
+  therefore `True` in **100%** of live samples and carried no information at
+  all. Worse, it was verified as "working" precisely *because* it read `True`
+  with `unreachable_exts: ['20']`, which is the symptom, not the proof.
+- The same expression drove the rollup's icon, so
+  `sensor.switchboard_link_health` has been showing **`mdi:lan-disconnect` on a
+  perfectly healthy fleet** — nine of nine phones up, permanently "disconnected"
+  on the dashboard. That one predates the flag.
+- Both now key on whether a phone **this process has actually measured** is
+  missing from the sample. A phone that has never answered a qualify cannot
+  have dropped out, so the softphone stops distorting anything; the cordless,
+  which does answer, still raises the flag the moment it disappears — which is
+  the case that matters, since losing the slowest phone makes `worst_rtt_ms`
+  *improve*.
+- The helper degrades deliberately rather than going quiet: given no history it
+  falls back to "a registered phone stopped answering". That is strictly
+  weaker — a phone that de-registers entirely is indistinguishable from one
+  that never registered — and the limit is pinned by test so nobody "fixes" the
+  fallback back into flagging the by-design-absent softphone.
+
 ## 0.53.0
 
 Three fixes from the 2026-08-22 audit — the first found by watching a real
