@@ -422,8 +422,11 @@ def test_history_is_written_atomically() -> None:
         # components can read it.
         import stat as _stat
         mode = _stat.S_IMODE(os.stat(pm.STATE_PATH).st_mode)
-        check(f"atomic: ledger stays group-readable, not world (got {oct(mode)})",
-              mode == 0o660)
+        # Least privilege for the actual access pattern: one writer (rtpmon, as
+        # root), readers in group asterisk, nothing for world. NOT the sibling
+        # ledger's 0664 — that one is written by asterisk-user AGIs.
+        check(f"atomic: ledger is 0640 — root writes, group reads (got {oct(mode)})",
+              mode == 0o640)
     finally:
         pm.STATE_PATH = saved
 

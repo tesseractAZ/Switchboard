@@ -467,11 +467,14 @@ def _append_history(phones: list) -> None:
                 # dropped this chmod, silently turning an asterisk-readable
                 # ledger into 0600 root-only. /data/state is the asterisk-owned
                 # directory (setgid) precisely so non-root components can read.
-                # 0660, NOT the 0664 the sibling ledger uses: group asterisk is
-                # the only reader that exists inside this container, so the
-                # world bit buys nothing and CodeQL is right to flag it
-                # (py/overly-permissive-file, sev 7.8).
-                os.chmod(STATE_PATH, 0o660)
+                # 0640, NOT the 0664 the sibling ledger uses — the requirements
+                # genuinely differ. callqos.jsonl is WRITTEN by asterisk-user
+                # AGIs, so it needs group write; THIS ledger has exactly one
+                # writer (rtpmon, as root) and only ever needs to be READ by
+                # group asterisk. So root writes, group reads, world gets
+                # nothing. CodeQL flagged both the world bit and the group-write
+                # bit (py/overly-permissive-file, sev 7.8) and was right twice.
+                os.chmod(STATE_PATH, 0o640)
             except OSError:
                 pass
         finally:
