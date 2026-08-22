@@ -422,8 +422,8 @@ def test_history_is_written_atomically() -> None:
         # components can read it.
         import stat as _stat
         mode = _stat.S_IMODE(os.stat(pm.STATE_PATH).st_mode)
-        check(f"atomic: ledger stays group/other readable (got {oct(mode)})",
-              mode == 0o664)
+        check(f"atomic: ledger stays group-readable, not world (got {oct(mode)})",
+              mode == 0o660)
     finally:
         pm.STATE_PATH = saved
 

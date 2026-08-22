@@ -464,10 +464,14 @@ def _append_history(phones: list) -> None:
                 # mkstemp creates 0600 owned by THIS process (root), and
                 # os.replace keeps the TEMP file's mode/owner — not the
                 # destination's. v0.52.0 copied callqos's atomic idiom but
-                # dropped this chmod, silently turning a 0664 asterisk-readable
+                # dropped this chmod, silently turning an asterisk-readable
                 # ledger into 0600 root-only. /data/state is the asterisk-owned
-                # directory precisely so non-root components can read it.
-                os.chmod(STATE_PATH, 0o664)
+                # directory (setgid) precisely so non-root components can read.
+                # 0660, NOT the 0664 the sibling ledger uses: group asterisk is
+                # the only reader that exists inside this container, so the
+                # world bit buys nothing and CodeQL is right to flag it
+                # (py/overly-permissive-file, sev 7.8).
+                os.chmod(STATE_PATH, 0o660)
             except OSError:
                 pass
         finally:
