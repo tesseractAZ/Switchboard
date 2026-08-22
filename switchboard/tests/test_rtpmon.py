@@ -350,30 +350,100 @@ def test_partial_flag_actually_reaches_home_assistant() -> None:
 
 
 def test_worst_rtt_is_flagged_partial_when_phones_are_missing() -> None:
-    """The rollup state is a max over REACHABLE phones only, so it is NOT
-    monotonic in fleet health: when the slowest phone drops off entirely it
-    leaves the sample and the number IMPROVES. The state is kept as-is (its
-    recorder history must keep one meaning) but the partial-sample condition is
-    published so an automation can refuse to threshold on it."""
-    healthy = [
-        {"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4, "reachable": True, "registered": True},
-        {"ext": "19", "name": "Cordless", "status": "Avail", "rtt_ms": 250.0, "reachable": True, "registered": True},
-    ]
-    s_ok = pm.summarize(healthy, ["11"])
-    check("partial: full sample -> worst is the slow phone", s_ok["worst_rtt_ms"] == 250.0)
-    check("partial: full sample is not flagged partial", s_ok["worst_rtt_is_partial"] is False)
+    """The rollup state is a max over REACHABLE phones, so when the slowest phone
+    drops off it leaves the sample and the number IMPROVES — the sensor's
+    all-time minimum can be its worst moment. The flag warns an automation off
+    thresholding a partial sample.
 
-    # The slow phone DROPS OFF: the fleet got worse, but the number gets better.
-    degraded = [dict(healthy[0]),
-                {"ext": "19", "name": "Cordless", "status": "Unregistered", "rtt_ms": None,
-                 "reachable": False, "registered": False}]
-    s_bad = pm.summarize(degraded, ["11"])
+    ★The v0.52.0 version keyed on `unreachable > 0`, which conflated "dropped
+    out" with "never there": ext 20 is a configured softphone that NEVER
+    registers by design, so the flag was True in 100% of live samples — dead
+    information — and it pinned the rollup's icon to "disconnected" on a
+    perfectly healthy fleet. The distinction is what this test protects."""
+    def phone(ext, rtt=None, up=True, reg=True):
+        return {"ext": ext, "name": ext, "status": "Avail" if up else "Unregistered",
+                "rtt_ms": rtt, "reachable": up, "registered": reg}
+
+    # The LIVE shape: eight wired + the cordless answering, ext 20 never registers.
+    healthy = [phone(e, 2.4) for e in "11 12 13 14 15 16 17 18".split()]
+    healthy.append(phone("19", 250.0))
+    healthy.append(phone("20", None, up=False, reg=False))
+    seen = {p["ext"] for p in healthy if p["reachable"]}
+
+    s_ok = pm.summarize(healthy, ["11"], seen)
+    check("partial: worst is the slow cordless", s_ok["worst_rtt_ms"] == 250.0)
+    check("partial: a by-design-absent softphone does NOT flag a healthy fleet",
+          s_ok["worst_rtt_is_partial"] is False)
+
+    # The slow phone DROPS OFF: fleet worse, number better — this MUST flag.
+    degraded = [p for p in healthy if p["ext"] != "19"]
+    degraded.append(phone("19", None, up=False, reg=False))
+    s_bad = pm.summarize(degraded, ["11"], seen)
     check("partial: losing the slow phone IMPROVES the state (the trap)",
           s_bad["worst_rtt_ms"] == 2.4 and s_bad["worst_rtt_ms"] < s_ok["worst_rtt_ms"])
-    check("partial: ...but the sample is flagged partial",
-          s_bad["worst_rtt_is_partial"] is True)
-    check("partial: and the missing phone is still named",
-          s_bad["unreachable_exts"] == ["19"])
+    check("partial: ...and THAT is flagged", s_bad["worst_rtt_is_partial"] is True)
+    check("partial: the missing phone is still named", "19" in s_bad["unreachable_exts"])
+
+    # A registered phone whose qualify fails is also a lost sample.
+    failing = [p for p in healthy if p["ext"] != "17"]
+    failing.append(phone("17", None, up=False, reg=True))
+    check("partial: registered-but-not-answering flags too",
+          pm.summarize(failing, ["11"], seen)["worst_rtt_is_partial"] is True)
+
+    # With no history offered, fall back to "any REGISTERED phone missing" —
+    # which still ignores the never-registered softphone.
+    check("partial: fallback ignores the never-registered softphone",
+          pm.summarize(healthy, ["11"], None)["worst_rtt_is_partial"] is False)
+    # An EMPTY set falls back to the heuristic rather than being taken
+    # literally: the loop that maintains the set is not unit-testable, and an
+    # empty EXPECTATION would make the flag silently False forever — the same
+    # inert-but-green failure this fix removes.
+    check("partial: empty history still ignores the softphone on a healthy fleet",
+          pm.summarize(healthy, ["11"], set())["worst_rtt_is_partial"] is False)
+    check("partial: empty history DOES catch a registered phone that stopped answering",
+          pm.summarize(failing, ["11"], set())["worst_rtt_is_partial"] is True)
+    # HONEST LIMIT: with no history, a phone that de-registered ENTIRELY is
+    # indistinguishable from one that never registered — both are simply
+    # `registered=False`. Only the measured-before set can tell them apart, and
+    # it does (asserted above). Pinned so nobody "fixes" the fallback into
+    # flagging the by-design-absent softphone again.
+    check("partial: fallback cannot see a full de-registration (documented limit)",
+          pm.summarize(degraded, ["11"], set())["worst_rtt_is_partial"] is False)
+
+
+def test_rollup_icon_tracks_the_partial_flag_not_raw_unreachable() -> None:
+    # Same conflation, second symptom: keyed on `unreachable` the rollup showed
+    # mdi:lan-disconnect FOREVER, because ext 20 never registers. Verified live
+    # on 2026-08-22: a 9-of-9 healthy fleet displaying the disconnected icon.
+    sets = []
+
+    class _Fake:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, attrs or {})); return True
+
+    sys.modules["ha_client"] = _Fake
+    try:
+        def phone(ext, rtt=None, up=True, reg=True):
+            return {"ext": ext, "name": ext, "status": "Avail" if up else "Unregistered",
+                    "rtt_ms": rtt, "reachable": up, "registered": reg}
+        healthy = [phone("11", 2.4), phone("19", 9.0),
+                   phone("20", None, up=False, reg=False)]
+        seen = {"11", "19"}
+        pm._publish(healthy, pm.summarize(healthy, ["11"], seen))
+        attrs = next(a for eid, a in sets if eid == "sensor.switchboard_link_health")
+        check("icon: healthy fleet shows CONNECTED despite the dead softphone",
+              attrs.get("icon") == "mdi:lan-connect")
+
+        sets.clear()
+        degraded = [phone("11", 2.4), phone("19", None, up=False, reg=False),
+                    phone("20", None, up=False, reg=False)]
+        pm._publish(degraded, pm.summarize(degraded, ["11"], seen))
+        attrs = next(a for eid, a in sets if eid == "sensor.switchboard_link_health")
+        check("icon: a real drop-out shows DISCONNECTED",
+              attrs.get("icon") == "mdi:lan-disconnect")
+    finally:
+        sys.modules.pop("ha_client", None)
 
 
 def test_history_is_written_atomically() -> None:
@@ -555,6 +625,7 @@ if __name__ == "__main__":
     test_outage_transition_warmup_never_counts()
     test_partial_flag_actually_reaches_home_assistant()
     test_worst_rtt_is_flagged_partial_when_phones_are_missing()
+    test_rollup_icon_tracks_the_partial_flag_not_raw_unreachable()
     test_history_is_written_atomically()
     test_trunk_transition()
     test_trunk_check_skips_an_ami_down_cycle()
