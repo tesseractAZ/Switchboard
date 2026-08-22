@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.53.0
+
+Three fixes from the 2026-08-22 audit — the first found by watching a real
+person fail to use the system.
+
+**"Cancel" now works at the wake-up prompt.**
+
+- The wake-up flow tells the caller "say a new time, **or say cancel**", and the
+  parser accepts cancel/clear/remove/delete/never mind/stop/forget — but the
+  recognizer was primed with time vocabulary only, so it had no prior for those
+  words. On 2026-08-21 at 05:58 someone tried to call off a 06:00 wake-up and
+  the transcripts came back **"Campbell."** then **"Campful."** Neither matched,
+  both attempts were spent, and the wake-up they were cancelling stayed set.
+  The prior now names the word the caller is invited to say. This is the same
+  failure the lights menu already documents for "list" ("Left"/"Lift"); the
+  lesson simply had not been carried across. A test now pins the contract that
+  every word the caller is *told* to say appears in the prior.
+
+**The link-health ledger is readable again.**
+
+- v0.52.0's atomic rewrite copied `switchboard-callqos`'s temp-file idiom but
+  dropped the `chmod` that follows it. `mkstemp` creates `0600` owned by the
+  writer, and `os.replace` keeps the *temp* file's mode rather than the
+  destination's — so `linkhealth.jsonl` silently became root-only `0600` where
+  it had been `0664`. Nothing in the shipped image reads it, so nothing broke,
+  but `/data/state` is the asterisk-owned directory precisely so non-root
+  components can. Restored, with a test that asserts the mode.
+
+**The sensor you are told to alert on describes its own freshness.**
+
+- v0.51.0 stamped `measured_at`/`poll_interval_s` onto the rollup only, while
+  the docs designate `sensor.switchboard_wired_link_health` as the one to graph
+  and alert on. A pushed sensor never expires, so an alert built on it could not
+  tell a current reading from a frozen one. Both sensors now carry the stamp.
+
 ## 0.52.1
 
 - `worst_rtt_is_partial` shipped **dead** in v0.52.0. It was computed,

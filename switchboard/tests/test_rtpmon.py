@@ -339,6 +339,12 @@ def test_partial_flag_actually_reaches_home_assistant() -> None:
         rollup = next(a for eid, _, a in sets if eid == "sensor.switchboard_link_health")
         check("published: False on a complete sample (not omitted)",
               rollup.get("worst_rtt_is_partial") is False)
+        # The WIRED sensor is the one DOCS tells you to graph and alert on, so it
+        # must describe its own freshness too — v0.51.0 stamped only the rollup.
+        wired = next(a for eid, _, a in sets if eid == "sensor.switchboard_wired_link_health")
+        check("published: wired sensor carries measured_at", "measured_at" in wired)
+        check("published: wired sensor carries poll_interval_s",
+              isinstance(wired.get("poll_interval_s"), int))
     finally:
         sys.modules.pop("ha_client", None)
 
@@ -409,6 +415,18 @@ def test_history_is_written_atomically() -> None:
               len(after) == 3 and after == recs)
         check("atomic: and leaves no temp turd behind",
               [f for f in os.listdir(d) if f.startswith(".linkhealth-")] == [])
+        # REGRESSION (v0.52.0): mkstemp makes 0600 owned by the writer, and
+        # os.replace keeps the TEMP file's mode — not the destination's — so the
+        # atomic rewrite silently turned a 0664 asterisk-readable ledger into
+        # 0600 root-only. /data/state is asterisk-owned precisely so non-root
+        # components can read it.
+        import stat as _stat
+        mode = _stat.S_IMODE(os.stat(pm.STATE_PATH).st_mode)
+        # Least privilege for the actual access pattern: one writer (rtpmon, as
+        # root), readers in group asterisk, nothing for world. NOT the sibling
+        # ledger's 0664 — that one is written by asterisk-user AGIs.
+        check(f"atomic: ledger is 0640 — root writes, group reads (got {oct(mode)})",
+              mode == 0o640)
     finally:
         pm.STATE_PATH = saved
 

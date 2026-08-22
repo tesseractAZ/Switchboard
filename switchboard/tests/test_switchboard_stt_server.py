@@ -194,6 +194,39 @@ def test_server_disabled_uses_cli() -> None:
           r == "CLI-RESULT" and cli == 1)
 
 
+def test_time_prompt_primes_the_cancel_vocabulary() -> None:
+    """The wake-up flow OFFERS "cancel" aloud, so the recognizer must expect it.
+
+    sw-wakeup-change says "say a new time, or say cancel", and switchboard-stt's
+    time mode accepts cancel/clear/remove/delete/never mind/stop/forget — but
+    whisper needs a PRIOR for those words or it returns a sound-alike. Observed
+    live 2026-08-21 05:58:35 and 05:58:51: a caller said "cancel" twice at that
+    prompt and got 'Campbell.' then 'Campful.'; neither matched, both attempts
+    were burned, and the 06:00 wake-up they were cancelling stayed set. The
+    lights menu documents the identical failure for "list" ('Left'/'Lift').
+    This pins the contract: every word the caller is INVITED to say must appear
+    in the prior."""
+    prompt = stt._TIME_PROMPT.lower()
+    check("time prompt: primes 'cancel' (the word the caller is told to say)",
+          "cancel" in prompt)
+    # And it must still be a TIME prompt — the cancel priming cannot crowd out
+    # the vocabulary the flow exists to recognize.
+    for w in ("a.m.", "thirty", "quarter", "noon", "midnight"):
+        check(f"time prompt: still primes {w!r}", w in prompt)
+
+
+def test_cancel_synonyms_and_prior_are_one_contract() -> None:
+    # The parser's synonym set and whisper's prior are two halves of one
+    # contract: a synonym the prior never mentions is effectively unreachable on
+    # an 8 kHz phone line, which is exactly how "cancel" failed live.
+    src = open(STT).read()
+    check("time mode: parser still accepts the cancel family",
+          all(w in src for w in ("cancel", "clear", "remove", "delete",
+                                 "never mind", "stop", "forget")))
+    check("time mode: and the prior names the word the caller is TOLD to say",
+          "cancel" in stt._TIME_PROMPT.lower())
+
+
 if __name__ == "__main__":
     test_server_ok_no_cli()
     test_connect_refused_falls_back_to_cli()
