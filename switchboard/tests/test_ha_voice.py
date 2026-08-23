@@ -267,5 +267,110 @@ def test_power_entities_have_no_built_in_defaults() -> None:
           ha_reports.power_report({"grid": "", "battery": ""}) == msg)
 
 
+def test_weather_line_is_truth_valued_not_prose() -> None:
+    """The wake-up must decide from a VALUE, not by sniffing a sentence.
+
+    On 2026-08-21 the 06:00 wake-up played its greeting and time and then said
+    nothing about the weather. The NWS fetch had timed out, weather_report()
+    returned the human fallback "Weather is unavailable right now.", and the AGI
+    detected that by testing `"unavailable" not in w.lower()` — so a control
+    decision hung on the exact wording of a spoken sentence. Reword the fallback
+    and the caller gets read the failure message at 6 a.m."""
+    import weather as _w
+    real_fetch, real_loc = _w.fetch_forecast, ha_client.ha_location
+    try:
+        # No location -> no line at all, and NO network attempt.
+        called = []
+        ha_client.ha_location = lambda: (None, None, None)
+        _w.fetch_forecast = lambda *a, **k: called.append(1) or []
+        check("weather_line: '' when the home location is unreadable",
+              ha_reports.weather_line() == "")
+        check("weather_line: does not even try NWS without coordinates", called == [])
+
+        # Location fine, forecast empty (timeout/outage) -> still ''.
+        ha_client.ha_location = lambda: (33.4, -112.0, "°F")
+        _w.fetch_forecast = lambda *a, **k: []
+        check("weather_line: '' when the forecast fetch fails",
+              ha_reports.weather_line() == "")
+        # ...while the human-facing report still says something sayable.
+        check("weather_report: still returns the spoken fallback for dial-45",
+              "unavailable" in ha_reports.weather_report().lower())
+
+        # Happy path.
+        _w.fetch_forecast = lambda *a, **k: [
+            {"name": "Today", "temperature": 111, "temperatureUnit": "F",
+             "shortForecast": "Sunny"}]
+        line = ha_reports.weather_line()
+        check("weather_line: real forecast produces a spoken line", bool(line))
+        check("weather_line: and never contains the failure word",
+              "unavailable" not in line.lower())
+    finally:
+        _w.fetch_forecast, ha_client.ha_location = real_fetch, real_loc
+
+
+def test_grid_url_is_cached_ON_DISK_so_a_wakeup_makes_one_request(tmp_path) -> None:
+    """The /points -> forecast-URL lookup is static per location, but the cache
+    was a module-level dict — and the wake-up runs as a FRESH AGI PROCESS every
+    morning, so it was always cold. Every wake-up therefore made TWO network
+    requests where one would do, doubling both the latency and the odds of the
+    timeout that actually cost the 2026-08-21 readout."""
+    import weather as _w
+    real_get, real_path, real_mem = _w._get, _w.GRID_CACHE_PATH, dict(_w._grid_cache)
+    hits = []
+    try:
+        _w.GRID_CACHE_PATH = str(tmp_path / "grid.json")
+        _w._grid_cache.clear()
+
+        def fake_get(url):
+            hits.append(url)
+            return {"properties": {"forecast": "https://api.weather.gov/gridpoints/PSR/1,2/forecast"}}
+        _w._get = fake_get
+
+        u1 = _w._forecast_url(33.4771961, -112.0631842)
+        check("grid: first call does the /points lookup", len(hits) == 1)
+        check("grid: and returns the forecast URL", u1.endswith("/forecast"))
+
+        # A FRESH process: in-memory cache empty, disk cache present.
+        _w._grid_cache.clear()
+        u2 = _w._forecast_url(33.4771961, -112.0631842)
+        check("grid: a fresh process reuses the DISK cache", len(hits) == 1)
+        check("grid: and gets the same URL", u2 == u1)
+
+        # An unwritable cache must not break the forecast, just cost the hop.
+        _w._grid_cache.clear()
+        _w.GRID_CACHE_PATH = "/proc/nonexistent/grid.json"
+        u3 = _w._forecast_url(33.4771961, -112.0631842)
+        check("grid: unwritable cache still returns a URL", u3 == u1)
+    finally:
+        _w._get, _w.GRID_CACHE_PATH = real_get, real_path
+        _w._grid_cache.clear(); _w._grid_cache.update(real_mem)
+
+
+def test_forecast_is_retried_because_a_wakeup_gets_one_shot() -> None:
+    # api.weather.gov intermittently stalls, and the wake-up has exactly one
+    # chance each morning. A single 6 s timeout cost the 2026-08-21 readout.
+    import weather as _w
+    calls = {"n": 0}
+
+    def flaky(lat, lon):
+        calls["n"] += 1
+        return [] if calls["n"] == 1 else [
+            {"name": "Today", "temperature": 80, "temperatureUnit": "F",
+             "shortForecast": "Clear"}]
+
+    real = _w._fetch_forecast_once
+    try:
+        _w._fetch_forecast_once = flaky
+        got = _w.fetch_forecast(33.4, -112.0)
+        check("forecast: a transient failure is retried", calls["n"] == 2)
+        check("forecast: and the retry's data is returned", bool(got))
+        calls["n"] = 0
+        _w._fetch_forecast_once = lambda lat, lon: (calls.update(n=calls["n"] + 1) or [])
+        check("forecast: gives up after the configured attempts",
+              _w.fetch_forecast(33.4, -112.0, attempts=2) == [] and calls["n"] == 2)
+    finally:
+        _w._fetch_forecast_once = real
+
+
 if __name__ == "__main__":
     main()

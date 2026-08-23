@@ -32,18 +32,34 @@ def main() -> None:
 
     # Per-room scene first (the room this wake-up is ringing), then the
     # whole-house fallback.
-    scene = sp.wakeup_scene_for(wk, sp.channel_ext(env))
+    ext = sp.channel_ext(env)
+    scene = sp.wakeup_scene_for(wk, ext)
     if scene and ha_client:
         try:
             ha_client.call_service("scene", "turn_on", {"entity_id": scene})
+            sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
         except Exception as exc:  # noqa: BLE001
             sp.log("wakeup-deliver", f"scene failed: {exc}")
+    elif not scene:
+        sp.log("wakeup-deliver", f"no wake-up scene configured for ext {ext or '?'}")
 
     if wk.get("weather", True) and ha_reports:
+        # Every branch here LOGS. The 2026-08-21 06:00 wake-up delivered its
+        # greeting and time and then said nothing about the weather, and the
+        # logs recorded absolutely nothing about why — the fetch had timed out,
+        # the report became the "unavailable" sentence, and the old string
+        # sniff dropped it in silence. A feature that can fail must say so.
         try:
-            w = ha_reports.weather_report()
-            if w and "unavailable" not in w.lower():
-                sp.say("Today's weather. " + w)
+            w = ha_reports.weather_line()
+            if not w:
+                sp.log("wakeup-deliver",
+                       "weather SKIPPED: no forecast (HA location unreadable or "
+                       "the NWS fetch failed/timed out) — greeting + time only")
+            elif not sp.say("Today's weather. " + w):
+                sp.log("wakeup-deliver",
+                       f"weather SKIPPED: TTS/playback failed for {w!r}")
+            else:
+                sp.log("wakeup-deliver", "weather spoken")
         except Exception as exc:  # noqa: BLE001
             sp.log("wakeup-deliver", f"weather failed: {exc}")
 
@@ -51,8 +67,10 @@ def main() -> None:
     if cal and ha_reports:
         try:
             c = ha_reports.calendar_report(cal)
-            if c:
-                sp.say(c)
+            if not c:
+                sp.log("wakeup-deliver", f"calendar {cal}: nothing due, skipping")
+            elif not sp.say(c):
+                sp.log("wakeup-deliver", f"calendar SKIPPED: TTS/playback failed for {c!r}")
         except Exception as exc:  # noqa: BLE001
             sp.log("wakeup-deliver", f"calendar failed: {exc}")
 
