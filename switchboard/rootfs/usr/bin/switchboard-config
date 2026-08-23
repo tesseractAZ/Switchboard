@@ -1429,8 +1429,8 @@ def render_extensions(opts: dict) -> str:
         # momentarily-unreachable primary handset from an inbound call.
         parts += [
             # Distinctive ring for OUTSIDE calls: a pre-dial subroutine tags the
-            # INVITE to the answering handset with a Bellcore Alert-Info, so the
-            # WP826 cordless plays a different ring cadence for an inbound trunk call
+            # INVITE to the answering handset with an Alert-Info header, so the
+            # WP826 cordless plays a different ring TONE for an inbound trunk call
             # than for a room-to-room call. Analog FXS handsets ignore the header
             # (their ring cadence is fixed at the gateway) — harmless. b(...) is a
             # pre-dial GoSub option, NOT a t/T DTMF-transfer flag, so it doesn't
@@ -1438,12 +1438,42 @@ def render_extensions(opts: dict) -> str:
             ";; ----- Distinctive-ring pre-dial for outside calls -----",
             "[sw-alert]",
             # Alert-Info with a plain-text tag `info=outsideline` (NOT Bellcore-drN,
-            # which only selects a ring CADENCE, not a distinct tone). The WP826 has a
-            # Match-Incoming-Caller-ID rule (account P1488="outsideline" -> ring tone 3,
-            # set via tools/wp826.mjs) that plays an obviously DIFFERENT ring for any
-            # INVITE carrying this tag — i.e. inbound trunk calls. The ';' is escaped
-            # (\;) so the dialplan parser keeps it as a literal header byte, not a
-            # comment. Analog FXS handsets ignore the header (harmless).
+            # which only selects a ring CADENCE, not a distinct tone — tested on this
+            # handset, it does not work). The WP826 carries ONE distinctive-ring match
+            # table at P1488/P1489 ("outsideline" -> ring 1001 = the uploaded
+            # office_ring.wav), written via tools/wp826.mjs.
+            #
+            # ★ THE RULE ONLY TAKES EFFECT WITH THE CORDLESS ON ACCOUNT 1 — VERIFIED
+            # BY EAR 2026-08-23. Rule P1488="outsideline" / P1489=1001 does nothing
+            # while the handset registers on account 2 (tested: inside and outside
+            # rang identically even after separating acct 2's own default ring from
+            # the rule's ring). It works once the handset is moved to account 1.
+            # => the cordless was MIGRATED to ACCOUNT 1 and account 2 disabled
+            # (P401=0). Account 1 identity codes are the scattered legacy set: P34
+            # auth password, P35 SIP user ID, P36 auth ID, P47 server, P270 account
+            # name, P271 account active, P3 display name, P40 local SIP port.
+            #
+            # The MECHANISM is NOT established — do not assert one. The handset has
+            # THREE rule-slot blocks with the same signature (empty pattern / ring
+            # defaulting to 2): P1488-P1523 (18 pairs), P6716-P6751 (18 pairs), and
+            # P26064/26066/26068/26096 (4 pairs). So "P1488 is account 1's table and
+            # P6716 is account 2's, and acct 2's was merely EMPTY" is just as
+            # consistent with the evidence as "the feature is account-1-only". The
+            # discriminating experiment, if it ever matters: re-enable account 2,
+            # register the handset there, set P6716="outsideline"/P6717=1001, call in.
+            #
+            # TRAP that masked this for two test rounds: the rule's ring must DIFFER
+            # from the account's OWN default ring. P423 had itself been pinned to 1001
+            # — the same office_ring the rule selects — so every call, inside and out,
+            # played office_ring and the two were audibly identical REGARDLESS of
+            # whether the rule fired. A ring experiment CANNOT discriminate while the
+            # default equals the exception; "no change observed" was therefore not
+            # evidence the rule was dead. Account 1 leaves its ring unset, so it falls
+            # back to the device default P104=2 (a plain ring) and the rule's 1001
+            # stays audibly distinct.
+            #
+            # The ';' is escaped (\;) so the dialplan parser keeps it as a literal
+            # header byte, not a comment. Analog FXS handsets ignore it (harmless).
             r"exten = s,1,Set(PJSIP_HEADER(add,Alert-Info)=<http://127.0.0.1>\;info=outsideline)",
             " same = n,Return()",
             "",
