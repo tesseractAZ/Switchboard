@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.54.0
+
+The 06:00 wake-up on 2026-08-21 played its greeting and the time, then said
+nothing about the weather — and the logs recorded nothing about why.
+
+**Why it went quiet.** `api.weather.gov` stalled, the fetch hit its 6-second
+timeout, and `weather_report()` returned its human fallback sentence
+("Weather is unavailable right now."). The wake-up AGI decided whether to speak
+by testing `"unavailable" not in w.lower()` — a control decision hanging on the
+exact wording of a spoken sentence — so it dropped the readout **silently**.
+Three fixes, one per layer:
+
+- **The wake-up now makes one network request instead of two.** The
+  `/points` → forecast-URL lookup is static per location and was cached in a
+  module-level dict — useless for the only caller that matters, since the
+  wake-up runs as a *fresh AGI process* every morning and always started cold.
+  It is now cached on disk, halving both the latency and the exposure to
+  exactly the timeout that caused this.
+- **The forecast is retried.** NWS is a free public service that intermittently
+  stalls, and a wake-up gets one attempt per morning.
+- **The decision is truth-valued, not prose.** A new `weather_line()` returns
+  `''` when the weather cannot be determined; `weather_report()` keeps the
+  spoken fallback for the dial-45 menu. Rewording that sentence can no longer
+  change what a sleeping person hears.
+
+**And it will never be silent about being silent again.** Every branch of the
+delivery AGI now logs — scene fired or not configured, weather spoken, skipped
+for want of a forecast, or skipped because text-to-speech failed (that last
+return value was being discarded entirely). The failure that prompted this was
+diagnosable only by inference from a 7-second gap in the call log.
+
 ## 0.53.1
 
 `worst_rtt_is_partial` shipped in v0.52.0 as dead information, and took the

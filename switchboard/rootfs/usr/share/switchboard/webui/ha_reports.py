@@ -147,10 +147,23 @@ def house_report() -> str:
 # --------------------------------------------------------------------------- #
 # Weather (NWS via the home's coordinates)
 # --------------------------------------------------------------------------- #
-def weather_report() -> str:
+def weather_line() -> str:
+    """The spoken weather sentence, or '' when it cannot be determined.
+
+    Callers that must DECIDE whether to speak use this. weather_report() below
+    returns a human sentence for the dial-45 menu, including the "unavailable"
+    fallback — and the wake-up AGI used to detect failure by sniffing that
+    sentence for the word "unavailable", which coupled a control decision to
+    prose. Reword the fallback and the AGI would happily read "Weather is
+    unavailable right now." to someone who just woke up."""
     lat, lon, _unit = ha_client.ha_location()
-    line = weather.speak_weather(weather.fetch_forecast(lat, lon))
-    return line or "Weather is unavailable right now."
+    if lat is None or lon is None:
+        return ""
+    return weather.speak_weather(weather.fetch_forecast(lat, lon))
+
+
+def weather_report() -> str:
+    return weather_line() or "Weather is unavailable right now."
 
 
 # --------------------------------------------------------------------------- #
