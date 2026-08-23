@@ -80,16 +80,61 @@ The Switchboard add-on serves the room directory at
 | P-code | field | note |
 |---|---|---|
 | **P95026** | ALERT_INFO_BELLCORE_MAPPING | `1` = `Bellcore-drN` → predefined cadence; `0` = `drN`/`info=text` → a custom ringtone. Either way, a plain-text `info=` tag routes to a **Match Incoming Caller ID** rule. |
-| **P1488 / P1489** | Match rule 1: pattern / ringtone | The first of ten (pattern, ringtone) pairs; ringtone accepts a custom id (≥1001). |
-| P104 | ACC_RING_TONE | account default ringtone |
+| **P1488 / P1489** | Match rule 1: pattern / ringtone | Ringtone accepts a custom id (>=1001). |
+| P104 | device default ringtone | the fallback when an account sets no ring of its own |
 | P26018 | IGNORE_ALERT_INFO | |
 | P26072 | PLAY_TONE_ON_CALL_ALERT_INFO | |
 
-The ten Match-Incoming-Caller-ID (pattern, ringtone) pairs are, in order:
-`P1488/P1489`, `P1490/P1491`, `P1492/P1493`, `P6716/P6717`, `P6718/P6719`,
-`P6720/P6721`, `P26064/P26065`, `P26066/P26067`, `P26068/P26069`, `P26096/P26097`.
-Patterns default empty; ringtones default `2`. The pattern matches the Alert-Info
-`info=` tag OR the caller-ID number.
+Match-Incoming-Caller-ID (pattern, ringtone) pairs, **as measured on firmware
+1.0.3.39** — three separate blocks, all with the same signature (pattern empty,
+ringtone defaulting to `2`):
+
+| block | pairs |
+|---|---|
+| `P1488/P1489` .. `P1522/P1523` | 18 |
+| `P6716/P6717` .. `P6750/P6751` | 18 |
+| `P26064/P26065`, `P26066/P26067`, `P26068/P26069`, `P26096/P26097` | 4 |
+
+The pattern matches the Alert-Info `info=` tag OR the caller-ID number. Rule 1
+(`P1488/P1489`) is the one this project uses.
+
+#### Two gotchas that make this look broken
+
+**1. The rule only takes effect with the handset on ACCOUNT 1** (verified by ear,
+2026-08-23). With the handset registered on account 2, `P1488="outsideline"` /
+`P1489=1001` does nothing — inside and outside calls ring identically. Move the
+extension to account 1 and it works.
+
+The mechanism is *not* established, so don't assume one. Because a second
+18-pair block exists at `P6716+`, "each account has its own table and account 2's
+was merely empty" fits the evidence just as well as "the feature is account-1
+only". The discriminating experiment: register on account 2, set
+`P6716="outsideline"` / `P6717=1001`, and call in.
+
+**2. The rule's ringtone must DIFFER from the account's own default ringtone.**
+Otherwise every call — inside and outside — plays the same tone and the two are
+audibly identical *whether or not the rule fires*, so no listening test can tell
+you anything. Account default ring codes: account 1 leaves it unset (falls back to
+`P104`), account 2 = `P423`, account 3 = `P523`, account 4 = `P623`.
+
+#### Account identity codes
+
+Account 1 uses a scattered legacy set; accounts 2-4 use clean 100-code blocks.
+
+| field | acct 1 | acct 2 | acct 3 | acct 4 |
+|---|---|---|---|---|
+| active | `P271` | `P401` | `P501` | `P601` |
+| SIP server | `P47` | `P402` | `P502` | `P602` |
+| SIP user ID | `P35` | `P404` | `P504` | `P604` |
+| auth ID | `P36` | `P405` | `P505` | `P605` |
+| auth password | `P34` | `P406` | `P506` | `P606` |
+| account name | `P270` | `P407` | `P507` | `P607` |
+| local SIP port | `P40` | `P413` | `P513` | `P613` |
+| ring tone | *(unset -> `P104`)* | `P423` | `P523` | `P623` |
+
+Password fields always read back as `\r******\r`; an empty one reads `""`, so a
+mask is proof a value is stored. A blank `P35`/`P47` means that account is genuinely
+unconfigured — not an API fault.
 
 > Firmware **1.0.3.35 is below 1.0.3.98**, so the remote-URL ringtone trick
 > (`Alert-Info: <http://host/x.wav>;info=ringN`) is **not** available — a custom
@@ -147,7 +192,8 @@ Access grid), `P2923` CUST_CALL_KEY_LAYOUT, `P22639` QUICK_APP_LONG_PRESS.
 
 - **Phonebook:** `P330=1` (HTTP), `P331=192.168.1.152:8099/phonebook.xml`,
   `P332=60` (auto-refresh).
-- **Distinctive outside-line ring + vintage tone:** `office_ring.wav` uploaded as
+- **Distinctive outside-line ring + vintage tone:** the cordless registers on
+  **account 1** (required — see the gotchas above); `office_ring.wav` uploaded as
   custom **id 1001**; match rule 1 = `P1488="outsideline"` / `P1489="1001"`. The
   Switchboard add-on tags inbound-trunk INVITEs with
   `Alert-Info: <http://127.0.0.1>;info=outsideline`, so outside-line calls ring the
