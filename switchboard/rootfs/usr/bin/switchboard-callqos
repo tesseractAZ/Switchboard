@@ -58,6 +58,21 @@ sys.path.insert(0, "/usr/share/switchboard/webui")
 # /data/state is the setgid, group-writable dir both the asterisk-user dialplan
 # and the root poller can write (see switchboard-config ensure_state_dir).
 PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
+
+# Legs the PBX ITSELF originates to play something at a phone: a wake-up
+# delivery, an intercom page, a recorded announcement. They ARE recorded — the
+# ledger should describe every leg the system carries, which is why they gained
+# an h-extension — but they never raise a notification and never drive the
+# "last call quality" sensor.
+#
+# Two reasons, both about who is listening. Nobody is on the line to act on a
+# real-time popup about a three-second chime, so an alert there is pure noise.
+# And these legs are one-directional BY DESIGN: the PBX talks and the handset
+# mostly listens, so the one-way-audio detector — which exists to catch a
+# BROKEN conversation — would fire on their normal shape. Human conversations
+# (rooms, operator, directory, from-trunk) and the interactive voice menus
+# (wakeup, automation, status) still alert exactly as before.
+PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 # Asterisk-readable runtime staged by switchboard-config (root-only options.json is
 # not readable by the asterisk user the dialplan runs us as).
 FEATURES = os.environ.get("SWITCHBOARD_FEATURES", "/run/switchboard/features.json")
@@ -226,7 +241,8 @@ def build_record(a) -> dict:
     # without re-opening the false alarms: the two real abandoned legs measured
     # ~1.1 s and ~1.2 s by BOTH billsec and RTP, so neither reaches 5 either way.
     long_enough = max(billsec or 0, rtp_secs) >= 5
-    one_way = long_enough and ((rxc > 50 and tx_dead) or (txc > 50 and rx_dead))
+    one_way = (long_enough and (a.tag or "") not in PLAYBACK_TAGS
+               and ((rxc > 50 and tx_dead) or (txc > 50 and rx_dead)))
     if one_way:
         reasons = [f"one-way audio ({'receive' if rx_dead else 'transmit'} dead)"] + reasons
         label, notify = "poor", True
@@ -263,7 +279,9 @@ def build_record(a) -> dict:
         "mes_worst": round(worst_mes, 1) if worst_mes is not None else None,
         "mos_worst": round(worst_mes / 20.0, 2) if worst_mes is not None else None,
         "quality": label,
-        "notify": notify,
+        # Recorded, never alerted — see PLAYBACK_TAGS. Stored as the honest
+        # False so the ledger says plainly that no alert was raised.
+        "notify": notify and (a.tag or "") not in PLAYBACK_TAGS,
         "reasons": reasons,
     }
     return rec
@@ -341,7 +359,8 @@ def push_ha(rec: dict) -> None:
 
     # Only the authoritative dialplan leg drives the headline sensor, so the
     # poller's slightly-stale far-leg snapshot can't flicker it.
-    if rec["source"] == "dialplan" and rec["mes_worst"] is not None:
+    if (rec["source"] == "dialplan" and rec["mes_worst"] is not None
+            and rec["tag"] not in PLAYBACK_TAGS):
         attrs = {
             "friendly_name": "Switchboard last call quality",
             "unit_of_measurement": "MES",

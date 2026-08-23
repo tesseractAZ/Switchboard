@@ -488,6 +488,42 @@ def test_gateway_ports_mismatch_is_flagged() -> None:
                                    "gateway_ports": " 11 , 11"}) == [])
 
 
+def test_every_call_carrying_context_feeds_the_quality_ledger() -> None:
+    """The ledger under-reported activity ~5x: only four contexts emitted the
+    hangup extension that feeds switchboard-callqos, so wake-ups, pages,
+    announcements and the voice menus produced no record at all (ten legs ran
+    in one observed window and exactly one was logged).
+
+    A context that can carry audio must account for it. `internal-xfer` and
+    `sw-alert` are excluded deliberately — neither terminates a leg of its own
+    (one re-enters a room, the other only stamps a SIP header)."""
+    import re as _re
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Family", "secret": "s1"},
+                             {"ext": "12", "name": "Kitchen", "secret": "s2"}])
+    e = sbc.render_extensions({"rooms": rooms,
+                               "trunk": {"enabled": True, "provider_host": "x.voip.ms",
+                                         "username": "u", "secret": "x",
+                                         "direct_dial": True, "registns": True}})
+    tagged, cur = {}, None
+    for line in e.splitlines():
+        m = _re.match(r"^\[([a-z0-9-]+)\]", line)
+        if m:
+            cur = m.group(1)
+            tagged.setdefault(cur, None)
+        if cur and "Gosub(switchboard-rtpqos,s,1(" in line:
+            tagged[cur] = _re.search(r"\(([a-z-]+)\)\)", line).group(1)
+
+    expected = {"rooms", "operator", "directory", "from-trunk", "wakeup",
+                "wakeup-deliver", "page", "automation", "status", "announce"}
+    for ctx in sorted(expected):
+        check(f"ledger: [{ctx}] has a hangup extension", tagged.get(ctx) is not None)
+        check(f"ledger: [{ctx}] tags its legs as {ctx!r}", tagged.get(ctx) == ctx)
+    # Helper contexts deliberately excluded.
+    for ctx in ("internal-xfer", "sw-alert"):
+        if ctx in tagged:
+            check(f"ledger: [{ctx}] deliberately has none", tagged[ctx] is None)
+
+
 def test_trunk_inbound_routing() -> None:
     # trunk.inbound_ext pins an incoming call to one room (the cordless phone);
     # empty rings the whole house; an ext that isn't a room is ignored (rings

@@ -715,6 +715,7 @@ def render_wakeup_context() -> list[str]:
         " same = n(bye),Playback(switchboard/sw-goodbye)",
         " same = n,Playback(switchboard/sw-endtone)",
         " same = n,Hangup()",
+    ] + rtpqos_h("wakeup") + [
         "",
         "[wakeup-deliver]",
         "exten = s,1,NoOp(Wake-up delivery to ${CHANNEL})",
@@ -730,6 +731,7 @@ def render_wakeup_context() -> list[str]:
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
         " same = n,SayUnixTime(,,IMp)",
         " same = n,Hangup()",
+    ] + rtpqos_h("wakeup-deliver") + [
         "",
     ]
 
@@ -745,6 +747,7 @@ def render_page_context() -> list[str]:
         " same = n,Answer()",
         " same = n,ConfBridge(switchboard-page,switchboard_bridge,switchboard_user)",
         " same = n,Hangup()",
+    ] + rtpqos_h("page") + [
         "",
     ]
 
@@ -762,6 +765,7 @@ def render_automation_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-automation.agi)",
         " same = n,Hangup()",
+    ] + rtpqos_h("automation") + [
         "",
     ]
 
@@ -817,6 +821,7 @@ def render_status_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-status.agi)",
         " same = n,Hangup()",
+    ] + rtpqos_h("status") + [
         "",
     ]
 
@@ -833,6 +838,7 @@ def render_announce_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-announce.agi)",
         " same = n,Hangup()",
+    ] + rtpqos_h("announce") + [
         "",
     ]
 
