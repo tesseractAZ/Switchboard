@@ -90,7 +90,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, high loss, one-way). Measurements are always recorded to a sensor regardless. |
+| `call_quality_alerts` | `true` | Notify when a **conversation's** audio is poor (low MOS, high loss, one-way). Every leg is measured and written to the ledger regardless; machine-initiated legs (wake-up delivery, paging, announcements) are recorded but never alert — see §11. |
 | `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
 | `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 | `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage). |
@@ -822,6 +822,25 @@ and by device health below.
 
 ### Per-call quality (`call_quality_alerts`)
 
+Every context that can carry audio writes a record to the ledger
+(`/data/state/callqos.jsonl`): room-to-room calls, the operator, directory
+assistance and outside calls, **and** — since v0.55.0 — wake-up set and
+delivery, paging, announcements and the voice menus. Before that only the first
+four reported, so the ledger under-reported activity roughly fivefold.
+
+**Recorded is not the same as alerted.** The three legs the PBX originates to
+play something *at* a phone — wake-up delivery, paging, announcements — are
+scored and stored honestly but never notify and never move
+`sensor.switchboard_last_call`. Nobody is on the line to act on an alert about
+a chime, and those legs are one-directional by design, so the one-way-audio
+detector (which exists to catch a broken conversation) would fire on their
+perfectly normal shape. Conversations and the interactive menus alert exactly
+as before.
+
+> One path stays unmeasurable: an announcement pushed from Home Assistant via
+> `/api/announce` is originated straight into `Playback` with no dialplan
+> context, so there is no hangup extension for it to report from.
+
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
@@ -861,7 +880,7 @@ recovery notice when they return to normal — again under that device's shared
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever any phone is missing — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
-| `sensor.switchboard_last_call` | Last call's audio quality (MES) + details. Updated only for legs whose MES was credible — see above |
+| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise call-quality alerts — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. |
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |

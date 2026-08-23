@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.55.0
+
+The call-quality ledger now covers every context that carries audio.
+
+- Only four contexts emitted the hangup extension that feeds
+  `switchboard-callqos`, so wake-ups, wake-up delivery, paging, announcements
+  and the voice menus produced **no record at all**. In one observed window ten
+  legs ran and exactly one was logged — the ledger was under-reporting activity
+  roughly fivefold, which is why a 3 a.m. wake-up session traced in the journal
+  was invisible to it. All six now report.
+
+**Recorded is not the same as alerted.** The three legs the PBX originates to
+play something *at* a phone — wake-up delivery, paging, announcements — are
+scored and stored honestly, but they never raise a notification and never move
+`sensor.switchboard_last_call`:
+
+- Nobody is on the line to act on a real-time popup about a three-second chime.
+- They are one-directional **by design** — the PBX talks, the handset mostly
+  listens — so the one-way-audio detector, which exists to catch a *broken
+  conversation*, would fire on their perfectly normal shape.
+
+Conversations (rooms, operator, directory, outside calls) and the interactive
+voice menus (wake-up, lights, status) alert exactly as before: bad audio in a
+menu wrecks speech recognition, and the caller feels that immediately.
+
+One path remains unmeasurable and is now documented as such: an announcement
+pushed from Home Assistant via `/api/announce` is originated straight into
+`Playback` with no dialplan context, so it has no hangup extension to report
+from.
+
 ## 0.54.0
 
 The 06:00 wake-up on 2026-08-21 played its greeting and the time, then said

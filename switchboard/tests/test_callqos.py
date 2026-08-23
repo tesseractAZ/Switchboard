@@ -480,6 +480,92 @@ def test_alert_id_distinguishes_calls_across_a_restart() -> None:
         sys.modules.pop("ha_client", None)
 
 
+def test_playback_legs_are_recorded_but_never_alert() -> None:
+    """Every leg the system carries belongs in the ledger; not every leg
+    deserves a notification.
+
+    v0.55.0 gave the machine-initiated contexts an h-extension so the ledger
+    stops under-reporting (ten legs ran in one window and one was recorded).
+    But a wake-up delivery, an intercom page and a recorded announcement are
+    the PBX talking AT a phone: nobody is on the line to act on a popup, and
+    the one-way-audio detector — which exists to catch a broken CONVERSATION —
+    would fire on their perfectly normal one-directional shape."""
+    # The shape that would look "one-way" on a conversation: we sent plenty,
+    # the handset sent almost nothing back.
+    def leg(tag):
+        return cq.build_record(_Args(source="dialplan", tag=tag, chan="PJSIP/19-1",
+                                     cid="19", billsec="30", hcause="16",
+                                     rxcount="5", txcount="2600", rxmes="88"))
+    for tag in ("wakeup-deliver", "page", "announce"):
+        rec = leg(tag)
+        check(f"{tag}: recorded with its tag", rec["tag"] == tag)
+        check(f"{tag}: NOT flagged one-way (that shape is its design)",
+              not any("one-way" in r for r in rec["reasons"]))
+        check(f"{tag}: never notifies", rec["notify"] is False)
+
+    # A real conversation with the same shape is still a genuine fault.
+    conv = leg("rooms")
+    check("rooms: the same shape on a conversation IS one-way",
+          any("one-way" in r for r in conv["reasons"]) and conv["notify"] is True)
+    # And the interactive voice menus keep alerting — bad audio there wrecks
+    # speech recognition, which the caller feels immediately.
+    for tag in ("wakeup", "automation", "status"):
+        check(f"{tag}: interactive menu still alerts", leg(tag)["notify"] is True)
+
+    # Genuinely BAD audio on a playback leg: it is still scored and recorded
+    # honestly, but it must not raise an alert. (Without this the suppression
+    # is untested — a healthy playback leg would not notify anyway.)
+    def rough(tag):
+        return cq.build_record(_Args(source="dialplan", tag=tag, chan="PJSIP/19-2",
+                                     cid="19", billsec="20", hcause="16",
+                                     rxcount="900", txcount="900",
+                                     rxploss="0", txploss="30",
+                                     rxmes="59", txmes="59"))
+    for tag in ("wakeup-deliver", "page", "announce"):
+        rec = rough(tag)
+        check(f"{tag}: poor audio is still SCORED honestly", rec["quality"] == "poor")
+        check(f"{tag}: ...and recorded with its reasons", bool(rec["reasons"]))
+        check(f"{tag}: ...but raises no alert", rec["notify"] is False)
+    conv = rough("operator")
+    check("operator: the same poor audio DOES alert",
+          conv["quality"] == "poor" and conv["notify"] is True)
+
+
+def test_playback_legs_do_not_drive_the_last_call_sensor() -> None:
+    # sensor.switchboard_last_call answers "how was the last CALL". A daily
+    # announcement chime overwriting that with its own score would make the
+    # sensor describe the PBX talking to itself.
+    sets = []
+
+    class _Fake:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append(eid); return True
+
+        @staticmethod
+        def notify(*a, **k):
+            return True
+
+    sys.modules["ha_client"] = _Fake
+    orig = cq._alerts_enabled
+    cq._alerts_enabled = lambda: True
+    try:
+        cq.push_ha(cq.build_record(_Args(source="dialplan", tag="announce",
+                                         chan="PJSIP/19-1", cid="19", billsec="4",
+                                         rxcount="200", txcount="200", rxmes="88", txmes="88")))
+        check("announce: does not update last_call",
+              "sensor.switchboard_last_call" not in sets)
+        sets.clear()
+        cq.push_ha(cq.build_record(_Args(source="dialplan", tag="rooms",
+                                         chan="PJSIP/11-1", cid="11", billsec="40",
+                                         rxcount="2000", txcount="2000", rxmes="88", txmes="88")))
+        check("rooms: a real conversation still updates last_call",
+              "sensor.switchboard_last_call" in sets)
+    finally:
+        cq._alerts_enabled = orig
+        sys.modules.pop("ha_client", None)
+
+
 if __name__ == "__main__":
     test_classify()
     test_tolerant_parsing()
