@@ -100,40 +100,35 @@ The pattern matches the Alert-Info `info=` tag OR the caller-ID number. Rule 1
 
 #### Two gotchas that make this look broken
 
-**1. The rule only takes effect with the handset on ACCOUNT 1** (verified by ear,
-2026-08-23). With the handset registered on account 2, `P1488="outsideline"` /
-`P1489=1001` does nothing — inside and outside calls ring identically. Move the
-extension to account 1 and it works.
+**1. Register the handset on ACCOUNT 1.** The match rule has no effect on the
+other account slots — the phone rings its normal tone and nothing you change in
+the rule makes any difference (verified by ear, 2026-08-23).
 
-The mechanism is *not* established, so don't assume one. Because a second
-18-pair block exists at `P6716+`, "each account has its own table and account 2's
-was merely empty" fits the evidence just as well as "the feature is account-1
-only". The discriminating experiment: register on account 2, set
-`P6716="outsideline"` / `P6717=1001`, and call in.
-
-**2. The rule's ringtone must DIFFER from the account's own default ringtone.**
-Otherwise every call — inside and outside — plays the same tone and the two are
+**2. The rule's ringtone must DIFFER from the account's default ringtone.**
+Otherwise every call — inside and outside — plays the same tone, and the two are
 audibly identical *whether or not the rule fires*, so no listening test can tell
-you anything. Account default ring codes: account 1 leaves it unset (falls back to
-`P104`), account 2 = `P423`, account 3 = `P523`, account 4 = `P623`.
+you anything. Account 1 leaves its ring unset and falls back to `P104`, so with
+`P104=2` and the rule pointing at a custom id the two stay distinct.
 
-#### Account identity codes
+#### Account 1 identity codes
 
-Account 1 uses a scattered legacy set; accounts 2-4 use clean 100-code blocks.
+Account 1 uses a scattered legacy set (the other slots use clean 100-code blocks
+based at `P401`, `P501`, `P601`, but this project uses only account 1):
 
-| field | acct 1 | acct 2 | acct 3 | acct 4 |
-|---|---|---|---|---|
-| active | `P271` | `P401` | `P501` | `P601` |
-| SIP server | `P47` | `P402` | `P502` | `P602` |
-| SIP user ID | `P35` | `P404` | `P504` | `P604` |
-| auth ID | `P36` | `P405` | `P505` | `P605` |
-| auth password | `P34` | `P406` | `P506` | `P606` |
-| account name | `P270` | `P407` | `P507` | `P607` |
-| local SIP port | `P40` | `P413` | `P513` | `P613` |
-| ring tone | *(unset -> `P104`)* | `P423` | `P523` | `P623` |
+| field | P-code |
+|---|---|
+| active | `P271` |
+| SIP server | `P47` |
+| SIP user ID | `P35` |
+| auth ID | `P36` |
+| auth password | `P34` |
+| account name | `P270` |
+| display name | `P3` |
+| local SIP port | `P40` |
+| ring tone | *(leave unset -> falls back to `P104`)* |
 
-Password fields always read back as `\r******\r`; an empty one reads `""`, so a
-mask is proof a value is stored. A blank `P35`/`P47` means that account is genuinely
+Password fields read back as `\r******\r` when set and `""` when empty, so a mask
+is proof a value is stored. A blank `P35`/`P47` means that account is genuinely
 unconfigured — not an API fault.
 
 > Firmware **1.0.3.35 is below 1.0.3.98**, so the remote-URL ringtone trick
