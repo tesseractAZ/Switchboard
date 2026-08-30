@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.56.0
+
+Health sensors now say how old they are, and the add-on log is readable again.
+
+**A pushed Home Assistant sensor never expires.** During the whole-host power
+cut of 2026-08-25 the PBX did not exist for 60 minutes 39 seconds — no
+extension could dial, the trunk was gone, the gateway was gone. Home Assistant
+history over that hour shows `sensor.switchboard_trunk_health` with exactly two
+rows, both `Registered`, and `sensor.switchboard_cordless_health` with three,
+all `ok`. No `unavailable`, no `unknown`, no gap marker. Anything reading those
+sensors during the outage — a person, a dashboard, an automation — got positive
+confirmation that a dead phone system was healthy.
+
+`rollup_is_stale()` already covered one poller dying while another survived to
+notice and publish `unknown`. Nothing inside the add-on can cover the add-on
+itself being gone: no code is left running to say anything. That is detectable
+only from outside, by comparing a timestamp against now — so every sensor now
+carries `measured_at` and `poll_interval_s`, not just `link_health`:
+
+- `sensor.switchboard_trunk_health`
+- `sensor.switchboard_cordless_health`
+- `sensor.switchboard_gateway_health`, including its explicit `unknown` path —
+  an unstamped `unknown` freezes exactly like an unstamped `ok` once nothing is
+  publishing.
+
+To act on it, alert when `now - measured_at` exceeds a small multiple of
+`poll_interval_s`. Until something does, a frozen sensor still reads green; the
+stamp makes the freeze *detectable*, it does not by itself make it *alarm*.
+
+**AMI connect/disconnect logging is off.** Asterisk defaults
+`displayconnects=yes`, which writes a `Manager 'switchboard' logged on/off` pair
+for every AMI session. The pollers open one per cycle, so those pairs were
+**82.4%** of the add-on log in one audit window and **89.4%** (3076 of 3438
+lines) in the next — four of every five lines carrying no information. Two
+separate audits each turned on single lines buried in that churn. AMI is
+loopback-only with a random per-boot secret and every session is our own
+poller, so the connect record has no forensic value here; genuine auth failures
+log separately and are unaffected.
+
+Both changes are covered by tests that were verified against mutants — removing
+any of the five stamp sites, or the `displayconnects` line, fails the suite.
+
 ## 0.55.0
 
 The call-quality ledger now covers every context that carries audio.

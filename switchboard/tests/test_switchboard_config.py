@@ -116,6 +116,15 @@ def test_hostile_inputs() -> None:
     check("AMI write still excludes command (no CLI/RCE)", "command" not in write_line)
     check("AMI write grants originate (test-ring) + system", "originate" in write_line and "system" in write_line)
     check("AMI write keeps the status-action classes", "system" in write_line and "reporting" in write_line)
+    # Asterisk defaults displayconnects=yes, which logs a logon/logoff PAIR per
+    # AMI session. The pollers open one per cycle, so those pairs were 82.4% and
+    # then 89.4% of the add-on log across two audit windows -- crowding out the
+    # events the log exists to record. AMI is loopback-only with a random secret
+    # and every session is our own poller, so the record has no forensic value.
+    check("AMI suppresses per-session connect/disconnect log spam",
+          "displayconnects = no" in mgr)
+    check("AMI is still loopback-only (the reason suppressing it is safe)",
+          "bindaddr = 127.0.0.1" in mgr and "permit = 127.0.0.1/255.255.255.255" in mgr)
 
 
 def test_whitespace_dial_prefix() -> None:

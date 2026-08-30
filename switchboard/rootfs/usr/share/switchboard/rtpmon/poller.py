@@ -427,7 +427,19 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
              # real countdown, so the attribute never implies "refresh overdue".
              "next_reg_s": _positive_int(reg.get("next_reg")),
              "auto_reregister_attempts": st.get("kicks", 0),
-             "last_kick_sent": kicked or None})
+             "last_kick_sent": kicked or None,
+             # Freshness stamp. A pushed HA sensor never expires, so if the
+             # WHOLE add-on dies this sensor keeps saying "Registered" forever —
+             # which is exactly what happened through the 60-minute outage of
+             # 2026-08-25: the PBX did not exist and trunk_health read
+             # "Registered" for the entire hour, with no 'unavailable' and no
+             # gap marker. rollup_is_stale() in devhealth covers one poller
+             # dying while another survives to notice; nothing INSIDE the add-on
+             # can cover the add-on itself being gone. Only a consumer comparing
+             # this stamp against now can, so publish it on every sensor a human
+             # or automation actually trusts.
+             "measured_at": _now_iso(),
+             "poll_interval_s": _poll_interval()})
     except Exception:
         pass
     event = trunk_transition(status, st, settled)

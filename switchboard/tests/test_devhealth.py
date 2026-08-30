@@ -472,3 +472,69 @@ def test_publish_cordless_state_is_always_the_level_string() -> None:
         assert attrs["battery_pct"] == 3 and attrs["health"] == "critical"
     finally:
         sys.modules.pop("ha_client", None)
+
+
+def test_every_published_sensor_carries_a_freshness_stamp() -> None:
+    """Each pushed sensor must describe its own age.
+
+    rollup_is_stale() above closes the case where ONE poller dies while another
+    survives to notice and publish "unknown". Nothing inside the add-on can
+    close the case where the ADD-ON ITSELF is gone: no code is left running to
+    say anything, so every sensor freezes at its last value and keeps asserting
+    it. Through the 60-minute whole-host outage of 2026-08-25 the PBX did not
+    exist, yet cordless_health read "ok" for the entire hour -- HA history shows
+    three rows, all "ok", with no 'unavailable' and no gap marker. Anything
+    reading it during the outage got positive confirmation that a dead phone
+    system was healthy.
+
+    Only a consumer OUTSIDE the add-on can catch that, by subtracting this stamp
+    from now -- so the stamp has to be present, parseable and timezone-aware on
+    every sensor, including the explicit-unknown path."""
+    import datetime as _d
+
+    class _FakeHA:
+        calls = []
+
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            _FakeHA.calls.append((eid, state, attrs or {})); return True
+
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        _FakeHA.calls.clear()
+        dh._publish_cordless("ok", [], {"reachable": True, "api_ok": True, "battery_pct": 80})
+        dh._publish_gateway("ok", [], [], ["11", "12"])
+        dh._publish_gateway_unknown("rollup stale", ["11", "12"])
+
+        # Assert PER CALL, not via a dict keyed on entity id: _publish_gateway
+        # and _publish_gateway_unknown both write sensor.switchboard_gateway_health,
+        # so a dict silently overwrites and only the last call is ever checked.
+        # Mutation testing caught exactly that -- dropping the stamp from
+        # _publish_gateway left this test green.
+        assert len(_FakeHA.calls) == 3, _FakeHA.calls
+        seen = {eid for eid, _s, _a in _FakeHA.calls}
+        assert seen == {
+            "sensor.switchboard_cordless_health",
+            "sensor.switchboard_gateway_health",
+        }, seen
+
+        for eid, _state, attrs in _FakeHA.calls:
+            assert "measured_at" in attrs, f"{eid} has no measured_at"
+            assert isinstance(attrs.get("poll_interval_s"), int), \
+                f"{eid} has no integer poll_interval_s"
+            # A cadence of 0 would make any staleness rule divide-by-zero or
+            # treat the sensor as permanently overdue.
+            assert attrs["poll_interval_s"] >= 30, f"{eid} interval too small"
+            # The stamp is only useful if a consumer can subtract it from now.
+            when = _d.datetime.fromisoformat(str(attrs["measured_at"]))
+            assert when.tzinfo is not None, f"{eid} measured_at is naive"
+
+        # The explicit-unknown path is the one that fires when the monitor has
+        # gone blind, so it must be stamped too -- an unstamped "unknown" is
+        # just as frozen as an unstamped "ok" once the add-on stops publishing.
+        unknown = [a for e, s, a in _FakeHA.calls
+                   if e == "sensor.switchboard_gateway_health" and s == "unknown"]
+        assert len(unknown) == 1, _FakeHA.calls
+        assert "measured_at" in unknown[0] and "poll_interval_s" in unknown[0]
+    finally:
+        sys.modules.pop("ha_client", None)

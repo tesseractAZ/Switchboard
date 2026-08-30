@@ -349,6 +349,58 @@ def test_partial_flag_actually_reaches_home_assistant() -> None:
         sys.modules.pop("ha_client", None)
 
 
+def test_trunk_sensor_carries_its_own_freshness_stamp() -> None:
+    """The trunk sensor must describe its own age.
+
+    A pushed HA sensor never expires. devhealth's rollup_is_stale() covers one
+    poller dying while another survives to notice — but when the WHOLE add-on
+    dies, nothing is left running to publish "unknown", so every sensor freezes
+    at its last value and keeps asserting it. Through the 60-minute whole-host
+    outage of 2026-08-25 this sensor read "Registered" for the entire hour while
+    the PBX did not exist: HA history shows exactly two rows, both "Registered",
+    with no 'unavailable' and no gap marker. Only a consumer comparing the stamp
+    against now can catch that, so the stamp has to be there to compare."""
+    sets = []
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, state, attrs or {})); return True
+
+    class _FakeAMI:
+        @staticmethod
+        def get_registrations_or_none():
+            return {pm.TRUNK_REG_NAME: {"status": "Registered", "next_reg": "0"}}
+
+        @staticmethod
+        def send_register(_name):
+            return True
+
+    sys.modules["ha_client"] = _FakeHA
+    sys.modules["ami"] = _FakeAMI
+    try:
+        pm._trunk_check({}, True, False)
+        eid = "sensor.switchboard_trunk_health"
+        published = [(st, a) for e, st, a in sets if e == eid]
+        check("trunk: the sensor was published at all", len(published) == 1)
+        state, attrs = published[0]
+        check("trunk: state is the registration status", state == "Registered")
+        check("trunk: carries measured_at", "measured_at" in attrs)
+        check("trunk: carries poll_interval_s",
+              isinstance(attrs.get("poll_interval_s"), int))
+        check("trunk: the advertised interval is a real cadence, not zero",
+              attrs["poll_interval_s"] >= 30)
+        # The stamp is only useful if it parses as a real instant — a consumer
+        # has to subtract it from now.
+        import datetime as _d
+        parsed = _d.datetime.fromisoformat(str(attrs["measured_at"]))
+        check("trunk: measured_at parses as an aware timestamp",
+              parsed.tzinfo is not None)
+    finally:
+        sys.modules.pop("ha_client", None)
+        sys.modules.pop("ami", None)
+
+
 def test_worst_rtt_is_flagged_partial_when_phones_are_missing() -> None:
     """The rollup state is a max over REACHABLE phones, so when the slowest phone
     drops off it leaves the sample and the number IMPROVES — the sensor's

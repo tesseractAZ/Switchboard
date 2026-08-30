@@ -1667,6 +1667,17 @@ def render_manager(ami_user: str, ami_secret: str) -> str:
         "enabled = yes\n"
         "bindaddr = 127.0.0.1\n"
         "port = 5038\n"
+        # Asterisk defaults displayconnects=yes, which logs a "Manager 'x' logged
+        # on/off" PAIR for every AMI session. The pollers open a short-lived
+        # session each cycle, so those pairs were 82.4% of the add-on log in one
+        # audit window and 89.4% (3076 of 3438 lines) in the next -- four of every
+        # five lines carrying no information, diluting real events ~6x. Two audits
+        # each hinged on single lines buried in that churn, and the log the
+        # operator actually reads is the one being drowned. AMI is loopback-only
+        # with a random per-boot secret, and every session is our own poller, so
+        # the connect/disconnect record has no forensic value here; a genuine
+        # auth failure logs separately and is unaffected.
+        "displayconnects = no\n"
         "\n"
         f"[{ami_user}]\n"
         f"secret = {ami_secret}\n"
