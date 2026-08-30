@@ -507,6 +507,37 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _poll_interval() -> int:
+    """This poller's own cadence — the same floor run() applies."""
+    return max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _freshness() -> dict:
+    """Freshness stamp for every sensor this poller pushes.
+
+    A pushed Home Assistant sensor never expires. rollup_is_stale() above closes
+    the case where ONE poller dies while another survives to notice and say
+    "unknown" out loud — but nothing inside the add-on can close the case where
+    the ADD-ON ITSELF is gone: no code is left running to publish anything, so
+    every sensor simply freezes at its last value and keeps asserting it.
+
+    That is not hypothetical. Through the 60-minute whole-host outage of
+    2026-08-25 the PBX did not exist, yet `cordless_health` read "ok" and
+    `trunk_health` read "Registered" for the entire hour — no 'unavailable', no
+    'unknown', no gap marker. Anything reading those sensors during the outage
+    got positive confirmation that a dead phone system was healthy.
+
+    Only a consumer OUTSIDE the add-on can detect that, by comparing this stamp
+    against now. `link_health` already carried it; the categorical health
+    sensors — the ones a human or an automation actually trusts — did not.
+    """
+    return {"measured_at": _now_iso(), "poll_interval_s": _poll_interval()}
+
+
 def _thresholds() -> dict:
     return {
         "battery_crit": _env_int("CORDLESS_BATTERY_CRIT", 15),
@@ -540,6 +571,7 @@ def _publish_cordless(level: str, reasons: list[str], snap: dict) -> None:
     # still showed state '3'; 'critical' only appeared once the handset died
     # and the read failed). The % remains as the battery_pct attribute; no
     # unit_of_measurement, since the state is no longer numeric.
+    attrs.update(_freshness())
     ha_client.set_state("sensor.switchboard_cordless_health", level, attrs)
 
 
@@ -556,6 +588,7 @@ def _publish_gateway(level: str, reasons: list[str], down: list[str], gw_exts: l
         "down_exts": [e for e in gw_exts if e in set(down or [])],
         "reasons": reasons,
         "health": level,
+        **_freshness(),
     })
 
 
@@ -577,6 +610,7 @@ def _publish_gateway_unknown(reason: str, gw_exts: list[str]) -> None:
         "ports_total": len(gw_exts),
         "reasons": [reason],
         "health": "unknown",
+        **_freshness(),
     })
 
 
