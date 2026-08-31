@@ -1709,3 +1709,60 @@ def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
           "Gosub(switchboard-rtpqos,s,1(announce))" in block)
     check("announce-play: tagged 'announce' so it stays in PLAYBACK_TAGS",
           "(announce)" in block and "(announce-play)" not in block)
+
+
+def test_asterisk_log_has_a_readable_twin_on_share() -> None:
+    """The forensic log must be reachable from outside the container.
+
+    /data/state/asterisk.log is the durable copy and belongs there -- /data
+    survives even if /share is unmounted. But it CANNOT BE READ: the container
+    shell is blocked by protection mode, backups are encrypted (SecureTar), and
+    the add-on API returns 403 on every path. A log written specifically for
+    post-incident forensics was unreachable at exactly the moment it was wanted;
+    an audit called this the single highest-value unlock available.
+
+    The /share twin also carries `verbose`, which the /data one omits on purpose.
+    NOTICE/WARNING/ERROR already reach the container log with timestamps, but
+    ast_verbose output -- the `-- Executing [...]` dialplan trace, i.e. what a
+    call actually did -- does not: 0 of 3438 container-log lines in one audit
+    window carried a timestamp at all. A file channel stamps every line."""
+    conf = sbc.render_logger({"log_level": "info"})
+    check("logger: channels live under [logfiles], not [general]",
+          "[logfiles]" in conf and conf.index("[logfiles]") < conf.index("console =>"))
+    check("logger: the durable /data copy is still declared",
+          "/data/state/asterisk.log => notice,warning,error" in conf)
+    check("logger: a readable twin exists under /share",
+          "/share/switchboard/asterisk.log =>" in conf)
+    share_line = [l for l in conf.splitlines() if l.startswith("/share/")][0]
+    check("logger: the /share copy carries verbose (the dialplan trace)",
+          "verbose" in share_line)
+    check("logger: and still carries the error severities",
+          all(sev in share_line for sev in ("notice", "warning", "error")))
+
+
+def test_scripted_contexts_record_how_far_they_got() -> None:
+    """Wake-up delivery and announce playback must mark their progress.
+
+    SW_STAGE is a channel variable, so it survives into the h extension and
+    rtpqos reports the LAST milestone reached. Without it, a delivery cut off
+    before the greeting was indistinguishable in the record from one that ran to
+    completion -- and a wake-up that half-played is a wake-up that failed."""
+    o = {"rooms": sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s"}]),
+         "wakeup": {"enabled": True}, "wakeup_enabled": True}
+    e = sbc.render_extensions(o)
+
+    wd = e.split("[wakeup-deliver]", 1)[1].split("\n[", 1)[0]
+    for stage in ("answering", "greeting", "time", "extras", "repeat", "complete"):
+        check(f"wakeup-deliver: marks stage '{stage}'", f"Set(SW_STAGE={stage})" in wd)
+    check("wakeup-deliver: 'complete' is set before the hangup, not after",
+          wd.index("Set(SW_STAGE=complete)") < wd.index("Hangup()"))
+
+    ap = e.split("[switchboard-announce-play]", 1)[1].split("\n[", 1)[0]
+    check("announce-play: marks playing then complete",
+          "Set(SW_STAGE=playing)" in ap and "Set(SW_STAGE=complete)" in ap)
+
+    # rtpqos must actually report it, or the markers are write-only.
+    q = e.split("[switchboard-rtpqos]", 1)[1].split("\n[", 1)[0]
+    check("rtpqos: passes --stage to the ledger", "--stage" in q)
+    check("rtpqos: filters the stage to plain letters (it reaches a shell arg)",
+          "FILTER(a-z,${SW_STAGE})" in q)

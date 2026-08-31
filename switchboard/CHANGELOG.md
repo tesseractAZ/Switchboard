@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.59.0
+
+The call record can now be trusted, and the Asterisk log can finally be read.
+
+**A readable copy of the Asterisk log.** `/data/state/asterisk.log` is the durable
+forensic log and belongs where it is — `/data` survives even if `/share` is
+unmounted. But it could not be **read**: the container shell is blocked by
+protection mode, backups are encrypted, and the add-on API returns 403 on every
+path. A log written specifically for post-incident forensics was unreachable at
+exactly the moment it was wanted.
+
+A second channel now writes `/share/switchboard/asterisk.log`, readable from the
+host side. It also carries `verbose`, which the `/data` copy omits on purpose:
+NOTICE/WARNING/ERROR already reach the container log with timestamps, but
+`ast_verbose` output — the `-- Executing [...]` dialplan trace, i.e. what a call
+actually *did* — does not. **0 of 3438 container-log lines** in one audit window
+carried a timestamp at all, so no add-on event could be placed in time or
+correlated with the host. A file channel stamps every line.
+
+Verbose is affordable here only because v0.56.0 turned off `displayconnects`, which
+was 89.4% of the log. It is capped at 32 MB and trimmed at start regardless.
+
+**Statistically empty measurements are now labelled.** `rtt=0.005538` with
+`stdev=0.000000` and `maxrtt` equal to `rtt` is a *one-RTCP-round* reading — it
+reached the ledger beside an ordinary `rxmes=82.5`, indistinguishable from a
+well-sampled leg by any field the record carried, and every mean and percentile
+was averaging it in at full weight. Records now carry `rtt_samples`:
+`multi` / `single` / `none`, derived from fields already in hand. Asterisk exposes
+no RTCP report count, and inventing a `CHANNEL(rtcp,...)` name that does not exist
+is the v0.48.0 `rxoctetcount` mistake — four WARNINGs per call and a field null in
+100% of records.
+
+**Scripted legs record how far they got.** A wake-up delivery cut off before the
+greeting was indistinguishable from one that ran to completion: the ledger held
+only "ring queued=True" and "answered", while one snoozed wake-up produced three
+attempts dying at dialplan steps 6, 5 and 9. `SW_STAGE` is now set at each
+milestone and reported from the hangup extension, so a record carries the last
+stage reached (`answering` → `greeting` → `time` → `extras` → `repeat` →
+`complete`). Announce playback marks `playing` → `complete`.
+
+**One audit finding corrected, not fixed.** It was reported that every wake-up
+delivery is "filed under a nonexistent extension 0". It is not: `ext` comes from
+the channel name and only falls back to `cid` for a non-numeric endpoint (an
+inbound trunk leg, where the cid genuinely is the PSTN caller). `cid=0` appears
+only in the human-readable Verbose line. A test now pins both halves of that
+behaviour so it cannot be misread again.
+
+
 ## 0.58.1
 
 The backup hooks now leave evidence that they ran.
