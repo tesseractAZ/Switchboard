@@ -8,8 +8,29 @@ state stopped being copied, which made it impossible to tell whether a torn
 ledger line fell inside a backup or not.
 
 Never fails the backup."""
+import datetime
+import json
+import os
 import sys
+
+STAMP_PATH = os.environ.get("SWITCHBOARD_BACKUP_STAMP",
+                            "/share/switchboard/backup-window.jsonl")
 
 if __name__ == "__main__":
     print("[switchboard-backup-post] snapshot window closed", flush=True)
+    # A hook runs via `docker exec`, whose stdout does NOT reach the add-on's log
+    # stream -- so the line above is unverifiable from outside. The stamp is the
+    # part an audit can actually read, and it closes the window the pre-hook
+    # opened.
+    try:
+        os.makedirs(os.path.dirname(STAMP_PATH), exist_ok=True)
+        with open(STAMP_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "phase": "post",
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                    timespec="seconds")}) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        print(f"[switchboard-backup-post] stamp: {exc}", flush=True)
     sys.exit(0)
