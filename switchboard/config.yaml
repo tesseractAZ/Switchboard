@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.56.0"
+version: "0.57.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -13,6 +13,16 @@ arch:
 init: false
 host_network: true
 apparmor: true
+# Start in the SERVICES phase, not the default 'application'. Asterisk, the GXW
+# gateway and the SIP trunk have no dependency on Home Assistant Core, but the
+# default phase queues the whole PBX behind Core reaching RUNNING — measured at
+# 66.4 s behind the first services-phase add-on on the 2026-08-25 boot, and
+# unbounded if Core ever stalls (a recorder migration on a dirty database, or a
+# wedged custom integration). Dial tone, including the 911 path, should not wait
+# on a home-automation server. Safe because the HA-facing pollers degrade rather
+# than exit when Core is absent: ha_client.set_state() returns False instead of
+# raising, and each poller retries on its next cycle.
+startup: services
 # Supervisor API access — auto-detect the Home Assistant timezone (talking clock
 # / wake-up calls). Home Assistant Core API access — the voice/TUI/GUI home-
 # automation feature reads light states and calls light.turn_on/turn_off via the

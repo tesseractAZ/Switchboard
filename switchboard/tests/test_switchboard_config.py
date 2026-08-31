@@ -1681,3 +1681,31 @@ if __name__ == "__main__":
               + ", ".join(_skipped))
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
+
+
+def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
+    """The HA-pushed announcement's Originate target must exist AND carry the
+    hangup hook -- the whole point of routing it through the dialplan.
+
+    It must also keep the tag "announce", which is in callqos's PLAYBACK_TAGS: the
+    record is stored honestly but never notifies, never moves last_call, and never
+    confirms a call for devhealth's last_call_mos. A NEW tag would silently opt
+    these legs back into all three."""
+    o = {"rooms": sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                                   {"ext": "19", "name": "Cordless", "secret": "s2"}])}
+    e = sbc.render_extensions(o)
+    check("announce-play: the Originate target context exists",
+          "[switchboard-announce-play]" in e)
+    check("announce-play: it plays the variable the AMI originate sets",
+          "Playback(${SW_ANN_FILE})" in e)
+    check("announce-play: it hangs up, so the h extension can run",
+          "[switchboard-announce-play]" in e and "Hangup()" in e)
+
+    # The h extension must belong to THIS context, not merely exist elsewhere.
+    block = e.split("[switchboard-announce-play]", 1)[1]
+    block = block.split("\n[", 1)[0]
+    check("announce-play: has its own h extension", "exten = h,1" in block)
+    check("announce-play: h gosubs the rtpqos logger",
+          "Gosub(switchboard-rtpqos,s,1(announce))" in block)
+    check("announce-play: tagged 'announce' so it stays in PLAYBACK_TAGS",
+          "(announce)" in block and "(announce-play)" not in block)

@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.57.0
+
+Playback legs no longer vouch for themselves, announcements are measurable, and
+the PBX stops waiting on Home Assistant to boot.
+
+**A playback leg can no longer confirm a call.** `last_call_mos()` only trusts a
+handset-side RTP record if a call-ledger leg lands within 90 s of it. That gate
+exists for one reason, stated in its own docstring: HA announce playback leaves
+handset records scoring 2.2–2.9, and three false `degraded` episodes fired on
+2026-08-05/06 because of them. It worked because playback legs were *absent*
+from the ledger — not because it excluded them.
+
+v0.55.0 then added the hangup hook to `wakeup-deliver`, `page` and `announce`.
+That was right on its own terms, but it wrote those legs into the ledger, so
+they began confirming themselves and quietly restored the bug the gate was
+written to close. Two audits saw the result — repeated `cordless degraded: last
+call quality poor (MOS 2.2)` against RTCP showing **zero** packet loss, ~20 ms
+jitter and Asterisk's own MES ≈ 87/100 — and could not explain it, because the
+tempting `rxmes/40` arithmetic is refuted by other calls in the same window. The
+2.2 was never Asterisk's number at all: it is the handset's own score for a
+playback leg. `load_callqos_ts()` now filters on tag, so the gate no longer
+depends on an accident of ledger coverage.
+
+**Announcements are measurable.** An announcement was Originated straight to
+`Application: Playback`, which never enters the dialplan — so it had no `h`
+extension and `switchboard-rtpqos` was unreachable *by construction*. Two audit
+windows found 23 and then 18 announce playbacks and not one quality record: an
+announcement that was clipped, dropped mid-play or never delivered looked
+exactly like one that played in full. That is the failure this handset is most
+prone to, because its WiFi radio parks between calls.
+
+Announcements now originate into a thin `[switchboard-announce-play]` context
+that plays the clip and hangs up, so the existing hook yields a hangup cause, a
+billsec and a QoS record. The tag stays `announce` — deliberately, so it remains
+in `PLAYBACK_TAGS` and is recorded without notifying, without moving
+`sensor.switchboard_last_call`, and without confirming a call. The clip path now
+travels as a dialplan variable, so it is charset-validated (`$`, `{`, `}`, `,`
+and whitespace barred) rather than only screened for CR/LF.
+
+**`startup: services`.** The Supervisor default, `application`, held the whole
+PBX until Home Assistant Core reported RUNNING — 66.4 s behind the first
+services-phase add-on on the 2026-08-25 boot, and unbounded if Core stalls on a
+recorder migration over a dirty database. Asterisk, the gateway and the trunk
+have no dependency on Core, and dial tone — including the 911 path — should not
+queue behind a home-automation server. Safe because the HA-facing pollers
+degrade rather than exit when Core is absent: `set_state()` returns `False`
+instead of raising, and each poller retries next cycle.
+
+Every change is covered by tests verified against mutants.
+
+
 ## 0.56.0
 
 Health sensors now say how old they are, and the add-on log is readable again.

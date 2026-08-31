@@ -538,3 +538,47 @@ def test_every_published_sensor_carries_a_freshness_stamp() -> None:
         assert "measured_at" in unknown[0] and "poll_interval_s" in unknown[0]
     finally:
         sys.modules.pop("ha_client", None)
+
+
+def test_playback_legs_never_confirm_a_call_for_last_call_mos(tmp_path) -> None:
+    """The ledger gate must exclude PLAYBACK legs by TAG, not by luck.
+
+    last_call_mos() only accepts a phone-side RTP record if some ledger leg lands
+    within CALLQOS_MATCH_WINDOW_S of it. That gate exists for exactly one reason,
+    per its own docstring: HA announce playback leaves phone-side records with
+    moscq 2.2-2.9 that fired three false 'degraded' episodes on 2026-08-05/06.
+
+    It originally worked because playback legs were simply ABSENT from the
+    ledger. v0.55.0 then added the rtpqos hook to wakeup-deliver, page and
+    announce -- so those legs ARE written now, and began confirming themselves,
+    silently restoring the bug. The gate must therefore filter on tag."""
+    import json as _json
+
+    led = tmp_path / "callqos.jsonl"
+    led.write_text(
+        _json.dumps({"ts": 1000.0, "tag": "wakeup-deliver"}) + "\n" +
+        _json.dumps({"ts": 2000.0, "tag": "page"}) + "\n" +
+        _json.dumps({"ts": 3000.0, "tag": "announce"}) + "\n" +
+        _json.dumps({"ts": 4000.0, "tag": "rooms"}) + "\n" +
+        _json.dumps({"ts": 5000.0, "tag": ""}) + "\n",
+        encoding="utf-8")
+
+    ts = dh.load_callqos_ts(str(led))
+    assert 1000.0 not in ts, "wakeup-deliver leg must not confirm a call"
+    assert 2000.0 not in ts, "page leg must not confirm a call"
+    assert 3000.0 not in ts, "announce leg must not confirm a call"
+    assert 4000.0 in ts, "a real room conversation MUST still confirm"
+    assert 5000.0 in ts, "an untagged legacy record must still confirm"
+    assert sorted(ts) == [4000.0, 5000.0], ts
+
+    # End to end: a handset record scoring 2.2 that lines up ONLY with a playback
+    # leg must be skipped entirely -- that is the false-'degraded' shape.
+    rtp = {"0": {"moscq": "2.2", "stopTimeSecond": "3000"}}
+    mos, _age = dh.last_call_mos(rtp, now=3060.0, ledger_ts=ts)
+    assert mos is None, f"playback leg confirmed a 2.2 record: {mos}"
+
+    # ...while a real conversation at the same score is still reported, because
+    # suppressing genuine bad audio would be the opposite failure.
+    rtp_real = {"0": {"moscq": "2.2", "stopTimeSecond": "4000"}}
+    mos2, _ = dh.last_call_mos(rtp_real, now=4060.0, ledger_ts=ts)
+    assert mos2 == 2.2, f"real call should still report poor MOS, got {mos2}"

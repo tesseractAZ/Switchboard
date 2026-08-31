@@ -879,3 +879,71 @@ def test_send_register_rejects_a_bogus_section_name() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_announce_originates_into_the_dialplan_not_bare_playback() -> None:
+    """An announcement must enter the dialplan so it produces a QoS record.
+
+    Originating to Application: Playback never enters the dialplan, so there is
+    no `h` extension and switchboard-rtpqos is unreachable BY CONSTRUCTION. Two
+    audit windows found 23 then 18 announce playbacks and zero QoS records --
+    a clipped or undelivered announcement was indistinguishable from one that
+    played in full, which is precisely the failure the cordless is prone to
+    because its WiFi radio parks between calls."""
+    sent = {}
+
+    def _fake(action_lines, timeout=4.0, single_response=False, action_id=""):
+        sent["lines"] = list(action_lines)
+        return [{"response": "success", "actionid": action_id}]
+
+    real = ami._ami_command
+    ami._ami_command = _fake
+    try:
+        ok = ami.announce_to_ext("19", "/run/switchboard/announce/ann-19-abc123")
+    finally:
+        ami._ami_command = real
+
+    check("announce: originate reported success", ok is True)
+    lines = sent["lines"]
+    joined = "\n".join(lines)
+    check("announce: no longer uses a bare Application originate",
+          not any(l.lower().startswith("application:") for l in lines))
+    check("announce: targets the dialplan context",
+          "Context: switchboard-announce-play" in lines)
+    check("announce: enters at s,1", "Exten: s" in lines and "Priority: 1" in lines)
+    check("announce: passes the clip as SW_ANN_FILE",
+          "Variable: SW_ANN_FILE=/run/switchboard/announce/ann-19-abc123" in lines)
+    # The auto-answer header is what makes it hands-free; losing it would turn
+    # every announcement into a ringing call.
+    check("announce: keeps the auto-answer Call-Info header",
+          "answer-after=0" in joined)
+
+
+def test_announce_clip_path_is_charset_guarded() -> None:
+    """The clip path now travels as a dialplan variable, so it must not be able
+    to carry an expansion, an extra Playback argument, or an AMI header break."""
+    called = {"n": 0}
+
+    def _fake(action_lines, timeout=4.0, single_response=False, action_id=""):
+        called["n"] += 1
+        return [{"response": "success", "actionid": action_id}]
+
+    real = ami._ami_command
+    ami._ami_command = _fake
+    try:
+        for bad, why in (
+            ("/run/x/${SHELL(id)}", "dialplan expansion"),
+            ("/run/x/a,Hangup", "extra Playback argument"),
+            ("/run/x/a\r\nAction: Command", "AMI header injection"),
+            ("/run/x/a}b{c", "brace"),
+            ("", "empty"),
+        ):
+            check(f"announce: rejects {why}",
+                  ami.announce_to_ext("19", bad) is False)
+        check("announce: rejected inputs never reached AMI", called["n"] == 0)
+        # ...and the legitimate generated shape still passes.
+        check("announce: accepts the real ann-<ext>-<hex> shape",
+              ami.announce_to_ext("19", "/run/switchboard/announce/ann-19-"
+                                        + "0123456789abcdef" * 2) is True)
+    finally:
+        ami._ami_command = real

@@ -596,6 +596,11 @@ def get_device_state(ext: str) -> str:
     return ""
 
 
+# Clip paths are built internally as ann-<ext>-<32hex>.wav under ANNOUNCE_DIR.
+# Deliberately excludes $ { } , and whitespace -- see announce_to_ext.
+_ANNOUNCE_SOUND_RE = re.compile(r"[A-Za-z0-9._/-]{1,255}")
+
+
 def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: int = 30) -> bool:
     """Originate an ANNOUNCEMENT to one ext: Asterisk calls the phone and, on
     answer, plays ``sound`` (a rendered TTS clip) straight out the handset.
@@ -612,7 +617,15 @@ def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: i
     (CR/LF) or a non-digit caller number. Returns True if Asterisk queued it."""
     if not _EXT_RE.fullmatch(ext or ""):
         return False
-    if any(c in (sound or "") for c in "\r\n"):  # no AMI header injection via the path
+    # The clip path now travels as a DIALPLAN VARIABLE (SW_ANN_FILE) rather than
+    # as Playback's Data, so validate it against a strict charset instead of only
+    # rejecting CR/LF: this bars '$', '{', '}' and ',' outright, so the value can
+    # carry neither an AMI header break nor a dialplan expansion nor an extra
+    # Playback argument. Callers build this name themselves as
+    # ann-<ext>-<32hex>.wav under ANNOUNCE_DIR (realpath-contained), which is
+    # already within this set -- the check is defence in depth, not a new
+    # constraint on legitimate input.
+    if not _ANNOUNCE_SOUND_RE.fullmatch(sound or ""):
         return False
     cnum = caller_num if (caller_num or "").isdigit() else "8000"
     action_id = _next_action_id()
@@ -621,8 +634,18 @@ def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: i
             [
                 "Action: Originate",
                 f"Channel: PJSIP/{ext}",
-                "Application: Playback",
-                f"Data: {sound}",
+                # Originate into a thin dialplan context rather than straight
+                # to Application: Playback. An Application originate never enters
+                # the dialplan, so it has no `h` extension and switchboard-rtpqos
+                # is unreachable BY CONSTRUCTION -- two audit windows found 23
+                # then 18 announce playbacks and zero QoS records, leaving a
+                # clipped or undelivered announcement indistinguishable from one
+                # that played in full. One dialplan hop buys a hangup cause, a
+                # billsec and a quality record.
+                "Context: switchboard-announce-play",
+                "Exten: s",
+                "Priority: 1",
+                f"Variable: SW_ANN_FILE={sound}",
                 f"CallerID: Switchboard Announce <{cnum}>",
                 # Auto-answer onto the SPEAKER via the standard SIP intercom header, so
                 # an alert plays HANDS-FREE instead of ringing (the WP826 has "Allow
