@@ -52,3 +52,23 @@ if __name__ == "__main__":
     test_translation_completeness()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     sys.exit(1 if _failures else 0)
+
+
+def test_addon_starts_in_the_services_phase() -> None:
+    """Dial tone must not queue behind Home Assistant Core.
+
+    The Supervisor default is startup: application, which holds the add-on until
+    Core reports RUNNING. Asterisk, the GXW gateway and the SIP trunk have no
+    dependency on Core, so that gate delays every extension -- and the 911 path --
+    for no benefit: 66.4 s behind the first services-phase add-on on the
+    2026-08-25 boot, and unbounded if Core stalls on a recorder migration over a
+    dirty database or a wedged custom integration.
+
+    Safe because the HA-facing pollers degrade instead of exiting when Core is
+    absent (ha_client.set_state returns False rather than raising, and each
+    poller retries next cycle). If that ever changes, this test should be
+    revisited deliberately rather than silently reverted."""
+    cfg = yaml.safe_load((_ROOT / "config.yaml").read_text())
+    assert cfg.get("startup") == "services", (
+        f"startup is {cfg.get('startup')!r}; 'application' queues the PBX behind "
+        "HA Core reaching RUNNING")

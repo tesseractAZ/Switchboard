@@ -826,6 +826,36 @@ def render_status_context() -> list[str]:
     ]
 
 
+def render_announce_play_context() -> list[str]:
+    """[switchboard-announce-play]: the target of the HA-pushed announcement.
+
+    An announcement used to be Originated straight to ``Application: Playback``,
+    which never enters the dialplan — so it had no ``h`` extension, and
+    switchboard-rtpqos was unreachable BY CONSTRUCTION. Two audit windows found
+    the same thing: 23 then 18 announce playbacks and not one QoS record, so an
+    announcement that was clipped, dropped mid-play or never delivered is
+    indistinguishable in the record from one that played in full. That is the
+    exact failure mode the cordless is prone to, since its WiFi radio parks
+    between calls.
+
+    Originating into this thin context instead yields a hangup cause, a billsec
+    and a QoS record, at the cost of one dialplan hop. The tag stays "announce"
+    (NOT a new one) so it lands in callqos's PLAYBACK_TAGS: recorded honestly,
+    but it never notifies, never moves sensor.switchboard_last_call, and — via
+    devhealth's load_callqos_ts filter — never confirms a call for last_call_mos.
+
+    SW_ANN_FILE is charset-validated in ami.announce_to_ext before it is sent."""
+    return [
+        ";; ----- HA -> phone announce playback (Originate target) -----",
+        "[switchboard-announce-play]",
+        "exten = s,1,NoOp(HA announce playback)",
+        " same = n,Playback(${SW_ANN_FILE})",
+        " same = n,Hangup()",
+    ] + rtpqos_h("announce") + [
+        "",
+    ]
+
+
 def render_announce_context() -> list[str]:
     """The [announce] context: record a short message and play it out to the
     configured Home Assistant media players (via the announce AGI)."""
@@ -1377,6 +1407,12 @@ def render_extensions(opts: dict) -> str:
         parts += render_status_context()
     if announce_on and exts:
         parts += render_announce_context()
+    # The HA-pushed announcement (POST /api/announce -> ami.announce_to_ext) is a
+    # SEPARATE feature from the phone->HA [announce] menu above and is not gated on
+    # announce_enabled, so emit its Originate target whenever there are extensions.
+    # Inert unless something originates into it.
+    if exts:
+        parts += render_announce_play_context()
     # Directory assistance context (voice room lookup + connect).
     if directory_on and exts:
         parts += render_directory_context(joined, trunk_on=bool(trunk.get("enabled")))

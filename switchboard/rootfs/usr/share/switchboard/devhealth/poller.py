@@ -212,6 +212,12 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
 CALLQOS_MATCH_WINDOW_S = 90
 
 
+# Legs the PBX originates to play something AT a phone. Mirrors PLAYBACK_TAGS in
+# switchboard-callqos; kept as a literal because devhealth is a separate process
+# that must not import from /usr/bin.
+PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
+
+
 def load_callqos_ts(path: str | None = None, max_bytes: int = 65536) -> list[float]:
     """Epoch hangup times (`ts`) of recent call-ledger legs, for gating the
     phone's RTP records to REAL dialplan calls (see last_call_mos). Reads only
@@ -232,7 +238,19 @@ def load_callqos_ts(path: str | None = None, max_bytes: int = 65536) -> list[flo
         # AttributeError: a syntactically-valid line that isn't an object
         # (e.g. a bare number) has no .get — skipped like any malformed line.
         try:
-            out.append(float(json.loads(line).get("ts")))
+            rec = json.loads(line)
+            # PLAYBACK legs must NOT confirm a call. This gate exists solely to
+            # keep phone-side RTP records from PLAYBACK out of last_call_mos --
+            # the handset scores them 2.2-2.9 and they fired three false
+            # 'degraded' episodes on 2026-08-05/06. It worked because playback
+            # legs were absent from the ledger; v0.55.0 then added the rtpqos
+            # hook to wakeup-deliver, page and announce, so they ARE in the
+            # ledger now and were confirming themselves -- silently restoring
+            # the exact bug this gate was written to close. Filter by tag, so
+            # the gate no longer depends on an accident of ledger coverage.
+            if str(rec.get("tag") or "") in PLAYBACK_TAGS:
+                continue
+            out.append(float(rec.get("ts")))
         except (AttributeError, TypeError, ValueError):
             continue
     return out
