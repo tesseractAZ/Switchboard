@@ -115,3 +115,46 @@ def test_backup_pre_hook_never_fails_a_backup() -> None:
     post = str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-post")
     r = subprocess.run([sys.executable, post], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[:200]
+
+
+def test_backup_hooks_leave_evidence_outside_the_container() -> None:
+    """Both hooks must record the backup window to a file under /share.
+
+    A hook runs via `docker exec`, and an exec's stdout does NOT reach the
+    container's main log stream -- so a hook that only prints is unverifiable
+    from outside, and a hook that silently never runs looks identical to one
+    that ran perfectly. /share is mapped writable and readable from the host
+    side, so the stamp is the only evidence an audit can actually check.
+
+    It also closes the gap that motivated the post-hook: the Supervisor log
+    shows the image export starting, but nothing recorded when THIS add-on's
+    state stopped being copied, so a torn ledger line could not be attributed
+    to a backup window."""
+    import json as _json
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        stamp = str(Path(td) / "sub" / "window.jsonl")   # nested: hook must mkdir
+        env = {"SWITCHBOARD_STATE": "/tmp", "SWITCHBOARD_BACKUP_STAMP": stamp,
+               "PATH": "/usr/bin:/bin"}
+        for hook in ("switchboard-backup-pre", "switchboard-backup-post"):
+            r = subprocess.run(
+                [sys.executable, str(_ROOT / "rootfs" / "usr" / "bin" / hook)],
+                capture_output=True, text=True, env=env)
+            assert r.returncode == 0, f"{hook}: {r.stderr[:200]}"
+
+        recs = [_json.loads(l) for l in Path(stamp).read_text().splitlines() if l.strip()]
+        phases = [r["phase"] for r in recs]
+        assert phases == ["pre", "post"], phases
+        assert all("ts" in r for r in recs), recs
+        assert recs[0].get("synced_files", -1) >= 0, "pre must record what it flushed"
+
+    # An unwritable stamp path must still not fail the backup.
+    r = subprocess.run(
+        [sys.executable, str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-pre")],
+        capture_output=True, text=True,
+        env={"SWITCHBOARD_STATE": "/tmp",
+             "SWITCHBOARD_BACKUP_STAMP": "/proc/cannot/write/here.jsonl",
+             "PATH": "/usr/bin:/bin"})
+    assert r.returncode == 0, f"unwritable stamp failed the backup: {r.stderr[:200]}"

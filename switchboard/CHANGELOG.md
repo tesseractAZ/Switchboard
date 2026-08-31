@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.58.1
+
+The backup hooks now leave evidence that they ran.
+
+A backup hook executes via `docker exec`, and an exec's stdout does **not** reach
+the container's main log stream — so a hook that only prints is unverifiable from
+outside, and a hook that silently never runs looks identical to one that ran
+perfectly. Verifying 0.58.0 hit exactly that wall: the backup completed, the
+hooks produced no log line, and neither outcome could be distinguished.
+
+Both hooks now append a record to `/share/switchboard/backup-window.jsonl`,
+which is readable from the host side unlike `/data`:
+
+    {"phase": "pre",  "ts": "...", "synced_files": 12}
+    {"phase": "post", "ts": "..."}
+
+That also closes the gap the post-hook existed for. The Supervisor log shows the
+image export starting, but nothing recorded when *this add-on's* state stopped
+being copied — so a torn ledger line could never be attributed to a backup
+window. Now both edges are on record.
+
+Still unable to fail a backup: an unwritable stamp path is logged and swallowed,
+and that path is covered by a test.
+
+
 ## 0.58.0
 
 Backups now flush this add-on's durable state before the Supervisor copies it.

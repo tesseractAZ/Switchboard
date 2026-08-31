@@ -23,6 +23,34 @@ import os
 import sys
 
 STATE_DIR = os.environ.get("SWITCHBOARD_STATE", "/data/state")
+# /share is mapped writable and is readable from OUTSIDE the container, unlike
+# /data. That matters twice over: it is the only way to observe that these hooks
+# ran at all (a hook runs via `docker exec`, whose stdout does NOT reach the
+# add-on's log stream, so printing alone is unverifiable), and it gives an audit
+# both edges of the backup window -- previously the Supervisor log showed the
+# image export starting but nothing recorded when this add-on's own state
+# stopped being copied, so a torn ledger line could not be attributed.
+STAMP_PATH = os.environ.get("SWITCHBOARD_BACKUP_STAMP",
+                            "/share/switchboard/backup-window.jsonl")
+
+
+def _stamp(phase: str, synced: int = -1) -> None:
+    """Append one backup-window record. Best-effort: never fails the backup."""
+    import datetime
+    import json
+    rec = {"phase": phase,
+           "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(
+               timespec="seconds")}
+    if synced >= 0:
+        rec["synced_files"] = synced
+    try:
+        os.makedirs(os.path.dirname(STAMP_PATH), exist_ok=True)
+        with open(STAMP_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        print(f"[switchboard-backup-pre] stamp: {exc}", flush=True)
 
 
 def main() -> int:
@@ -61,6 +89,7 @@ def main() -> int:
         print(f"[switchboard-backup-pre] fsync dir: {exc}", flush=True)
     print(f"[switchboard-backup-pre] flushed {synced} state file(s) in {STATE_DIR}",
           flush=True)
+    _stamp("pre", synced)
     return 0
 
 
