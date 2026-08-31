@@ -718,18 +718,31 @@ def render_wakeup_context() -> list[str]:
     ] + rtpqos_h("wakeup") + [
         "",
         "[wakeup-deliver]",
+        # SW_STAGE records how far delivery actually got. Channel variables survive
+        # into the h extension, so rtpqos_h reports the LAST stage reached. Without
+        # it the ledger recorded only "ring queued=True" plus "answered": one
+        # snoozed wake-up produced three attempts that died at dialplan steps 6, 5
+        # and 9, and nothing distinguished a delivery cut off before the greeting
+        # from one that ran to completion. A wake-up that half-played is a wake-up
+        # that failed, and it looked identical to a success.
         "exten = s,1,NoOp(Wake-up delivery to ${CHANNEL})",
+        " same = n,Set(SW_STAGE=answering)",
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
+        " same = n,Set(SW_STAGE=greeting)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        " same = n,Set(SW_STAGE=time)",
         " same = n,SayUnixTime(,,IMp)",
         # Smart wake-up: fire the configured scene + speak weather / next calendar
         # event (all no-ops if unconfigured or HA is unreachable — the AGI degrades).
+        " same = n,Set(SW_STAGE=extras)",
         " same = n,AGI(switchboard-wakeup-deliver.agi)",
         " same = n,Wait(1)",
+        " same = n,Set(SW_STAGE=repeat)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
         " same = n,SayUnixTime(,,IMp)",
+        " same = n,Set(SW_STAGE=complete)",
         " same = n,Hangup()",
     ] + rtpqos_h("wakeup-deliver") + [
         "",
@@ -849,7 +862,9 @@ def render_announce_play_context() -> list[str]:
         ";; ----- HA -> phone announce playback (Originate target) -----",
         "[switchboard-announce-play]",
         "exten = s,1,NoOp(HA announce playback)",
+        " same = n,Set(SW_STAGE=playing)",
         " same = n,Playback(${SW_ANN_FILE})",
+        " same = n,Set(SW_STAGE=complete)",
         " same = n,Hangup()",
     ] + rtpqos_h("announce") + [
         "",
@@ -1089,6 +1104,9 @@ def render_rtpqos_context() -> list:
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         ' --codec "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
         ' --hcause "${HANGUPCAUSE}" --rxcount "${RXC}" --txcount "${TXC}"'
+        # How far a scripted leg got before hangup. Empty for contexts that set
+        # no stage (a normal room call has no stages to reach).
+        ' --stage "${FILTER(a-z,${SW_STAGE})}"'
         f' --rxploss {q("rxploss")} --txploss {q("txploss")}'
         f' --rxjitter {q("rxjitter")} --txjitter {q("txjitter")} --rtt {q("rtt")}'
         f' --rxmes {q("rxmes")} --txmes {q("txmes")}'
@@ -1126,7 +1144,8 @@ def render_rtpqos_context() -> list:
         f"rxcount=${{RXC}} txcount=${{TXC}} "
         f"rxploss={_q('rxploss')} txploss={_q('txploss')} "
         f"rxjitter={_q('rxjitter')} txjitter={_q('txjitter')} rtt={_q('rtt')} "
-        f"rxmes={_q('rxmes')} txmes={_q('txmes')} tag=${{ARG1}})",
+        f"rxmes={_q('rxmes')} txmes={_q('txmes')} tag=${{ARG1}} "
+        "stage=${FILTER(a-z,${SW_STAGE})})",
         callqos,
         " same = n(done),Return()",
     ]
@@ -1763,6 +1782,11 @@ def render_logger(opts: dict) -> str:
         "[logfiles]\n"
         f"console => {base}\n"
         "/data/state/asterisk.log => notice,warning,error\n"
+        # The readable twin. Same severities PLUS verbose, because the container
+        # log stamps NOTICE/WARNING/ERROR but NOT ast_verbose -- the dialplan
+        # trace that shows what a call actually did. A file channel stamps every
+        # line, and /share can be read from the host side, unlike /data.
+        "/share/switchboard/asterisk.log => notice,warning,error,verbose\n"
     )
 
 
@@ -1791,6 +1815,63 @@ def render_features() -> str:
         "atxfer => *2",
         "",
     ])
+
+
+SHARE_DIR = Path("/share/switchboard")
+SHARE_LOG = SHARE_DIR / "asterisk.log"
+# Verbose is affordable here only because v0.56.0 turned off displayconnects: the
+# AMI logon/logoff pairs were 89.4% of the log. Cap anyway -- Asterisk never
+# rotates a logfiles channel, and an unbounded forensic log is its own outage.
+SHARE_LOG_MAX_BYTES = 32 * 1024 * 1024
+
+
+def ensure_share_log_dir() -> None:
+    """Create /share/switchboard, asterisk-writable, for the READABLE copy of the
+    Asterisk log -- and trim it if it has grown past the cap.
+
+    /data/state/asterisk.log already exists as the durable forensic log, and it is
+    the right place for it: /data survives even if /share is unmounted. But it
+    cannot be READ. The container shell is blocked by protection mode, backups are
+    encrypted (SecureTar), and the add-on API returns 403 on every path -- so the
+    log written specifically for post-incident forensics is unreachable at exactly
+    the moment it is wanted. An audit called this "the single highest-value unlock".
+
+    /share is mapped writable and readable from the host side, so a second channel
+    here is the whole fix. It also carries `verbose`, which the /data one omits:
+    NOTICE/WARNING/ERROR reach the container log already stamped, but ast_verbose
+    output -- the `-- Executing [...]` dialplan trace, i.e. the actual call flow --
+    does not, and 0 of 3438 container-log lines in one audit window carried a
+    timestamp at all. A file channel stamps every line, so the call flow finally
+    becomes correlatable with host.log and the Supervisor.
+
+    Asterisk runs as -U asterisk, so it must own the directory to open the file.
+    Best-effort throughout: a logging convenience must never block a PBX start."""
+    try:
+        SHARE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            if SHARE_LOG.exists() and SHARE_LOG.stat().st_size > SHARE_LOG_MAX_BYTES:
+                # Truncate rather than delete: keep the inode so a running Asterisk
+                # (on a config reload rather than a cold start) keeps writing.
+                with open(SHARE_LOG, "w", encoding="utf-8"):
+                    pass
+                log(f"trimmed {SHARE_LOG} (was over {SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
+        except OSError as exc:
+            log(f"WARN could not trim {SHARE_LOG}: {exc}")
+        import shutil as _sh
+        try:
+            _sh.chown(str(SHARE_DIR), user="asterisk", group="asterisk")
+        except (LookupError, KeyError, PermissionError, OSError) as exc:
+            log(f"WARN could not chown {SHARE_DIR}: {exc}")
+        if SHARE_LOG.exists():
+            try:
+                _sh.chown(str(SHARE_LOG), user="asterisk", group="asterisk")
+            except (LookupError, KeyError, PermissionError, OSError):
+                pass
+        log(f"share log dir ready: {SHARE_DIR}")
+    except OSError as exc:
+        # /share not mapped, read-only, or full -- Asterisk will log its own
+        # failure to open the channel and carry on with the /data one.
+        log(f"WARN share log dir unavailable ({exc}); /data/state/asterisk.log only")
 
 
 def ensure_state_dir() -> None:
@@ -2061,6 +2142,7 @@ def main() -> None:
     # wake-up AGI and the dialplan's MWI-clear (both run as the asterisk user) can
     # write their JSON stores instead of crashing with EPERM.
     ensure_state_dir()
+    ensure_share_log_dir()
     # Set the container's local time before Asterisk/console start, so the
     # talking clock and console clock read local time.
     tz = apply_timezone(resolve_timezone(opts))

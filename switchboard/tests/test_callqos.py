@@ -33,10 +33,15 @@ def check(name: str, cond: bool) -> None:
 
 
 class _Args:
-    """A stand-in for argparse.Namespace with the defaults callqos expects."""
-    _FIELDS = ("source tag chan cid codec billsec hcause rxcount txcount rxploss "
-               "txploss rxjitter txjitter rtt rxmes txmes maxrtt stdevrtt rxmaxjitter "
-               "rxoctet txoctet").split()
+    """A stand-in for argparse.Namespace with the defaults callqos expects.
+
+    The field list is DERIVED from the real parser rather than restated. It used
+    to be a hand-maintained copy, which silently drifted the moment callqos gained
+    an argument: adding --stage made build_record raise
+    AttributeError: '_Args' object has no attribute 'stage' in 11 tests at once --
+    a failure about the stub, not about the behaviour under test, which is pure
+    noise to debug. Deriving it means the stub cannot lag the parser again."""
+    _FIELDS = sorted(vars(cq._parse_args([])))
 
     def __init__(self, **kw):
         for f in self._FIELDS:
@@ -584,3 +589,85 @@ if __name__ == "__main__":
     test_main_never_raises()
     print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
     raise SystemExit(1 if _failures else 0)
+
+
+def test_rtt_sampling_flags_a_statistically_empty_measurement() -> None:
+    """A one-RTCP-round RTT must be distinguishable from a well-sampled one.
+
+    Live example that motivated this: rtt=0.005538 with stdev=0.000000 and maxrtt
+    equal to rtt reached the ledger beside an ordinary rxmes=82.5. Statistically
+    empty, yet indistinguishable from a real reading by any field the record
+    carried -- so every mean, percentile and trend built on the ledger was
+    averaging it in at full weight.
+
+    Asterisk exposes no RTCP report count, and inventing a CHANNEL(rtcp,...) name
+    that does not exist is the v0.48.0 rxoctetcount mistake (four WARNINGs per
+    call, field null in 100% of records). So this is derived from fields already
+    in hand."""
+    check("sampling: spread present -> multi", cq.rtt_sampling(5.5, 9.0, 1.2) == "multi")
+    check("sampling: zero spread, max == mean -> single",
+          cq.rtt_sampling(5.538, 5.538, 0.0) == "single")
+    check("sampling: nothing measured at all -> none",
+          cq.rtt_sampling(0.0, 0.0, 0.0) == "none")
+    check("sampling: all-None -> none", cq.rtt_sampling(None, None, None) == "none")
+    # A max that disagrees with the mean means real spread, whatever stdev says --
+    # claim 'multi' rather than assert a single sample we cannot support.
+    check("sampling: max above mean with zero stdev -> multi",
+          cq.rtt_sampling(5.0, 9.0, 0.0) == "multi")
+
+    rec = cq.build_record(_Args(source="dialplan", tag="wakeup-deliver",
+                                chan="PJSIP/19-1", billsec="3", rxcount="150",
+                                txcount="150", rtt="0.005538", maxrtt="0.005538",
+                                stdevrtt="0.000000", rxmes="82.5", txmes="82.5"))
+    check("record: carries rtt_samples", rec.get("rtt_samples") == "single")
+
+    rec2 = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
+                                 billsec="30", rxcount="1500", txcount="1500",
+                                 rtt="0.004", maxrtt="0.012", stdevrtt="0.003",
+                                 rxmes="88.0", txmes="88.0"))
+    check("record: a well-sampled leg reads multi", rec2.get("rtt_samples") == "multi")
+
+
+def test_playback_leg_is_attributed_to_its_extension_not_to_cid_zero() -> None:
+    """A wake-up delivery leg must be filed under its extension.
+
+    An audit reported that all three tag=wakeup-deliver records carried cid=0 and
+    concluded "every wake-up delivery measurement is filed under a nonexistent
+    extension 0". That is WRONG, and this pins why: ext is taken from the CHANNEL
+    NAME, and only falls back to cid when the endpoint is not numeric (an inbound
+    PJSIP/trunk-... leg, where the cid genuinely is the PSTN caller). cid=0 shows
+    up only in the human-readable Verbose line."""
+    rec = cq.build_record(_Args(source="dialplan", tag="wakeup-deliver",
+                                chan="PJSIP/19-00000025", cid="0", billsec="8",
+                                rxcount="400", txcount="400", rxmes="88", txmes="88"))
+    check("attribution: filed under the channel's extension, not cid 0",
+          rec["ext"] == "19")
+    # The inbound-trunk case must keep the old behaviour.
+    rec2 = cq.build_record(_Args(source="dialplan", tag="from-trunk",
+                                 chan="PJSIP/trunk-0000001", cid="5551234",
+                                 billsec="20", rxcount="1000", txcount="1000"))
+    check("attribution: non-numeric endpoint still keeps the caller id",
+          rec2["ext"] == "5551234")
+
+
+def test_stage_records_how_far_a_scripted_leg_got() -> None:
+    """A wake-up cut off before the greeting must not look like a completed one.
+
+    The ledger previously recorded only "ring queued=True" plus "answered". One
+    snoozed wake-up produced three attempts that died at dialplan steps 6, 5 and
+    9, and nothing in the record distinguished them from a delivery that ran to
+    completion. A wake-up that half-played is a wake-up that failed."""
+    cut = cq.build_record(_Args(source="dialplan", tag="wakeup-deliver",
+                                chan="PJSIP/19-1", stage="greeting", billsec="2",
+                                rxcount="100", txcount="100"))
+    done = cq.build_record(_Args(source="dialplan", tag="wakeup-deliver",
+                                 chan="PJSIP/19-2", stage="complete", billsec="21",
+                                 rxcount="1050", txcount="1050"))
+    check("stage: a cut-off delivery records where it stopped",
+          cut["stage"] == "greeting")
+    check("stage: a completed delivery says so", done["stage"] == "complete")
+    check("stage: the two are distinguishable", cut["stage"] != done["stage"])
+    # An ordinary room call defines no stages and must not invent one.
+    plain = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
+                                  billsec="30", rxcount="1500", txcount="1500"))
+    check("stage: empty for a context with no stages", plain["stage"] == "")

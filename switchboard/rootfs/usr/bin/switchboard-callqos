@@ -131,6 +131,35 @@ def _ms(sec):
 # real-world failure mode — e.g. the MES-59 WiFi-cordless call) can't hide behind
 # a healthy reverse path.
 # --------------------------------------------------------------------------- #
+def rtt_sampling(rtt_ms, max_ms, stdev_ms):
+    """How many RTCP rounds the RTT figures rest on: 'multi' | 'single' | 'none'.
+
+    A one-round measurement is the dangerous case, because it does not LOOK like
+    one. Live example: rtt=0.005538 with stdev=0.000000 and maxrtt equal to rtt
+    reached the ledger beside a perfectly ordinary rxmes=82.5 -- statistically
+    empty, but indistinguishable from a well-sampled leg by any field the record
+    carried. Every mean, percentile and trend the ledger supports was averaging
+    those in at full weight.
+
+    Asterisk exposes no RTCP report count, and inventing a CHANNEL(rtcp,...) name
+    that does not exist is exactly the v0.48.0 rxoctetcount mistake -- four
+    WARNINGs per call and a field null in 100% of records. So this is DERIVED
+    from what is already in hand: a spread of zero with max == mean means one
+    sample (or none at all, if the mean is zero too)."""
+    def _z(v):
+        return v is None or abs(v) < 1e-9
+    if _z(rtt_ms) and _z(max_ms) and _z(stdev_ms):
+        return "none"
+    if not _z(stdev_ms):
+        return "multi"
+    # stdev is zero: one sample, unless max disagrees with the mean (which would
+    # mean real spread that stdev somehow missed -- treat that as multi, not as a
+    # claim we cannot support).
+    if _z(max_ms) or abs((max_ms or 0) - (rtt_ms or 0)) < 1e-9:
+        return "single"
+    return "multi"
+
+
 def classify(worst_mes, worst_loss_pct, rtt_ms):
     """Return (label, notify: bool, reasons: list[str]).
 
@@ -265,6 +294,10 @@ def build_record(a) -> dict:
         "dur": dur,
         "billsec_raw": billsec_raw,
         "hcause": _int(a.hcause),
+        # "" for an ordinary call; for a scripted leg this is the LAST milestone
+        # reached, so a wake-up cut off before the greeting is finally
+        # distinguishable from one that ran to completion.
+        "stage": (a.stage or "").strip(),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
         "jitter_rx_ms": jit_rx, "jitter_tx_ms": jit_tx,
@@ -272,6 +305,10 @@ def build_record(a) -> dict:
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
         # bumpy stream that a healthy AVERAGE would mask.
         "rtt_max_ms": _ms(_num(a.maxrtt)), "rtt_stdev_ms": _ms(_num(a.stdevrtt)),
+        # How much sampling the RTT figures rest on. 'single' is the one that
+        # matters: statistically empty but visually identical to a real reading.
+        # Consumers computing any aggregate should drop anything but 'multi'.
+        "rtt_samples": rtt_sampling(rtt_ms, _ms(_num(a.maxrtt)), _ms(_num(a.stdevrtt))),
         "jitter_rx_max_ms": _ms(_num(a.rxmaxjitter)),
         "rx_octets": _int(a.rxoctet), "tx_octets": _int(a.txoctet),
         "mes_rx": round(rxmes, 1) if rxmes is not None else None,
@@ -416,6 +453,9 @@ def _parse_args(argv):
     p.add_argument("--codec", default="")
     p.add_argument("--billsec", default="")
     p.add_argument("--hcause", default="")
+    # How far a scripted leg (wake-up delivery, announce) got before hangup.
+    # Empty for contexts that define no stages.
+    p.add_argument("--stage", default="")
     for f in ("rxcount", "txcount", "rxploss", "txploss", "rxjitter", "txjitter",
               "rtt", "rxmes", "txmes", "maxrtt", "stdevrtt", "rxmaxjitter",
               "rxoctet", "txoctet"):
