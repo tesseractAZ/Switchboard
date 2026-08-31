@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Quiesce Switchboard's durable state just before the Supervisor snapshots it.
+
+Every backup of this add-on runs HOT: an audit of 3975 Supervisor lines found 18
+`Stopping app_` entries and not one of them was Switchboard, and 13 of 16 add-on
+updates in the same window took no pre-update backup at all. So the call-quality
+ledger and the durable Asterisk log are copied while they are being appended to,
+with no flush and no fsync barrier.
+
+Taking the add-on COLD for a backup was rejected deliberately: it would drop dial
+tone -- including the 911 path -- for the ~15 s the image export takes, every
+night. A dropped phone line is a worse failure than a torn trailing log line.
+
+So this does the cheap, safe half instead: flush the page cache for the state
+directory to disk so everything written up to this instant is durable in the
+snapshot. A record still being written when the copy starts can be torn, but
+every reader already tolerates that -- load_callqos_ts() and the ledger readers
+skip malformed lines by design -- and the torn record is at most the newest one.
+
+Never fails the backup: any error is logged and swallowed. A backup that runs is
+worth far more than one blocked by a hook."""
+import os
+import sys
+
+STATE_DIR = os.environ.get("SWITCHBOARD_STATE", "/data/state")
+
+
+def main() -> int:
+    synced = 0
+    try:
+        names = sorted(os.listdir(STATE_DIR))
+    except OSError as exc:
+        print(f"[switchboard-backup-pre] state dir unreadable ({exc}); nothing to "
+              "flush", flush=True)
+        return 0
+    for name in names:
+        path = os.path.join(STATE_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.fsync(fd)
+            synced += 1
+        except OSError as exc:
+            print(f"[switchboard-backup-pre] fsync {name}: {exc}", flush=True)
+        finally:
+            os.close(fd)
+    # Also fsync the directory itself so renames/creations are durable, not just
+    # file contents -- an atomic-replace writer leaves the new name in the dir
+    # entry, which is a separate durability concern from the data blocks.
+    try:
+        dfd = os.open(STATE_DIR, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as exc:
+        print(f"[switchboard-backup-pre] fsync dir: {exc}", flush=True)
+    print(f"[switchboard-backup-pre] flushed {synced} state file(s) in {STATE_DIR}",
+          flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # never block a backup
+        print(f"[switchboard-backup-pre] non-fatal: {exc}", flush=True)
+        sys.exit(0)
