@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.58.0
+
+Backups now flush this add-on's durable state before the Supervisor copies it.
+
+Every backup of Switchboard runs **hot**. An audit of 3975 Supervisor lines
+found 18 `Stopping app_` entries and not one of them was Switchboard, and 13 of
+16 add-on updates in the same window took no pre-update backup at all. So the
+call-quality ledger and the durable Asterisk log at `/data/state/` were being
+copied mid-append, with no flush and no fsync barrier.
+
+Taking the add-on **cold** for a backup was rejected deliberately: it would drop
+dial tone — including the 911 path — for the ~15 s the image export takes, every
+night. A dropped phone line is a worse failure than a torn trailing log line, and
+every reader already tolerates the latter (`load_callqos_ts()` and the ledger
+readers skip malformed lines by design).
+
+So `backup_pre` does the cheap, safe half instead: fsync every file in the state
+directory, then fsync the directory itself so an atomic-replace writer's new name
+is durable too, not just its data blocks. `backup_post` marks the closing edge,
+because an audit could previously see the image export begin but had no record of
+when this add-on's state stopped being copied — which made it impossible to tell
+whether a torn ledger line fell inside a backup window.
+
+Neither hook can fail a backup. Every error path is logged and swallowed: a
+backup that runs is worth far more than one blocked by a flush that had nothing
+to do.
+
+
 ## 0.57.0
 
 Playback legs no longer vouch for themselves, announcements are measurable, and

@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.57.0"
+version: "0.58.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -23,6 +23,17 @@ apparmor: true
 # than exit when Core is absent: ha_client.set_state() returns False instead of
 # raising, and each poller retries on its next cycle.
 startup: services
+# Every backup of this add-on runs HOT -- an audit of 3975 Supervisor lines found
+# 18 "Stopping app_" entries and none was Switchboard, and 13 of 16 add-on updates
+# in that window took no pre-update backup at all. So the call-quality ledger and
+# the durable Asterisk log are copied mid-append with no flush barrier. Going COLD
+# was rejected deliberately: it would drop dial tone, including the 911 path, for
+# the ~15 s the image export takes, every night. The pre-hook flushes state to
+# disk instead; readers already tolerate a torn trailing line, and neither hook
+# can fail a backup.
+backup: hot
+backup_pre: /usr/bin/switchboard-backup-pre
+backup_post: /usr/bin/switchboard-backup-post
 # Supervisor API access — auto-detect the Home Assistant timezone (talking clock
 # / wake-up calls). Home Assistant Core API access — the voice/TUI/GUI home-
 # automation feature reads light states and calls light.turn_on/turn_off via the

@@ -72,3 +72,46 @@ def test_addon_starts_in_the_services_phase() -> None:
     assert cfg.get("startup") == "services", (
         f"startup is {cfg.get('startup')!r}; 'application' queues the PBX behind "
         "HA Core reaching RUNNING")
+
+
+def test_backup_hooks_are_declared() -> None:
+    """Backups must flush this add-on's durable state before being copied.
+
+    Every backup runs hot -- an audit found 18 "Stopping app_" lines in a window
+    and none was Switchboard -- so the call-quality ledger and the durable
+    Asterisk log are snapshotted mid-append. Going cold was rejected on purpose:
+    it would drop dial tone, including the 911 path, for the ~15 s of image
+    export, nightly. A torn trailing log line is the cheaper failure, and every
+    reader already skips malformed lines."""
+    cfg = yaml.safe_load((_ROOT / "config.yaml").read_text())
+    assert cfg.get("backup") == "hot", (
+        "cold backups would drop dial tone during every nightly snapshot")
+    assert cfg.get("backup_pre") == "/usr/bin/switchboard-backup-pre", cfg.get("backup_pre")
+    assert cfg.get("backup_post") == "/usr/bin/switchboard-backup-post", cfg.get("backup_post")
+    for hook in ("switchboard-backup-pre", "switchboard-backup-post"):
+        p = _ROOT / "rootfs" / "usr" / "bin" / hook
+        assert p.is_file(), f"{hook} declared in config.yaml but not shipped"
+    # ...and the image must make them executable, or the Supervisor's exec fails.
+    dockerfile = (_ROOT / "Dockerfile").read_text()
+    for hook in ("switchboard-backup-pre", "switchboard-backup-post"):
+        assert f"chmod +x /usr/bin/{hook}" in dockerfile, f"{hook} not chmod +x in Dockerfile"
+
+
+def test_backup_pre_hook_never_fails_a_backup() -> None:
+    """The hook must exit 0 even when its state directory is missing.
+
+    A hook that returns non-zero fails the Supervisor's backup. A backup that
+    runs is worth far more than one blocked by a flush that had nothing to do,
+    so every error path here is logged and swallowed."""
+    import subprocess
+    hook = str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-pre")
+    for state, why in (("/nonexistent-switchboard-state", "missing dir"),
+                       ("/tmp", "populated dir")):
+        r = subprocess.run([sys.executable, hook], capture_output=True, text=True,
+                           env={"SWITCHBOARD_STATE": state, "PATH": "/usr/bin:/bin"})
+        assert r.returncode == 0, f"{why}: exit {r.returncode}, stderr={r.stderr[:200]}"
+        assert "switchboard-backup-pre" in r.stdout, f"{why}: no log line emitted"
+
+    post = str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-post")
+    r = subprocess.run([sys.executable, post], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[:200]

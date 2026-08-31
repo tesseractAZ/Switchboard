@@ -97,6 +97,8 @@ COPY --from=whisper-builder /out/ /
 COPY rootfs /
 
 RUN chmod +x /usr/bin/switchboard-config \
+    && chmod +x /usr/bin/switchboard-backup-pre \
+    && chmod +x /usr/bin/switchboard-backup-post \
     && chmod +x /usr/bin/switchboard-opt \
     && chmod +x /usr/bin/switchboard-stt \
     && chmod +x /usr/bin/switchboard-tts \
@@ -130,4 +132,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.57.0"
+    io.hass.version="0.58.0"

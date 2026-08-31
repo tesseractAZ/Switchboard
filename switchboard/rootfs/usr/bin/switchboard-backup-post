@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Marks the end of the Supervisor's snapshot window.
+
+The pre-hook only flushes; it does not pause writers, so there is nothing to
+resume. This exists so the log carries both edges of the backup window: an audit
+could see the image export start but had no record of when the add-on's own
+state stopped being copied, which made it impossible to tell whether a torn
+ledger line fell inside a backup or not.
+
+Never fails the backup."""
+import sys
+
+if __name__ == "__main__":
+    print("[switchboard-backup-post] snapshot window closed", flush=True)
+    sys.exit(0)
