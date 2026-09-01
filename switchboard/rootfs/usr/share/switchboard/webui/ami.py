@@ -568,6 +568,26 @@ def device_busy(state: str) -> bool:
     return norm in _BUSY_DEVICE_STATES
 
 
+# Device states meaning "this endpoint has no usable contact right now". An
+# Originate to one of these cannot create a channel: Asterisk logs
+# `ast_sip_create_dialog_uac: Endpoint 'N': Could not create dialog to invalid
+# URI 'N'` and gives up. That error is the ONLY trace such an attempt leaves --
+# no channel means no dialplan, so no SW_STAGE, no rtpqos and no ledger row.
+_UNREACHABLE_DEVICE_STATES = frozenset({"unavailable", "invalid", "unknown"})
+
+
+def device_unreachable(state: str) -> bool:
+    """True when a device-state string means the endpoint has no contact.
+
+    Normalised the same way device_busy() normalises, because Asterisk uses two
+    spellings for these ("UNAVAILABLE" / "Unavailable"). An EMPTY state is NOT
+    treated as unreachable: the state read itself can fail, and refusing to
+    announce because we could not ask would silence an alarm. Fails open, the
+    same direction as the busy guard."""
+    norm = (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
+    return norm in _UNREACHABLE_DEVICE_STATES
+
+
 def get_device_state(ext: str) -> str:
     """Read DEVICE_STATE(PJSIP/<ext>) via a channel-less AMI Getvar: NOT_INUSE,
     INUSE, RINGING, RINGINUSE, BUSY, ONHOLD, UNAVAILABLE, INVALID or UNKNOWN.

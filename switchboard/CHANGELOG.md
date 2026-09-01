@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.61.0
+
+A delivery that never became a call now leaves a record.
+
+The QoS ledger is written from the dialplan's hangup extension, so it can only
+ever describe legs that **answered**. Everything upstream was invisible: an
+Originate refused for want of a contact, a handset that rang and was never picked
+up, an AMI error. One audit window held three refused Originates and a wake-up
+that rang 60 s unanswered, and not one produced a ledger row, a sensor, or
+anything an operator would read — nothing distinguished *"the phone never rang"*
+from *"the user ignored it."*
+
+That matters most for the alarm clock. A wake-up that silently fails is the
+defect most likely to be noticed at 7 a.m., by which point the record that would
+explain it does not exist.
+
+**Announcements now pre-flight the contact.** An Originate to an endpoint with no
+contact cannot create a channel — Asterisk logs `Could not create dialog to
+invalid URI` and stops — and with no channel there is no dialplan, so no
+`SW_STAGE`, no `rtpqos` and no ledger row. The handler now checks the device
+state first, skips the doomed Originate, and records the outcome. `device_unreachable()`
+fails **open** on an unreadable state, the same direction as the busy guard: a
+failed state read must never silence an alarm.
+
+Outcomes land in `/share/switchboard/delivery-outcomes.jsonl` alongside the other
+readable records, distinguishing `unreachable`, `skipped-busy`,
+`originate-error` and `originate-refused`.
+
+
 ## 0.60.1
 
 Heartbeat field names corrected.

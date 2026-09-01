@@ -420,3 +420,127 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_delivery_outcomes_are_recorded_where_they_can_be_read(tmp_path) -> None:
+    """Attempts that never became a call must still leave a record.
+
+    The QoS ledger is written from the dialplan's hangup extension, so it can
+    only ever describe legs that ANSWERED. An Originate refused for want of a
+    contact, a handset that rang unanswered, an AMI error -- all invisible. One
+    audit window held three refused Originates and a wake-up that rang 60 s
+    unanswered, and none of them produced a ledger row, a sensor, or anything an
+    operator would read. Nothing distinguished "the phone never rang" from "the
+    user ignored it".
+
+    Written under /share because /data cannot be read from outside the
+    container."""
+    import json as _json
+
+    out = tmp_path / "sub" / "delivery.jsonl"        # nested: the writer must mkdir
+    real = app.DELIVERY_OUTCOME_PATH
+    app.DELIVERY_OUTCOME_PATH = str(out)
+    try:
+        app._record_delivery("19", "announce", "unreachable",
+                             device_state="UNAVAILABLE")
+        app._record_delivery("19", "announce", "skipped-busy", device_state="INUSE")
+        app._record_delivery("14", "wakeup", "noanswer")
+    finally:
+        app.DELIVERY_OUTCOME_PATH = real
+
+    recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    check("delivery: one record per attempt", len(recs) == 3)
+    check("delivery: every record is dated", all(r.get("ts") for r in recs))
+    check("delivery: names the extension",
+          [r["ext"] for r in recs] == ["19", "19", "14"])
+    check("delivery: distinguishes the failure modes",
+          [r["outcome"] for r in recs] == ["unreachable", "skipped-busy", "noanswer"])
+    check("delivery: carries the device state that caused the skip",
+          recs[0]["device_state"] == "UNAVAILABLE")
+    check("delivery: omits absent optional fields rather than writing null",
+          "device_state" not in recs[2])
+    check("delivery: distinguishes a wake-up from an announcement",
+          recs[2]["kind"] == "wakeup")
+
+    # A record path that cannot be written must never fail a delivery.
+    app.DELIVERY_OUTCOME_PATH = "/proc/cannot/write/here.jsonl"
+    try:
+        app._record_delivery("19", "announce", "unreachable")
+        check("delivery: an unwritable record path is swallowed", True)
+    finally:
+        app.DELIVERY_OUTCOME_PATH = real
+
+
+def test_announce_handler_refuses_a_contactless_endpoint_and_records_it(tmp_path) -> None:
+    """The HANDLER must run the unreachable pre-flight -- not merely be able to.
+
+    Mutation testing caught this: disabling the pre-flight in api_announce left
+    the whole suite green, because the guard function had its own test while the
+    call site had none. That is the fourth time in this work that a function was
+    covered and its caller was not, so the caller gets driven directly here.
+
+    An Originate to a contactless endpoint cannot create a channel, and with no
+    channel there is no dialplan, no SW_STAGE, no rtpqos and no ledger row --
+    the failure's only trace was an Asterisk ERROR line."""
+    import asyncio as _aio
+    import json as _json
+
+    out = tmp_path / "delivery.jsonl"
+    originated = []
+
+    class _Req:
+        headers = {}
+        @staticmethod
+        async def json():
+            return {"text": "hello"}
+
+    class _Resp:
+        """Stand-in for fastapi's JSONResponse, which is None without fastapi."""
+        def __init__(self, payload, status_code=200):
+            self.payload, self.status_code = payload, status_code
+
+    class _Renderer:
+        """Stand-in for the TTS renderer: the handler renders BEFORE it guards,
+        and announce_asterisk is None in the test environment."""
+        @staticmethod
+        def build_announcement_8k(text, path):
+            with open(path, "wb") as fh:
+                fh.write(b"\0" * 32)
+            return True
+
+    saved = {k: getattr(app, k) for k in
+             ("load_options", "configured_room_exts", "valid_ext",
+              "get_device_state", "device_busy", "device_unreachable",
+              "announce_to_ext", "DELIVERY_OUTCOME_PATH", "announce_asterisk",
+              "ANNOUNCE_DIR", "JSONResponse")}
+    try:
+        app.JSONResponse = _Resp
+        app.announce_asterisk = _Renderer
+        app.ANNOUNCE_DIR = str(tmp_path / "ann")
+        import os as _os
+        _os.makedirs(app.ANNOUNCE_DIR, exist_ok=True)
+        app.load_options = lambda: {}
+        app.configured_room_exts = lambda o: {"19"}
+        app.valid_ext = lambda e: True
+        app.device_busy = lambda s: False
+        app.device_unreachable = lambda s: s == "UNAVAILABLE"
+        app.get_device_state = lambda e: "UNAVAILABLE"
+        app.announce_to_ext = lambda e, s: originated.append(e) or True
+        app.DELIVERY_OUTCOME_PATH = str(out)
+
+        resp = _aio.run(app.api_announce("19", _Req()))
+    finally:
+        for k, v in saved.items():
+            setattr(app, k, v)
+
+    check("handler: refuses rather than firing a doomed Originate",
+          originated == [])
+    check("handler: reports it did not deliver",
+          getattr(resp, "status_code", None) == 503)
+    check("handler: wrote a delivery record", out.exists())
+    rec = _json.loads(out.read_text().splitlines()[-1])
+    check("handler: the record names the failure mode",
+          rec["outcome"] == "unreachable")
+    check("handler: the record names the extension", rec["ext"] == "19")
+    check("handler: the record carries the device state",
+          rec["device_state"] == "UNAVAILABLE")
