@@ -30,18 +30,31 @@ def main() -> None:
     env = sp.read_env()
     wk = (sp.load_features() or {}).get("wakeup", {}) or {}
 
+    # Optional mode argument, so the dialplan can fire the SCENE on answer and
+    # speak the extras later:
+    #   "scene" -> fire the scene and return    "speak" -> extras only
+    #   absent  -> both, in the original order (backward compatible)
+    mode = (sys.argv[1].strip().lower() if len(sys.argv) > 1 else "")
+    do_scene = mode in ("", "scene")
+    do_speak = mode in ("", "speak")
+
     # Per-room scene first (the room this wake-up is ringing), then the
     # whole-house fallback.
     ext = sp.channel_ext(env)
     scene = sp.wakeup_scene_for(wk, ext)
+    if not do_scene:
+        scene = None
     if scene and ha_client:
         try:
             ha_client.call_service("scene", "turn_on", {"entity_id": scene})
             sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
         except Exception as exc:  # noqa: BLE001
             sp.log("wakeup-deliver", f"scene failed: {exc}")
-    elif not scene:
+    elif not scene and do_scene:
         sp.log("wakeup-deliver", f"no wake-up scene configured for ext {ext or '?'}")
+
+    if not do_speak:
+        return
 
     if wk.get("weather", True) and ha_reports:
         # Every branch here LOGS. The 2026-08-21 06:00 wake-up delivered its

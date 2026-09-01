@@ -729,6 +729,17 @@ def render_wakeup_context() -> list[str]:
         " same = n,Set(SW_STAGE=answering)",
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
+        # Fire the SCENE on answer, before a word is spoken. The delivery AGI used
+        # to run only after the greeting and the time, so hanging up during either
+        # meant the scene never fired -- and hanging up is exactly what someone
+        # does when a wake-up call has already woken them. Live: the scene fired
+        # on 1 of 3 delivered wake-ups.
+        #
+        # The audio is DISMISSIBLE; the scene is a real-world effect and is
+        # arguably the part that does the waking. Gating the least dismissible
+        # action behind the most dismissible one had it backwards.
+        " same = n,Set(SW_STAGE=scene)",
+        " same = n,AGI(switchboard-wakeup-deliver.agi,scene)",
         " same = n,Wait(1)",
         " same = n,Set(SW_STAGE=greeting)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
@@ -736,8 +747,10 @@ def render_wakeup_context() -> list[str]:
         " same = n,SayUnixTime(,,IMp)",
         # Smart wake-up: fire the configured scene + speak weather / next calendar
         # event (all no-ops if unconfigured or HA is unreachable — the AGI degrades).
+        # ...and the spoken extras (weather / calendar) stay here, after the time,
+        # where they belong in the narration. The scene has already fired.
         " same = n,Set(SW_STAGE=extras)",
-        " same = n,AGI(switchboard-wakeup-deliver.agi)",
+        " same = n,AGI(switchboard-wakeup-deliver.agi,speak)",
         " same = n,Wait(1)",
         " same = n,Set(SW_STAGE=repeat)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
