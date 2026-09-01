@@ -387,20 +387,24 @@ def trunk_transition(status: str, st: dict, settled: bool = True) -> str:
     return ""
 
 
-def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
+def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> str | None:
     """One watchdog cycle: read status, auto-kick if Rejected, publish, notify.
-    Every step best-effort — the link-health loop must never die on trunk work."""
+    Every step best-effort — the link-health loop must never die on trunk work.
+
+    Returns the registration status string (or None when AMI could not answer),
+    so the caller can put the outside line's state into the heartbeat record —
+    the trunk previously had no timestamped health history on any surface."""
     try:
         import ami
         regs = ami.get_registrations_or_none()
     except Exception:
-        return  # AMI down this cycle: skip entirely (don't blank the sensor)
+        return None  # AMI down this cycle: skip entirely (don't blank the sensor)
     if regs is None:
         # AMI unreachable — NOT the same as "the trunk has no registration".
         # Publishing here would blank the sensor to "unknown" (observed on 6/6
         # restarts before this distinction existed) and, once settled, would
         # count toward the down-alert and fire a false "outside line down".
-        return
+        return None
     reg = regs.get(TRUNK_REG_NAME) or {}
     status = (reg.get("status") or "").strip()
     kicked = False
@@ -444,7 +448,7 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
         pass
     event = trunk_transition(status, st, settled)
     if not (event and alerts_on):
-        return
+        return status or "unknown"
     try:
         import ha_client
         nid = "switchboard_trunk_registration"
@@ -461,6 +465,7 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> None:
                              notification_id=nid)
     except Exception:
         pass
+    return status or "unknown"
 
 
 def _load_options() -> dict:
@@ -538,6 +543,67 @@ def _poll_interval() -> int:
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+HEARTBEAT_PATH = os.environ.get("SWITCHBOARD_HEARTBEAT",
+                                "/share/switchboard/heartbeat.jsonl")
+HEARTBEAT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _heartbeat(summ: dict | None, trunk_status: str | None,
+               wired_down: list | None = None) -> None:
+    """Append one liveness record to /share, readable from OUTSIDE the container.
+
+    Two problems, one file.
+
+    (1) The forensic log cannot tell idle from dead. It went 19 h 42 m with no
+    entry on 2026-08-30/31 while the PBX was perfectly healthy -- steady-state
+    contact refreshes do not log, only initial registration does, so a quiet
+    system and a wedged Asterisk produce byte-identical output: none. Reading
+    that log alone, those two cases are indistinguishable.
+
+    (2) The outside line had no timestamped health history on ANY surface. Its
+    state lived only in a pushed HA sensor, which has no history a log reader can
+    consult and which freezes at its last value if the add-on dies. The trunk is
+    the outside line and the open E911 path.
+
+    A dated record every poll cycle fixes both: silence in THIS file means the
+    poller stopped, and the trunk's state is on the record with a timestamp. It
+    lives beside the forensic log precisely because /data cannot be read.
+
+    Best-effort throughout -- a liveness record must never break the poll that
+    produces it."""
+    rec = {
+        "ts": _now_iso(),
+        "poller": "rtpmon",
+        "interval_s": _poll_interval(),
+        "trunk": trunk_status or "unknown",
+    }
+    if summ:
+        rec["reachable"] = summ.get("reachable")
+        rec["expected"] = summ.get("expected")
+        rec["worst_rtt_ms"] = summ.get("worst_rtt")
+    else:
+        # AMI unreachable this cycle: say so rather than omitting the fields,
+        # so a reader can tell "no data" from "zero phones up".
+        rec["reachable"] = None
+        rec["ami"] = "unreachable"
+    if wired_down:
+        rec["wired_down"] = list(wired_down)
+    try:
+        os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
+        # Cap: this file is append-only and unbounded otherwise. Truncating keeps
+        # the newest records, which are the ones a reader wants.
+        try:
+            if os.path.getsize(HEARTBEAT_PATH) > HEARTBEAT_MAX_BYTES:
+                with open(HEARTBEAT_PATH, "w", encoding="utf-8"):
+                    pass
+        except OSError:
+            pass
+        with open(HEARTBEAT_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError as exc:
+        sys.stderr.write(f"[switchboard-rtpmon] heartbeat: {exc}\n")
 
 
 def _publish(phones: list, summ: dict) -> None:
@@ -719,8 +785,18 @@ def run() -> int:
             event = outage_transition(summ, outage_st, settled)
             if event and opts.get("link_health_alerts", True):
                 _notify_outage(event, summ)
+        trunk_status = None
         if trunk_enabled(opts):
-            _trunk_check(trunk_st, settled, opts.get("link_health_alerts", True))
+            trunk_status = _trunk_check(trunk_st, settled,
+                                        opts.get("link_health_alerts", True))
+        # Liveness record, EVERY cycle -- including cycles where AMI was down and
+        # nothing else was published. Silence in the heartbeat file is the only
+        # signal that separates "the PBX is idle" from "the poller stopped": the
+        # forensic log went 19 h 42 m with no entry while perfectly healthy,
+        # because steady-state contact refreshes do not log.
+        _heartbeat(summ, trunk_status,
+                   wired_down=[p["ext"] for p in (phones or [])
+                               if p.get("ext") in set(wired) and not p.get("reachable")])
         polls += 1
         # A cycle where AMI was down (summ is None) tells us nothing about the
         # fleet — don't let it end warm-up on a phantom "all wired ports up".

@@ -742,3 +742,152 @@ def test_wired_exts_parses_the_gateway_ports_option() -> None:
     assert pm.wired_exts({"gateway_ports": " 11 , 12 ,, "}) == ["11", "12"]
     assert pm.wired_exts({}) == []
     assert pm.wired_exts({"gateway_ports": None}) == []
+
+
+def test_heartbeat_records_liveness_and_the_trunk(tmp_path) -> None:
+    """A dated liveness record must land on every cycle, readable from OUTSIDE.
+
+    Two problems, one file. (1) The forensic log cannot tell idle from dead: it
+    went 19 h 42 m with no entry on 2026-08-30/31 while the PBX was perfectly
+    healthy, because steady-state contact refreshes do not log -- only initial
+    registration does. A quiet system and a wedged Asterisk produce byte-identical
+    output: none. (2) The outside line had no timestamped health history on ANY
+    surface; its state lived only in a pushed HA sensor, which has no history and
+    freezes at its last value if the add-on dies.
+
+    The AMI-down cycle is the one that matters most: that is exactly when the
+    other publishers go quiet, so a heartbeat that skipped it would go silent at
+    the moment its silence is least interpretable."""
+    import json as _json
+
+    hb = tmp_path / "sub" / "heartbeat.jsonl"          # nested: must mkdir
+    real = pm.HEARTBEAT_PATH
+    pm.HEARTBEAT_PATH = str(hb)
+    try:
+        pm._heartbeat({"reachable": 9, "expected": 9, "worst_rtt": 12.3}, "Registered")
+        pm._heartbeat(None, None)                       # AMI down this cycle
+        pm._heartbeat({"reachable": 7, "expected": 9, "worst_rtt": 40.0},
+                      "Rejected", wired_down=["13", "14"])
+    finally:
+        pm.HEARTBEAT_PATH = real
+
+    recs = [_json.loads(l) for l in hb.read_text().splitlines() if l.strip()]
+    check("heartbeat: one record per cycle, including the AMI-down cycle",
+          len(recs) == 3)
+    check("heartbeat: identifies which poller wrote it",
+          all(r.get("poller") == "rtpmon" for r in recs))
+    check("heartbeat: every record is dated", all(r.get("ts") for r in recs))
+    check("heartbeat: advertises its own cadence so a reader can judge staleness",
+          all(isinstance(r.get("interval_s"), int) and r["interval_s"] >= 30
+              for r in recs))
+    check("heartbeat: carries the trunk state (its only timestamped history)",
+          recs[0]["trunk"] == "Registered" and recs[2]["trunk"] == "Rejected")
+
+    # The AMI-down record must say so rather than look like a healthy zero.
+    check("heartbeat: an AMI-down cycle is written, not skipped",
+          recs[1]["trunk"] == "unknown" and recs[1].get("ami") == "unreachable")
+    check("heartbeat: AMI-down reports reachable as null, NOT 0 "
+          "(no phones measured is not the same as no phones up)",
+          recs[1]["reachable"] is None)
+    check("heartbeat: names the wired ports that were down",
+          recs[2].get("wired_down") == ["13", "14"])
+
+    # A dated record is only useful if it parses back to an instant.
+    import datetime as _d
+    check("heartbeat: ts parses as an aware timestamp",
+          _d.datetime.fromisoformat(recs[0]["ts"]).tzinfo is not None)
+
+
+def test_trunk_check_reports_its_status_to_the_caller() -> None:
+    """_trunk_check must hand the registration state back, so the heartbeat can
+    record it -- and it must still run its alert transition afterwards. An early
+    return placed before trunk_transition() would silently disable outside-line
+    alerting while every test still passed."""
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None): return True
+        @staticmethod
+        def notify(*a, **k): return True
+
+    class _FakeAMI:
+        @staticmethod
+        def get_registrations_or_none():
+            return {pm.TRUNK_REG_NAME: {"status": "Registered", "next_reg": "0"}}
+        @staticmethod
+        def send_register(_n): return True
+
+    sys.modules["ha_client"] = _FakeHA
+    sys.modules["ami"] = _FakeAMI
+    try:
+        st = {"cycles": 0, "alerted": False}
+        check("trunk: status is returned for the heartbeat",
+              pm._trunk_check(st, True, False) == "Registered")
+
+        # AMI unreachable -> None, and the sensor must NOT be blanked.
+        class _Dead:
+            @staticmethod
+            def get_registrations_or_none(): return None
+        sys.modules["ami"] = _Dead
+        check("trunk: AMI unreachable returns None, not a fake status",
+              pm._trunk_check(st, True, False) is None)
+    finally:
+        sys.modules.pop("ha_client", None)
+        sys.modules.pop("ami", None)
+
+
+def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
+    """The run loop must INVOKE the heartbeat -- not merely be able to.
+
+    A unit test on _heartbeat() proves the function works and says nothing about
+    whether anything calls it. This project has shipped that exact bug before: a
+    feature wired, tested and mutation-proven while the production call site
+    never referenced it. Mutation testing caught the same gap here -- replacing
+    the call site with a nonexistent name left the whole suite green.
+
+    So this drives the real loop for one iteration, with sleep() raising to break
+    out, and asserts the call happened with the cycle's actual data."""
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_sleep(_n):
+        raise _Stop()
+
+    phones = [{"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4,
+               "reachable": True, "registered": True},
+              {"ext": "13", "name": "B", "status": "Unavail", "rtt_ms": None,
+               "reachable": False, "registered": True}]
+    summ = {"reachable": 1, "expected": 2, "worst_rtt": 2.4}
+
+    saved = {k: getattr(pm, k) for k in
+             ("_load_options", "room_names", "wired_exts", "poll_once",
+              "_append_history", "_publish", "trunk_enabled", "_trunk_check",
+              "_heartbeat")}
+    real_sleep = pm.time.sleep
+    try:
+        pm._load_options = lambda: {"link_health_alerts": False}
+        pm.room_names = lambda o: {"11": "A", "13": "B"}
+        pm.wired_exts = lambda o: ["11", "13"]
+        pm.poll_once = lambda n, w, m: (phones, summ)
+        pm._append_history = lambda p: None
+        pm._publish = lambda p, s: None
+        pm.trunk_enabled = lambda o: True
+        pm._trunk_check = lambda st, settled, alerts: "Registered"
+        pm._heartbeat = lambda s, t, wired_down=None: seen.append((s, t, wired_down))
+        pm.time.sleep = _fake_sleep
+        try:
+            pm.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+        pm.time.sleep = real_sleep
+
+    check("run loop: the heartbeat was actually called", len(seen) == 1)
+    s, t, wd = seen[0]
+    check("run loop: it received this cycle's summary", s == summ)
+    check("run loop: it received the trunk status from _trunk_check",
+          t == "Registered")
+    check("run loop: it was told which wired ports were down", wd == ["13"])

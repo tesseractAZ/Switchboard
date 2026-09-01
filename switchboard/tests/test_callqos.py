@@ -671,3 +671,160 @@ def test_stage_records_how_far_a_scripted_leg_got() -> None:
     plain = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
                                   billsec="30", rxcount="1500", txcount="1500"))
     check("stage: empty for a context with no stages", plain["stage"] == "")
+
+
+def test_unsampled_rtt_is_null_not_a_convincing_zero() -> None:
+    """A leg with no completed RTCP round must not publish 0.0 as a measurement.
+
+    Asterisk reports rtt, rxjitter, rxmes and txmes as 0.000000 TOGETHER when no
+    round completed. _credible() already nulls the MES pair, but a 0 ms RTT and
+    0 ms jitter read as a flawless call rather than as no measurement, and were
+    forwarded unqualified into every aggregate. Live exemplar: a 3-second
+    wakeup-deliver leg with rxcount=156, all four fields exactly zero."""
+    rec = cq.build_record(_Args(source="dialplan", tag="wakeup-deliver",
+                                chan="PJSIP/19-1", billsec="3",
+                                rxcount="156", txcount="109",
+                                rxploss="0", txploss="0",
+                                rxjitter="0.000000", txjitter="0.003750",
+                                rtt="0.000000", maxrtt="0.000000",
+                                stdevrtt="0.000000",
+                                rxmes="0.000000", txmes="0.000000"))
+    check("unsampled: labelled as no sampling", rec["rtt_samples"] == "none")
+    check("unsampled: RTT is null, not 0.0", rec["rtt_ms"] is None)
+    check("unsampled: rx jitter is null, not 0.0", rec["jitter_rx_ms"] is None)
+    check("unsampled: MES stays null (pre-existing _credible behaviour)",
+          rec["mes_worst"] is None)
+    check("unsampled: quality reads unknown, not excellent",
+          rec["quality"] == "unknown")
+    # A direction that WAS measured must survive -- do not null the whole record.
+    check("unsampled: the measured tx jitter is kept", rec["jitter_tx_ms"] == 3.75)
+
+    # ...and a genuinely fast call must NOT be nulled just for being fast.
+    good = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
+                                 billsec="30", rxcount="1500", txcount="1500",
+                                 rtt="0.004", maxrtt="0.012", stdevrtt="0.003",
+                                 rxjitter="0.002", txjitter="0.002",
+                                 rxmes="88", txmes="88"))
+    check("measured: a real low RTT is preserved", good["rtt_ms"] == 4.0)
+    check("measured: real jitter is preserved", good["jitter_rx_ms"] == 2.0)
+
+
+def test_mean_and_min_rtt_are_recorded() -> None:
+    """--rtt is the LAST RTCP round, not the mean.
+
+    A live announce reported rtt=0.007675 against maxrtt=0.146652 -- a 19x
+    spread -- so publishing --rtt as "the call's RTT" published one arbitrary
+    draw from the distribution. A threshold alarm on it under-fires while
+    rtt_samples simultaneously certifies the leg as well-sampled."""
+    rec = cq.build_record(_Args(source="dialplan", tag="announce",
+                                chan="PJSIP/19-1", billsec="72",
+                                rxcount="3626", txcount="3629",
+                                rtt="0.007675", maxrtt="0.146652",
+                                minrtt="0.004100", normdevrtt="0.031000",
+                                stdevrtt="0.036807", rxmes="88", txmes="88"))
+    check("rtt: the last round is still recorded", rec["rtt_ms"] == 7.68)
+    check("rtt: the MEAN is now recorded too", rec["rtt_mean_ms"] == 31.0)
+    check("rtt: the floor is recorded", rec["rtt_min_ms"] == 4.1)
+    check("rtt: the peak is recorded", rec["rtt_max_ms"] == 146.65)
+    check("rtt: a consumer can now see the spread, not one draw",
+          rec["rtt_max_ms"] / max(rec["rtt_ms"], 0.01) > 15)
+    check("rtt: still labelled multi (stdev is non-zero)",
+          rec["rtt_samples"] == "multi")
+
+
+def test_outcome_is_mirrored_somewhere_readable(tmp_path) -> None:
+    """callqos must leave readable proof it ran and what it decided.
+
+    The dialplan launches it as TrySystem(... --detach ... &). The trailing '&'
+    makes the shell exit 0 immediately, so the dialplan proves only that the
+    process STARTED -- never that it parsed its arguments, scored the call, or
+    wrote anything. An audit found 13/13 log hits were invocation lines and ZERO
+    were output from this program. The full ledger lives in /data, which cannot
+    be read from outside the container."""
+    import json as _json
+
+    out = tmp_path / "sub" / "outcomes.jsonl"          # nested: must mkdir
+    real = cq.SHARE_OUTCOME_PATH
+    cq.SHARE_OUTCOME_PATH = str(out)
+    try:
+        rec = cq.build_record(_Args(source="dialplan", tag="announce",
+                                    chan="PJSIP/19-1", stage="complete",
+                                    billsec="72", rxcount="3626", txcount="3629",
+                                    rtt="0.0077", maxrtt="0.1467",
+                                    normdevrtt="0.031", stdevrtt="0.0368",
+                                    rxmes="88", txmes="88"))
+        cq.append_outcome(rec)
+    finally:
+        cq.SHARE_OUTCOME_PATH = real
+
+    recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    check("outcome: one line written", len(recs) == 1)
+    r = recs[0]
+    for k in ("ts", "ext", "tag", "stage", "quality", "rtt_samples"):
+        check(f"outcome: carries {k}", k in r)
+    check("outcome: says which extension", r["ext"] == "19")
+    check("outcome: says how far the leg got", r["stage"] == "complete")
+    check("outcome: carries the verdict, not just the inputs",
+          r["quality"] in ("excellent", "good", "fair", "poor", "unknown"))
+    check("outcome: carries the mean RTT so the spread is visible outside",
+          r.get("rtt_mean_ms") == 31.0)
+
+    # An unwritable mirror must never break the ledger path.
+    cq.SHARE_OUTCOME_PATH = "/proc/cannot/write/here.jsonl"
+    try:
+        cq.append_outcome({"ts": 1, "ext": "19"})   # must not raise
+        check("outcome: an unwritable mirror is swallowed", True)
+    finally:
+        cq.SHARE_OUTCOME_PATH = real
+
+
+def test_main_writes_both_the_ledger_and_the_readable_outcome(tmp_path) -> None:
+    """Drive main() as the dialplan does -- the call site must be exercised.
+
+    Unit-testing append_outcome() proves the function works and says nothing
+    about whether main() calls it. Mutation testing caught exactly that:
+    replacing the call with `pass` left the entire suite green. This project has
+    shipped a feature that was wired, tested and mutation-proven while the
+    production call site never referenced it, so the call site gets its own test.
+
+    Note --detach is deliberately NOT passed: it forks, which would take the test
+    runner out from under itself."""
+    import json as _json
+
+    ledger = tmp_path / "callqos.jsonl"
+    outcome = tmp_path / "sub" / "outcomes.jsonl"
+    real_path, real_out = cq.PATH, cq.SHARE_OUTCOME_PATH
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None): return True
+        @staticmethod
+        def notify(*a, **k): return True
+
+    sys.modules["ha_client"] = _FakeHA
+    cq.PATH, cq.SHARE_OUTCOME_PATH = str(ledger), str(outcome)
+    try:
+        rc = cq.main(["--source", "dialplan", "--tag", "announce",
+                      "--chan", "PJSIP/19-00000007", "--cid", "8000",
+                      "--codec", "ulaw", "--billsec", "72", "--hcause", "16",
+                      "--rxcount", "3626", "--txcount", "3629",
+                      "--stage", "complete",
+                      "--rtt", "0.0077", "--maxrtt", "0.1467",
+                      "--normdevrtt", "0.031", "--minrtt", "0.0041",
+                      "--stdevrtt", "0.0368",
+                      "--rxmes", "88.0", "--txmes", "88.0"])
+    finally:
+        cq.PATH, cq.SHARE_OUTCOME_PATH = real_path, real_out
+        sys.modules.pop("ha_client", None)
+
+    check("main: returns 0 (a hangup handler must never fail loudly)", rc == 0)
+    check("main: wrote the durable ledger", ledger.exists())
+    check("main: ALSO wrote the readable outcome mirror", outcome.exists())
+
+    o = _json.loads(outcome.read_text().splitlines()[-1])
+    check("main: the mirror names the extension", o["ext"] == "19")
+    check("main: the mirror carries the stage", o["stage"] == "complete")
+    check("main: the mirror carries the verdict", o["quality"] == "excellent")
+    check("main: the mirror carries the mean RTT", o["rtt_mean_ms"] == 31.0)
+    check("main: playback tags are recorded but never notify",
+          o["notify"] is False)

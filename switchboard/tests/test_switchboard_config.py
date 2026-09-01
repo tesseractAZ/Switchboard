@@ -1766,3 +1766,30 @@ def test_scripted_contexts_record_how_far_they_got() -> None:
     check("rtpqos: passes --stage to the ledger", "--stage" in q)
     check("rtpqos: filters the stage to plain letters (it reaches a shell arg)",
           "FILTER(a-z,${SW_STAGE})" in q)
+
+
+def test_rtpqos_passes_the_whole_rtt_distribution() -> None:
+    """The dialplan must hand callqos the MEAN and FLOOR, not just the last round.
+
+    --rtt is the last RTCP round only. A live announce reported rtt=0.007675
+    against maxrtt=0.146652 -- a 19x spread -- so a threshold alarm on "the
+    call's RTT" was reading one arbitrary draw while rtt_samples simultaneously
+    certified the leg as well-sampled.
+
+    Testing callqos's handling of these flags proves nothing if the generator
+    never emits them; mutation testing caught exactly that hole here."""
+    o = {"rooms": sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s"}])}
+    e = sbc.render_extensions(o)
+    q = e.split("[switchboard-rtpqos]", 1)[1].split("\n[", 1)[0]
+    for flag, why in (("--rtt", "last round"), ("--maxrtt", "peak"),
+                      ("--stdevrtt", "spread"), ("--normdevrtt", "mean"),
+                      ("--minrtt", "floor")):
+        check(f"rtpqos: passes {flag} ({why})", flag in q)
+    # The RTCP field names must be the real ones. Asterisk 20 silently WARNs
+    # four times per call and nulls the field for a name it does not know --
+    # that is how --rxoctet/--txoctet shipped dead in v0.48.0.
+    for field in ("normdevrtt", "minrtt"):
+        check(f"rtpqos: reads CHANNEL(rtcp,{field})",
+              "${CHANNEL(rtcp," + field + ")}" in q)
+    check("rtpqos: does NOT resurrect the octet counters that do not exist",
+          "rxoctetcount" not in q and "txoctetcount" not in q)

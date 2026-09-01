@@ -53,7 +53,26 @@ def _stamp(phase: str, synced: int = -1) -> None:
         print(f"[switchboard-backup-pre] stamp: {exc}", flush=True)
 
 
+def _self_check() -> None:
+    """Assert this hook is where config.yaml says it is, and is executable.
+
+    A hook the Supervisor cannot exec fails at BACKUP time, not at build time --
+    and it fails silently, because a hook runs via `docker exec` whose stdout
+    never reaches the add-on log. v0.58.0 shipped hooks whose firing was
+    unobservable for exactly this reason, and whether they ever ran is now
+    permanently unknowable. This makes the next such mistake loud instead."""
+    for path in ("/usr/bin/switchboard-backup-pre",
+                 "/usr/bin/switchboard-backup-post"):
+        if not os.path.isfile(path):
+            print(f"[switchboard-backup-pre] SELF-CHECK: {path} declared in "
+                  "config.yaml but MISSING", flush=True)
+        elif not os.access(path, os.X_OK):
+            print(f"[switchboard-backup-pre] SELF-CHECK: {path} is not "
+                  "executable — the Supervisor cannot run it", flush=True)
+
+
 def main() -> int:
+    _self_check()
     synced = 0
     try:
         names = sorted(os.listdir(STATE_DIR))
