@@ -421,6 +421,61 @@ def serve_announcement(name: str):
     return FileResponse(path, media_type="audio/wav")
 
 
+# 8 kHz mono 16-bit PCM = 16000 bytes/s. 90 s is generous for a spoken alert and
+# still well under the 72 s that was observed repeating on the cordless.
+ANNOUNCE_BYTES_PER_SECOND = 16000
+ANNOUNCE_MAX_SECONDS = float(os.environ.get("ANNOUNCE_MAX_SECONDS", "90") or 90)
+ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
+# ext -> (digest, monotonic seconds). Process-local by design: a restart should
+# not inherit a suppression decision made before it.
+_ANNOUNCE_LAST: dict = {}
+
+
+def _announce_seconds(path: str) -> float | None:
+    """Approximate clip duration from the rendered WAV's size.
+
+    A byte count is enough to catch a runaway announcement and needs no audio
+    library. Returns None when the file cannot be measured -- an unmeasurable
+    clip must not be refused, since failing closed here would silence alerts."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    # 44-byte canonical WAV header; ignore anything smaller than that.
+    return max(0.0, (size - 44)) / ANNOUNCE_BYTES_PER_SECOND
+
+
+def _announce_digest(path: str) -> str:
+    """Content hash of the rendered audio, so an identical payload is RECOGNISABLE.
+
+    Each render currently gets a fresh uuid, so three byte-identical
+    announcements look like three different ones -- which is precisely why a
+    repeating payload went unnoticed until a duration histogram exposed it."""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _is_duplicate_announce(ext: str, digest: str, now: float | None = None) -> bool:
+    """True when this exact payload already played to this ext very recently.
+
+    Records the attempt either way, so a repeat pushes the window forward rather
+    than letting a producer retry past it every N seconds."""
+    now = now if now is not None else time.monotonic()
+    prev = _ANNOUNCE_LAST.get(ext)
+    _ANNOUNCE_LAST[ext] = (digest, now)
+    if not prev:
+        return False
+    prev_digest, prev_ts = prev
+    return prev_digest == digest and (now - prev_ts) < ANNOUNCE_DEDUP_WINDOW_S
+
+
 def _announce_name(ext: str) -> str:
     """A safe, UNIQUE *.wav filename for a per-ext announcement clip. A uuid4 hex
     (not pid+second, which collide on two announces to the same ext within one
@@ -536,6 +591,37 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         built = False
     if not built:
         return JSONResponse({"ok": False, "error": "render failed"}, status_code=502)
+
+    # Duration guard. Four live announcements ran 66-72 s each, and three of them
+    # were bit-identical (billsec 72, rxcount 3626) from three DIFFERENT files --
+    # either the producer re-renders the same payload with no dedup, or something
+    # upstream truncates at ~72.5 s. Both possibilities live in HA/TTS rather than
+    # here, but the handset is what pays for them: a 72-second unsolicited
+    # announcement holds the cordless off-hook, and an inbound call arriving
+    # during one lands as call-waiting instead of a normal ring.
+    #
+    # REJECT rather than truncate. Silently clipping an announcement is exactly
+    # the failure the audit could not rule out; a refusal that names itself is
+    # always better than audio that stops mid-sentence with no record.
+    secs = _announce_seconds(path)
+    if secs is not None and secs > ANNOUNCE_MAX_SECONDS:
+        print(f"[switchboard-webui] announce {ext} refused: {secs:.1f}s exceeds "
+              f"{ANNOUNCE_MAX_SECONDS}s", flush=True)
+        _record_delivery(ext, "announce", "too-long", seconds=round(secs, 1))
+        return JSONResponse({"ok": False, "skipped": "too-long",
+                             "seconds": round(secs, 1)}, status_code=413)
+
+    # Duplicate suppression. An identical payload repeating every ~15 minutes is
+    # noise, not information -- and the repeat is invisible today because each
+    # render gets a fresh uuid, so three identical announcements look like three
+    # different ones.
+    digest = _announce_digest(path)
+    if digest and _is_duplicate_announce(ext, digest):
+        print(f"[switchboard-webui] announce {ext} suppressed: identical payload "
+              f"within {ANNOUNCE_DEDUP_WINDOW_S}s", flush=True)
+        _record_delivery(ext, "announce", "duplicate-suppressed",
+                         digest=digest[:12], seconds=round(secs or 0, 1))
+        return JSONResponse({"ok": True, "skipped": "duplicate"})
 
     # Playback wants the path WITHOUT the extension (it resolves "<path>.wav").
     sound = path[:-4] if path.endswith(".wav") else path

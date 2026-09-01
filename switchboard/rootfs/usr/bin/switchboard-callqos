@@ -312,6 +312,17 @@ def build_record(a) -> dict:
         "stage": (a.stage or "").strip(),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
+        # ★ DO NOT BUILD A RECEIVE-JITTER ALARM ON jitter_rx_ms.
+        # On announce-tagged legs it is the degenerate constant 0.019875 s in
+        # 7 of 7 observed records, across durations from 5 s to 72 s -- pinned a
+        # hair under the 20 ms ulaw packet interval, i.e. the estimator is not
+        # converging rather than reporting a real measurement. Wake-up legs sit
+        # in the same narrow band (0.019000-0.019750). A threshold on this field
+        # would read permanently green while measuring nothing, which is worse
+        # than having no check at all. jitter_tx_ms DOES vary
+        # (0.001000-0.008375) and is the usable direction.
+        # Nothing thresholds on jitter today; this note exists so that stays a
+        # decision rather than an accident.
         "jitter_rx_ms": jit_rx, "jitter_tx_ms": jit_tx,
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a

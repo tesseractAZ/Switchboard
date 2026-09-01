@@ -544,3 +544,169 @@ def test_announce_handler_refuses_a_contactless_endpoint_and_records_it(tmp_path
     check("handler: the record names the extension", rec["ext"] == "19")
     check("handler: the record carries the device state",
           rec["device_state"] == "UNAVAILABLE")
+
+
+def test_announce_duration_guard_and_dedup(tmp_path) -> None:
+    """A runaway or repeating announcement must be refused, and named.
+
+    Four live announcements ran 66-72 s each and three were bit-identical
+    (billsec 72, rxcount 3626) from three DIFFERENT files -- each render gets a
+    fresh uuid, so identical payloads looked like different ones and the repeat
+    went unnoticed until a duration histogram exposed it. A 72-second unsolicited
+    announcement also holds the cordless off-hook, so an inbound call arriving
+    during one lands as call-waiting instead of a normal ring."""
+    hdr = b"\0" * 44
+
+    short = tmp_path / "short.wav"
+    short.write_bytes(hdr + b"\1" * (16000 * 5))          # 5 s
+    long_ = tmp_path / "long.wav"
+    long_.write_bytes(hdr + b"\1" * (16000 * 120))        # 120 s
+
+    check("duration: a 5 s clip measures ~5 s",
+          abs(app._announce_seconds(str(short)) - 5.0) < 0.01)
+    check("duration: a 120 s clip measures ~120 s",
+          abs(app._announce_seconds(str(long_)) - 120.0) < 0.01)
+    check("duration: over the cap is detected",
+          app._announce_seconds(str(long_)) > app.ANNOUNCE_MAX_SECONDS)
+    check("duration: under the cap is allowed",
+          app._announce_seconds(str(short)) < app.ANNOUNCE_MAX_SECONDS)
+    # An unmeasurable clip must NOT be refused -- failing closed would silence
+    # alerts, which is worse than letting a long one through.
+    check("duration: an unmeasurable clip returns None, not a refusal",
+          app._announce_seconds(str(tmp_path / "nope.wav")) is None)
+
+    # Identical bytes under different names must hash the same -- that is the
+    # whole point, since every render gets a fresh uuid.
+    twin = tmp_path / "twin.wav"
+    twin.write_bytes(short.read_bytes())
+    check("digest: identical payloads under different names hash alike",
+          app._announce_digest(str(short)) == app._announce_digest(str(twin)) != "")
+    check("digest: different payloads differ",
+          app._announce_digest(str(short)) != app._announce_digest(str(long_)))
+
+    d1, d2 = app._announce_digest(str(short)), app._announce_digest(str(long_))
+    app._ANNOUNCE_LAST.clear()
+    try:
+        check("dedup: the first announcement is never a duplicate",
+              app._is_duplicate_announce("19", d1, now=1000.0) is False)
+        check("dedup: the same payload moments later IS a duplicate",
+              app._is_duplicate_announce("19", d1, now=1030.0) is True)
+        check("dedup: a DIFFERENT payload is not suppressed",
+              app._is_duplicate_announce("19", d2, now=1040.0) is False)
+        # The window is measured from the last ATTEMPT, so a producer retrying
+        # every 30 s cannot walk past it.
+        app._ANNOUNCE_LAST.clear()
+        app._is_duplicate_announce("19", d1, now=0.0)
+        t = 0.0
+        for _ in range(20):
+            t += 30.0
+            app._is_duplicate_announce("19", d1, now=t)
+        check("dedup: a repeating producer cannot outlast the window by retrying",
+              app._is_duplicate_announce("19", d1, now=t + 30.0) is True)
+        # ...but a genuine repeat after the window is allowed through.
+        check("dedup: the same payload after the window is allowed",
+              app._is_duplicate_announce(
+                  "19", d1, now=t + 30.0 + app.ANNOUNCE_DEDUP_WINDOW_S + 1) is False)
+        # Suppression must be per-extension.
+        app._ANNOUNCE_LAST.clear()
+        app._is_duplicate_announce("19", d1, now=1000.0)
+        check("dedup: another extension is unaffected",
+              app._is_duplicate_announce("14", d1, now=1001.0) is False)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+
+
+def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None):
+    """Run the real api_announce handler with the renderer producing `payload`.
+
+    The guards live INSIDE the handler, so testing the helper functions proves
+    nothing about whether they run -- mutation testing showed both call sites
+    surviving while the helpers were fully covered."""
+    import asyncio as _aio
+
+    class _Resp:
+        def __init__(self, p, status_code=200):
+            self.payload, self.status_code = p, status_code
+
+    class _Req:
+        headers = {}
+        @staticmethod
+        async def json():
+            return {"text": "hello"}
+
+    class _Renderer:
+        @staticmethod
+        def build_announcement_8k(text, path):
+            with open(path, "wb") as fh:
+                fh.write(payload)
+            return True
+
+    originated = []
+    saved = {k: getattr(app, k) for k in
+             ("load_options", "configured_room_exts", "valid_ext",
+              "get_device_state", "device_busy", "device_unreachable",
+              "announce_to_ext", "DELIVERY_OUTCOME_PATH", "announce_asterisk",
+              "ANNOUNCE_DIR", "JSONResponse")}
+    import os as _os
+    try:
+        app.JSONResponse = _Resp
+        app.announce_asterisk = _Renderer
+        app.ANNOUNCE_DIR = str(tmp_path / "ann")
+        _os.makedirs(app.ANNOUNCE_DIR, exist_ok=True)
+        app.load_options = lambda: {}
+        app.configured_room_exts = lambda o: {"19"}
+        app.valid_ext = lambda e: True
+        app.device_busy = lambda s: False
+        app.device_unreachable = lambda s: False
+        app.get_device_state = lambda e: state
+        app.announce_to_ext = lambda e, s: originated.append(e) or True
+        if out is not None:
+            app.DELIVERY_OUTCOME_PATH = str(out)
+        resp = _aio.run(app.api_announce("19", _Req()))
+    finally:
+        for k, v in saved.items():
+            setattr(app, k, v)
+    return resp, originated
+
+
+def test_announce_handler_refuses_a_runaway_clip(tmp_path) -> None:
+    """The handler must apply the duration cap -- not merely be able to.
+
+    Mutation testing showed this call site surviving while _announce_seconds()
+    was fully covered. A 72-second unsolicited announcement holds the cordless
+    off-hook, so an inbound call arriving during one lands as call-waiting."""
+    out = tmp_path / "d.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 200)      # 200 s, well over the cap
+    resp, originated = _drive_announce(tmp_path, payload=payload, out=out)
+
+    check("runaway: refused rather than played",
+          getattr(resp, "status_code", None) == 413)
+    check("runaway: the Originate never fired", originated == [])
+    check("runaway: recorded", out.exists())
+    import json as _json
+    rec = _json.loads(out.read_text().splitlines()[-1])
+    check("runaway: named as too-long", rec["outcome"] == "too-long")
+    check("runaway: the record says how long it was", rec["seconds"] > 190)
+
+
+def test_announce_handler_suppresses_an_identical_repeat(tmp_path) -> None:
+    """The handler must dedup -- three bit-identical live announcements looked
+    like three different ones because each render gets a fresh uuid."""
+    out = tmp_path / "d2.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)        # 5 s, under the cap
+    app._ANNOUNCE_LAST.clear()
+    try:
+        r1, o1 = _drive_announce(tmp_path, payload=payload, out=out)
+        r2, o2 = _drive_announce(tmp_path, payload=payload, out=out)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+
+    check("dedup: the first announcement plays", o1 == ["19"])
+    check("dedup: the identical repeat does NOT play", o2 == [])
+    check("dedup: the repeat still reports ok (nothing to retry)",
+          getattr(r2, "status_code", 200) == 200)
+    import json as _json
+    rec = _json.loads(out.read_text().splitlines()[-1])
+    check("dedup: the suppression is recorded",
+          rec["outcome"] == "duplicate-suppressed")
+    check("dedup: the record carries the payload digest", len(rec["digest"]) == 12)

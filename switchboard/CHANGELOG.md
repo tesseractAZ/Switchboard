@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.62.0
+
+Announcements are capped, deduplicated, and honest about what they measure.
+
+**A runaway announcement is refused, not truncated.** Four live announcements ran
+66–72 s each on the cordless, roughly every 15 minutes. An announcement that long
+holds the handset off-hook, so an inbound call arriving during one lands as call
+waiting instead of a normal ring. Anything over 90 s is now refused with a named
+outcome rather than played — and refused rather than clipped, because silently
+truncating an announcement is the failure mode the audit could not rule out, and
+audio that stops mid-sentence with no record is worse than a refusal that says so.
+
+An unmeasurable clip is **allowed through**. Failing closed here would silence
+alerts, which is the worse error.
+
+**Identical repeats are suppressed.** Three of those four announcements were
+bit-identical — `billsec=72`, `rxcount=3626` — from three *different* files,
+because every render gets a fresh uuid, so the same payload looked like three
+different ones. Rendered audio is now hashed, and an identical payload to the
+same extension inside 5 minutes is suppressed and recorded. The window refreshes
+on every attempt, so a producer retrying every 30 s cannot walk past it.
+
+**A note where someone would trip over it.** On announce legs `jitter_rx_ms` is
+the degenerate constant `0.019875 s` in 7 of 7 observed records, across durations
+from 5 s to 72 s — pinned a hair under the 20 ms ulaw packet interval, i.e. the
+estimator is not converging rather than measuring. A receive-jitter threshold
+would read permanently green while measuring nothing, which is worse than no
+check at all. `jitter_tx_ms` does vary and is the usable direction. Nothing
+thresholds on jitter today; the note exists so that stays a decision rather than
+an accident.
+
+
 ## 0.61.0
 
 A delivery that never became a call now leaves a record.
