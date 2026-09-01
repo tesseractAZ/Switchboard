@@ -947,3 +947,27 @@ def test_announce_clip_path_is_charset_guarded() -> None:
                                         + "0123456789abcdef" * 2) is True)
     finally:
         ami._ami_command = real
+
+
+def test_device_unreachable_classifies_a_contactless_endpoint() -> None:
+    """An endpoint with no contact must be recognised BEFORE an Originate.
+
+    An Originate to such an endpoint cannot create a channel -- Asterisk logs
+    `ast_sip_create_dialog_uac: Endpoint 'N': Could not create dialog to invalid
+    URI 'N'` and stops. No channel means no dialplan, so no SW_STAGE, no rtpqos
+    and no ledger row: three such attempts in one audit window left an ERROR
+    line as their only trace."""
+    for s in ("UNAVAILABLE", "Unavailable", "unavailable", "INVALID", "UNKNOWN"):
+        check(f"unreachable: {s!r} has no contact", ami.device_unreachable(s) is True)
+    for s in ("NOT_INUSE", "Not in use", "INUSE", "RINGINUSE", "Ringing"):
+        check(f"unreachable: {s!r} is a live endpoint",
+              ami.device_unreachable(s) is False)
+    # Fails OPEN, exactly like the busy guard: a failed state read must never
+    # silence an alarm.
+    check("unreachable: an empty state is NOT treated as unreachable",
+          ami.device_unreachable("") is False)
+    check("unreachable: None is NOT treated as unreachable",
+          ami.device_unreachable(None) is False)
+    # The two guards must not overlap -- a busy phone is reachable.
+    check("unreachable: busy and unreachable are disjoint",
+          not (ami.device_busy("INUSE") and ami.device_unreachable("INUSE")))

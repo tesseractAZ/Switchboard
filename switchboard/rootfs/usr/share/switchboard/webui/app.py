@@ -15,6 +15,7 @@ works unmodified behind Home Assistant Ingress, whatever path it is mounted on.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -58,6 +59,7 @@ from ami import (  # noqa: E402
     codecs_for_channels,
     connect_extensions,
     device_busy,
+    device_unreachable,
     get_device_state,
     get_endpoints,
     get_registrations,
@@ -445,6 +447,42 @@ def _cleanup_announce_dir(max_age: int = 300) -> None:
         pass
 
 
+DELIVERY_OUTCOME_PATH = os.environ.get(
+    "SWITCHBOARD_DELIVERY_OUTCOME", "/share/switchboard/delivery-outcomes.jsonl")
+DELIVERY_OUTCOME_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:
+    """Record a delivery attempt that never became a call.
+
+    The QoS ledger is written from the dialplan's hangup extension, so it can
+    only ever describe legs that ANSWERED. Everything upstream of that is
+    invisible: an Originate refused for want of a contact, a handset that rang
+    and was never picked up, an AMI error. One audit window held three refused
+    Originates and a wake-up that rang 60 s unanswered, and not one of them
+    produced a ledger row, a sensor, or anything an operator would read —
+    nothing distinguished "the phone never rang" from "the user ignored it".
+
+    Written beside the other /share records because /data cannot be read from
+    outside the container. Best-effort: telemetry must never fail a delivery."""
+    rec = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(
+               timespec="seconds"),
+           "ext": ext, "kind": kind, "outcome": outcome}
+    rec.update({k: v for k, v in extra.items() if v is not None})
+    try:
+        os.makedirs(os.path.dirname(DELIVERY_OUTCOME_PATH), exist_ok=True)
+        try:
+            if os.path.getsize(DELIVERY_OUTCOME_PATH) > DELIVERY_OUTCOME_MAX_BYTES:
+                with open(DELIVERY_OUTCOME_PATH, "w", encoding="utf-8"):
+                    pass
+        except OSError:
+            pass
+        with open(DELIVERY_OUTCOME_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError as exc:
+        print(f"[switchboard-webui] delivery record: {exc}", flush=True)
+
+
 @app.post("/api/announce/{ext}")
 async def api_announce(ext: str, request: Request) -> JSONResponse:
     """Speak an announcement OUT one room handset — the SIP "media player" that lets
@@ -513,12 +551,29 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     state = await asyncio.to_thread(get_device_state, ext)
     if device_busy(state):
         print(f"[switchboard-webui] announce {ext} skipped: device {state}", flush=True)
+        _record_delivery(ext, "announce", "skipped-busy", device_state=state)
         return JSONResponse({"ok": True, "skipped": "busy", "device_state": state})
+    # Pre-flight the contact. An Originate to an endpoint with no contact cannot
+    # create a channel — Asterisk logs `Could not create dialog to invalid URI`
+    # and stops — and because there is no channel there is no dialplan, so no
+    # SW_STAGE, no rtpqos and NO LEDGER ROW. Three such attempts in one audit
+    # window left an ERROR line as their only trace. Checking first turns an
+    # invisible failure into a recorded one, and skips a doomed Originate.
+    if device_unreachable(state):
+        print(f"[switchboard-webui] announce {ext} skipped: device {state} "
+              "(no contact — the handset is not registered)", flush=True)
+        _record_delivery(ext, "announce", "unreachable", device_state=state)
+        return JSONResponse({"ok": False, "skipped": "unreachable",
+                             "device_state": state}, status_code=503)
     try:
         ok = await asyncio.to_thread(announce_to_ext, ext, sound)
     except (AMIError, OSError) as exc:
         print(f"[switchboard-webui] announce originate {ext} failed: {exc}", flush=True)
+        _record_delivery(ext, "announce", "originate-error", detail=str(exc)[:120])
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    if not ok:
+        # AMI accepted the connection but refused the Originate.
+        _record_delivery(ext, "announce", "originate-refused")
     return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
 
 
