@@ -1125,6 +1125,14 @@ def render_rtpqos_context() -> list:
         # the flags are dropped rather than renamed. (The sink still accepts
         # them, for a future Asterisk that exposes the counters.)
         f' --maxrtt {q("maxrtt")} --stdevrtt {q("stdevrtt")}'
+        # --rtt is the LAST RTCP round, not the mean, and the difference is not
+        # academic: one live announce reported rtt=0.007675 against
+        # maxrtt=0.146652 -- a 19x spread -- so a threshold alarm on "the call's
+        # RTT" was reading a single arbitrary sample. normdevrtt is Asterisk's
+        # running MEAN and minrtt the floor; together with max/stdev they let a
+        # consumer see the distribution instead of one draw from it. Same RTCP
+        # family as maxrtt/stdevrtt, which are already proven to resolve here.
+        f' --normdevrtt {q("normdevrtt")} --minrtt {q("minrtt")}'
         f' --rxmaxjitter {q("local_maxjitter")} &)'
     )
     return [

@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.60.0
+
+Silence is now distinguishable from death, and the call record says what it
+measured rather than implying it.
+
+**A heartbeat for the forensic log.** The `/share` Asterisk log went 19 h 42 m
+with no entry while the PBX was perfectly healthy: steady-state contact refreshes
+do not log, only initial registration does, so a quiet system and a wedged
+Asterisk produce byte-identical output — none. rtpmon now appends a dated record
+to `/share/switchboard/heartbeat.jsonl` **every cycle**, including cycles where
+AMI was unreachable and nothing else published. Silence in *that* file means the
+poller stopped.
+
+The same record carries the trunk's registration state, which previously had **no
+timestamped history on any surface** — it lived only in a pushed HA sensor with
+no history, which freezes at its last value if the add-on dies. The trunk is the
+outside line and the open E911 path.
+
+An AMI-down cycle reports `reachable: null`, never `0`: no phones measured is not
+the same as no phones up.
+
+**The call record now shows the distribution, not one draw.** `--rtt` is the LAST
+RTCP round. One live announce reported `rtt=0.007675` against
+`maxrtt=0.146652` — a **19× spread** — so a threshold alarm on "the call's RTT"
+was reading a single arbitrary sample while `rtt_samples` simultaneously
+certified the leg as well-sampled. Records now carry `rtt_mean_ms` and
+`rtt_min_ms` from Asterisk's own running mean and floor.
+
+**Zero is no longer published as a measurement.** When no RTCP round completes,
+Asterisk reports rtt, rxjitter, rxmes and txmes as `0.000000` *together* — four
+fields exactly zero at once, a combination no real call produces. `_credible()`
+already nulled the MES pair, but a 0 ms RTT and 0 ms jitter read as a flawless
+call. Those now publish `null`.
+
+**callqos leaves proof it ran.** The dialplan launches it as
+`TrySystem(... --detach ... &)`; the trailing `&` makes the shell exit 0 at once,
+so the dialplan proves only that the process *started* — never that it parsed its
+arguments, scored the call, or wrote anything. An audit found 13 of 13 log hits
+were invocations and **zero** were output from it. It now mirrors a compact
+outcome to `/share/switchboard/callqos-outcomes.jsonl`.
+
+**A refuted baseline, corrected.** The "~4.5 minute GXW re-registration window"
+was folklore. Measured off the forensic log: `Asterisk Ready.` 20:31:27 → 8/8
+Reachable 20:32:17 = **50 seconds**, with a second boot bounded at ≤67 s. The
+grace period deliberately stays at 360 s — the measurement is n=2 and too short
+resurrects the false-alarm storm it exists to stop — but it is now a documented
+5.4× margin rather than a guess.
+
+Also: the backup pre-hook self-checks that both hook paths exist and are
+executable, because a hook the Supervisor cannot exec fails at backup time, not
+build time, and fails silently.
+
+
 ## 0.59.0
 
 The call record can now be trusted, and the Asterisk log can finally be read.

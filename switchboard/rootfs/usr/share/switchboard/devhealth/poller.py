@@ -370,13 +370,28 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
 
 
 # After THIS add-on restarts, Asterisk drops every registration and the GXW
-# re-REGISTERs its ports on its own timer — measured at ~4.5 minutes for all 8.
-# During that window "all ports down" is the expected state, not an outage, so
-# the all-down CRITICAL is held back until the window passes. Anything still
-# down afterwards alerts normally, and a PARTIAL outage is never suppressed.
-# Without this, every add-on restart fired "the GXW gateway likely lost power or
-# its uplink" (observed repeatedly on 2026-08-03) — an alarm that names the
-# wrong component and trains the reader to ignore it.
+# re-REGISTERs its ports on its own timer. During that window "all ports down" is
+# the expected state, not an outage, so the all-down CRITICAL is held back until
+# it passes. Anything still down afterwards alerts normally, and a PARTIAL outage
+# is never suppressed. Without this, every add-on restart fired "the GXW gateway
+# likely lost power or its uplink" (observed repeatedly on 2026-08-03) — an alarm
+# that names the wrong component and trains the reader to ignore it.
+#
+# ★ THE "~4.5 MINUTES" THIS COMMENT USED TO CLAIM IS REFUTED. Measured off the
+# timestamped forensic log on 2026-08-30: "Asterisk Ready." 20:31:27 -> 8/8
+# Reachable 20:32:17 = 50 SECONDS (contacts at +1, +2, +2, +9, +12, +13, +23,
+# +47, +50 s). A second boot bounds it at <= 67 s. The old figure was folklore
+# and it mattered: it made a 50-second delivery-loss window look like a
+# 4.5-minute one, and it would have hidden a genuinely slow re-registration
+# inside "normal".
+#
+# The VALUE deliberately stays at 360 s anyway. The measurement is n=2, and the
+# asymmetry is stark: too long merely delays a CRITICAL for a gateway that is
+# already down, while too short resurrects the false-alarm storm this grace was
+# written to stop. 360 s is now a documented 5.4x margin over the slowest
+# observed convergence, not a guess. The right long-term fix is to END the grace
+# early once all ports have been seen up at least once, which removes the blind
+# window entirely instead of tuning it.
 GATEWAY_STARTUP_GRACE_S = 360
 
 

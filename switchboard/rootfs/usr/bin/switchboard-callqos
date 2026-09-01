@@ -230,6 +230,18 @@ def build_record(a) -> dict:
 
     label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms)
 
+    # When NO RTCP round completed, Asterisk reports rtt, rxjitter, rxmes and
+    # txmes as 0.000000 together -- and 0.0 is a convincing number. _credible()
+    # already nulls the MES pair, but a 0 ms RTT and 0 ms jitter read as a
+    # flawless call rather than as no measurement, and were being forwarded
+    # unqualified into every aggregate. Four fields exactly zero at once is a
+    # combination no real call produces, so treat it as the sentinel it is.
+    _sampling = rtt_sampling(rtt_ms, _ms(_num(a.maxrtt)), _ms(_num(a.stdevrtt)))
+    if _sampling == "none":
+        rtt_ms = None
+        if jit_rx == 0:
+            jit_rx = None
+
     rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
 
     # Duration: billsec, unless the monotonic packet counters say the leg ran far
@@ -305,10 +317,13 @@ def build_record(a) -> dict:
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
         # bumpy stream that a healthy AVERAGE would mask.
         "rtt_max_ms": _ms(_num(a.maxrtt)), "rtt_stdev_ms": _ms(_num(a.stdevrtt)),
+        # The MEAN, so a consumer alarming on "the call's RTT" sees the whole
+        # call rather than its last RTCP round. rtt_ms stays as the last round.
+        "rtt_mean_ms": _ms(_num(a.normdevrtt)), "rtt_min_ms": _ms(_num(a.minrtt)),
         # How much sampling the RTT figures rest on. 'single' is the one that
         # matters: statistically empty but visually identical to a real reading.
         # Consumers computing any aggregate should drop anything but 'multi'.
-        "rtt_samples": rtt_sampling(rtt_ms, _ms(_num(a.maxrtt)), _ms(_num(a.stdevrtt))),
+        "rtt_samples": _sampling,
         "jitter_rx_max_ms": _ms(_num(a.rxmaxjitter)),
         "rx_octets": _int(a.rxoctet), "tx_octets": _int(a.txoctet),
         "mes_rx": round(rxmes, 1) if rxmes is not None else None,
@@ -328,6 +343,46 @@ def build_record(a) -> dict:
 # Durable ledger — append, cap to MAX_RECORDS, atomic + flock (same idiom as
 # mwi_store, so the root poller and asterisk-user dialplan can both write).
 # --------------------------------------------------------------------------- #
+SHARE_OUTCOME_PATH = os.environ.get(
+    "SWITCHBOARD_CALLQOS_OUTCOME", "/share/switchboard/callqos-outcomes.jsonl")
+SHARE_OUTCOME_MAX_BYTES = 4 * 1024 * 1024
+
+
+def append_outcome(rec: dict) -> None:
+    """Mirror a COMPACT outcome to /share, readable from outside the container.
+
+    This process is launched by the dialplan as
+    ``TrySystem(... --detach ... &)``. The trailing ``&`` makes the shell exit 0
+    immediately, so the dialplan proves only that the process was LAUNCHED --
+    never that it parsed its arguments, scored the call, or wrote anything. An
+    audit found 13 of 13 log hits were invocation lines and ZERO were output
+    from this program, before or after the release built to instrument this very
+    pipeline. If callqos were failing -- a bad parse of a newly added flag, a
+    store write error -- the failure would be completely silent.
+
+    The full ledger lives in /data, which cannot be read from outside (container
+    shell blocked, backups encrypted, add-on API 403). So the terminal step
+    leaves a short, readable record of what it decided: enough to confirm it ran
+    and to see the verdict, without duplicating the ledger.
+
+    Best-effort: a visibility mirror must never break the ledger write."""
+    out = {k: rec.get(k) for k in
+           ("ts", "ext", "tag", "stage", "quality", "mes_worst", "rtt_ms",
+            "rtt_mean_ms", "rtt_samples", "notify", "dur")}
+    try:
+        os.makedirs(os.path.dirname(SHARE_OUTCOME_PATH), exist_ok=True)
+        try:
+            if os.path.getsize(SHARE_OUTCOME_PATH) > SHARE_OUTCOME_MAX_BYTES:
+                with open(SHARE_OUTCOME_PATH, "w", encoding="utf-8"):
+                    pass
+        except OSError:
+            pass
+        with open(SHARE_OUTCOME_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(out) + "\n")
+    except OSError:
+        pass
+
+
 def append_record(rec: dict) -> None:
     d = os.path.dirname(PATH) or "."
     os.makedirs(d, exist_ok=True)
@@ -456,6 +511,11 @@ def _parse_args(argv):
     # How far a scripted leg (wake-up delivery, announce) got before hangup.
     # Empty for contexts that define no stages.
     p.add_argument("--stage", default="")
+    # Asterisk's running MEAN and floor for RTT. --rtt is the LAST round only:
+    # one live call reported rtt=0.007675 against maxrtt=0.146652, a 19x spread,
+    # so publishing --rtt as "the call's RTT" was publishing one arbitrary draw.
+    p.add_argument("--normdevrtt", default="")
+    p.add_argument("--minrtt", default="")
     for f in ("rxcount", "txcount", "rxploss", "txploss", "rxjitter", "txjitter",
               "rtt", "rxmes", "txmes", "maxrtt", "stdevrtt", "rxmaxjitter",
               "rxoctet", "txoctet"):
@@ -510,6 +570,9 @@ def main(argv=None) -> int:
         a = _parse_args(argv)
         rec = build_record(a)
         append_record(rec)
+        # Readable proof this program ran and what it decided -- the dialplan's
+        # trailing '&' means launch is all it can ever prove.
+        append_outcome(rec)
         push_ha(rec)
     except (Exception, SystemExit):
         # A hangup handler must never fail loudly. Swallow and move on.
