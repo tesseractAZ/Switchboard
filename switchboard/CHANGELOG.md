@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.63.0
+
+The wake-up scene fires on answer, before anything is spoken.
+
+The delivery AGI ran only *after* the greeting and the time announcement, so
+hanging up during either meant the configured scene never fired at all — and
+hanging up is exactly what someone does once a wake-up call has already woken
+them. Live evidence: **the scene fired on 1 of 3 delivered wake-ups**, with two
+legs dying at dialplan steps 5 and 6.
+
+The audio is dismissible. The scene is a real-world effect, arguably the part
+that does the waking, and gating the least dismissible action behind the most
+dismissible one had it backwards.
+
+The AGI now takes a mode: `scene` fires the scene and returns, `speak` does the
+weather and calendar only. `[wakeup-deliver]` calls it twice — the scene right
+after `Answer()`, the spoken extras after the time, where they belong in the
+narration. A bare call with no argument still does both, so an older dialplan
+that has not been regenerated does not silently lose its scene.
+
+`SW_STAGE=scene` marks the new step, so a hangup during it is attributable.
+
+
 ## 0.62.0
 
 Announcements are capped, deduplicated, and honest about what they measure.

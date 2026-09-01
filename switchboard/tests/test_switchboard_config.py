@@ -1187,8 +1187,15 @@ def test_status_announce_dialplan() -> None:
     check("announce: dial 46 -> [announce] AGI",
           "exten = 46,1,NoOp(Announce)" in e and "Goto(announce,s,1)" in e
           and _context_of(e, "AGI(switchboard-announce.agi)") == "announce")
-    check("smart wake-up delivery AGI wired into [wakeup-deliver]",
-          _context_of(e, "AGI(switchboard-wakeup-deliver.agi)") == "wakeup-deliver")
+    # The delivery AGI is now invoked TWICE in [wakeup-deliver] with explicit
+    # modes: the scene fires on answer, the spoken extras come after the time.
+    # Before that split, hanging up during the greeting meant the scene never
+    # fired at all -- and hanging up is what someone does once a wake-up call has
+    # already woken them.
+    check("wake-up scene AGI wired into [wakeup-deliver]",
+          _context_of(e, "AGI(switchboard-wakeup-deliver.agi,scene)") == "wakeup-deliver")
+    check("wake-up extras AGI wired into [wakeup-deliver]",
+          _context_of(e, "AGI(switchboard-wakeup-deliver.agi,speak)") == "wakeup-deliver")
 
 
 def test_status_announce_collisions() -> None:
@@ -1793,3 +1800,35 @@ def test_rtpqos_passes_the_whole_rtt_distribution() -> None:
               "${CHANNEL(rtcp," + field + ")}" in q)
     check("rtpqos: does NOT resurrect the octet counters that do not exist",
           "rxoctetcount" not in q and "txoctetcount" not in q)
+
+
+def test_wakeup_scene_fires_on_answer_not_after_the_narration() -> None:
+    """The wake-up scene must fire before anything is spoken.
+
+    The delivery AGI used to run only after the greeting and the time, so hanging
+    up during either meant the scene never fired -- and hanging up is exactly what
+    someone does once a wake-up call has woken them. Live evidence: the scene
+    fired on 1 of 3 delivered wake-ups; two legs died at dialplan steps 5 and 6.
+
+    The audio is dismissible; the scene is a real-world effect and is arguably
+    the part that does the waking."""
+    o = {"rooms": sbc.valid_rooms([{"ext": "19", "name": "Cordless", "secret": "s"}]),
+         "wakeup_enabled": True}
+    e = sbc.render_extensions(o)
+    wd = e.split("[wakeup-deliver]", 1)[1].split("\n[", 1)[0]
+
+    check("wakeup: the scene AGI runs in scene-only mode",
+          "AGI(switchboard-wakeup-deliver.agi,scene)" in wd)
+    check("wakeup: the extras AGI runs in speak-only mode",
+          "AGI(switchboard-wakeup-deliver.agi,speak)" in wd)
+    # Ordering is the whole point.
+    i_scene = wd.index("AGI(switchboard-wakeup-deliver.agi,scene)")
+    i_greet = wd.index("sw-wakeup-greeting")
+    i_speak = wd.index("AGI(switchboard-wakeup-deliver.agi,speak)")
+    check("wakeup: the scene fires BEFORE the greeting", i_scene < i_greet)
+    check("wakeup: the spoken extras stay after the greeting", i_speak > i_greet)
+    check("wakeup: the scene stage is marked so a hangup is attributable",
+          "Set(SW_STAGE=scene)" in wd and wd.index("Set(SW_STAGE=scene)") < i_greet)
+    # A bare AGI() call would fire the scene AND speak, duplicating the extras.
+    check("wakeup: no un-moded AGI call remains",
+          "AGI(switchboard-wakeup-deliver.agi)" not in wd)
