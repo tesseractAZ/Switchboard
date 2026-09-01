@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.60.1
+
+Heartbeat field names corrected.
+
+v0.60.0's heartbeat read `summ.get("expected")` and `summ.get("worst_rtt")`.
+`summarize()` produces neither — the keys are `total` and `worst_rtt_ms` — so
+both fields wrote `null` on every cycle. The live file exposed it within one
+poll of deploying.
+
+The unit test could not have caught it: it passed a **hand-made** summary dict
+using the same invented keys, so it confirmed the mistake rather than finding it.
+The test now builds its input with the real `summarize()`, and reintroducing
+either wrong key fails the suite.
+
+The record also gains `worst_ext`, so a reader can see *which* phone is the
+slowest without cross-referencing another surface.
+
+
 ## 0.60.0
 
 Silence is now distinguishable from death, and the call record says what it

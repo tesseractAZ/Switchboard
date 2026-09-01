@@ -580,9 +580,15 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         "trunk": trunk_status or "unknown",
     }
     if summ:
+        # Key names must match summarize() EXACTLY. The first shipped version of
+        # this used "expected" and "worst_rtt", neither of which summarize()
+        # produces, so both fields wrote null on every cycle -- and the unit test
+        # passed a hand-made dict with the same wrong keys, so it confirmed the
+        # mistake instead of catching it. The live file exposed it in one cycle.
         rec["reachable"] = summ.get("reachable")
-        rec["expected"] = summ.get("expected")
-        rec["worst_rtt_ms"] = summ.get("worst_rtt")
+        rec["total"] = summ.get("total")
+        rec["worst_rtt_ms"] = summ.get("worst_rtt_ms")
+        rec["worst_ext"] = summ.get("worst_ext")
     else:
         # AMI unreachable this cycle: say so rather than omitting the fields,
         # so a reader can tell "no data" from "zero phones up".
