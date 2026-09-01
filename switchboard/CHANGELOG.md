@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.63.1
+
+The backup hook now flushes the `/share` mirrors too.
+
+`/share/switchboard` holds everything this add-on writes that can actually be
+read from outside the container — the forensic Asterisk log, the heartbeat, the
+callqos outcomes, the delivery outcomes. The Supervisor archives that folder at a
+**different point** in the backup than the app image, so until now they were the
+only Switchboard files copied with no flush barrier at all.
+
+They are mirrors rather than sources of truth — the authoritative ledger lives
+under `/data/state` and was already quiesced — but they are also the copies an
+audit actually reads, and flushing them costs a handful of fsyncs on files
+appended a few times an hour.
+
+
 ## 0.63.0
 
 The wake-up scene fires on answer, before anything is spoken.

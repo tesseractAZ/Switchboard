@@ -23,6 +23,14 @@ import os
 import sys
 
 STATE_DIR = os.environ.get("SWITCHBOARD_STATE", "/data/state")
+# /share now holds the readable mirrors this add-on writes -- the forensic
+# Asterisk log, the heartbeat, the callqos outcomes, the delivery outcomes. They
+# are mirrors rather than sources of truth (the authoritative ledger is under
+# /data/state and is quiesced above), but the Supervisor archives the share
+# folder at a DIFFERENT point in the backup than the app image, so without this
+# they are the only Switchboard files copied with no flush at all. Flushing them
+# costs a handful of fsyncs on files that are appended a few times an hour.
+SHARE_DIR = os.environ.get("SWITCHBOARD_SHARE", "/share/switchboard")
 # /share is mapped writable and is readable from OUTSIDE the container, unlike
 # /data. That matters twice over: it is the only way to observe that these hooks
 # ran at all (a hook runs via `docker exec`, whose stdout does NOT reach the
@@ -71,6 +79,45 @@ def _self_check() -> None:
                   "executable — the Supervisor cannot run it", flush=True)
 
 
+def _fsync_dir(path: str) -> int:
+    """fsync every regular file in `path`, then the directory entry itself.
+
+    The directory matters as much as the contents: an atomic-replace writer
+    leaves the new name in the dir entry, which is a separate durability concern
+    from the data blocks. Returns how many files were flushed."""
+    synced = 0
+    try:
+        names = sorted(os.listdir(path))
+    except OSError as exc:
+        print(f"[switchboard-backup-pre] {path} unreadable ({exc}); nothing to "
+              "flush", flush=True)
+        return 0
+    for name in names:
+        fp = os.path.join(path, name)
+        if not os.path.isfile(fp):
+            continue
+        try:
+            fd = os.open(fp, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.fsync(fd)
+            synced += 1
+        except OSError as exc:
+            print(f"[switchboard-backup-pre] fsync {name}: {exc}", flush=True)
+        finally:
+            os.close(fd)
+    try:
+        dfd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as exc:
+        print(f"[switchboard-backup-pre] fsync dir {path}: {exc}", flush=True)
+    return synced
+
+
 def main() -> int:
     _self_check()
     synced = 0
@@ -106,8 +153,10 @@ def main() -> int:
             os.close(dfd)
     except OSError as exc:
         print(f"[switchboard-backup-pre] fsync dir: {exc}", flush=True)
-    print(f"[switchboard-backup-pre] flushed {synced} state file(s) in {STATE_DIR}",
-          flush=True)
+    shared = _fsync_dir(SHARE_DIR)
+    synced += shared
+    print(f"[switchboard-backup-pre] flushed {synced} file(s) "
+          f"({STATE_DIR} + {shared} in {SHARE_DIR})", flush=True)
     _stamp("pre", synced)
     return 0
 

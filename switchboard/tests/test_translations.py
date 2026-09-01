@@ -150,6 +150,28 @@ def test_backup_hooks_leave_evidence_outside_the_container() -> None:
         assert all("ts" in r for r in recs), recs
         assert recs[0].get("synced_files", -1) >= 0, "pre must record what it flushed"
 
+    # /share holds the readable mirrors this add-on writes, and the Supervisor
+    # archives that folder at a DIFFERENT point in the backup than the app image.
+    # Without flushing them they are the only Switchboard files copied with no
+    # barrier at all.
+    with tempfile.TemporaryDirectory() as td2:
+        st = Path(td2) / "state"; sh = Path(td2) / "share"
+        st.mkdir(); sh.mkdir()
+        (st / "callqos.jsonl").write_text("{}\n")
+        (sh / "heartbeat.jsonl").write_text("{}\n")
+        (sh / "asterisk.log").write_text("x\n")
+        stamp2 = str(Path(td2) / "w.jsonl")
+        r = subprocess.run(
+            [sys.executable, str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-pre")],
+            capture_output=True, text=True,
+            env={"SWITCHBOARD_STATE": str(st), "SWITCHBOARD_SHARE": str(sh),
+                 "SWITCHBOARD_BACKUP_STAMP": stamp2, "PATH": "/usr/bin:/bin"})
+        assert r.returncode == 0, r.stderr[:200]
+        rec = _json.loads(Path(stamp2).read_text().splitlines()[0])
+        assert rec["synced_files"] == 3, (
+            f"expected 1 state + 2 share files flushed, got {rec['synced_files']}")
+        assert str(sh) in r.stdout, "the log must name the share dir it flushed"
+
     # An unwritable stamp path must still not fail the backup.
     r = subprocess.run(
         [sys.executable, str(_ROOT / "rootfs" / "usr" / "bin" / "switchboard-backup-pre")],
