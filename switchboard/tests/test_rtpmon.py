@@ -760,14 +760,25 @@ def test_heartbeat_records_liveness_and_the_trunk(tmp_path) -> None:
     the moment its silence is least interpretable."""
     import json as _json
 
+    # Build the summary with the REAL summarize(), never a hand-made dict. The
+    # first version of this test invented keys ("expected", "worst_rtt") that
+    # summarize() does not produce; the code under test used the same invented
+    # names, so the test confirmed the bug instead of catching it and both
+    # fields wrote null on every live cycle.
+    real_summ = pm.summarize([
+        {"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4,
+         "reachable": True, "registered": True},
+        {"ext": "19", "name": "C", "status": "Avail", "rtt_ms": 12.3,
+         "reachable": True, "registered": True},
+    ])
+
     hb = tmp_path / "sub" / "heartbeat.jsonl"          # nested: must mkdir
     real = pm.HEARTBEAT_PATH
     pm.HEARTBEAT_PATH = str(hb)
     try:
-        pm._heartbeat({"reachable": 9, "expected": 9, "worst_rtt": 12.3}, "Registered")
+        pm._heartbeat(real_summ, "Registered")
         pm._heartbeat(None, None)                       # AMI down this cycle
-        pm._heartbeat({"reachable": 7, "expected": 9, "worst_rtt": 40.0},
-                      "Rejected", wired_down=["13", "14"])
+        pm._heartbeat(real_summ, "Rejected", wired_down=["13", "14"])
     finally:
         pm.HEARTBEAT_PATH = real
 
@@ -791,6 +802,16 @@ def test_heartbeat_records_liveness_and_the_trunk(tmp_path) -> None:
           recs[1]["reachable"] is None)
     check("heartbeat: names the wired ports that were down",
           recs[2].get("wired_down") == ["13", "14"])
+
+    # Every field copied out of the summary must actually exist in it -- this is
+    # what the hand-made dict hid.
+    for k in ("reachable", "total", "worst_rtt_ms"):
+        check(f"heartbeat: {k} is populated from the real summary, not null",
+              recs[0].get(k) is not None)
+    check("heartbeat: the worst RTT matches what summarize() computed",
+          recs[0]["worst_rtt_ms"] == real_summ["worst_rtt_ms"] == 12.3)
+    check("heartbeat: the phone count matches", recs[0]["total"] == 2)
+    check("heartbeat: names the worst extension", recs[0]["worst_ext"] == "19")
 
     # A dated record is only useful if it parses back to an instant.
     import datetime as _d
