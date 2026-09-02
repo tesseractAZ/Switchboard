@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.64.0
+
+The `/share` call mirror now carries the whole record.
+
+It shipped as a curated 11-field subset of the ledger's 32 — "enough to confirm
+it ran and see the verdict." That turned out to be the wrong shape for the job.
+`/data` cannot be read from outside the container, so this file is the **only**
+view any audit gets, and on a surface like that absence reads as loss: an audit
+correctly observed 11 fields and reasonably concluded the other 21 were being
+discarded before the record was written. They were not — they were in the ledger
+it could not see.
+
+A partial mirror of a durable record is not a smaller truth, it is a different
+claim. At ~20 calls a day the full record costs a few hundred bytes each against
+a 4 MB cap, so there is no reason to editorialise. `loss_rx_pct`, `jitter_rx_ms`,
+`rtt_max_ms`, `rtt_stdev_ms`, `mes_rx`/`mes_tx`, `hcause`, `chan`, `reasons` and
+the rest are now visible where they can actually be read.
+
+
 ## 0.63.2
 
 The unsampled-RTT null now covers the whole family.

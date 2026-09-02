@@ -773,7 +773,15 @@ def test_outcome_is_mirrored_somewhere_readable(tmp_path) -> None:
     recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     check("outcome: one line written", len(recs) == 1)
     r = recs[0]
-    for k in ("ts", "ext", "tag", "stage", "quality", "rtt_samples"):
+    # The mirror must carry the WHOLE record. A curated subset made an audit
+    # conclude the omitted fields were being discarded before the ledger write --
+    # /data is unreadable from outside, so this file is the only view there is,
+    # and on that surface absence reads as loss.
+    check("outcome: mirrors every ledger field, not a curated subset",
+          set(r) == set(rec))
+    for k in ("ts", "ext", "tag", "stage", "quality", "rtt_samples",
+              "loss_rx_pct", "jitter_rx_ms", "rtt_max_ms", "mes_rx", "reasons",
+              "chan", "hcause", "rxcount"):
         check(f"outcome: carries {k}", k in r)
     check("outcome: says which extension", r["ext"] == "19")
     check("outcome: says how far the leg got", r["stage"] == "complete")

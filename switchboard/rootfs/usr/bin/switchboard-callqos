@@ -388,9 +388,19 @@ def append_outcome(rec: dict) -> None:
     and to see the verdict, without duplicating the ledger.
 
     Best-effort: a visibility mirror must never break the ledger write."""
-    out = {k: rec.get(k) for k in
-           ("ts", "ext", "tag", "stage", "quality", "mes_worst", "rtt_ms",
-            "rtt_mean_ms", "rtt_samples", "notify", "dur")}
+    # Mirror the FULL record, not a curated subset. The first version copied 11
+    # of the ledger's 32 fields -- "enough to confirm it ran and see the verdict"
+    # -- and that turned out to be the wrong shape for the job. /data cannot be
+    # read from outside the container, so this file is the ONLY view any audit
+    # gets, and on a surface like that absence reads as loss: an audit correctly
+    # observed 11 fields here and reasonably concluded the other 21 were being
+    # discarded before the record was written. They are not; they are in the
+    # ledger it cannot see.
+    #
+    # A partial mirror of a durable record is not a smaller truth, it is a
+    # different claim. At ~20 calls a day the full record costs a few hundred
+    # bytes each against a 4 MB cap, so there is no reason to editorialise.
+    out = dict(rec)
     try:
         os.makedirs(os.path.dirname(SHARE_OUTCOME_PATH), exist_ok=True)
         try:
