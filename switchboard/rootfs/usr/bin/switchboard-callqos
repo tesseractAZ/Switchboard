@@ -236,9 +236,20 @@ def build_record(a) -> dict:
     # flawless call rather than as no measurement, and were being forwarded
     # unqualified into every aggregate. Four fields exactly zero at once is a
     # combination no real call produces, so treat it as the sentinel it is.
-    _sampling = rtt_sampling(rtt_ms, _ms(_num(a.maxrtt)), _ms(_num(a.stdevrtt)))
+    rtt_max = _ms(_num(a.maxrtt))
+    rtt_stdev = _ms(_num(a.stdevrtt))
+    rtt_mean = _ms(_num(a.normdevrtt))
+    rtt_min = _ms(_num(a.minrtt))
+    _sampling = rtt_sampling(rtt_ms, rtt_max, rtt_stdev)
     if _sampling == "none":
-        rtt_ms = None
+        # Null the WHOLE RTT family, not just the headline figure. v0.60.0 nulled
+        # rtt_ms and rx jitter but left mean/min/max/stdev at 0.0, and a live
+        # record proved the gap: rtt_ms=null beside rtt_mean_ms=0.0 on the same
+        # leg. A consumer averaging rtt_mean_ms saw a flawless 0 ms call, which is
+        # exactly the convincing zero the fix was written to eliminate -- half a
+        # fix here is arguably worse than none, because the nulled field implies
+        # the others were checked.
+        rtt_ms = rtt_max = rtt_stdev = rtt_mean = rtt_min = None
         if jit_rx == 0:
             jit_rx = None
 
@@ -327,10 +338,10 @@ def build_record(a) -> dict:
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
         # bumpy stream that a healthy AVERAGE would mask.
-        "rtt_max_ms": _ms(_num(a.maxrtt)), "rtt_stdev_ms": _ms(_num(a.stdevrtt)),
+        "rtt_max_ms": rtt_max, "rtt_stdev_ms": rtt_stdev,
         # The MEAN, so a consumer alarming on "the call's RTT" sees the whole
         # call rather than its last RTCP round. rtt_ms stays as the last round.
-        "rtt_mean_ms": _ms(_num(a.normdevrtt)), "rtt_min_ms": _ms(_num(a.minrtt)),
+        "rtt_mean_ms": rtt_mean, "rtt_min_ms": rtt_min,
         # How much sampling the RTT figures rest on. 'single' is the one that
         # matters: statistically empty but visually identical to a real reading.
         # Consumers computing any aggregate should drop anything but 'multi'.
