@@ -686,11 +686,23 @@ def test_unsampled_rtt_is_null_not_a_convincing_zero() -> None:
                                 rxcount="156", txcount="109",
                                 rxploss="0", txploss="0",
                                 rxjitter="0.000000", txjitter="0.003750",
+                                # ALL of these arrive as the literal "0.000000",
+                                # not absent -- that is what the live record
+                                # showed (rtt_ms=null beside rtt_mean_ms=0.0).
+                                # Omitting them from the fixture made them None
+                                # for the wrong reason and hid two mutants.
                                 rtt="0.000000", maxrtt="0.000000",
-                                stdevrtt="0.000000",
+                                stdevrtt="0.000000", normdevrtt="0.000000",
+                                minrtt="0.000000",
                                 rxmes="0.000000", txmes="0.000000"))
     check("unsampled: labelled as no sampling", rec["rtt_samples"] == "none")
     check("unsampled: RTT is null, not 0.0", rec["rtt_ms"] is None)
+    # The WHOLE family, not just the headline. A live record showed rtt_ms=null
+    # beside rtt_mean_ms=0.0 on the same leg -- a consumer averaging the mean saw
+    # a flawless 0 ms call. Half a fix is arguably worse than none here, because
+    # the one nulled field implies the others were checked.
+    for f in ("rtt_mean_ms", "rtt_min_ms", "rtt_max_ms", "rtt_stdev_ms"):
+        check(f"unsampled: {f} is null too, not 0.0", rec[f] is None)
     check("unsampled: rx jitter is null, not 0.0", rec["jitter_rx_ms"] is None)
     check("unsampled: MES stays null (pre-existing _credible behaviour)",
           rec["mes_worst"] is None)
@@ -706,6 +718,7 @@ def test_unsampled_rtt_is_null_not_a_convincing_zero() -> None:
                                  rxjitter="0.002", txjitter="0.002",
                                  rxmes="88", txmes="88"))
     check("measured: a real low RTT is preserved", good["rtt_ms"] == 4.0)
+    check("measured: the mean survives on a sampled leg", good["rtt_max_ms"] == 12.0)
     check("measured: real jitter is preserved", good["jitter_rx_ms"] == 2.0)
 
 

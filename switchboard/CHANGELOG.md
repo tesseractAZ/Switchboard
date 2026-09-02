@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.63.2
+
+The unsampled-RTT null now covers the whole family.
+
+v0.60.0 published `null` instead of `0.0` when no RTCP round completed — but only
+for `rtt_ms` and rx jitter. A live record proved the gap:
+
+    {"rtt_ms": null, "rtt_mean_ms": 0.0, "rtt_samples": "none", "dur": 0}
+
+`rtt_mean_ms` still read `0.0` on the same leg, so a consumer averaging the mean
+saw a flawless 0 ms call. Half a fix is arguably worse than none here, because the
+one nulled field implies the others were checked.
+
+`rtt_mean_ms`, `rtt_min_ms`, `rtt_max_ms` and `rtt_stdev_ms` are now nulled with
+`rtt_ms` whenever sampling resolves to `none`.
+
+The test fixture was the reason this shipped incomplete: it omitted `normdevrtt`
+and `minrtt` entirely, so they were `None` for the wrong reason and two mutants
+survived undetected. It now passes the literal `"0.000000"` those fields actually
+arrive as, matching the live record.
+
+
 ## 0.63.1
 
 The backup hook now flushes the `/share` mirrors too.
