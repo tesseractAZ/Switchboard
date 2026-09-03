@@ -912,3 +912,118 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
     check("run loop: it received the trunk status from _trunk_check",
           t == "Registered")
     check("run loop: it was told which wired ports were down", wd == ["13"])
+
+
+def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
+    """A 300 s poll cannot see an outage that starts and ends between samples.
+
+    On 2026-09-01 all eight wired extensions went Unreachable 01:00:07 ->
+    01:02:06 MST, and the heartbeat records at 07:58:47Z and 08:03:47Z bracket it
+    reading `reachable: 9` on BOTH sides. The surface built to catch exactly that
+    published an unbroken all-clear across it -- a 300 s point-sample has a duty
+    cycle near 0.3%.
+
+    Asterisk wrote every transition down as it happened, so the poller does not
+    need to have been awake; it only needs to read what it slept through."""
+    log = tmp_path / "asterisk.log"
+    # Seed with a REAL prior transition. A fixture whose history contains no
+    # transition cannot detect a reader that replays history -- the mutant
+    # survived on exactly that weakness.
+    log.write_text(
+        "[Aug 30 09:00:00] VERBOSE[308] res_pjsip/pjsip_configuration.c: "
+        "Endpoint 99 is now Unreachable\n"
+        "[Sep  1 00:00:00] VERBOSE[1] pbx.c: Asterisk Ready.\n")
+
+    real = pm.ENDPOINT_LOG_PATH
+    pm.ENDPOINT_LOG_PATH = str(log)
+    pm._transition_offset = None
+    try:
+        # First call establishes the watermark at "now" -- history must NOT be
+        # replayed as if it just happened.
+        check("transitions: the first call replays no history "
+              "(the seeded ext 99 transition must NOT appear)",
+              pm.endpoint_transitions() == [])
+
+        # Now the exact outage, written while the poller was asleep.
+        with open(log, "a") as fh:
+            for e in ("11", "12", "13", "14", "15", "16", "17", "18"):
+                fh.write(f"[Sep  1 01:00:0{e[-1]}] VERBOSE[308] "
+                         f"res_pjsip/pjsip_configuration.c: Endpoint {e} is now Unreachable\n")
+                fh.write(f"[Sep  1 01:00:0{e[-1]}] VERBOSE[308] "
+                         f"res_pjsip/pjsip_options.c: Contact {e}/sip:{e}@x is now Unreachable.  RTT: 0.000 msec\n")
+            for e in ("11", "12", "13", "14", "15", "16", "17", "18"):
+                fh.write(f"[Sep  1 01:01:30] VERBOSE[308] "
+                         f"res_pjsip/pjsip_configuration.c: Endpoint {e} is now Reachable\n")
+
+        t = pm.endpoint_transitions()
+        check("transitions: the whole outage is recovered", len(t) == 16)
+        down = sorted({x["ext"] for x in t if x["state"] == "Unreachable"})
+        check("transitions: every wired port is named",
+              down == ["11", "12", "13", "14", "15", "16", "17", "18"])
+        check("transitions: the recovery is recorded too",
+              len([x for x in t if x["state"] == "Reachable"]) == 8)
+        # Only the Endpoint lines count -- the Contact lines would double it.
+        check("transitions: Contact lines are not double-counted", len(t) == 16)
+
+        # A quiet interval must report nothing, so an empty list is meaningful.
+        check("transitions: nothing new -> empty", pm.endpoint_transitions() == [])
+
+        # The cap truncates the log; the reader must not go backwards forever.
+        log.write_text("[Sep  1 02:00:00] VERBOSE[308] "
+                       "res_pjsip/pjsip_configuration.c: Endpoint 19 is now Unreachable\n")
+        t2 = pm.endpoint_transitions()
+        check("transitions: a trimmed log is handled, not skipped",
+              [x["ext"] for x in t2] == ["19"])
+    finally:
+        pm.ENDPOINT_LOG_PATH = real
+        pm._transition_offset = None
+
+    # And a missing log must never break the poll.
+    pm.ENDPOINT_LOG_PATH = "/nonexistent/asterisk.log"
+    pm._transition_offset = None
+    try:
+        check("transitions: a missing log yields [] rather than raising",
+              pm.endpoint_transitions() == [])
+    finally:
+        pm.ENDPOINT_LOG_PATH = real
+        pm._transition_offset = None
+
+
+def test_heartbeat_carries_the_transitions(tmp_path) -> None:
+    """The heartbeat must SAY that it spanned an outage.
+
+    Without this the record is a bare point-sample: 'everything was up when I
+    looked', which is exactly what read all-clear across a real 119 s blackout."""
+    import json as _json
+    log = tmp_path / "a.log"
+    log.write_text("start\n")
+    hb = tmp_path / "hb.jsonl"
+    real_log, real_hb = pm.ENDPOINT_LOG_PATH, pm.HEARTBEAT_PATH
+    pm.ENDPOINT_LOG_PATH, pm.HEARTBEAT_PATH = str(log), str(hb)
+    pm._transition_offset = None
+    try:
+        pm.endpoint_transitions()                     # set the watermark
+        with open(log, "a") as fh:
+            # Two DIFFERENT extensions: 13 went down, 14 only came back. Using
+            # one ext for both states makes the Unreachable filter untestable --
+            # the mutant that dropped it survived on that.
+            fh.write("[Sep  1 01:00:07] VERBOSE[308] res_pjsip/pjsip_configuration.c: "
+                     "Endpoint 13 is now Unreachable\n")
+            fh.write("[Sep  1 01:01:30] VERBOSE[308] res_pjsip/pjsip_configuration.c: "
+                     "Endpoint 14 is now Reachable\n")
+        summ = pm.summarize([{"ext": "13", "name": "A", "status": "Avail",
+                              "rtt_ms": 2.4, "reachable": True, "registered": True}])
+        pm._heartbeat(summ, "Registered")
+        rec = _json.loads(hb.read_text().splitlines()[-1])
+        check("heartbeat: reports the transitions it slept through",
+              len(rec.get("transitions", [])) == 2)
+        check("heartbeat: names ONLY what went unreachable, not what recovered",
+              rec.get("went_unreachable") == ["13"])
+        # A clean cycle must NOT carry the keys, so their presence is a signal.
+        pm._heartbeat(summ, "Registered")
+        rec2 = _json.loads(hb.read_text().splitlines()[-1])
+        check("heartbeat: a quiet cycle omits the keys entirely",
+              "transitions" not in rec2 and "went_unreachable" not in rec2)
+    finally:
+        pm.ENDPOINT_LOG_PATH, pm.HEARTBEAT_PATH = real_log, real_hb
+        pm._transition_offset = None

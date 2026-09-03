@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.65.0
+
+The heartbeat now reports what the poller slept through.
+
+On 2026-09-01 all eight wired extensions went Unreachable from 01:00:07 to
+01:02:06 MST. The heartbeat records at 07:58:47Z and 08:03:47Z bracket that
+outage and **both read `reachable: 9`** — the surface built to catch exactly this
+published an unbroken all-clear across it. A 300-second point-sample has a duty
+cycle near 0.3%: proving the poller is alive says nothing about the 299 seconds
+it was not looking. **Poller liveness is not fleet coverage.**
+
+Asterisk wrote every transition down as it happened, so the poller does not need
+to have been awake — it only needs to read what it slept through. Each cycle now
+advances a byte watermark over the forensic log and reports any endpoint
+reachability transition it finds:
+
+    "transitions": [{"ext": "13", "state": "Unreachable"}, ...],
+    "went_unreachable": ["13"]
+
+A quiet cycle omits both keys entirely, so their presence is itself the signal.
+The watermark starts at the log's current size, so a fresh process does not
+replay history as though it just happened, and a trimmed log (the 32 MB cap)
+resets rather than going backwards forever.
+
+This costs nothing: no AMI event subscription, no change to any poll interval,
+and a missing or unreadable log yields an empty list rather than breaking the
+poll that produces it.
+
+
 ## 0.64.0
 
 The `/share` call mirror now carries the whole record.

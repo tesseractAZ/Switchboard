@@ -545,6 +545,65 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+# The forensic Asterisk log carries every endpoint reachability TRANSITION at
+# VERBOSE level, e.g.
+#   [Sep  1 01:00:49] VERBOSE[308] res_pjsip/pjsip_configuration.c: Endpoint 16 is now Unreachable
+ENDPOINT_LOG_PATH = os.environ.get("SWITCHBOARD_ASTERISK_LOG",
+                                   "/share/switchboard/asterisk.log")
+_TRANSITION_RE = re.compile(r"Endpoint (\S+) is now (Unreachable|Reachable)")
+# Bound a single read so a huge backlog cannot balloon the poller's memory.
+_TRANSITION_MAX_READ = 512 * 1024
+# Byte watermark. Starts at the file's CURRENT size so a fresh process does not
+# replay history as if it just happened; a restart is itself a transition and is
+# already visible as the reachable=null cycle.
+_transition_offset = None
+
+
+def endpoint_transitions() -> list:
+    """Reachability transitions Asterisk logged SINCE THE LAST CALL.
+
+    A 300 s poll cannot see an outage that begins and ends between two samples.
+    That is not hypothetical: on 2026-09-01 all eight wired extensions went
+    Unreachable 01:00:07 -> 01:02:06 MST, and the heartbeat records at 07:58:47Z
+    and 08:03:47Z bracket it reading `reachable: 9` on BOTH sides. The surface
+    built to catch exactly that published an unbroken all-clear across it.
+
+    Poller liveness is not fleet coverage -- a 300 s point-sample has a duty
+    cycle near 0.3%. But Asterisk WROTE every transition down as it happened, so
+    the poller does not need to have been awake; it only needs to read what it
+    slept through. A byte watermark over the forensic log turns 299 seconds of
+    blindness per cycle into a complete record, without an AMI event
+    subscription or any change to how often anything is polled.
+
+    Best-effort: any error yields [] and the poll continues."""
+    global _transition_offset
+    try:
+        size = os.path.getsize(ENDPOINT_LOG_PATH)
+    except OSError:
+        return []
+    if _transition_offset is None:          # first cycle: start at "now"
+        _transition_offset = size
+        return []
+    if size < _transition_offset:           # log was trimmed at its cap
+        _transition_offset = 0
+    if size == _transition_offset:
+        return []
+    start = max(_transition_offset, size - _TRANSITION_MAX_READ)
+    try:
+        with open(ENDPOINT_LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start)
+            chunk = fh.read()
+    except OSError:
+        return []
+    _transition_offset = size
+    out = []
+    for line in chunk.splitlines():
+        m = _TRANSITION_RE.search(line)
+        if m:
+            out.append({"ext": m.group(1), "state": m.group(2)})
+    return out
+
+
 HEARTBEAT_PATH = os.environ.get("SWITCHBOARD_HEARTBEAT",
                                 "/share/switchboard/heartbeat.jsonl")
 HEARTBEAT_MAX_BYTES = 4 * 1024 * 1024
@@ -596,6 +655,14 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         rec["ami"] = "unreachable"
     if wired_down:
         rec["wired_down"] = list(wired_down)
+    # Everything Asterisk saw while this poller was asleep. An empty list means
+    # "nothing changed", which is a far stronger statement than a point-sample
+    # that merely found everything up at one instant.
+    trans = endpoint_transitions()
+    if trans:
+        rec["transitions"] = trans
+        rec["went_unreachable"] = sorted({t["ext"] for t in trans
+                                          if t["state"] == "Unreachable"})
     try:
         os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
         # Cap: this file is append-only and unbounded otherwise. Truncating keeps
