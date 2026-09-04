@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.66.0
+
+An alert that lapses is no longer reported as a recovery.
+
+`classify_cordless` flags a poor call only while it sits inside `mos_window`, so
+the level returns to `ok` on its own once the bad call is old enough — with
+nothing new observed. That was being announced as **"Cordless recovered — back to
+normal."** Live on 2026-09-01, a `cordless degraded: last call quality poor` was
+followed immediately by `cordless recovered: recovered`, with no call in between.
+
+A recovery notification is an affirmative claim about the present, and an
+operator who sees one reasonably believes something was re-checked. Nothing was.
+This is the frozen-sensor pattern wearing different clothes: silence would have
+been more honest, and saying which of the two actually happened is better still.
+
+`health_transition()` now takes `fresh_evidence` and returns `stale-clear` when
+an alert lapses without new measurement. The cordless poller identifies the call
+its MOS verdict rests on by that call's **end time**, so it can tell "a newer
+call was measured" from "the same old call finally aged out". The notification
+says so plainly and tells the reader to treat the state as unknown until the next
+call.
+
+The default stays `recovered`, so any caller that cannot judge freshness behaves
+exactly as before.
+
+
 ## 0.65.0
 
 The heartbeat now reports what the poller slept through.

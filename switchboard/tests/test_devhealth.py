@@ -8,6 +8,7 @@ health_transition (the alert state machine), and last_call_mos (newest-call MOS,
 The WP826 HTTP client + the poll loop are I/O and are not exercised here (mirrors how
 test_rtpmon.py leaves the AMI socket untested).
 """
+import os
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -582,3 +583,160 @@ def test_playback_legs_never_confirm_a_call_for_last_call_mos(tmp_path) -> None:
     rtp_real = {"0": {"moscq": "2.2", "stopTimeSecond": "4000"}}
     mos2, _ = dh.last_call_mos(rtp_real, now=4060.0, ledger_ts=ts)
     assert mos2 == 2.2, f"real call should still report poor MOS, got {mos2}"
+
+
+def test_a_clear_driven_by_staleness_is_not_reported_as_recovery() -> None:
+    """An alert that lapses because its evidence aged out is NOT a recovery.
+
+    classify_cordless flags a poor call only while it is inside mos_window, so
+    the level returns to 'ok' on its own once the bad call is old enough -- with
+    nothing new observed. Reporting that as "recovered - back to normal" is an
+    affirmative claim about the present made on no present evidence, and an
+    operator who sees a recovery notification reasonably believes something was
+    re-checked. Live on 2026-09-01: "cordless degraded: last call quality poor"
+    was followed immediately by "cordless recovered: recovered" with no call in
+    between.
+
+    This is the frozen-sensor pattern wearing different clothes."""
+    # Alert first: two consecutive unhealthy cycles arm it.
+    st = {}
+    dh.health_transition("degraded", st)
+    check("transition: first unhealthy cycle is held by the gate",
+          dh.health_transition("degraded", st) == "degraded")
+
+    # Now ok WITHOUT new evidence -> must not claim recovery.
+    st_stale = dict(st)
+    check("transition: an aged-out clear reports stale-clear, not recovered",
+          dh.health_transition("ok", st_stale, fresh_evidence=False) == "stale-clear")
+
+    # And ok WITH new evidence -> a genuine recovery.
+    st_fresh = dict(st)
+    check("transition: a clear backed by a new measurement IS a recovery",
+          dh.health_transition("ok", st_fresh, fresh_evidence=True) == "recovered")
+
+    # Either way the alert latch clears, so neither repeats.
+    check("transition: stale-clear clears the latch",
+          dh.health_transition("ok", st_stale, fresh_evidence=False) == "")
+    check("transition: recovered clears the latch",
+          dh.health_transition("ok", st_fresh, fresh_evidence=True) == "")
+
+    # Default stays backward-compatible for callers that cannot judge freshness.
+    st2 = {}
+    dh.health_transition("critical", st2)
+    dh.health_transition("critical", st2)
+    check("transition: the default is still 'recovered' (backward compatible)",
+          dh.health_transition("ok", st2) == "recovered")
+
+
+def test_stale_clear_notification_does_not_say_back_to_normal() -> None:
+    """The wording is the whole point: a lapsed alert must not read as an
+    all-clear, and must not be formatted as a degraded alert either."""
+    sent = []
+
+    class _FakeHA:
+        @staticmethod
+        def notify(msg, title=None, notification_id=None):
+            sent.append((title or "", msg)); return True
+
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        dh._notify("cordless", "stale-clear", [])
+        dh._notify("cordless", "recovered", [])
+        dh._notify("cordless", "degraded", ["last call quality poor (MOS 2.2, 129s ago)"])
+    finally:
+        sys.modules.pop("ha_client", None)
+
+    stale_title, stale_msg = sent[0]
+    check("stale-clear: does NOT claim back to normal",
+          "back to normal" not in stale_msg.lower())
+    check("stale-clear: says nothing was measured",
+          "nothing new was measured" in stale_msg.lower())
+    check("stale-clear: tells the reader the state is unknown",
+          "unknown" in stale_msg.lower())
+    check("stale-clear: is not titled as a degraded alert",
+          "degraded" not in stale_title.lower() and "critical" not in stale_title.lower())
+
+    rec_title, rec_msg = sent[1]
+    check("recovered: still says back to normal", "back to normal" in rec_msg.lower())
+    check("recovered: is not confused with the lapse wording",
+          "aged out" not in rec_msg.lower())
+
+    deg_title, deg_msg = sent[2]
+    check("degraded: still names the reason", "MOS 2.2" in deg_msg)
+    check("degraded: is still titled as degraded", "degraded" in deg_title.lower())
+
+
+def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
+    """The run loop must WORK OUT whether anything was re-measured.
+
+    health_transition() accepts fresh_evidence, but a caller that never supplies
+    it silently reverts to always claiming recovery. Mutation testing showed
+    exactly that: dropping the argument at the call site left the whole suite
+    green, because the decision logic lives in run() and nothing drove run().
+    That is the seventh call-site gap of this kind in this work, so the caller
+    gets driven directly.
+
+    Scenario: a poor call is measured, the alert arms, and then the SAME call
+    simply ages out of mos_window. Nothing new is observed, so the clear must be
+    reported as a lapse, not a recovery."""
+    import time as _t
+    events = []
+
+    class _Stop(Exception):
+        pass
+
+    now = _t.time()
+    # Cycle 1 and 2: the same poor call, 100 s old -> arms the alert.
+    # Cycle 3: identical call, now 1000 s old -> outside mos_window (900) -> ok,
+    # with NO newer measurement.
+    snaps = [
+        {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 100},
+        {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 220},
+        {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 1000},
+    ]
+    calls = {"n": 0}
+
+    def _probe(ip, pw, pin):
+        i = min(calls["n"], len(snaps) - 1)
+        calls["n"] += 1
+        return dict(snaps[i])
+
+    def _sleep(_n):
+        if calls["n"] >= len(snaps):
+            raise _Stop()
+
+    saved = {k: getattr(dh, k) for k in
+             ("probe_cordless", "resolve_cordless_ip", "_publish_cordless",
+              "_publish_gateway", "gateway_down_exts_from_rollup", "_notify")}
+    real_sleep = dh.time.sleep
+    real_env = dict(os.environ)
+    try:
+        os.environ["CORDLESS_IP"] = "192.0.2.1"
+        os.environ["CORDLESS_PASSWORD"] = "x"
+        os.environ["DEVICE_HEALTH_INTERVAL"] = "30"
+        dh.probe_cordless = _probe
+        dh.resolve_cordless_ip = lambda ext, ip: ip
+        dh._publish_cordless = lambda *a, **k: None
+        dh._publish_gateway = lambda *a, **k: None
+        dh.gateway_down_exts_from_rollup = lambda: None
+        dh._notify = lambda device, event, reasons: events.append((device, event))
+        dh.time.sleep = _sleep
+        try:
+            dh.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(dh, k, v)
+        dh.time.sleep = real_sleep
+        os.environ.clear(); os.environ.update(real_env)
+
+    kinds = [e for d, e in events if d == "cordless"]
+    check("run loop: the poor call armed a degraded alert", "degraded" in kinds)
+    check("run loop: the aged-out clear is a LAPSE, not a recovery",
+          "stale-clear" in kinds)
+    check("run loop: it did NOT claim recovery on no new evidence",
+          "recovered" not in kinds)

@@ -422,14 +422,29 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
 _RANK = {"ok": 0, "degraded": 1, "critical": 2}
 
 
-def health_transition(level: str, st: dict, min_cycles: int = 2) -> str:
+def health_transition(level: str, st: dict, min_cycles: int = 2,
+                      fresh_evidence: bool = True) -> str:
     """One-shot, hysteretic device-alert state machine (mirrors rtpmon.outage_transition
     but for a 3-level single device). `st` carries {'cycles','level','alerted'}.
     Returns an event to notify on:
       'critical' / 'degraded' — fire once, after `min_cycles` consecutive unhealthy
         cycles at a level AT OR ABOVE the last alerted one (a worsening re-alerts);
-      'recovered' — fire once when it returns to ok after having alerted;
+      'recovered' — fire once when it returns to ok after having alerted AND a
+        genuinely new measurement cleared it;
+      'stale-clear' — same transition, but nothing was re-measured: the alert
+        lapsed only because its evidence aged out of the judging window;
       '' — nothing.
+
+    The recovered/stale-clear split matters more than it looks. classify_cordless
+    flags a poor call only while it is INSIDE mos_window, so the level returns to
+    'ok' on its own once the bad call is old enough — with nothing new observed.
+    Reporting that as "recovered — back to normal" is an affirmative claim about
+    the present made on no present evidence, and an operator who sees a recovery
+    notification reasonably believes something was re-checked. Live on
+    2026-09-01, a "cordless degraded: last call quality poor" was followed
+    immediately by "cordless recovered: recovered" with no call in between.
+    Silence would have been more honest; saying which of the two happened is
+    better still.
     The consecutive-cycle gate rejects a single flaky poll (one dropped Wi-Fi frame,
     a transient API timeout)."""
     if level == "ok":
@@ -437,7 +452,7 @@ def health_transition(level: str, st: dict, min_cycles: int = 2) -> str:
         st["level"] = "ok"
         if st.get("alerted"):
             st["alerted"] = None
-            return "recovered"
+            return "recovered" if fresh_evidence else "stale-clear"
         return ""
     # unhealthy (degraded/critical)
     if level == st.get("level"):
@@ -657,7 +672,16 @@ def _notify(device: str, event: str, reasons: list[str]) -> None:
     nid = f"switchboard_{device}_health"
     label = "Cordless" if device == "cordless" else "GXW gateway"
     if event == "recovered":
-        ha_client.notify(f"{label} recovered — back to normal.", title=f"Switchboard: {label.lower()} OK", notification_id=nid)
+        ha_client.notify(f"{label} recovered — back to normal.",
+                         title=f"Switchboard: {label.lower()} OK", notification_id=nid)
+    elif event == "stale-clear":
+        # NOT "back to normal" -- nothing was re-measured. Say what actually
+        # happened so the reader does not infer a fresh all-clear.
+        ha_client.notify(
+            f"The {label.lower()} alert cleared because its evidence aged out — "
+            "nothing new was measured. Treat the current state as unknown until "
+            "the next call.",
+            title=f"Switchboard: {label.lower()} alert lapsed", notification_id=nid)
     else:
         why = "; ".join(reasons) or event
         title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
@@ -699,8 +723,21 @@ def run() -> None:
                 snap = probe_cordless(probe_ip, cordless_pw, cordless_cert_pin)
                 level, reasons = classify_cordless(snap, th)
                 _publish_cordless(level, reasons, snap)
-                ev = health_transition(level, cst)
+                # Identify the call the MOS verdict rests on by its END time, so
+                # a clear can be attributed. age_s grows for the SAME call every
+                # cycle, so the difference tells apart "a newer call was measured"
+                # from "the same old call finally aged out of mos_window".
+                _age = snap.get("last_mos_age_s")
+                call_end = (time.time() - _age) if isinstance(_age, (int, float)) else None
+                prev_end = cst.get("mos_call_end")
+                fresh = (call_end is not None
+                         and (prev_end is None or call_end > prev_end + 1))
+                if level != "ok" and call_end is not None:
+                    cst["mos_call_end"] = call_end
+                ev = health_transition(level, cst, fresh_evidence=fresh)
                 if ev:
+                    if ev == "stale-clear":
+                        cst.pop("mos_call_end", None)
                     print(f"[devhealth] cordless {ev}: {'; '.join(reasons) or ev}", flush=True)
                     _notify("cordless", ev, reasons)
             except Exception as e:
