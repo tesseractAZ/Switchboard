@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.67.0
+
+A wake-up that rings out no longer vanishes.
+
+The QoS ledger is written from the dialplan's hangup extension, so it can only
+ever describe a leg that **answered**. The 06:18 wake-up on 2026-09-03 rang
+extension 19 and produced no record of any kind — `ring queued=True`,
+`Called 19`, `is ringing`, and then nothing at all for 98 minutes. Nothing
+distinguished *"the phone never rang"* from *"the user ignored it"*, on an alarm
+clock.
+
+Every wake-up attempt now writes to `/share/switchboard/delivery-outcomes.jsonl`,
+the same file and shape the announce path already used — the alarm clock and
+announcements fail in the same ways and should be readable together:
+
+| outcome | meaning |
+|---|---|
+| `ring-queued` | originated, with the scheduled time and ring window |
+| `deferred` | the room was not idle at its appointed minute, with the state |
+| `originate-refused` | AMI accepted the connection but refused the Originate |
+| `originate-error` | the Originate raised |
+
+A `ring-queued` record with no matching call record **is** the no-answer signal,
+and both now live where they can be read together. A deferral was previously
+only a line in a container log that carries no timestamps.
+
+The writer moved to a shared `delivery` module so the scheduler and the web UI
+cannot drift apart. Telemetry is best-effort throughout: an alarm clock must
+never fail to ring because its record could not be written.
+
+
 ## 0.66.0
 
 An alert that lapses is no longer reported as a recovery.

@@ -438,15 +438,15 @@ def test_delivery_outcomes_are_recorded_where_they_can_be_read(tmp_path) -> None
     import json as _json
 
     out = tmp_path / "sub" / "delivery.jsonl"        # nested: the writer must mkdir
-    real = app.DELIVERY_OUTCOME_PATH
-    app.DELIVERY_OUTCOME_PATH = str(out)
+    real = app._delivery.OUTCOME_PATH
+    app._delivery.OUTCOME_PATH = str(out)
     try:
         app._record_delivery("19", "announce", "unreachable",
                              device_state="UNAVAILABLE")
         app._record_delivery("19", "announce", "skipped-busy", device_state="INUSE")
         app._record_delivery("14", "wakeup", "noanswer")
     finally:
-        app.DELIVERY_OUTCOME_PATH = real
+        app._delivery.OUTCOME_PATH = real
 
     recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     check("delivery: one record per attempt", len(recs) == 3)
@@ -463,12 +463,12 @@ def test_delivery_outcomes_are_recorded_where_they_can_be_read(tmp_path) -> None
           recs[2]["kind"] == "wakeup")
 
     # A record path that cannot be written must never fail a delivery.
-    app.DELIVERY_OUTCOME_PATH = "/proc/cannot/write/here.jsonl"
+    app._delivery.OUTCOME_PATH = "/proc/cannot/write/here.jsonl"
     try:
         app._record_delivery("19", "announce", "unreachable")
         check("delivery: an unwritable record path is swallowed", True)
     finally:
-        app.DELIVERY_OUTCOME_PATH = real
+        app._delivery.OUTCOME_PATH = real
 
 
 def test_announce_handler_refuses_a_contactless_endpoint_and_records_it(tmp_path) -> None:
@@ -511,7 +511,7 @@ def test_announce_handler_refuses_a_contactless_endpoint_and_records_it(tmp_path
     saved = {k: getattr(app, k) for k in
              ("load_options", "configured_room_exts", "valid_ext",
               "get_device_state", "device_busy", "device_unreachable",
-              "announce_to_ext", "DELIVERY_OUTCOME_PATH", "announce_asterisk",
+              "announce_to_ext", "announce_asterisk",
               "ANNOUNCE_DIR", "JSONResponse")}
     try:
         app.JSONResponse = _Resp
@@ -526,7 +526,7 @@ def test_announce_handler_refuses_a_contactless_endpoint_and_records_it(tmp_path
         app.device_unreachable = lambda s: s == "UNAVAILABLE"
         app.get_device_state = lambda e: "UNAVAILABLE"
         app.announce_to_ext = lambda e, s: originated.append(e) or True
-        app.DELIVERY_OUTCOME_PATH = str(out)
+        app._delivery.OUTCOME_PATH = str(out)
 
         resp = _aio.run(app.api_announce("19", _Req()))
     finally:
@@ -642,10 +642,11 @@ def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None):
             return True
 
     originated = []
+    saved_outcome = app._delivery.OUTCOME_PATH
     saved = {k: getattr(app, k) for k in
              ("load_options", "configured_room_exts", "valid_ext",
               "get_device_state", "device_busy", "device_unreachable",
-              "announce_to_ext", "DELIVERY_OUTCOME_PATH", "announce_asterisk",
+              "announce_to_ext", "announce_asterisk",
               "ANNOUNCE_DIR", "JSONResponse")}
     import os as _os
     try:
@@ -661,11 +662,14 @@ def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None):
         app.get_device_state = lambda e: state
         app.announce_to_ext = lambda e, s: originated.append(e) or True
         if out is not None:
-            app.DELIVERY_OUTCOME_PATH = str(out)
+            app._delivery.OUTCOME_PATH = str(out)
         resp = _aio.run(app.api_announce("19", _Req()))
     finally:
         for k, v in saved.items():
             setattr(app, k, v)
+        # The outcome path lives on the shared module, not on app, so it needs
+        # restoring explicitly -- otherwise it leaks into every later test.
+        app._delivery.OUTCOME_PATH = saved_outcome
     return resp, originated
 
 

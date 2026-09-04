@@ -20,6 +20,24 @@ sys.path.insert(0, "/usr/share/switchboard/wakeup")
 sys.path.insert(0, "/usr/share/switchboard/webui")
 import store  # noqa: E402
 import ami  # noqa: E402
+
+try:
+    import delivery as _delivery  # noqa: E402
+except Exception:  # noqa: BLE001 - the scheduler must run without it
+    _delivery = None
+
+
+def _record(ext: str, outcome: str, **extra) -> None:
+    """Record a wake-up delivery attempt, shared shape with the announce path.
+
+    Best-effort: an alarm clock must never fail to ring because its telemetry
+    could not be written."""
+    if _delivery is None:
+        return
+    try:
+        _delivery.record(ext, "wakeup", outcome, **extra)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not record wake-up outcome for ext {ext}: {exc}")
 try:
     import ha_client  # noqa: E402  (surface a missed wake-up as an HA notification)
 except Exception:  # noqa: BLE001 — HA integration is optional; never break the loop
@@ -77,13 +95,34 @@ def tick() -> None:
         state = states.get(ext, "")
         if state.strip().lower() != "not in use":
             log(f"wake-up for ext {ext} ({entry.get('hhmm')}) deferred — room '{state or 'unknown'}'")
+            # A deferral is a wake-up that did NOT happen at its appointed time.
+            # It was previously only a line in an untimestamped container log.
+            _record(ext, "deferred", hhmm=entry.get("hhmm"),
+                    device_state=state or "unknown")
             continue
         ok = False
         try:
             ok = ami.originate_wakeup(ext, RING)
         except Exception as exc:  # AMI hiccup — leave it for the next tick
             log(f"originate wake-up for ext {ext} failed: {exc}")
+            _record(ext, "originate-error", hhmm=entry.get("hhmm"),
+                    detail=str(exc)[:120])
         log(f"wake-up for ext {ext} ({entry.get('hhmm')}): ring queued={ok}")
+        # Record the ATTEMPT, not just the log line. The QoS ledger is written
+        # from the dialplan's hangup extension, so it can only ever describe a
+        # leg that ANSWERED -- a wake-up that rings out leaves nothing there at
+        # all. The 06:18 wake-up on 2026-09-03 rang ext 19 and produced no
+        # record of any kind: "ring queued=True", "Called 19", "is ringing",
+        # then silence for 98 minutes. Nothing distinguished "the phone never
+        # rang" from "the user ignored it", on an alarm clock.
+        #
+        # A ring-queued record with no matching call record IS the no-answer
+        # signal, and both now live in /share where they can be read together.
+        if ok:
+            _record(ext, "ring-queued", hhmm=entry.get("hhmm"),
+                    ring_seconds=RING)
+        elif not ok:
+            _record(ext, "originate-refused", hhmm=entry.get("hhmm"))
         if ok:
             try:
                 store.cancel_if(ext, entry.get("target_epoch"))  # one-shot; don't clobber a re-set one
