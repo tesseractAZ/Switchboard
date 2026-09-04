@@ -196,3 +196,164 @@ def test_wakeup_scene_for_prefers_room_then_falls_back() -> None:
     assert _sp.wakeup_scene_for({}, "12") == ""
     # Malformed 'scenes' must not raise.
     assert _sp.wakeup_scene_for({"scene": "scene.a", "scenes": "nope"}, "12") == "scene.a"
+
+
+def test_every_wakeup_attempt_leaves_a_record(tmp_path) -> None:
+    """A wake-up that rings out must not vanish.
+
+    The QoS ledger is written from the dialplan's hangup extension, so it can
+    only ever describe a leg that ANSWERED. The 06:18 wake-up on 2026-09-03 rang
+    ext 19 and produced no record of any kind -- "ring queued=True", "Called 19",
+    "is ringing", then silence for 98 minutes. Nothing distinguished "the phone
+    never rang" from "the user ignored it", on an alarm clock.
+
+    A ring-queued record with no matching call record IS the no-answer signal."""
+    import json as _json
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    _sys.path.insert(0, str(webui))
+    delivery = SourceFileLoader("delivery", str(webui / "delivery.py")).load_module()
+
+    out = tmp_path / "sub" / "delivery.jsonl"     # nested: the writer must mkdir
+    real = delivery.OUTCOME_PATH
+    delivery.OUTCOME_PATH = str(out)
+    try:
+        delivery.record("19", "wakeup", "ring-queued", hhmm="06:18", ring_seconds=60)
+        delivery.record("14", "wakeup", "deferred", hhmm="07:00",
+                        device_state="In use")
+        delivery.record("19", "wakeup", "originate-refused", hhmm="06:30")
+        delivery.record("19", "announce", "unreachable", device_state="UNAVAILABLE")
+    finally:
+        delivery.OUTCOME_PATH = real
+
+    recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    check("wakeup record: one line per attempt", len(recs) == 4)
+    check("wakeup record: every line is dated", all(r.get("ts") for r in recs))
+    check("wakeup record: the ring is recorded",
+          recs[0]["kind"] == "wakeup" and recs[0]["outcome"] == "ring-queued")
+    check("wakeup record: it carries the scheduled time", recs[0]["hhmm"] == "06:18")
+    check("wakeup record: and the ring window, so a no-answer is datable",
+          recs[0]["ring_seconds"] == 60)
+    check("wakeup record: a deferral is recorded, not just logged",
+          recs[1]["outcome"] == "deferred" and recs[1]["device_state"] == "In use")
+    check("wakeup record: a refused originate is distinguishable from a ring",
+          recs[2]["outcome"] == "originate-refused")
+    # Wake-ups and announcements share the file and must stay distinguishable.
+    check("wakeup record: kind separates the alarm clock from announcements",
+          [r["kind"] for r in recs] == ["wakeup", "wakeup", "wakeup", "announce"])
+    check("wakeup record: absent optionals are omitted, not written as null",
+          "device_state" not in recs[0] and "hhmm" not in recs[3])
+
+    # An unwritable path must never stop an alarm ringing.
+    delivery.OUTCOME_PATH = "/proc/cannot/write/here.jsonl"
+    try:
+        delivery.record("19", "wakeup", "ring-queued")
+        check("wakeup record: an unwritable path is swallowed", True)
+    finally:
+        delivery.OUTCOME_PATH = real
+
+
+def test_tick_records_the_attempt_it_actually_made(tmp_path) -> None:
+    """tick() must WRITE the record, not merely be able to.
+
+    Recording is done by a shared helper with its own tests -- but a helper that
+    is never called is worth nothing, and mutation testing showed both call
+    sites in tick() surviving while the helper was fully covered. That is the
+    eighth gap of this shape in this work, so the caller gets driven directly.
+
+    Two paths matter: a wake-up that fires (ring-queued) and one deferred
+    because the room was busy at its appointed minute. Both were previously only
+    lines in a container log that carries no timestamps."""
+    import json as _json
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    _sys.path.insert(0, str(webui))
+    delivery = SourceFileLoader("delivery", str(webui / "delivery.py")).load_module()
+
+    out = tmp_path / "d.jsonl"
+    saved_path = delivery.OUTCOME_PATH
+    delivery.OUTCOME_PATH = str(out)
+
+    # scheduler.py resolves store/ami/ha_client at IMPORT time from absolute
+    # container paths, so pre-register stand-ins before loading it.
+    class _Pre:
+        @staticmethod
+        def due(now): return ([], [])
+        @staticmethod
+        def cancel_if(ext, epoch): return True
+        @staticmethod
+        def get_endpoints(): return []
+        @staticmethod
+        def originate_wakeup(ext, ring): return True
+        @staticmethod
+        def notify(*a, **k): return True
+
+    pre_saved = {k: _sys.modules.get(k) for k in ("store", "ami", "ha_client", "delivery")}
+    for k in ("store", "ami", "ha_client"):
+        _sys.modules[k] = _Pre
+    _sys.modules["delivery"] = delivery
+    try:
+        sched = SourceFileLoader(
+            "sw_scheduler",
+            str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+                / "switchboard" / "wakeup" / "scheduler.py")).load_module()
+    finally:
+        for k, v in pre_saved.items():
+            if v is None:
+                _sys.modules.pop(k, None)
+            else:
+                _sys.modules[k] = v
+
+    saved = {k: getattr(sched, k, None) for k in ("store", "ami", "ha_client", "_delivery")}
+    try:
+        sched._delivery = delivery
+
+        class _Store:
+            @staticmethod
+            def due(now):
+                return ([("19", {"hhmm": "06:18", "target_epoch": now}),
+                         ("14", {"hhmm": "07:00", "target_epoch": now})], [])
+            @staticmethod
+            def cancel_if(ext, epoch): return True
+
+        class _AMI:
+            @staticmethod
+            def get_endpoints():
+                # The real shape: a list of {"name", "state"} dicts. An earlier
+                # version of this stub invented endpoint_states(), which made
+                # tick() take the AMI-down path and defer BOTH wake-ups -- the
+                # recording was correct, the fixture was not.
+                return [{"name": "19", "state": "Not in use"},   # idle -> rings
+                        {"name": "14", "state": "In use"}]        # busy -> deferred
+            @staticmethod
+            def originate_wakeup(ext, ring): return True
+
+        sched.store = _Store
+        sched.ami = _AMI
+        sched.ha_client = None
+        sched.tick()
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                setattr(sched, k, v)
+        delivery.OUTCOME_PATH = saved_path
+
+    recs = [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    by_ext = {r["ext"]: r for r in recs}
+    check("tick: the wake-up that fired is recorded", "19" in by_ext)
+    check("tick: it is recorded as a queued ring",
+          by_ext.get("19", {}).get("outcome") == "ring-queued")
+    check("tick: with the scheduled time, so a no-answer is datable",
+          by_ext.get("19", {}).get("hhmm") == "06:18")
+    check("tick: the DEFERRED wake-up is recorded too", "14" in by_ext)
+    check("tick: named as deferred, with the state that caused it",
+          by_ext.get("14", {}).get("outcome") == "deferred"
+          and by_ext.get("14", {}).get("device_state") == "In use")
+    check("tick: both are tagged as wake-ups, not announcements",
+          all(r["kind"] == "wakeup" for r in recs))

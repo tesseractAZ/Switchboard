@@ -502,40 +502,18 @@ def _cleanup_announce_dir(max_age: int = 300) -> None:
         pass
 
 
-DELIVERY_OUTCOME_PATH = os.environ.get(
-    "SWITCHBOARD_DELIVERY_OUTCOME", "/share/switchboard/delivery-outcomes.jsonl")
-DELIVERY_OUTCOME_MAX_BYTES = 2 * 1024 * 1024
+# Delivery-attempt records live in the shared `delivery` module so the wake-up
+# scheduler writes to the same file with the same shape -- the announce path and
+# the alarm clock fail in the same ways and should be readable together.
+try:
+    import delivery as _delivery
+except Exception:  # noqa: BLE001 - the webui must import without it
+    _delivery = None
 
 
 def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:
-    """Record a delivery attempt that never became a call.
-
-    The QoS ledger is written from the dialplan's hangup extension, so it can
-    only ever describe legs that ANSWERED. Everything upstream of that is
-    invisible: an Originate refused for want of a contact, a handset that rang
-    and was never picked up, an AMI error. One audit window held three refused
-    Originates and a wake-up that rang 60 s unanswered, and not one of them
-    produced a ledger row, a sensor, or anything an operator would read —
-    nothing distinguished "the phone never rang" from "the user ignored it".
-
-    Written beside the other /share records because /data cannot be read from
-    outside the container. Best-effort: telemetry must never fail a delivery."""
-    rec = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(
-               timespec="seconds"),
-           "ext": ext, "kind": kind, "outcome": outcome}
-    rec.update({k: v for k, v in extra.items() if v is not None})
-    try:
-        os.makedirs(os.path.dirname(DELIVERY_OUTCOME_PATH), exist_ok=True)
-        try:
-            if os.path.getsize(DELIVERY_OUTCOME_PATH) > DELIVERY_OUTCOME_MAX_BYTES:
-                with open(DELIVERY_OUTCOME_PATH, "w", encoding="utf-8"):
-                    pass
-        except OSError:
-            pass
-        with open(DELIVERY_OUTCOME_PATH, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
-    except OSError as exc:
-        print(f"[switchboard-webui] delivery record: {exc}", flush=True)
+    if _delivery is not None:
+        _delivery.record(ext, kind, outcome, **extra)
 
 
 @app.post("/api/announce/{ext}")
