@@ -1038,9 +1038,11 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
             ";; International (011) and premium 1-900 are denied. More specific",
             ";; than the outbound pattern below, so matched first.",
             "exten = _011.,1,NoOp(Blocked international)",
+            " same = n,Set(SW_TAG=blocked)",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
             "exten = _1900NXXXXXX,1,NoOp(Blocked premium 1-900)",
+            " same = n,Set(SW_TAG=blocked)",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
             "",
@@ -1050,6 +1052,7 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
             ";; 10-digit number is NOT routed (add the 1) — that is what keeps the",
             ";; feature codes and extension 20 dialing instantly.",
             "exten = _1NXXNXXXXXX,1,NoOp(Outbound ${EXTEN})",
+            " same = n,Set(SW_TAG=outbound)",
         ] + _outbound_dial_body("${EXTEN}", caller_id)
 
     # Prefix mode.
@@ -1082,17 +1085,21 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         ";; patterns are more specific than the general rule below, so Asterisk",
         ";; matches them first. Everything else still dials out normally.",
         f"exten = _{prefix}011.,1,NoOp(Blocked international)",
+        " same = n,Set(SW_TAG=blocked)",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
         f"exten = _{prefix}1900.,1,NoOp(Blocked premium 1-900)",
+        " same = n,Set(SW_TAG=blocked)",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
         f"exten = _{prefix}900.,1,NoOp(Blocked premium 900)",
+        " same = n,Set(SW_TAG=blocked)",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
         "",
         ";; ----- Outbound via SIP trunk (in [rooms] so the phones can dial it) -----",
         f"exten = _{prefix}.,1,NoOp(Outbound ${{EXTEN:{plen}}})",
+        " same = n,Set(SW_TAG=outbound)",
     ] + _outbound_dial_body(f"${{EXTEN:{plen}}}", caller_id)
 
 
@@ -1316,6 +1323,7 @@ def render_extensions(opts: dict) -> str:
             # belt-and-braces for a clean fall-through that never happens).
             parts += [
                 f"exten = {clock_ext},1,NoOp(Talking clock)",
+                " same = n,Set(SW_TAG=clock)",
                 " same = n,Answer()",
                 " same = n,Set(CHANNEL(language)=en)",
                 " same = n,Wait(1)",
@@ -1371,6 +1379,7 @@ def render_extensions(opts: dict) -> str:
             peers = "&".join(f"PJSIP/{e}" for e in exts)
             parts += [
                 f"exten = {page_ext},1,NoOp(Page)",
+                " same = n,Set(SW_TAG=page)",
                 f' same = n,Set(PAGEPEERS={peers})',
                 " same = n,Page(${PAGEPEERS},d)",
                 " same = n,Hangup()",
@@ -1485,7 +1494,13 @@ def render_extensions(opts: dict) -> str:
             "exten = _X.,1,NoOp(Room call to ${EXTEN})",
             # This IS a room-to-room call; say so explicitly rather than letting
             # it inherit the context name that four other call kinds share.
-            " same = n,Set(SW_TAG=room)",
+            #
+            # `room-to-room`, not `room`: the h-extension's fallback tag is the
+            # context name `rooms`, and `room` is a PREFIX of it. One character
+            # separated "a real room-to-room call" from "we could not classify
+            # this", and any startswith() downstream merged the two. Prefix
+            # collisions inside one tag namespace are now a test failure.
+            " same = n,Set(SW_TAG=room-to-room)",
             f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
         ] + room_dial + [
             " same = n,Hangup()",
