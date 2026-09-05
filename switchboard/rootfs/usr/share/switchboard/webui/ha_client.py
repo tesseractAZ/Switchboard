@@ -229,6 +229,40 @@ def get_states() -> list:
         return []
 
 
+def converse(text: str, agent_id: str = "conversation.home_assistant",
+             language: str = "en") -> tuple[str | None, str | None]:
+    """Ask Home Assistant's conversation agent and return (speech, response_type).
+
+    Deliberately NOT routed through call_service(): that guards a domain
+    allow-list and returns only a bool, and this needs the service RESPONSE --
+    the sentence to speak back. Widening the allow-list to get at it would
+    weaken a safety guard for an unrelated reason.
+
+    Everything on this path is LOCAL. `conversation.home_assistant` is Home
+    Assistant's built-in intent matcher, not a cloud agent, so an internet
+    outage cannot break it -- which is the whole point of reaching it from a
+    phone that has to work when the line is the only thing still up. Do not
+    default this to a cloud agent for better phrasing; the trade is wrong here.
+
+    (None, None) when HA is unreachable or the reply cannot be parsed, so the
+    caller can apologise out loud rather than sit in silence."""
+    if not (text or "").strip():
+        return None, None
+    status, body = _request(
+        "POST", "/api/services/conversation/process?return_response=true",
+        {"text": text.strip(), "agent_id": agent_id, "language": language})
+    if status is None or status >= 300 or not body:
+        _log(f"converse failed (status={status})")
+        return None, None
+    try:
+        resp = ((json.loads(body).get("service_response") or {}).get("response") or {})
+        speech = ((resp.get("speech") or {}).get("plain") or {}).get("speech")
+        return (speech or None), resp.get("response_type")
+    except (ValueError, AttributeError) as exc:
+        _log(f"converse: could not parse reply ({exc})")
+        return None, None
+
+
 def call_service(domain: str, service: str, data: dict | None = None) -> bool:
     """Call a HA service, restricted to the allow-listed domains. Returns True
     only if HA accepted it. `data` is passed through as the service payload.

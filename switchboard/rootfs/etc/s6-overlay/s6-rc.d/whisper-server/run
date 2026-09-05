@@ -37,8 +37,9 @@ if [ "$(bashio::config 'operator.enabled')" = "false" ] \
    && [ "$(bashio::config 'automation_enabled')" = "false" ] \
    && [ "$(bashio::config 'status_enabled')" = "false" ] \
    && [ "$(bashio::config 'announce_enabled')" = "false" ] \
-   && [ "$(bashio::config 'directory_enabled')" = "false" ]; then
-    bashio::log.info "No STT feature enabled (operator/wakeup/automation/status/announce/directory all off); whisper-server idling."
+   && [ "$(bashio::config 'directory_enabled')" = "false" ] \
+   && [ "$(bashio::config 'assistant_enabled')" = "false" ]; then
+    bashio::log.info "No STT feature enabled (operator/wakeup/automation/status/announce/directory/assistant all off); whisper-server idling."
     exec sleep infinity
 fi
 

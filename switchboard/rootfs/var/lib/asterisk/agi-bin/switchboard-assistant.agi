@@ -1,0 +1,335 @@
+#!/usr/bin/python3
+"""Switchboard assistant — a fully-local phone -> Home Assistant voice path.
+
+Reached from the [assistant] dialplan context (dial the assistant code). The
+whole loop is:
+
+    greet -> record an utterance -> transcribe -> ask Home Assistant -> speak
+
+Nothing on that path leaves the Pi. The recording is transcribed by the
+add-on's own whisper server (``switchboard-stt``), the text is handed to Home
+Assistant's BUILT-IN intent matcher (``conversation.home_assistant`` via
+``ha_client.converse``), and the reply is synthesized by the add-on's own piper
+voice (``switchboard-tts``). No cloud STT, no cloud TTS, no cloud agent -- an
+internet outage does not disturb it.
+
+This is deliberately NOT a Wyoming "voice satellite". A satellite streams raw
+audio to Home Assistant and lets HA own the whole pipeline; that would put a
+second STT and a second TTS in the path when Switchboard already has both, and
+it would need a persistent stream per call. Sending TEXT to HA and speaking the
+text it returns reuses what is already installed and keeps each call a couple of
+short local HTTP round-trips.
+
+Scope note: each utterance is a fresh one-shot request -- no conversation_id is
+threaded, so HA cannot ask a follow-up question ("which light?") and remember
+the answer. Multi-turn context is a deliberate v2 item; the phone flow instead
+re-prompts and treats every utterance as a complete command.
+
+Channel-safe by construction: the top-level handler swallows every exception so
+the channel never wedges, and a TTS, STT or HA failure degrades to a canned
+spoken apology + graceful hangup -- the caller is never left in silence.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+# Foundation module: ha_client (HA Core API, incl. the local conversation agent).
+sys.path.insert(0, "/usr/share/switchboard/webui")
+try:
+    import ha_client  # noqa: E402
+except Exception:  # noqa: BLE001  (degrade gracefully if the client won't import)
+    ha_client = None
+
+STT = "/usr/bin/switchboard-stt"
+TTS = "/usr/bin/switchboard-tts"
+ASR_DIR = "/run/switchboard/asr"
+RECORD_MS = 8000        # a sentence-length command needs longer than a room name
+SILENCE_S = 3
+MAX_TURNS = 5           # hard cap so a stuck line cannot hold the channel open
+MAX_EMPTY = 2           # consecutive silent/unrecognized turns before goodbye
+
+# Canned prompts shipped with the add-on (used for the greeting + apology so the
+# flow still has *some* voice even if TTS is broken).
+PROMPT_BEEP = "switchboard/sw-beep"
+PROMPT_ONEMOMENT = "switchboard/sw-onemoment"
+PROMPT_GOODBYE = "switchboard/sw-goodbye"          # best-effort; may be absent
+
+# Spoken words that end the call. Matched as whole words against the transcript
+# so "turn off the hall light" does not hang up on the word "off".
+GOODBYE_WORDS = frozenset({
+    "goodbye", "bye", "cancel", "nevermind", "quit", "exit", "stop",
+    "hangup", "disconnect", "thanks", "thank", "done",
+})
+
+# Command vocabulary fed to whisper as a decoding bias alongside the live entity
+# and area names. Without these the recognizer has no prior for the words the
+# prompt actually invites, and short utterances ("off", "list") are the ones it
+# gets wrong most often.
+BIAS_VERBS = (
+    "turn on, turn off, set, open, close, lock, unlock, start, stop, "
+    "what is, how, temperature, lights, scene, goodbye, cancel, never mind"
+)
+
+_tts_seq = 0  # monotonically increasing so each utterance gets a unique file
+
+
+# --------------------------------------------------------------------------- #
+# AGI plumbing (same shape as the operator / automation / wakeup AGIs)
+# --------------------------------------------------------------------------- #
+def read_env() -> dict:
+    env: dict[str, str] = {}
+    while True:
+        line = sys.stdin.readline()
+        if not line or not line.strip():
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def agi(command: str) -> str:
+    sys.stdout.write(command + "\n")
+    sys.stdout.flush()
+    return sys.stdin.readline().strip()
+
+
+def stream(soundfile: str) -> None:
+    agi(f'STREAM FILE {soundfile} ""')
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"[assistant] {msg}\n")
+
+
+# --------------------------------------------------------------------------- #
+# Speech: dynamic via switchboard-tts -> Playback; canned fallback otherwise.
+# --------------------------------------------------------------------------- #
+def say(text: str) -> bool:
+    """Synthesize `text` with switchboard-tts and Playback it. Returns True on
+    success. On any failure the caller should fall back to a canned prompt --
+    this function never raises."""
+    global _tts_seq
+    _tts_seq += 1
+    base = f"/tmp/sw-asst-{os.getpid()}-{_tts_seq}"
+    wav = base + ".wav"
+    try:
+        proc = subprocess.run([TTS, text, base], capture_output=True,
+                              text=True, timeout=25)
+        if proc.returncode != 0 or not os.path.exists(wav):
+            log(f"tts failed rc={proc.returncode} for {text!r}: {(proc.stderr or '').strip()}")
+            return False
+        # Playback wants the path WITHOUT extension.
+        agi(f"EXEC Playback {base}")
+        return True
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"tts error for {text!r}: {exc}")
+        return False
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+
+
+def say_or(text: str, fallback_prompt: str) -> None:
+    """Speak dynamic `text`; if TTS fails, play a canned prompt so there's never
+    dead air."""
+    if not say(text):
+        stream(fallback_prompt)
+
+
+def apologize_and_bye() -> None:
+    """Graceful degradation: one spoken (or canned) apology, then return so the
+    dialplan hangs up."""
+    if not say("Sorry, the assistant is unavailable right now. Goodbye."):
+        stream(PROMPT_GOODBYE)
+
+
+# --------------------------------------------------------------------------- #
+# Recording + recognition
+# --------------------------------------------------------------------------- #
+def listen(tag: str, attempt: int, bias: str = "") -> str:
+    """Record one utterance and return the raw transcript ('' on nothing)."""
+    rec = f"{ASR_DIR}/asst-{os.getpid()}-{tag}-{attempt}"
+    stream(PROMPT_BEEP)
+    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    wav = rec + ".wav"
+    text = ""
+    cmd = [STT, "--in", wav, "--mode", "transcribe"]
+    if bias:
+        cmd += ["--bias", bias]
+    # Start STT before the "one moment" prompt so inference overlaps its playback
+    # (the child only touches the WAV + loopback whisper-server, not the channel).
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True)
+    except OSError as exc:
+        log(f"stt spawn error: {exc}")
+        proc = None
+    stream(PROMPT_ONEMOMENT)
+    try:
+        if proc is not None:
+            so, se = proc.communicate(timeout=30)
+            text = (so or "").strip()
+            if se:
+                sys.stderr.write(se)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate()
+        except OSError:
+            pass
+        log("stt timeout")
+    except OSError as exc:
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.communicate()
+            except OSError:
+                pass
+        log(f"stt error: {exc}")
+    finally:
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers (unit-tested without a channel)
+# --------------------------------------------------------------------------- #
+def normalize(text: str) -> str:
+    """Lowercase and strip punctuation so word matching is stable. Whisper
+    punctuates ('Goodbye.') and a naive `in` test would miss it."""
+    return "".join(c if (c.isalnum() or c.isspace()) else " " for c in (text or "").lower())
+
+
+# Multi-word endings folded to a single terminator token before matching.
+# Needed because normalize() splits on whitespace and whisper transcribes these
+# as separate words -- "never mind" would otherwise be two filler words with no
+# terminator among them, and so not a goodbye at all.
+GOODBYE_PHRASES = (
+    ("never mind", "nevermind"),
+    ("that s all", "goodbye"),
+    ("that is all", "goodbye"),
+)
+
+
+def is_goodbye(text: str) -> bool:
+    """True when the caller asked to end the call.
+
+    Whole-UTTERANCE matching, not substring: "stop the music" and "cancel my
+    seven a m wake up" both contain a goodbye word but are real commands, so a
+    goodbye is recognized only when SOME word is a terminator AND EVERY word is
+    either a terminator or filler around one. "that's all, thanks" therefore
+    ends the call while "turn on the kitchen light, thanks" does not."""
+    flat = " ".join(normalize(text).split())
+    for phrase, token in GOODBYE_PHRASES:
+        flat = flat.replace(phrase, token)
+    words = flat.split()
+    if not words:
+        return False
+    # Filler is what may SURROUND a goodbye word without changing the meaning.
+    # Nothing here may also be a goodbye word: a word in both sets would satisfy
+    # the `any` clause on its own and turn a filler-only utterance into a hangup.
+    filler = {"that", "s", "m", "it", "all", "ok", "okay", "you", "please", "no",
+              "im", "i", "am", "for", "now", "mind", "never", "much", "a", "lot"}
+    return (any(w in GOODBYE_WORDS for w in words)
+            and all(w in GOODBYE_WORDS or w in filler for w in words))
+
+
+def build_bias(by_area: dict) -> str:
+    """Seed whisper with the names it is most likely to hear.
+
+    The bias is a PRIOR, not a whitelist -- an unlisted word can still be
+    transcribed, it is just less likely. So including the live area and light
+    names costs nothing and materially improves short commands. Degrades to the
+    verb list alone when Home Assistant is unreachable."""
+    names: list[str] = []
+    for area, lights in (by_area or {}).items():
+        if area:
+            names.append(str(area))
+        for light in lights or []:
+            name = (light or {}).get("name")
+            if name:
+                names.append(str(name))
+    # De-duplicate while preserving order so the prompt reads naturally.
+    seen: set[str] = set()
+    uniq = [n for n in names if not (n.lower() in seen or seen.add(n.lower()))]
+    return ", ".join(uniq + [BIAS_VERBS]) if uniq else BIAS_VERBS
+
+
+def reply_text(speech: str | None, response_type: str | None) -> str:
+    """What to speak for one HA answer.
+
+    HA returns speech for BOTH success and 'error' response types -- an
+    unmatched command comes back as a perfectly good sentence ('Sorry, I am not
+    aware of any device called ...'). So speech wins whenever it exists, and the
+    fallback is only for the transport failing outright."""
+    if speech:
+        return speech
+    if response_type:
+        return "Sorry, I didn't understand that."
+    return "Sorry, I couldn't reach Home Assistant."
+
+
+# --------------------------------------------------------------------------- #
+# Flow
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    read_env()
+    agi("ANSWER")
+
+    if ha_client is None or not ha_client.available():
+        log("home assistant unavailable")
+        apologize_and_bye()
+        return
+
+    try:
+        bias = build_bias(ha_client.lights_by_area())
+    except Exception as exc:  # noqa: BLE001  (a bias failure must not end the call)
+        log(f"bias build failed: {exc}")
+        bias = BIAS_VERBS
+
+    say_or("Home assistant. What would you like?", PROMPT_BEEP)
+
+    empty = 0
+    for turn in range(1, MAX_TURNS + 1):
+        text = listen("ask", turn, bias)
+        if not text:
+            empty += 1
+            if empty >= MAX_EMPTY:
+                say_or("I didn't catch that. Goodbye.", PROMPT_GOODBYE)
+                return
+            say_or("Sorry, I didn't hear anything. Please say that again.", PROMPT_BEEP)
+            continue
+
+        if is_goodbye(text):
+            say_or("Goodbye.", PROMPT_GOODBYE)
+            return
+
+        empty = 0
+        log(f"turn {turn}: {text!r}")
+        speech, response_type = ha_client.converse(text)
+        say_or(reply_text(speech, response_type), PROMPT_GOODBYE)
+
+        if turn < MAX_TURNS:
+            say("Anything else?")
+
+    say_or("Goodbye.", PROMPT_GOODBYE)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001  (never wedge the channel)
+        sys.stderr.write(f"[assistant] fatal: {exc}\n")
+        try:
+            apologize_and_bye()
+        except Exception:
+            pass

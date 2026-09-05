@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.69.0
+
+A phone can now talk to Home Assistant's voice assistant, with nothing on the
+path leaving the machine. **Off by default** — set `assistant_enabled: true`.
+
+Dial `47` (configurable via `assistant_ext`), say a command or a question in
+plain language, and hear the answer. It re-asks "anything else?" after each
+reply and hangs up on "goodbye", "cancel", "never mind", "that's all" or
+"thanks".
+
+The local part is the point. This add-on already ships a speech recognizer and
+a voice, so the flow reuses both: its own whisper transcribes the utterance,
+the *text* goes to Home Assistant's built-in `conversation.home_assistant`
+agent, and its own piper speaks the reply. No cloud speech-to-text, no cloud
+text-to-speech, no cloud conversation agent — an internet outage does not
+affect it. This is deliberately not a Wyoming voice satellite: streaming raw
+audio to Home Assistant would put a second recognizer and a second voice in a
+path that already has both, and would hold an audio stream open per call.
+
+Ending the call is matched against the whole utterance rather than by substring.
+"stop the music" and "cancel my seven a.m. wake-up" both contain a terminator
+word and are treated as commands; a goodbye is recognized only when every word
+is a terminator or filler around one.
+
+The loop is bounded at five recordings and gives up after two consecutive
+silent turns, so an off-hook handset next to a television cannot hold a channel
+and a recognizer slot open.
+
+Speech recognition is biased toward the live area and light names, which
+improves short commands; the bias is a decoding hint, not a restriction, and it
+degrades to a plain command vocabulary when Home Assistant is unreachable. An
+unreachable Home Assistant produces a spoken apology rather than dead air.
+
+Unlike the other feature codes, a dial-code collision disables this one
+outright. Nothing else routes into the context, so emitting it without a dial
+code would leave unreachable dialplan that still reads as a working feature.
+
+Note that the conversation agent can only act on entities exposed to Assist
+(*Settings → Voice assistants → Expose*). Until something is exposed, every
+command is answered "Sorry, I am not aware of any device called …". That, and
+the fact that exposing an entity makes it reachable from every phone in the
+house, is why the option ships off.
+
 ## 0.68.0
 
 A call's recorded kind is no longer just the context it hung up in.

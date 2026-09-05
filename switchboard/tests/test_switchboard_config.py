@@ -850,6 +850,56 @@ def test_automation_dialplan() -> None:
           "exten = 12,1,NoOp(Automation)" not in coll and "[automation]" in coll)
 
 
+def test_assistant_dialplan() -> None:
+    """The local voice assistant: dial code, context, and default-OFF.
+
+    Default-off is the deliberate part. The flow can only act on entities that
+    have been exposed to Assist, and exposing an entity makes it reachable from
+    EVERY phone in the house -- that is the owner's decision, not a default."""
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+
+    on = sbc.render_extensions({"rooms": rooms, "assistant_enabled": True,
+                                "assistant_ext": "47", "trunk": {}})
+    check("assistant: dial code 47 routes to [assistant]",
+          "exten = 47,1,NoOp(Assistant)" in on and "Goto(assistant,s,1)" in on)
+    check("assistant: [assistant] context runs the AGI",
+          "[assistant]" in on and "AGI(switchboard-assistant.agi)" in on)
+    check("assistant: the context answers before the AGI",
+          on.index("[assistant]") < on.index("AGI(switchboard-assistant.agi)")
+          and "Answer()" in on[on.index("[assistant]"):on.index("AGI(switchboard-assistant.agi)")])
+    check("assistant: legs are tagged for the call-quality ledger",
+          "Set(SW_KIND=" in on[on.index("[assistant]"):]
+          and ":assistant)})" in on[on.index("[assistant]"):])
+
+    # OFF BY DEFAULT -- the whole point. A stock install must not answer 47.
+    default = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+    check("assistant: OFF by default (no dial code)",
+          "NoOp(Assistant)" not in default)
+    check("assistant: OFF by default (no context)", "[assistant]" not in default)
+
+    off = sbc.render_extensions({"rooms": rooms, "assistant_enabled": False,
+                                 "trunk": {}})
+    check("assistant: explicitly disabled removes dial code + context",
+          "NoOp(Assistant)" not in off and "[assistant]" not in off)
+
+    # A COLLIDED dial code must not leave an unreachable context behind. Unlike
+    # [automation] there is no spoken route into [assistant], so a context with
+    # no dial code is dead dialplan -- and dead dialplan reads as a working
+    # feature to anyone grepping the generated file.
+    coll = sbc.render_extensions({"rooms": rooms, "assistant_enabled": True,
+                                  "assistant_ext": "12", "trunk": {}})
+    check("assistant: room collision skips the dial code",
+          "exten = 12,1,NoOp(Assistant)" not in coll)
+    check("assistant: room collision leaves NO orphan [assistant] context",
+          "[assistant]" not in coll)
+
+    bad = sbc.render_extensions({"rooms": rooms, "assistant_enabled": True,
+                                 "assistant_ext": "4x", "trunk": {}})
+    check("assistant: a non-numeric ext disables the feature entirely",
+          "NoOp(Assistant)" not in bad and "[assistant]" not in bad)
+
+
 def test_operator_mwi_clear() -> None:
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                              {"ext": "12", "name": "Office", "secret": "s2"}])

@@ -149,6 +149,7 @@ its default is fine.
 | `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
 | `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
+| `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
 
 ### Outside line (SIP trunk)
 
@@ -252,6 +253,7 @@ Dial these from any room phone. All are configurable (`*_ext`) and can be disabl
 | `44`  | **Page all** — house-wide intercom | [§6](#6-paging--announcements) |
 | `45`  | **Dial-a-status** — hear live Home Assistant readings | [§4](#4-the-voice-operator--directory-assistance) |
 | `46`  | **Announce** — speak a message out your Home Assistant speakers | [§6](#6-paging--announcements) |
+| `47`  | **Local voice assistant** — ask Home Assistant anything (*off by default*) | [§4](#4-the-voice-operator--directory-assistance) |
 | `411` | **Directory assistance** | [§4](#4-the-voice-operator--directory-assistance) |
 
 A feature's dial code is skipped (with a log line) if it collides with a room
@@ -259,7 +261,9 @@ extension or another code, but the underlying feature usually still works via
 the operator, the scheduler, or the dashboard. Two exceptions: the talking
 clock is fully disabled on a collision, and a collided page code stays
 reachable only from the dashboard/console (the operator's "page" route is
-dropped with it).
+dropped with it). The local voice assistant is also fully disabled on a
+collision: nothing else routes into it, so a context with no dial code would be
+unreachable dialplan that still reads as a working feature.
 
 ### In-call transfer (analog phones)
 
@@ -358,6 +362,48 @@ after **8 answers**, and it gives up (with "okay, goodbye") as soon as **two
 replies in a row** go unrecognized at the same prompt. Say "goodbye" to leave
 early. The cap is a backstop against a noisy or wedged line holding a channel
 open indefinitely.
+
+### Local voice assistant — dial `47`
+
+**Off by default.** Set `assistant_enabled: true` to switch it on.
+
+Dial `47`, say a command or a question in plain language, and hear the answer.
+Unlike the home-automation menu (§4, dial `43`) there is no guided room →
+light → action script: you say the whole thing at once, and anything Home
+Assistant's own voice assistant understands works here too.
+
+It re-asks "anything else?" after each answer. The loop is bounded: it stops
+after **5 recordings**, and it gives up as soon as **two turns in a row** are
+silent or unintelligible. Say "goodbye", "cancel", "never mind", "that's all"
+or "thanks" to leave early — the phrase has to be the whole utterance, so
+"turn off the porch light" and "stop the music" are treated as commands, not
+as hang-ups.
+
+**Nothing on this path leaves the machine.** The recording is transcribed by
+this add-on's own speech recognition, the text goes to Home Assistant's
+built-in `conversation.home_assistant` agent, and the reply is spoken by this
+add-on's own voice. No cloud speech-to-text, no cloud text-to-speech, no cloud
+conversation agent — an internet outage does not affect it. (Home Assistant
+Cloud's assistant is *not* used even if you have a subscription.)
+
+**You must expose entities before it can do anything.** Home Assistant's
+conversation agent only acts on entities explicitly exposed to Assist
+(*Settings → Voice assistants → Expose*). Until you expose something, every
+command comes back as *"Sorry, I am not aware of any device called …"* — the
+feature is working, it simply has nothing in scope. This is why the option
+ships off: exposing an entity makes it controllable from **every phone in the
+house**, including, if you have an outside line, a call that has been
+transferred to one. That is a decision for the owner of the system, not a
+default.
+
+Speech recognition is biased toward your live area and light names, which
+materially improves short commands. The bias is a hint, not a restriction —
+words outside it are still recognized.
+
+Each utterance is a fresh request; the assistant does not carry context between
+turns, so a command that Home Assistant would normally answer with a follow-up
+question ("which light?") will not be resolvable over the phone. Say the whole
+command instead.
 
 ---
 

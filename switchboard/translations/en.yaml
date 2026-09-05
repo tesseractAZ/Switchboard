@@ -165,6 +165,19 @@ configuration:
   status_ext:
     name: Status Extension
     description: Dial this for the spoken status menu. 2–6 digits. Default 45.
+  assistant_enabled:
+    name: Local Voice Assistant
+    description: >-
+      Let a phone talk to Home Assistant's built-in conversation agent. Fully
+      local — this add-on's own speech recognition and voice, and Home
+      Assistant's own intent matcher; no cloud service is involved, so an
+      internet outage does not affect it. Off by default: the assistant can only
+      act on entities you have exposed to Assist (Settings → Voice assistants →
+      Expose), and until you expose something it will answer "I am not aware of
+      any device called…" to everything.
+  assistant_ext:
+    name: Assistant Extension
+    description: Dial this to reach the local voice assistant. 2–6 digits. Default 47.
   status_power_grid:
     name: Status Menu — Grid Power Entity
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.
