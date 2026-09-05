@@ -971,3 +971,70 @@ def test_device_unreachable_classifies_a_contactless_endpoint() -> None:
     # The two guards must not overlap -- a busy phone is reachable.
     check("unreachable: busy and unreachable are disjoint",
           not (ami.device_busy("INUSE") and ami.device_unreachable("INUSE")))
+
+
+def test_converse_is_local_and_parses_the_spoken_reply() -> None:
+    """The phone->assistant path must reach HA's LOCAL agent and return speech.
+
+    The whole reason this exists is that the line has to work when the internet
+    does not, so the default agent must be Home Assistant's built-in intent
+    matcher -- never a cloud agent, however much better it phrases things.
+
+    It is deliberately not routed through call_service(), which guards a domain
+    allow-list and returns only a bool; widening that allow-list to get at the
+    service response would weaken a safety guard for an unrelated reason."""
+    import json as _json
+    from importlib.machinery import SourceFileLoader as _SFL
+    hc = _SFL("sb_ha_client",
+              str(AMI_PATH.parent / "ha_client.py")).load_module()
+    calls = []
+
+    def _fake_request(method, path, body=None):
+        calls.append((method, path, body))
+        return 200, _json.dumps({"service_response": {"response": {
+            "response_type": "action_done",
+            "speech": {"plain": {"speech": "Turned on the kitchen light."}}}}})
+
+    real = hc._request
+    hc._request = _fake_request
+    try:
+        speech, kind = hc.converse("turn on the kitchen light")
+    finally:
+        hc._request = real
+
+    check("converse: returns the sentence to speak",
+          speech == "Turned on the kitchen light.")
+    check("converse: returns the response type", kind == "action_done")
+    method, path, body = calls[0]
+    check("converse: asks for the service RESPONSE, not just an ack",
+          "return_response=true" in path)
+    check("converse: defaults to the LOCAL built-in agent, not a cloud one",
+          body["agent_id"] == "conversation.home_assistant"
+          and "cloud" not in body["agent_id"])
+    check("converse: sends the caller's words", body["text"] == "turn on the kitchen light")
+
+    # HA unreachable -> (None, None) so the caller can apologise out loud
+    # rather than leave the line silent.
+    hc._request = lambda *a, **k: (None, None)
+    try:
+        check("converse: HA unreachable degrades to (None, None)",
+              hc.converse("anything") == (None, None))
+    finally:
+        hc._request = real
+
+    # A non-JSON body must not raise into the AGI.
+    hc._request = lambda *a, **k: (200, "<html>not json</html>")
+    try:
+        check("converse: an unparseable reply degrades, it does not raise",
+              hc.converse("anything") == (None, None))
+    finally:
+        hc._request = real
+
+    # Empty input never reaches HA at all.
+    hc._request = _fake_request
+    calls.clear()
+    try:
+        check("converse: blank input is not sent to HA",
+              hc.converse("   ") == (None, None) and calls == [])
+    finally:
+        hc._request = real

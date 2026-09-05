@@ -111,6 +111,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-status.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-announce.agi \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-wakeup-deliver.agi \
+    && chmod +x /var/lib/asterisk/agi-bin/switchboard-assistant.agi \
     && chmod +x /usr/share/switchboard/console/console.py \
     && chmod +x /usr/share/switchboard/console-web/server.py \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \
@@ -132,4 +133,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.68.0"
+    io.hass.version="0.69.0"
