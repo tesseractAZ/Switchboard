@@ -1909,3 +1909,86 @@ def test_wakeup_scene_fires_on_answer_not_after_the_narration() -> None:
     # A bare AGI() call would fire the scene AND speak, duplicating the extras.
     check("wakeup: no un-moded AGI call remains",
           "AGI(switchboard-wakeup-deliver.agi)" not in wd)
+
+
+def test_emergency_numbers_do_not_depend_on_the_trunk() -> None:
+    """911 and 933 must be answered in EVERY configuration.
+
+    TWO LIVE DEFECTS, both closed here.
+
+    (1) These extensions lived inside `render_outbound_rules`, which is called
+    only when the trunk is enabled. On a trunk-less install — the DEFAULT — there
+    was no `exten = 911` at all: the dial fell through `_X.`, failed the room
+    test and hit Congestion, i.e. a fast busy indistinguishable from a misdial.
+    The spoken "use a mobile" notice, the entire point of the block, had never
+    played on such an install.
+
+    (2) `933` — the FCC's number for TESTING a 911 setup without engaging
+    dispatch — was matched only in the direct-dial branch. In prefix mode it fell
+    to `_9.`, which strips the prefix and dials the remainder, placing a real PSTN
+    call to "33". That is the same shape as the 911 -> "11" bug this file's own
+    comment records fixing; it was left behind on the sibling number.
+    """
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    base = {"enabled": True, "provider_host": "example.net", "username": "u",
+            "secret": "x", "outbound_caller_id": "5555550100"}
+    modes = {
+        "trunk disabled": {"enabled": False},
+        "prefix mode": dict(base, dial_prefix="9"),
+        "direct dial": dict(base, direct_dial=True),
+    }
+    for name, trunk in modes.items():
+        e = sbc.render_extensions({"rooms": rooms, "trunk": trunk,
+                                   "operator": {"enabled": True}})
+        for num in ("911", "933"):
+            check(f"{name}: {num} is answered", f"exten = {num},1," in e)
+            check(f"{name}: {num} is registered exactly ONCE",
+                  e.count(f"exten = {num},1,") == 1)
+        check(f"{name}: the spoken notice is reachable", "sw-no-emergency" in e)
+        check(f"{name}: an emergency attempt is findable in the ledger",
+              "Set(SW_TAG=emergency)" in e)
+
+    # The prefixed forms exist ONLY where a prefix exists, and must precede the
+    # outbound catch-all that would otherwise swallow them.
+    pre = sbc.render_extensions({"rooms": rooms, "trunk": dict(base, dial_prefix="9"),
+                                 "operator": {"enabled": True}})
+    check("prefix mode: 9911 is caught", "exten = 9911,1," in pre)
+    check("prefix mode: 9933 is caught — the hole this closes", "exten = 9933,1," in pre)
+    check("prefix mode: emergency numbers precede the _9. catch-all",
+          pre.index("exten = 911,1,") < pre.index("_9."))
+
+    direct = sbc.render_extensions({"rooms": rooms, "trunk": dict(base, direct_dial=True),
+                                    "operator": {"enabled": True}})
+    check("direct mode: no phantom prefixed forms",
+          "exten = 9911,1," not in direct and "exten = 9933,1," not in direct)
+
+
+def test_no_emergency_number_can_reach_the_trunk() -> None:
+    """The property, not the strings: nothing that starts with a dialled
+    emergency number may fall through to an outbound pattern.
+
+    A pattern test rather than a literal one, so adding a third emergency number
+    later cannot silently reintroduce the hole for it."""
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    for prefix in ("9", "99", "*8"):
+        e = sbc.render_extensions({
+            "rooms": rooms,
+            "trunk": {"enabled": True, "provider_host": "example.net", "username": "u",
+                      "secret": "x", "dial_prefix": prefix,
+                      "outbound_caller_id": "5555550100"},
+            "operator": {"enabled": True}})
+        for num in ("911", "933"):
+            # The prefixed form must be matched explicitly. Without it the
+            # generic _<prefix>. pattern strips the prefix and dials the rest.
+            check(f"prefix {prefix!r}: {prefix}{num} is matched explicitly",
+                  f"exten = {prefix}{num},1," in e)
+            # Compare against the PATTERN LINE, not the bare token: the block's
+            # own comment mentions `_9.` several lines above the exten it
+            # describes, and matching that would make this assertion pass on
+            # position rather than on ordering.
+            catch_all = f"exten = _{prefix}.,1,"
+            check(f"prefix {prefix!r}: the outbound catch-all exists to be ordered against",
+                  catch_all in e)
+            check(f"prefix {prefix!r}: {prefix}{num} precedes the catch-all",
+                  e.index(f"exten = {prefix}{num},1,") < e.index(catch_all))

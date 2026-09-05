@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.73.0
+
+Two emergency-dialling defects, both live, both closed.
+
+**On a trunk-less install there was no 911 at all.** The 911 and 933 extensions
+lived inside `render_outbound_rules`, which is called only when the trunk is
+enabled. With the trunk off — the default — `exten = 911` was never emitted: an
+emergency dial fell through `_X.`, failed the room test and landed on
+Congestion. A fast busy, indistinguishable from a misdial. The spoken "this
+system cannot carry emergency calls, use a mobile" notice, the entire reason the
+block exists, had never once played on such an install.
+
+**933 dialled 33 out the trunk.** 933 is the FCC's designated number for testing
+a 911 setup *without* engaging dispatch — exactly what a careful owner dials to
+check their emergency path. It was matched only in the direct-dial branch. In
+prefix mode it fell to `_9.`, which strips the prefix and dials the remainder,
+placing a real PSTN call to "33". That is the identical shape to the 911 → "11"
+bug this file's own comment records fixing; it was simply left behind on the
+sibling number.
+
+Both are now emitted by `render_emergency_notices()`, unconditionally and ahead
+of the outbound rules, with the prefixed variants (`9911`, `9933`) added
+alongside in prefix mode. Each is stamped `SW_TAG=emergency` — a distinct tag
+rather than `blocked`, because a 911 attempt on a PBX with no E911 is the most
+important call kind on this system and filing it beside a 1-900 dial makes it
+unfindable in the ledger.
+
+Verified across all three real configurations (trunk disabled, prefix mode,
+direct dial): each number answered exactly once, prefixed forms only where a
+prefix exists, and the emergency extensions ordered ahead of the outbound
+catch-all. 5 mutants applied, 5 killed — including putting the notices back
+behind the trunk gate and removing the prefixed 933.
+
+**This does not make 911 work.** The system still cannot carry an emergency call
+and still tells you so; what changes is that it now tells you in every
+configuration, and stops placing a wrong call when you test it. Whether the
+notice is reachable from the eight antique phones depends on the Grandstream
+gateway's own dial plan, which is not in this repo — dial 911 from a wired
+handset, not the cordless, to find out.
+
 ## 0.72.0
 
 The heartbeat now describes the cycle it actually ran in.

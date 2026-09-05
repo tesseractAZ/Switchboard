@@ -952,6 +952,49 @@ def _outbound_dial_body(num_expr: str, caller_id: str) -> list:
     ]
 
 
+def render_emergency_notices() -> list:
+    """911 and 933, answered with a spoken notice — INDEPENDENT of the trunk.
+
+    Two defects this closes, both live before v0.73.0.
+
+    (1) These lived inside `render_outbound_rules`, which is called only when the
+    trunk is enabled. On a trunk-less install -- the DEFAULT -- `exten = 911` did
+    not exist at all, so an emergency dial fell through `_X.`, failed the room
+    test and landed on Congestion: a fast busy indistinguishable from a wrong
+    number. The spoken "use a mobile" notice, the entire reason this block
+    exists, had never once played on such an install.
+
+    (2) `933` -- the FCC's designated number for TESTING a 911 setup without
+    engaging dispatch -- was matched only in the direct-dial branch. In prefix
+    mode it fell to `_9.`, which strips the prefix and dials the remainder: a
+    caller checking their emergency setup placed a real PSTN call to "33". That
+    is the identical shape to the 911->"11" bug this file's own comment records
+    fixing, left behind on the sibling number.
+
+    Emitted unconditionally so the notice does not depend on a trunk it does not
+    use, and BEFORE the outbound rules so it precedes `_9.` in the file as well
+    as in Asterisk's specificity ordering.
+    """
+    out = []
+    for num, what in (("911", "911 attempted"), ("933", "933 test")):
+        out += [
+            f"exten = {num},1,NoOp(EMERGENCY {what} — not carried)",
+            " same = n,Answer()",
+            # Tagged so an emergency attempt is findable in the call ledger. A
+            # distinct tag, not `blocked`: a 911 dial on a PBX with no E911 is
+            # the most important call kind on this system, and filing it beside
+            # a 1-900 attempt makes it unfindable.
+            " same = n,Set(SW_TAG=emergency)",
+            " same = n,Playback(switchboard/sw-no-emergency)",
+            " same = n,Congestion(5)",
+            " same = n,Hangup()",
+        ]
+    return ["", ";; ----- Emergency numbers are NOT carried -----",
+            ";; No E911 service is registered, so these are answered and",
+            ";; explained rather than dialled. See render_emergency_notices().",
+            ] + out + [""]
+
+
 def render_outbound_rules(prefix: str, caller_id: str) -> list:
     """Outbound-via-trunk dialplan lines, emitted INSIDE the [rooms] context.
 
@@ -988,26 +1031,7 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         return [
             "",
             "",
-            ";; ----- Emergency numbers are NOT carried (see below) -----",
-            ";; This PBX has no E911 service: the trunk provider has no address",
-            ";; registered for it, so an emergency call could not be routed to the",
-            ";; right dispatcher even if it completed. Rather than let 911 fall",
-            ";; through to a pattern that would place a WRONG call (in prefix mode",
-            ";; _9. matches '911' and would dial the remainder, '11', out the",
-            ";; trunk), match it EXPLICITLY and say so out loud, immediately. A",
-            ";; caller in an emergency must learn in one second to use a mobile,",
-            ";; not listen to ringback for a number that cannot help them.",
-            "exten = 911,1,NoOp(EMERGENCY 911 attempted — not carried)",
-            " same = n,Answer()",
-            " same = n,Playback(switchboard/sw-no-emergency)",
-            " same = n,Congestion(5)",
-            " same = n,Hangup()",
-            "exten = 933,1,NoOp(EMERGENCY 933 test — not carried)",
-            " same = n,Answer()",
-            " same = n,Playback(switchboard/sw-no-emergency)",
-            " same = n,Congestion(5)",
-            " same = n,Hangup()",
-            "",
+            ";; Emergency numbers are emitted unconditionally by\n            ;; render_emergency_notices() -- see there for why they are not\n            ;; gated on the trunk.",
             ";; ----- Blocked destinations (toll-fraud guard) — direct-dial -----",
             ";; International (011) and premium 1-900 are denied. More specific",
             ";; than the outbound pattern below, so matched first.",
@@ -1031,17 +1055,22 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
     return [
         "",
         "",
-        ";; ----- Emergency numbers are NOT carried -----",
-        ";; MUST precede the outbound pattern: _9. matches '911' and would dial",
-        ";; the remainder ('11') out the trunk — a wrong call placed during an",
-        ";; emergency. Both the bare 911 and the prefixed form are caught.",
-        "exten = 911,1,NoOp(EMERGENCY 911 attempted — not carried)",
+        ";; ----- Emergency numbers, PREFIXED forms -----",
+        ";; MUST precede the outbound pattern: _9. matches a prefixed emergency",
+        ";; number and would dial the remainder out the trunk — a wrong call",
+        ";; placed during an emergency. The BARE forms are emitted",
+        ";; unconditionally by render_emergency_notices(); these are the",
+        ";; dial-prefix variants. 933 is included because it is the FCC test",
+        ";; number, and without this line it fell to _9. and dialled '33'.",
+        f"exten = {prefix}911,1,NoOp(EMERGENCY {prefix}911 attempted — not carried)",
         " same = n,Answer()",
+        " same = n,Set(SW_TAG=emergency)",
         " same = n,Playback(switchboard/sw-no-emergency)",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
-        f"exten = {prefix}911,1,NoOp(EMERGENCY {prefix}911 attempted — not carried)",
+        f"exten = {prefix}933,1,NoOp(EMERGENCY {prefix}933 test — not carried)",
         " same = n,Answer()",
+        " same = n,Set(SW_TAG=emergency)",
         " same = n,Playback(switchboard/sw-no-emergency)",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
@@ -1463,6 +1492,9 @@ def render_extensions(opts: dict) -> str:
             " same = n,Hangup()",
             "",
         ]
+        # Emergency notices FIRST, and unconditionally: they must not depend on
+        # a trunk they never use, and they must sit above _9. in the file.
+        parts += render_emergency_notices()
         # Outbound-via-trunk rules belong in [rooms] (alongside the room pattern)
         # so the phones can actually reach them; _<prefix>. out-prioritises _X.
         if trunk.get("enabled"):
