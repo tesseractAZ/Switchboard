@@ -9,6 +9,7 @@ dashboard: field-name casing, the ContactList identity field, DeviceState-based
 registration, the stream terminator, and auth-failure surfacing. Each block of
 bytes below is a realistic capture of what Asterisk 20 sends.
 """
+import re
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -971,6 +972,32 @@ def test_device_unreachable_classifies_a_contactless_endpoint() -> None:
     # The two guards must not overlap -- a busy phone is reachable.
     check("unreachable: busy and unreachable are disjoint",
           not (ami.device_busy("INUSE") and ami.device_unreachable("INUSE")))
+
+
+def test_no_ha_client_path_double_prefixes_api() -> None:
+    """Every _request() path must start at "/services" or "/states", never "/api".
+
+    _request prepends a base that ALREADY ends in "/api"
+    (http://supervisor/core/api), so a path of "/api/services/..." becomes
+    ".../core/api/api/services/..." -> 404. This shipped once: converse() was
+    written against the raw REST convention (http://<ha>:8123/api/services/...),
+    which is what a host-side test or a curl from a laptop uses. Both passed. The
+    call 404'd on EVERY request from inside the add-on container -- the only place
+    that actually matters -- so the phone assistant answered nothing at all.
+
+    A per-call assertion could not catch this, because the assertion just repeats
+    whichever string the author chose. The invariant is CONSISTENCY ACROSS CALLS,
+    so this test reads them all out of the source and checks them as a set."""
+    src = (AMI_PATH.parent / "ha_client.py").read_text()
+    # Every literal first argument to a _request(...) call.
+    paths = re.findall(r'_request\(\s*"[A-Z]+",\s*(?:\n\s*)?f?"([^"]*)"', src)
+    check("ha_client: found the _request call sites", len(paths) >= 10)
+    offenders = [p for p in paths if p.startswith("/api")]
+    check(f"ha_client: no path double-prefixes /api (found {offenders})", not offenders)
+    # And the positive form: they all start at a real HA API collection.
+    known = ("/", "/template", "/states", "/services", "/config", "/calendars", "/history")
+    bad = [p for p in paths if not p.startswith(known)]
+    check(f"ha_client: every path starts at a known collection (bad={bad})", not bad)
 
 
 def test_converse_is_local_and_parses_the_spoken_reply() -> None:
