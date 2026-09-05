@@ -662,8 +662,11 @@ reference home's `11`–`20` extensions:
   first two digits of a longer one, so the gateway cannot know you are finished
   and waits out `P85` exactly like rooms 12–19 (press `#` to send at once). `411`
   itself is unambiguous once the third digit lands. If that pause on the clock
-  bothers you, move one of the two off the collision — `clock_ext: 47` keeps the
-  clock instant, or a `directory_ext` that isn't a `41…` prefix does the same.
+  bothers you, move one of the two off the collision. Pick a code that is not
+  already taken — `47` is the local voice assistant, and setting `clock_ext: 47`
+  would collide with it and silently disable one of the two (a collided feature
+  code is skipped with a log line, not an error). `48` or `49` are free; or move
+  `directory_ext` to something that isn't a `41…` prefix.
 - **`P85 = 3` seconds** is the reference value: it trims that 12–19 pause from the
   firmware default of 4 s while staying above a **rotary/pulse** phone's
   inter-digit gap, so a slow rotary dial of a long number isn't cut off mid-number.
