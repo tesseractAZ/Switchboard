@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.79.0
+
+Two detectors that could not fire. Both had been built, shipped, and wired to
+nothing — which from the outside is indistinguishable from never having built
+them, because a detector that cannot fire and a system with no faults produce
+exactly the same silence.
+
+**Every phone in the house dropped at once, and every monitor read healthy.** On
+2026-09-01 at 01:00:07 all eight wired ports on the gateway went unreachable
+within fifty seconds, each reporting a round-trip of zero. They came back
+between 01:01:13 and 01:02:06, the first ones at nearly a second and a half of
+latency. For 119 seconds not one antique phone in the house could be reached: an
+incoming call, a wake-up, or a 911 dial would have failed.
+
+The whole event fell inside a single gap between health checks, which run every
+five minutes. Both surrounding samples read nine of ten phones reachable, so
+every monitor reported healthy straight across it.
+
+The repair for this was already written. `endpoint_transitions()` reads
+Asterisk's own log — which records every reachability change as it happens, not
+whenever a sampler wakes up — and has been writing the list of extensions that
+dropped into the heartbeat file since v0.68.0. Nothing read it. The fleet-outage
+alert continued to run entirely off point samples, which is the one thing that
+provably cannot see this.
+
+It has a consumer now, using the same threshold as the point-sample detector so
+the two cannot disagree about the same fleet. A drop that is still in effect
+stays the point-sample detector's to report, and escalates as it always has;
+this one covers the drop that already healed, and says so plainly rather than
+implying the phones are down right now. A gateway re-registering after a restart
+fills the log with recovery lines and is not a drop — worth stating, because
+there were nineteen restarts in the six days this audit covers.
+
+**And the speech recogniser could be reported as switched off, but never as
+dead.** The health probe keeps its own copy of the list of features that hold
+the recogniser in memory, and that copy was one behind: the dial-47 voice
+assistant was added to the real gate in v0.69.0 and never added here. On an
+install where the assistant is the only speech feature turned on, the probe
+concluded nothing needed the recogniser and returned "disabled" without ever
+checking — so the one feature that depended on it could fail with the health
+check reporting normal.
+
+The list is now derived from the gate itself rather than restated beside it. A
+shell script is invisible to Python and unit tests set the flags directly, so
+only a test that reads both files can see them drift.
+
 ## 0.78.0
 
 The alarm clock. A wake-up call is the only feature here with a hard deadline,

@@ -11,6 +11,7 @@ sensors) using injected fakes.
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from importlib.machinery import SourceFileLoader
@@ -899,8 +900,13 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         # this is the poller's first cycle, so the stub must accept them. A stub
         # with a stale signature is how a call-site change hides behind a green
         # suite; capture them and assert, rather than swallowing them with **kw.
-        pm._heartbeat = lambda s, t, wired_down=None, settled=True, first=False: \
-            seen.append((s, t, wired_down, settled, first))
+        # v0.77.0 — and the transitions harvested this cycle. run() is now the
+        # only caller of endpoint_transitions() (it advances a byte watermark,
+        # so whoever calls first is the only caller that sees anything), and it
+        # hands the list down rather than letting the heartbeat re-fetch it.
+        pm._heartbeat = lambda s, t, wired_down=None, settled=True, first=False, \
+            transitions=None: seen.append((s, t, wired_down, settled, first,
+                                           transitions))
         pm.time.sleep = _fake_sleep
         try:
             pm.run()
@@ -912,7 +918,7 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         pm.time.sleep = real_sleep
 
     check("run loop: the heartbeat was actually called", len(seen) == 1)
-    s, t, wd, settled, first = seen[0]
+    s, t, wd, settled, first, trans = seen[0]
     check("run loop: it received this cycle's summary", s == summ)
     check("run loop: it received the trunk status from _trunk_check",
           t == "Registered")
@@ -924,6 +930,12 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
           first is True)
     check("run loop: the first cycle is reported as warm-up, not steady",
           settled is False)
+    # The heartbeat must be HANDED the transitions, not left to fetch its own.
+    # endpoint_transitions() advances a byte watermark over asterisk.log, so two
+    # callers in one cycle means the second sees an empty list -- and the alert
+    # and the record would then disagree about what happened.
+    check("run loop: the cycle's transitions are passed down, not re-fetched",
+          trans is not None)
 
 
 def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
@@ -1145,3 +1157,213 @@ def test_the_heartbeat_reports_the_cadence_it_will_actually_sleep(tmp_path) -> N
     check("elapsed time is MEASURED, not copied from the configured interval",
           isinstance(steady["since_prev_s"], int)
           and steady["since_prev_s"] != steady["interval_s"])
+
+
+# --------------------------------------------------------------------------- #
+# v0.77.0 — F10/F11/F14: the outage every monitor read as healthy.
+# --------------------------------------------------------------------------- #
+def test_a_fleet_wide_drop_between_samples_is_detected() -> None:
+    """2026-09-01 01:00:07 MST — all eight wired FXS ports, gone in fifty seconds.
+
+    asterisk.log lines 525-540: `Endpoint 14 is now Unreachable` at 01:00:07,
+    then 15, 12, 11, 13, 18, 16, and 17 at 01:00:57 — every port on the GXW4216,
+    each with `RTT: 0.000 msec`. Recovery ran 01:01:13 through 01:02:06, the
+    first ports coming back at RTT 1484 ms.
+
+    For 119 seconds not one antique phone in the house could be reached. It fell
+    entirely inside a single 300 s poll gap, so both surrounding samples read 9
+    of 10 reachable and every monitor in the system reported healthy across it.
+
+    `endpoint_transitions()` was written for this event and cites it by name.
+    It has been writing `went_unreachable` into the heartbeat since v0.68.0 —
+    where nothing read it. A detector wired to no consumer is indistinguishable
+    from a detector that was never built.
+    """
+    summ = {"total": 10, "reachable": 9, "unreachable": 1,
+            "unreachable_exts": ["20"]}
+    went = ["11", "12", "13", "14", "15", "16", "17", "18"]
+    check("mass-drop: eight of ten dropping at once IS a fleet outage",
+          pm.is_mass_drop(went, summ) is True)
+    # The point sample taken after recovery is the one the old detector saw.
+    check("mass-drop: precondition — the point sample reads HEALTHY",
+          pm.is_mass_outage(summ) is False)
+
+
+def test_the_mass_drop_threshold_matches_the_point_sample_one() -> None:
+    """One rule, two inputs. A drop that would not be an outage `now` is not one
+    between samples either — otherwise the two detectors disagree about the same
+    fleet and whichever fires first defines the truth."""
+    summ = {"total": 10, "reachable": 10, "unreachable": 0}
+    check("mass-drop: one handset napping is not a fleet event",
+          pm.is_mass_drop(["19"], summ) is False)
+    check("mass-drop: two ports is still not half the fleet",
+          pm.is_mass_drop(["11", "12"], summ) is False)
+    check("mass-drop: half the fleet is",
+          pm.is_mass_drop(["11", "12", "13", "14", "15"], summ) is True)
+    check("mass-drop: nothing dropped is never an event",
+          pm.is_mass_drop([], summ) is False)
+    check("mass-drop: an unknown fleet size cannot be judged",
+          pm.is_mass_drop(["11", "12", "13", "14", "15"], None) is False)
+    # The thresholds must agree: same count, same verdict, whichever way it came.
+    for n in range(0, 11):
+        exts = [str(10 + i) for i in range(n)]
+        pt = pm.is_mass_outage({"total": 10, "unreachable": n})
+        tr = pm.is_mass_drop(exts, {"total": 10, "unreachable": 0})
+        check(f"mass-drop: the two detectors agree at n={n}", pt == tr)
+
+
+def test_the_detector_actually_reaches_a_notification() -> None:
+    """The whole finding, and it must be tested through run().
+
+    `went_unreachable` reached a JSONL file and stopped. A unit test on
+    `is_mass_drop` plus one on `_notify_mass_drop` would both have passed in
+    v0.76.0 — where the detector existed, the data existed, and nothing joined
+    them. The first version of THIS test made that same mistake: it drove run()
+    only for the warm-up case and then called the notifier by hand, and a mutant
+    that deleted the call site entirely survived it. So the assertion has to be
+    that driving the real loop, with the real transitions, produces a real
+    notification.
+    """
+    import types
+    phones = [{"ext": e, "reachable": True, "rtt_ms": 5.0, "name": e}
+              for e in ("11", "12", "13", "14", "15", "16", "17", "18", "19")]
+    summ = {"total": 10, "reachable": 9, "unreachable": 1,
+            "unreachable_exts": ["20"]}
+    drop = [{"ext": e, "state": "Unreachable"} for e in
+            ("11", "12", "13", "14", "15", "16", "17", "18")]
+    drop += [{"ext": e, "state": "Reachable"} for e in
+             ("11", "12", "13", "14", "15", "16", "17", "18")]
+
+    def _drive(transitions, *, settled_after=1, alerts=True, outage_alerted=False):
+        """Run the loop for `settled_after`+1 cycles and return the notifications."""
+        notes = []
+        ha = types.ModuleType("ha_client")
+        ha.notify = lambda msg, **kw: notes.append((msg, kw)) or True
+        ha.set_state = lambda *a, **k: True
+
+        class _Stop(Exception):
+            pass
+        n = {"c": 0}
+
+        def _sleep(_):
+            n["c"] += 1
+            if n["c"] > settled_after:
+                raise _Stop
+        keys = ("_load_options", "room_names", "wired_exts", "poll_once",
+                "_append_history", "_publish", "_heartbeat", "trunk_enabled",
+                "endpoint_transitions", "warmup_done", "outage_transition")
+        saved = {k: getattr(pm, k) for k in keys}
+        real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
+        try:
+            sys.modules["ha_client"] = ha
+            pm._load_options = lambda: {"link_health_alerts": alerts}
+            pm.room_names = lambda o: {}
+            pm.wired_exts = lambda o: ["11", "12", "13", "14", "15",
+                                       "16", "17", "18"]
+            pm.poll_once = lambda a, b, c: (phones, summ)
+            pm._append_history = lambda p: None
+            pm._publish = lambda p, s: None
+            pm._heartbeat = lambda *a, **k: None
+            pm.trunk_enabled = lambda o: False
+            pm.endpoint_transitions = lambda: transitions
+            # Warm-up ends after the first cycle so the second one is settled.
+            pm.warmup_done = lambda *a, **k: True
+            # Drive the point-sample latch independently of this detector.
+            def _ot(sm, st, settled=True):
+                st["alerted"] = outage_alerted
+                return ""
+            pm.outage_transition = _ot
+            pm.time.sleep = _sleep      # ...without this, run() sleeps for real
+            try:
+                pm.run()
+            except _Stop:
+                pass
+        finally:
+            for k, v in saved.items():
+                setattr(pm, k, v)
+            pm.time.sleep = real_sleep
+            if real_ha is None:
+                sys.modules.pop("ha_client", None)
+            else:
+                sys.modules["ha_client"] = real_ha
+        return notes
+
+    notes = _drive(drop)
+    check("consumer: driving the REAL loop produces a notification", len(notes) >= 1)
+    body = notes[0][0] if notes else ""
+    check("consumer: which names the extensions that dropped",
+          all(e in body for e in ("11", "18")))
+    check("consumer: and says the phones are back, so it is not read as current",
+          "up now" in body)
+    check("consumer: it says what was at stake while it lasted", "911" in body)
+    check("consumer: a later event does not overwrite an unread one",
+          notes and notes[0][1].get("notification_id", "")
+          .startswith("switchboard_mass_drop_"))
+
+    # The controls. Each of these is a way the alert could become noise.
+    check("consumer: a quiet cycle raises nothing", _drive([]) == [])
+    check("consumer: one handset napping raises nothing",
+          _drive([{"ext": "19", "state": "Unreachable"}]) == [])
+    check("consumer: the opt-out is honoured", _drive(drop, alerts=False) == [])
+    check("consumer: an outage that is STILL down is the point-sample "
+          "detector's — this must not double-report it",
+          _drive(drop, outage_alerted=True) == [])
+    check("consumer: warm-up alone never alerts", _drive(drop, settled_after=0) == [])
+
+    # ★ RECOVERY LINES ARE NOT DROPS, and the difference is not academic: after
+    # every add-on restart asterisk.log fills with "Endpoint NN is now
+    # Reachable" as the gateway re-registers, with no Unreachable line in the
+    # window at all. Counting those would fire a fleet-outage alert on every
+    # restart — 19 of them in the six days this audit covers.
+    #
+    # The first version of this test used the SAME eight extensions for both
+    # states, so the set deduped to the same eight either way and a mutant that
+    # dropped the state filter survived. The exts have to differ.
+    reregistration = [{"ext": e, "state": "Reachable"} for e in
+                      ("11", "12", "13", "14", "15", "16", "17", "18")]
+    check("consumer: a gateway re-registering is not a fleet drop",
+          _drive(reregistration) == [])
+    mixed = [{"ext": "19", "state": "Unreachable"}] + reregistration
+    check("consumer: one real drop beside eight recoveries is still one drop",
+          _drive(mixed) == [])
+
+
+def test_the_heartbeat_uses_the_transitions_it_was_handed() -> None:
+    """One watermark, one reader.
+
+    `endpoint_transitions()` advances a byte offset over asterisk.log, so the
+    SECOND caller in a cycle sees nothing. If the heartbeat re-fetches instead of
+    using what run() passed it, the alert and the durable record disagree about
+    the same cycle — and the record, which is the forensic one, is the one that
+    comes up empty.
+    """
+    import tempfile
+    calls = {"n": 0}
+    real = pm.endpoint_transitions
+    d = tempfile.mkdtemp()
+    real_path = pm.HEARTBEAT_PATH
+    try:
+        pm.HEARTBEAT_PATH = os.path.join(d, "hb.jsonl")
+
+        def _counting():
+            calls["n"] += 1
+            return [{"ext": "99", "state": "Unreachable"}]
+        pm.endpoint_transitions = _counting
+        handed = [{"ext": "11", "state": "Unreachable"},
+                  {"ext": "12", "state": "Unreachable"}]
+        pm._heartbeat({"total": 10, "reachable": 10, "unreachable": 0}, None,
+                      transitions=handed)
+        rec = json.loads(open(pm.HEARTBEAT_PATH).read().splitlines()[-1])
+        check("watermark: endpoint_transitions was NOT called again",
+              calls["n"] == 0)
+        check("watermark: the record carries what run() harvested",
+              rec.get("went_unreachable") == ["11", "12"])
+        # ...and a direct caller with nothing to hand it still self-serves.
+        pm._heartbeat({"total": 10, "reachable": 10, "unreachable": 0}, None)
+        rec2 = json.loads(open(pm.HEARTBEAT_PATH).read().splitlines()[-1])
+        check("watermark: a caller with no list still fetches its own",
+              calls["n"] == 1 and rec2.get("went_unreachable") == ["99"])
+    finally:
+        pm.endpoint_transitions = real
+        pm.HEARTBEAT_PATH = real_path
+        shutil.rmtree(d, ignore_errors=True)

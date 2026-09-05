@@ -290,6 +290,58 @@ def is_mass_outage(summ: dict) -> bool:
     return total > 0 and down >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
 
 
+def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
+    """The same fleet-outage threshold, applied to what happened BETWEEN samples.
+
+    `is_mass_outage` above reads a POINT SAMPLE and cannot see an outage that
+    began and ended between two of them. The one this system has actually had
+    did exactly that: on 2026-09-01 at 01:00:07 all eight wired FXS ports went
+    Unreachable within fifty seconds and every one was back by 01:02:06 — 119
+    seconds, entirely inside a single 300 s poll gap. Both surrounding samples
+    read 9 of 10 reachable, so every monitor in the system reported healthy
+    across a total loss of every antique phone in the house.
+
+    Asterisk's own log is the authority on transitions; the poller's sample is
+    only the authority on "now". `endpoint_transitions()` has been harvesting
+    those log lines since v0.68.0 and writing `went_unreachable` into the
+    heartbeat, where NOTHING read it — the detector was built, shipped, and
+    wired to no consumer, which is indistinguishable from not having built it.
+    """
+    total = (summ or {}).get("total", 0)
+    n = len(went_unreachable or [])
+    return total > 0 and n >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
+
+
+def _notify_mass_drop(went_unreachable: list, summ: dict) -> None:
+    """Report a fleet-wide drop that had already recovered by sample time.
+
+    Deliberately the drawer card and not the audible push: by the time this
+    fires the phones are back, so it is a diagnostic about a gateway or uplink
+    that dropped every registration at once, not an emergency. A drop that is
+    STILL down at sample time is the point-sample detector's job, and that one
+    escalates; this must not double-report it.
+
+    The notification_id carries the timestamp, so a second event days later does
+    not silently overwrite the first one nobody has read yet.
+    """
+    try:
+        import ha_client
+    except Exception:
+        return
+    exts = ", ".join(went_unreachable)
+    msg = (f"All {len(went_unreachable)} of these phones dropped their SIP "
+           f"registration at once and came back before the next health check "
+           f"(exts {exts}). Nothing was reachable while it lasted — an incoming "
+           f"call, a wake-up or a 911 dial would have failed. The phones are up "
+           f"now; this is a warning about the gateway or its uplink, not a "
+           f"current outage.")
+    try:
+        ha_client.notify(msg, title="Switchboard: all phones dropped briefly",
+                         notification_id=f"switchboard_mass_drop_{int(time.time())}")
+    except Exception:
+        pass
+
+
 def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     """Pure state machine for the availability alert. `st` carries
     {'cycles', 'alerted'} across calls. Returns 'down' (fire the outage alert, once,
@@ -664,7 +716,8 @@ _last_heartbeat_mono: float | None = None
 
 def _heartbeat(summ: dict | None, trunk_status: str | None,
                wired_down: list | None = None, settled: bool = True,
-               first: bool = False) -> None:
+               first: bool = False,
+               transitions: list | None = None) -> None:
     """Append one liveness record to /share, readable from OUTSIDE the container.
 
     Two problems, one file.
@@ -757,7 +810,11 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
     # Everything Asterisk saw while this poller was asleep. An empty list means
     # "nothing changed", which is a far stronger statement than a point-sample
     # that merely found everything up at one instant.
-    trans = endpoint_transitions()
+    # Exactly ONE call per cycle: endpoint_transitions() advances a byte
+    # watermark over asterisk.log, so a second call in the same cycle returns
+    # nothing. run() passes the list it already harvested; a direct caller (the
+    # tests) gets the old self-serve behaviour.
+    trans = endpoint_transitions() if transitions is None else transitions
     if trans:
         rec["transitions"] = trans
         rec["went_unreachable"] = sorted({t["ext"] for t in trans
@@ -951,6 +1008,23 @@ def run() -> int:
             event = outage_transition(summ, outage_st, settled)
             if event and opts.get("link_health_alerts", True):
                 _notify_outage(event, summ)
+        # ★ THE BETWEEN-SAMPLES DETECTOR. Harvested here, once per cycle, so
+        # both the heartbeat record and the alert below read the same list --
+        # endpoint_transitions() advances a byte watermark, so whoever calls it
+        # first is the only caller that sees anything.
+        trans = endpoint_transitions()
+        went = sorted({t["ext"] for t in trans if t["state"] == "Unreachable"})
+        if (phones is not None and is_mass_drop(went, summ) and settled
+                and not outage_st.get("alerted")):
+            # `not alerted` is what keeps this from double-reporting an outage
+            # that is still in effect: that one is the point-sample detector's,
+            # and it escalates. This card is for the drop that already healed --
+            # the case no sample could ever have seen.
+            sys.stderr.write(
+                f"switchboard-rtpmon: ALL PHONES DROPPED between samples and "
+                f"recovered — exts {', '.join(went)}\n")
+            if opts.get("link_health_alerts", True):
+                _notify_mass_drop(went, summ)
         trunk_status = None
         if trunk_enabled(opts):
             trunk_status = _trunk_check(trunk_st, settled,
@@ -963,7 +1037,7 @@ def run() -> int:
         _heartbeat(summ, trunk_status,
                    wired_down=[p["ext"] for p in (phones or [])
                                if p.get("ext") in set(wired) and not p.get("reachable")],
-                   settled=settled, first=(polls == 0))
+                   settled=settled, first=(polls == 0), transitions=trans)
         polls += 1
         # A cycle where AMI was down (summ is None) tells us nothing about the
         # fleet — don't let it end warm-up on a phantom "all wired ports up".

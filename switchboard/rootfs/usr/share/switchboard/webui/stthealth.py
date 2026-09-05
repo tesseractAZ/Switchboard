@@ -18,9 +18,19 @@ import socket
 HOST = os.environ.get("SW_WHISPER_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SW_WHISPER_PORT", "8126") or "8126")
 
-# Speech features that keep the resident server up (mirrors whisper-server/run).
+# Speech features that keep the resident server up. This MIRRORS the RAM gate in
+# whisper-server/run, and a mirror is a copy: this one drifted. `assistant_enabled`
+# was added to the run script with the v0.69.0 dial-47 assistant and never added
+# here, so on an install where the assistant is the only speech feature turned on,
+# `_enabled()` returned False, `status()` short-circuited to "disabled", and the
+# probe could report the recognizer as switched off but never as DOWN. The health
+# check for the feature was blind to exactly the install that needed it.
+#
+# `test_the_stt_feature_gate_mirrors_the_run_script` now DERIVES this list from
+# the run script and fails on any divergence, so the copy cannot silently lag
+# again — a shell script is invisible to Python and only a test can see both.
 _FEATURE_FLAGS = ("wakeup_enabled", "automation_enabled", "status_enabled",
-                  "announce_enabled", "directory_enabled")
+                  "announce_enabled", "directory_enabled", "assistant_enabled")
 
 
 def _truthy(value, default: bool) -> bool:
