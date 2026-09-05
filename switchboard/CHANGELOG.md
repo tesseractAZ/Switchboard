@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.69.1
+
+The voice assistant answered nothing. Fixed.
+
+`ha_client.converse()` was written against the raw REST convention
+(`http://<ha>:8123/api/services/...`), but `_request()` prepends a base that
+already ends in `/api` (`http://supervisor/core/api`). The path therefore
+resolved to `.../core/api/api/services/conversation/process` and returned **404
+on every request from inside the add-on container** — the only place it runs.
+Every other call in the module already used the right convention; this one call
+was the outlier.
+
+It passed every check beforehand because both the unit test and a manual `curl`
+from a laptop use the *other* convention, where the `/api` prefix is correct. The
+add-on booted clean, the dialplan was right, the AGI was executable, piper spoke
+and whisper listened — and the assistant still could not have answered a single
+question.
+
+The replacement test asserts a module-wide invariant rather than one call's
+string: it reads every `_request()` path out of the source and requires that none
+begins with `/api`. A per-call assertion cannot catch this class of bug, because
+it only repeats whichever string the author chose. Mutation-verified against the
+original defect and against the same mistake injected into two other call sites.
+
 ## 0.69.0
 
 A phone can now talk to Home Assistant's voice assistant, with nothing on the

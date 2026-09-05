@@ -248,8 +248,13 @@ def converse(text: str, agent_id: str = "conversation.home_assistant",
     caller can apologise out loud rather than sit in silence."""
     if not (text or "").strip():
         return None, None
+    # NOTE the path convention: _request() prepends a base that ALREADY ends in
+    # "/api" (http://supervisor/core/api), so paths here start at "/services",
+    # never "/api/services". Getting this wrong yields .../api/api/... -> 404,
+    # which only shows up INSIDE the add-on container -- a host-side test hitting
+    # http://<ha>:8123/api/... uses the other convention and passes regardless.
     status, body = _request(
-        "POST", "/api/services/conversation/process?return_response=true",
+        "POST", "/services/conversation/process?return_response=true",
         {"text": text.strip(), "agent_id": agent_id, "language": language})
     if status is None or status >= 300 or not body:
         _log(f"converse failed (status={status})")
