@@ -386,19 +386,51 @@ add-on's own voice. No cloud speech-to-text, no cloud text-to-speech, no cloud
 conversation agent — an internet outage does not affect it. (Home Assistant
 Cloud's assistant is *not* used even if you have a subscription.)
 
-**You must expose entities before it can do anything.** Home Assistant's
-conversation agent only acts on entities explicitly exposed to Assist
-(*Settings → Voice assistants → Expose*). Until you expose something, every
-command comes back as *"Sorry, I am not aware of any device called …"* — the
-feature is working, it simply has nothing in scope. This is why the option
-ships off: exposing an entity makes it controllable from **every phone in the
-house**, including, if you have an outside line, a call that has been
-transferred to one. That is a decision for the owner of the system, not a
-default.
+**Who can reach it.** Anyone who can pick up a house phone: family, guests, a
+child, a visitor left alone in a room with an extension. **Not** an outside
+caller. Two independent mechanisms stop that: the inbound trunk `Dial` uses
+`r` only (never `t`/`T`), so no in-call DTMF transfer is ever armed for the
+outside party; and even if one were, transfers are confined by
+`__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
+and `0` — no feature codes at all. See [§9](#9-adding-an-outside-line-sip-trunk).
 
-Speech recognition is biased toward your live area and light names, which
-materially improves short commands. The bias is a hint, not a restriction —
-words outside it are still recognized.
+**What it can act on.** Only entities exposed to Assist
+(*Settings → Voice assistants → Expose*). Exposing an entity makes it reachable
+from **every phone in the house**, so treat that list as the real security
+boundary. Two things worth knowing about it:
+
+- A **garage door, lock, or anything that opens or unlocks should not be
+  exposed.** A voice command is not authenticated — the phone in the guest room
+  is as good as the one in the kitchen.
+- Entities that **silence an alarm or disable a safety automation** deserve the
+  same treatment even though they actuate nothing: a switch that turns off
+  critical power alerts is a security control, and turning it off by voice
+  leaves no visible trace.
+
+**Duplicate names break commands.** The intent matcher resolves by spoken name,
+so two exposed entities sharing a name make both unreliable. This bites in a
+non-obvious way: Home Assistant's `switch_as_x` helper creates a `light.*`
+wrapper *from* a `switch.*`, giving one physical device two entity IDs with the
+identical friendly name. Expose the `light.*` (it answers brightness intents
+too), not the switch.
+
+**Phrasings that work.** The built-in agent is a fixed-sentence matcher, not a
+language model, so the wording matters:
+
+| Goal | Say |
+|---|---|
+| Control a light | "turn on the kitchen lights" |
+| Check something | "is the master bath fan on" |
+| Read a sensor | "what is the camera health" |
+| A binary sensor | "is the front door motion on" (not "is there motion at the front door") |
+| Temperature | "what is the temperature in the hallway" |
+| Survey | "what lights are on" |
+
+**Temperature needs a room.** A bare "what is the temperature" fails when more
+than one thermostat is exposed. A smart speaker resolves this from the room it
+sits in; a phone call carries no room, so name the area. This also means your
+thermostats must have an **area** assigned — without one, even the room-qualified
+question fails.
 
 Each utterance is a fresh request; the assistant does not carry context between
 turns, so a command that Home Assistant would normally answer with a follow-up
