@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.69.2
+
+Documentation for the voice assistant, corrected against how the system actually
+behaves.
+
+**Who can reach it.** The previous text left this to inference. Dial `47` is
+reachable by anyone who can pick up a house phone — and *not* by an outside
+caller, for two independent reasons that are worth stating rather than assuming:
+the inbound trunk `Dial` uses `r` only and never `t`/`T`, so no in-call DTMF
+transfer is armed for the outside party; and transfers are confined by
+`__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
+and `0` — no feature codes at all.
+
+**What the exposure list really is.** It is the security boundary, so the section
+now says plainly that a garage door or lock does not belong on it, and that an
+entity which silences an alarm deserves the same treatment even though it
+actuates nothing.
+
+**Duplicate names break commands.** Documented the `switch_as_x` trap: Home
+Assistant generates a `light.*` wrapper from a `switch.*`, so one physical device
+gets two entity IDs with the identical spoken name. Expose the light, not the
+switch.
+
+**Phrasings.** The built-in agent is a fixed-sentence matcher, not a language
+model, and the difference shows: "is the front door motion on" works where "is
+there motion at the front door" does not. Added a table of forms that work.
+
+**Temperature needs a room.** A bare "what is the temperature" cannot resolve
+when more than one thermostat is exposed — a smart speaker infers the room it
+sits in, a phone call carries none. This also requires the thermostats to have an
+area assigned at all, which is easy to miss.
+
 ## 0.69.1
 
 The voice assistant answered nothing. Fixed.
