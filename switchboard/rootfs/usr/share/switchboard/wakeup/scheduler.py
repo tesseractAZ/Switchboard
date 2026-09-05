@@ -94,6 +94,26 @@ def _reconcile_rings(now: float) -> None:
         r = _ringing[ext]
         if now - r["started"] < RETRY_AFTER:
             continue                                    # still ringing; too early to judge
+        # v0.74.0 — FAIL SAFE ON AN UNUSABLE LEDGER.
+        #
+        # The join below asks "was an `answered` record written?". If the ledger
+        # cannot be WRITTEN in the first place, the answer is always no — for a
+        # wake-up somebody picked up as much as for one that rang out. That is
+        # not a missing answer, it is a missing instrument, and treating the two
+        # alike escalates every successful wake-up with a critical push.
+        #
+        # This was live: /share/switchboard was created root-owned 0644 while the
+        # AGI runs as `asterisk`, so every `answered` write failed with EACCES and
+        # was swallowed. Escalating on an unreadable instrument is worse than not
+        # escalating at all, so say so loudly and stop tracking.
+        if _delivery is not None and not _delivery.is_writable():
+            log(f"wake-up for ext {ext} ({r['hhmm']}): the delivery ledger is NOT "
+                f"WRITABLE, so an answer could not have been recorded — refusing to "
+                f"judge this ring. Fix the permissions on the ledger; until then a "
+                f"ring-out cannot be detected.")
+            _record(ext, "unjudgeable", hhmm=r["hhmm"], reason="ledger-not-writable")
+            _ringing.pop(ext, None)
+            continue
         answered = False
         if _delivery is not None:
             try:

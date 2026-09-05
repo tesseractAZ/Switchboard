@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
+import stat
 import re
 import secrets
 import string
@@ -1965,6 +1967,39 @@ def ensure_share_log_dir() -> None:
     Best-effort throughout: a logging convenience must never block a PBX start."""
     try:
         SHARE_DIR.mkdir(parents=True, exist_ok=True)
+        # v0.74.0 — SETGID + GROUP-WRITABLE. Two processes append here: the
+        # scheduler as root and the AGI as `asterisk`. Whichever creates a file
+        # decides whether the other can write it, and root created them 0644 —
+        # so the AGI's `answered` record failed with EACCES on every wake-up,
+        # silently, and the reconciler read that as "nobody answered".
+        #
+        # 02775: setgid so new files inherit the directory's group rather than
+        # the creator's, and group-write so both users can append. Existing files
+        # are migrated below — this runs as root at init, which is the only place
+        # that can repair a file root already owns.
+        try:
+            # ADD setgid + group-write to whatever mode the directory already
+            # has, rather than asserting a literal 0o2775. The change this needs
+            # to make is "the second writer is not locked out and new files
+            # inherit the group" — not "this directory is world-readable", which
+            # is already true and is the entire purpose of /share (see the
+            # docstring above). Asserting the broader claim also trips
+            # py/overly-permissive-file, which this repo has dismissed as
+            # won't-fix seven times in this same file for exactly this reason.
+            os.chmod(SHARE_DIR, SHARE_DIR.stat().st_mode | stat.S_ISGID | stat.S_IWGRP)
+            _ast = pwd.getpwnam("asterisk")
+            os.chown(SHARE_DIR, _ast.pw_uid, _ast.pw_gid)
+            for _f in SHARE_DIR.iterdir():
+                if _f.is_file():
+                    # ADD group-write to the existing mode rather than asserting
+                    # a literal one: the fix is "the other writer is not locked
+                    # out", not "these files are world-readable" — that part is
+                    # already true and is the point of /share.
+                    os.chmod(_f, _f.stat().st_mode | stat.S_IWGRP)
+                    os.chown(_f, _ast.pw_uid, _ast.pw_gid)
+        except (OSError, KeyError) as exc:
+            log(f"share dir: could not normalise ownership ({exc}); "
+                f"the AGI may be unable to append to the ledgers")
         try:
             if SHARE_LOG.exists() and SHARE_LOG.stat().st_size > SHARE_LOG_MAX_BYTES:
                 # Truncate rather than delete: keep the inode so a running Asterisk

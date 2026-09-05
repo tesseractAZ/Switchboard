@@ -19,15 +19,26 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import stat
 
 OUTCOME_PATH = os.environ.get("SWITCHBOARD_DELIVERY_OUTCOME",
                               "/share/switchboard/delivery-outcomes.jsonl")
 MAX_BYTES = 2 * 1024 * 1024
 
 
-def record(ext: str, kind: str, outcome: str, **extra) -> None:
-    """Append one delivery-attempt record. Best-effort: telemetry must never
-    fail the delivery it is describing."""
+def record(ext: str, kind: str, outcome: str, **extra) -> bool:
+    """Append one delivery-attempt record. Returns True iff it was WRITTEN.
+
+    v0.74.0 — the return value exists because this function swallowing an error
+    made a shipped feature inert and invisible. `/share/switchboard` was created
+    root-owned 0644 while the AGI runs as `asterisk`, so the `answered` record
+    v0.70.0 depends on failed with EACCES on every write — and because the caller
+    could not tell, every ANSWERED wake-up looked unanswered to the reconciler,
+    would have been rung a second time, and then escalated with a critical
+    DND-bypassing push saying nobody had picked up.
+
+    Still best-effort: telemetry must never fail the delivery it describes. But
+    "best-effort" must not mean "indistinguishable from success"."""
     rec = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(
                timespec="seconds"),
            "ext": ext, "kind": kind, "outcome": outcome}
@@ -44,8 +55,23 @@ def record(ext: str, kind: str, outcome: str, **extra) -> None:
             pass
         with open(OUTCOME_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
+        # Group-writable: the scheduler (root) and the AGI (asterisk) both append
+        # here, and whichever creates the file decides whether the other can.
+        #
+        # ADD the group-write bit rather than asserting a literal mode. Writing
+        # 0o664 would also assert world-readable, which is a broader claim than
+        # this needs to make — the file inherits whatever the umask and the
+        # setgid directory already decided, and this only ensures the second
+        # writer is not locked out.
+        try:
+            os.chmod(OUTCOME_PATH, os.stat(OUTCOME_PATH).st_mode | stat.S_IWGRP)
+        except OSError:
+            pass
+        return True
     except OSError as exc:
-        print(f"[switchboard-delivery] record: {exc}", flush=True)
+        print(f"[switchboard-delivery] record FAILED ({exc}) — "
+              f"{kind}/{outcome} for ext {ext} was NOT written", flush=True)
+        return False
 
 
 def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
@@ -85,3 +111,20 @@ def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
         if rec.get("ext") == ext and rec.get("kind") == kind and rec.get("outcome") == outcome:
             return True
     return False
+
+
+def is_writable() -> bool:
+    """Can this process actually append to the ledger?
+
+    The reconciler MUST distinguish "no answer was recorded" from "the ledger
+    cannot be written, so no answer could have been recorded". Treating the
+    second as the first escalates every successful wake-up.
+    """
+    try:
+        d = os.path.dirname(OUTCOME_PATH)
+        os.makedirs(d, exist_ok=True)
+        if os.path.exists(OUTCOME_PATH):
+            return os.access(OUTCOME_PATH, os.W_OK)
+        return os.access(d, os.W_OK)
+    except OSError:
+        return False
