@@ -519,8 +519,15 @@ def test_every_call_carrying_context_feeds_the_quality_ledger() -> None:
         if m:
             cur = m.group(1)
             tagged.setdefault(cur, None)
-        if cur and "Gosub(switchboard-rtpqos,s,1(" in line:
-            tagged[cur] = _re.search(r"\(([a-z-]+)\)\)", line).group(1)
+        # The Gosub now takes ${SW_KIND}, which resolves SW_TAG with the
+        # context name as fallback -- several distinct call kinds share the
+        # [rooms] context, so the context name alone mislabelled them. Read the
+        # FALLBACK out of the Set line, which is where the context name now
+        # lives.
+        if cur and "Set(SW_KIND=" in line:
+            mm = _re.search(r":([a-z-]+)\)\}\)", line)
+            if mm:
+                tagged[cur] = mm.group(1)
 
     expected = {"rooms", "operator", "directory", "from-trunk", "wakeup",
                 "wakeup-deliver", "page", "automation", "status", "announce"}
@@ -1346,8 +1353,24 @@ def test_rtpqos_telemetry() -> None:
     # context as ARG1 so the sink/log can attribute the leg.
     for ctx in ("rooms", "operator", "directory", "from-trunk"):
         body = _ctx_body(e, ctx)
-        check(f"rtpqos: [{ctx}] h-extension Gosubs the logger with its context tag",
-              "exten = h,1" in body and f"Gosub(switchboard-rtpqos,s,1({ctx}))" in body)
+        check(f"rtpqos: [{ctx}] h-extension Gosubs the logger",
+              "exten = h,1" in body
+              and "Gosub(switchboard-rtpqos,s,1(${SW_KIND}))" in body)
+        check(f"rtpqos: [{ctx}] falls back to its context name when nothing "
+              "stamped a kind",
+              f":{ctx})}})" in body)
+        check(f"rtpqos: [{ctx}] filters the kind before it reaches a shell arg",
+              "FILTER(a-z-,${SW_TAG})" in body)
+    # ...and the kind must actually be STAMPED where it differs from the context
+    # name. [rooms] hosts room-to-room dialling, outbound PSTN, the operator, the
+    # clock and paging, and all five hung up in [rooms] -- an audit found that
+    # NONE of the four records tagged "rooms" was a room-to-room call.
+    rooms_body = _ctx_body(e, "rooms")
+    check("rtpqos: a genuine room-to-room call stamps its own kind",
+          "Set(SW_TAG=room)" in rooms_body)
+    check("rtpqos: the stamp precedes the dial, so a hangup mid-dial still "
+          "carries it",
+          rooms_body.index("Set(SW_TAG=room)") < rooms_body.index("Dial(PJSIP/"))
     # v0.21.0: the telemetry context ALSO pushes each leg to switchboard-callqos
     # (HA sensor + poor-call notification + durable JSONL ledger). Backgrounded via
     # TrySystem so a script error can never delay or wedge the hangup, with every
@@ -1713,9 +1736,13 @@ def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
     block = block.split("\n[", 1)[0]
     check("announce-play: has its own h extension", "exten = h,1" in block)
     check("announce-play: h gosubs the rtpqos logger",
-          "Gosub(switchboard-rtpqos,s,1(announce))" in block)
+          "Gosub(switchboard-rtpqos,s,1(${SW_KIND}))" in block
+          and ":announce)})" in block)
+    # The tag must be exactly 'announce' -- callqos's PLAYBACK_TAGS membership
+    # is what stops a playback leg confirming a call and raising a false
+    # 'degraded'. 'announce-play' would fall outside that set.
     check("announce-play: tagged 'announce' so it stays in PLAYBACK_TAGS",
-          "(announce)" in block and "(announce-play)" not in block)
+          ":announce)})" in block and ":announce-play)" not in block)
 
 
 def test_asterisk_log_has_a_readable_twin_on_share() -> None:

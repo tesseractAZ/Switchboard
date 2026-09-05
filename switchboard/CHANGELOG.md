@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.68.0
+
+A call's recorded kind is no longer just the context it hung up in.
+
+`[rooms]` hosts five distinct call types — room-to-room dialling, outbound PSTN
+via the dial prefix, the operator, the talking clock and paging — and all five
+hang up in `[rooms]`, so all five were filed as `tag=rooms`. An audit found that
+**none of the four records tagged "rooms" was actually a room-to-room call**:
+they were two outbound PSTN calls, an operator session and a paging leg. Any
+per-type quality trend drawn from that field was wrong.
+
+A context may now stamp `SW_TAG` to declare what kind of call it really is. The
+hangup extension resolves it with the context name as the fallback, so a context
+that stamps nothing behaves exactly as before, and the value is filtered to plain
+letters and a dash because it reaches a shell argument.
+
+Room-to-room dialling stamps `room`, before the `Dial`, so a hangup part-way
+through still carries it.
+
+
 ## 0.67.0
 
 A wake-up that rings out no longer vanishes.

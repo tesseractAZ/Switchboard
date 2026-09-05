@@ -1091,9 +1091,24 @@ def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
 def rtpqos_h(tag: str) -> list:
     """The `h` (hangup) extension for a call context: on hangup, Gosub the rtpqos
     logger while the RTP instance is still alive. Runs on the channel that executed
-    the context — the initiating phone (or the inbound trunk)."""
+    the context — the initiating phone (or the inbound trunk).
+
+    The tag passed here is the CONTEXT's name, which is not always the call's
+    KIND. Several distinct call types are defined inside [rooms] — room-to-room
+    dialling, outbound PSTN via the dial prefix, the operator, the talking clock,
+    paging — and every one of them hangs up in [rooms], so every one was filed as
+    `tag=rooms`. An audit found that none of the four records tagged "rooms" was
+    actually a room-to-room call, which makes any per-type quality trend from
+    that field wrong.
+
+    So a context may override the kind by setting SW_TAG before the call
+    proceeds; the context name remains the fallback, so a context that stamps
+    nothing behaves exactly as before. FILTER keeps the value to plain letters
+    and a dash: it reaches a shell argument."""
     return [f"exten = h,1,NoOp(rtpqos {tag})",
-            f" same = n,Gosub(switchboard-rtpqos,s,1({tag}))"]
+            f' same = n,Set(SW_KIND=${{IF($["${{SW_TAG}}" != ""]?'
+            f'${{FILTER(a-z-,${{SW_TAG}})}}:{tag})}})',
+            " same = n,Gosub(switchboard-rtpqos,s,1(${SW_KIND}))"]
 
 
 def _q(field: str) -> str:
@@ -1396,6 +1411,9 @@ def render_extensions(opts: dict) -> str:
             room_dial = [" same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)"]
         parts += [
             "exten = _X.,1,NoOp(Room call to ${EXTEN})",
+            # This IS a room-to-room call; say so explicitly rather than letting
+            # it inherit the context name that four other call kinds share.
+            " same = n,Set(SW_TAG=room)",
             f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
         ] + room_dial + [
             " same = n,Hangup()",
