@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.72.0
+
+The heartbeat now describes the cycle it actually ran in.
+
+Six audit findings, one record. Reading the live file, nobody could tell restart
+convergence from an outage, learn *which* phone was missing from an 8-of-10 row,
+or trust the cadence it reported.
+
+**It reported a cadence it was not honouring.** `interval_s` always said the
+configured poll interval, including on warm-up cycles where the loop sleeps
+`WARMUP_DELAY`. A reader reconstructing a timeline was told 300 s while the rows
+were 15 s apart — which is exactly how a 90-second restart convergence reads as a
+half-hour fault. Records now carry the cadence they will honour, plus `settled`
+and `phase`, and a `since_prev_s` **measured** from the monotonic clock (so an
+NTP step cannot produce a negative gap) rather than assumed.
+
+**It counted against a denominator that could never be met.** `total` is every
+configured room, which includes an extension that has never registered in the
+lifetime of this system — so a completely healthy fleet reported "9 of 10"
+forever, and a reader had no way to distinguish that steady 9/10 from a genuine
+one-phone outage. Records now carry `expected` (registered, or measured at some
+point by this process) alongside `total`. Both, permanently: you need the pair to
+tell a converging fleet from a healthy one. The `measured_before` term is
+load-bearing — a cordless that drops off WiFi stays in the denominator, so an
+outage reads 8 of 9 rather than shrinking the target and reading as full health.
+
+**It said one phone was missing and refused to say which.** `wired_down` omits
+the cordless, so the four 8/10 rows in the live file carried `wired_down: []`.
+Records now carry `down`, naming every endpoint that should be up and is not —
+excluding the never-registered one, which is absent by nature rather than down.
+
+**The fleet max hid the wired ports.** `worst_rtt_ms` is a max across the fleet,
+and on this plant that is almost always the WiFi cordless in power-save (~266 ms
+idle) — which says nothing about the eight wired ports sitting at 2.5 ms. The
+wired median, max and count now ride along.
+
+**The poller's own first cycle says so** (`poller_started`), which is precisely
+the set of rows that carry `ami: unreachable` after a restart. That join used to
+be done by hand against timestamps.
+
+8 mutants applied, 8 killed — including the two live defects (the bare
+`_poll_interval()` and the wired-only `down` list) and both denominator
+regressions. 389 tests pass.
+
 ## 0.71.0
 
 A security warning you could not silence by complying with it.

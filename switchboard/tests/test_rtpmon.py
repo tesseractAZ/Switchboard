@@ -895,7 +895,12 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         pm._publish = lambda p, s: None
         pm.trunk_enabled = lambda o: True
         pm._trunk_check = lambda st, settled, alerts: "Registered"
-        pm._heartbeat = lambda s, t, wired_down=None: seen.append((s, t, wired_down))
+        # v0.72.0 — the heartbeat now also receives the cycle PHASE and whether
+        # this is the poller's first cycle, so the stub must accept them. A stub
+        # with a stale signature is how a call-site change hides behind a green
+        # suite; capture them and assert, rather than swallowing them with **kw.
+        pm._heartbeat = lambda s, t, wired_down=None, settled=True, first=False: \
+            seen.append((s, t, wired_down, settled, first))
         pm.time.sleep = _fake_sleep
         try:
             pm.run()
@@ -907,11 +912,18 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         pm.time.sleep = real_sleep
 
     check("run loop: the heartbeat was actually called", len(seen) == 1)
-    s, t, wd = seen[0]
+    s, t, wd, settled, first = seen[0]
     check("run loop: it received this cycle's summary", s == summ)
     check("run loop: it received the trunk status from _trunk_check",
           t == "Registered")
     check("run loop: it was told which wired ports were down", wd == ["13"])
+    # v0.72.0 — the first cycle of a fresh run is a WARM-UP cycle, and the record
+    # must say so. Restart convergence used to be indistinguishable from a fault:
+    # the row claimed the steady 300 s cadence while the loop was sleeping 15 s.
+    check("run loop: the first cycle is flagged as the poller's own first",
+          first is True)
+    check("run loop: the first cycle is reported as warm-up, not steady",
+          settled is False)
 
 
 def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
@@ -1027,3 +1039,109 @@ def test_heartbeat_carries_the_transitions(tmp_path) -> None:
     finally:
         pm.ENDPOINT_LOG_PATH, pm.HEARTBEAT_PATH = real_log, real_hb
         pm._transition_offset = None
+
+
+# ── v0.72.0: the heartbeat describes the cycle it actually ran ───────────────
+#
+# Four defects, one record. Reading the live file, an auditor could not tell
+# restart convergence from an outage, could not learn WHICH phone was missing
+# from an 8-of-10 row, and was told a 300 s cadence on rows that were 15 s apart.
+# The denominator was 10 forever because ext 20 has never registered in the
+# lifetime of the system, so a healthy fleet read "9 of 10" indefinitely.
+
+def _hb_phones(**over):
+    """Eight wired + the cordless + the never-registered softphone — the real plant."""
+    rows = [{"ext": e, "name": e, "status": "Avail", "rtt_ms": 2.5,
+             "reachable": True, "registered": True} for e in
+            ("11", "12", "13", "14", "15", "16", "17", "18")]
+    rows.append({"ext": "19", "name": "Cordless", "status": "Avail", "rtt_ms": 266.0,
+                 "reachable": True, "registered": True})
+    rows.append({"ext": "20", "name": "iPhone", "status": "Unregistered", "rtt_ms": None,
+                 "reachable": False, "registered": False})
+    rows.extend(over.get("extra", []))
+    return rows
+
+
+def test_the_denominator_counts_phones_that_actually_register() -> None:
+    """A fleet where every real phone is up must not read "9 of 10" forever."""
+    summ = pm.summarize(_hb_phones(), wired_exts=["11","12","13","14","15","16","17","18"])
+    check("expected counts only phones that register", summ["expected"] == 9)
+    check("total still counts every configured room", summ["total"] == 10)
+    check("the never-registered ext is named", summ["never_registered_exts"] == ["20"])
+
+    # THE CASE THE `| measured_before` TERM EXISTS FOR: a cordless that drops off
+    # WiFi must STAY in the denominator. Without it a vanishing phone shrinks the
+    # target it is measured against and a real outage reads as full health.
+    dropped = [p.copy() for p in _hb_phones()]
+    for p in dropped:
+        if p["ext"] == "19":
+            p.update(registered=False, reachable=False, status="Unregistered")
+    s2 = pm.summarize(dropped, wired_exts=["11","12","13","14","15","16","17","18"],
+                      measured_before={"19"})
+    check("a phone measured earlier stays in the denominator (8 of 9, not 8 of 8)",
+          s2["reachable"] == 8 and s2["expected"] == 9)
+
+
+def test_the_heartbeat_names_every_endpoint_it_counts(tmp_path) -> None:
+    """The four live 8/10 rows carried `wired_down: []` — they said one phone was
+    missing and refused to say which, because the cordless is not wired."""
+    phones = [p.copy() for p in _hb_phones()]
+    for p in phones:
+        if p["ext"] == "19":
+            p.update(reachable=False, status="Unavail", rtt_ms=None)
+    summ = pm.summarize(phones, wired_exts=["11","12","13","14","15","16","17","18"])
+    saved, pm.HEARTBEAT_PATH = pm.HEARTBEAT_PATH, str(tmp_path / "hb.jsonl")
+    try:
+        pm._heartbeat(summ, "Registered", wired_down=[])
+        rec = json.loads(open(pm.HEARTBEAT_PATH).read().strip().split("\n")[-1])
+    finally:
+        pm.HEARTBEAT_PATH = saved
+    check("the down list names the cordless the wired list cannot", rec["down"] == ["19"])
+    check("reachable + down accounts for every expected phone",
+          rec["reachable"] + len(rec["down"]) == rec["expected"])
+
+
+def test_the_wired_figures_survive_the_fleet_max_rollup(tmp_path) -> None:
+    """`worst_rtt_ms` is a fleet MAX, and on this plant that is almost always the
+    WiFi cordless in power-save (~266 ms idle) — which says nothing about the
+    eight wired ports sitting at 2.5 ms. The fixture must therefore keep the
+    cordless REACHABLE and slow, or the two figures coincide and the assertion
+    proves nothing."""
+    summ = pm.summarize(_hb_phones(), wired_exts=["11","12","13","14","15","16","17","18"])
+    saved, pm.HEARTBEAT_PATH = pm.HEARTBEAT_PATH, str(tmp_path / "hb.jsonl")
+    try:
+        pm._heartbeat(summ, "Registered", wired_down=[])
+        rec = json.loads(open(pm.HEARTBEAT_PATH).read().strip().split("\n")[-1])
+    finally:
+        pm.HEARTBEAT_PATH = saved
+    check("the fleet max is the cordless, not a wired port",
+          rec["worst_rtt_ms"] == 266.0 and rec["worst_ext"] == "19")
+    check("the wired median is carried and is NOT the fleet max",
+          rec["wired_median_rtt_ms"] == 2.5 and rec["wired_median_rtt_ms"] != rec["worst_rtt_ms"])
+    check("the wired count is carried", rec["wired_count"] == 8)
+
+
+def test_the_heartbeat_reports_the_cadence_it_will_actually_sleep(tmp_path) -> None:
+    saved, pm.HEARTBEAT_PATH = pm.HEARTBEAT_PATH, str(tmp_path / "hb.jsonl")
+    saved_mono = pm._last_heartbeat_mono
+    try:
+        pm._last_heartbeat_mono = None          # explicit: this must not depend on test order
+        pm._heartbeat(None, "Registered", settled=False, first=True)
+        pm._heartbeat(None, "Registered", settled=True)
+        rows = [json.loads(l) for l in open(pm.HEARTBEAT_PATH) if l.strip()]
+    finally:
+        pm.HEARTBEAT_PATH = saved
+        pm._last_heartbeat_mono = saved_mono
+    warm, steady = rows[0], rows[1]
+    check("a warm-up cycle reports the warm-up cadence, not the configured one",
+          warm["interval_s"] == pm.WARMUP_DELAY and warm["settled"] is False)
+    check("a warm-up cycle names its phase", warm["phase"] == "warmup")
+    check("a settled cycle reports the real poll interval",
+          steady["interval_s"] >= 30 and steady["settled"] is True)
+    check("the poller's own first cycle says so", warm.get("poller_started") is True)
+    check("later cycles do not claim to be the first", "poller_started" not in steady)
+    check("the first record of a process has no previous to measure from",
+          warm["since_prev_s"] is None)
+    check("elapsed time is MEASURED, not copied from the configured interval",
+          isinstance(steady["since_prev_s"], int)
+          and steady["since_prev_s"] != steady["interval_s"])
