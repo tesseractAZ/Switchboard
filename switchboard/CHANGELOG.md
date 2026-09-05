@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.74.0
+
+**Hotfix.** v0.70.0's wake-up repair was inert on this system, and would have
+escalated every *answered* wake-up.
+
+`/share/switchboard` is created by the config generator running as root, and its
+files landed root-owned `0644`. The wake-up delivery AGI runs as `asterisk`. So
+`delivery.record(ext, "wakeup", "answered")` — the ground truth the whole v0.70.0
+join rests on — failed with `EACCES` on every single write, and `record()` caught
+the error and returned as though it had succeeded.
+
+The consequence was not a missing feature. It was an actively wrong one: the
+reconciler asks *"was an `answered` record written?"*, the answer was always no,
+so a wake-up somebody picked up looked identical to one that rang out. Every
+answered wake-up would have been rung a **second** time and then escalated with a
+critical, Do-Not-Disturb-bypassing push telling the owner nobody had answered.
+
+Three changes, because one would not have been enough:
+
+- **The directory is `02775`, setgid, `asterisk`-owned, and existing files are
+  migrated to `0664`.** Two processes append here — the scheduler as root and the
+  AGI as `asterisk` — and whichever creates a file decides whether the other can
+  write it. That is the root cause.
+- **`record()` returns whether it actually wrote.** Best-effort telemetry must
+  never fail the delivery it describes, but "best-effort" must not mean
+  "indistinguishable from success".
+- **The reconciler refuses to judge a ring it could not have measured.** If the
+  ledger is not writable, no `answered` record *could* exist, so the absence of
+  one carries no information. A missing instrument is not a measurement, and
+  escalating on one is worse than not escalating at all. It now says so loudly
+  and records `unjudgeable` instead.
+
+Found by running the AGI's own write **as the `asterisk` user inside the running
+container** — `os.access(W_OK)` returned False and the probe row never landed,
+while `record()` reported success. A green test suite could not have found this:
+the tests write to a temp path owned by the test user.
+
+4 mutants applied, 4 killed — including re-arming the escalation on an unwritable
+ledger, and making `is_writable()` return True unconditionally. That second one
+initially SURVIVED because every test stubbed the probe; a test that exercises the
+real function against a genuinely unwritable path was added to kill it.
+
 ## 0.73.0
 
 Two emergency-dialling defects, both live, both closed.

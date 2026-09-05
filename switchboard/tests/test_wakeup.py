@@ -541,3 +541,104 @@ def test_outcomes_since_respects_ext_kind_outcome_and_time(tmp_path):
           not delivery.outcomes_since("19", "wakeup", "answered", t0 + 3600))
     check("join: a missing file is not an answer",
           not SourceFileLoader("d2", str(webui / "delivery.py")).load_module().outcomes_since("19", "wakeup", "answered", 0))
+
+
+def test_an_unwritable_ledger_is_not_read_as_nobody_answered(tmp_path):
+    """THE REGRESSION THIS CLOSES, and it was live.
+
+    v0.70.0's reconciler asks "was an `answered` record written?". If the ledger
+    cannot be WRITTEN at all, that answer is always no — for a wake-up somebody
+    picked up exactly as much as for one that rang out.
+
+    On the live system /share/switchboard was created root-owned 0644 while the
+    AGI runs as `asterisk`, so every `answered` write failed with EACCES and
+    `delivery.record()` swallowed it. Every ANSWERED wake-up would therefore have
+    been rung a second time and then escalated with a critical, DND-bypassing
+    push telling the owner nobody had picked up.
+
+    A missing instrument is not a measurement. Escalating on one is worse than
+    not escalating at all."""
+    sched, delivery = _reconciler(tmp_path)
+    rings, pushes = [], []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): rings.append(ext); return True
+    class _HA:
+        @staticmethod
+        def push(*a, **k): pushes.append(1); return True
+        @staticmethod
+        def notify(*a, **k): return True
+    sched.ami, sched.ha_client = _AMI, _HA
+    delivery.is_writable = lambda: False        # the live EACCES condition
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": False}
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+
+    check("an unwritable ledger does not trigger a second ring", rings == [])
+    check("an unwritable ledger does not fire a critical push", pushes == [])
+    check("the unjudgeable ring stops being tracked", "19" not in sched._ringing)
+
+    # And the control: with a writable ledger the same setup DOES escalate, so
+    # the guard cannot be a blanket "never escalate".
+    delivery.is_writable = lambda: True
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": False}
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    check("a WRITABLE ledger still detects the ring-out", rings == ["19"])
+
+
+def test_record_reports_whether_it_actually_wrote(tmp_path):
+    """`record()` swallowing EACCES is what made the live failure invisible."""
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    d = SourceFileLoader("delivery_rep", str(webui / "delivery.py")).load_module()
+    d.OUTCOME_PATH = str(tmp_path / "ok.jsonl")
+    check("a successful write reports True", d.record("19", "wakeup", "answered") is True)
+    # Point it at a path that cannot be created: a FILE used as a directory.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    d.OUTCOME_PATH = str(blocker / "nested" / "x.jsonl")
+    check("a failed write reports False, it does not pretend to have succeeded",
+          d.record("19", "wakeup", "answered") is False)
+
+
+def test_is_writable_actually_probes_the_filesystem(tmp_path):
+    """The reconciler's fail-safe is only as good as this probe.
+
+    A previous version of this suite stubbed `is_writable` in every test, so a
+    mutant that made it return True unconditionally survived — the guard would
+    have been re-armed into the exact regression it exists to prevent, with a
+    green suite. This exercises the real function."""
+    import os as _os
+    from importlib.machinery import SourceFileLoader
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    d = SourceFileLoader("delivery_probe", str(webui / "delivery.py")).load_module()
+
+    ok = tmp_path / "w" / "d.jsonl"
+    d.OUTCOME_PATH = str(ok)
+    check("a creatable path is writable", d.is_writable() is True)
+
+    d.record("19", "wakeup", "answered")
+    check("an existing writable file is writable", d.is_writable() is True)
+
+    # Now make the real file unwritable and confirm the probe NOTICES.
+    _os.chmod(ok, 0o444)
+    try:
+        # root ignores the mode bits, so only assert when the test user is not root.
+        if _os.geteuid() != 0:
+            check("a read-only ledger reports NOT writable", d.is_writable() is False)
+        else:
+            check("running as root — mode bits do not apply, probe skipped", True)
+    finally:
+        _os.chmod(ok, 0o644)
+
+    # A path whose parent is a FILE cannot be created at all.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    d.OUTCOME_PATH = str(blocker / "nested" / "x.jsonl")
+    check("an uncreatable path reports NOT writable", d.is_writable() is False)
