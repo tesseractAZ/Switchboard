@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.75.0
+
+Every call in `[rooms]` now says what kind of call it is.
+
+`[rooms]` hosts six distinct things — room-to-room dialling, outbound PSTN, the
+talking clock, paging, the emergency numbers and the toll-fraud blocks — and all
+of them hang up in `[rooms]`, so all of them were filed as `tag=rooms`. An audit
+found that **none of the four records tagged "rooms" was a room-to-room call**,
+so any per-kind quality trend drawn from that field was wrong.
+
+The clock, the page, the outbound rule and the five blocked patterns now stamp
+their own kind. What is guarded is the *invariant*, not today's list: every
+non-`h` extension in `[rooms]` must either stamp `SW_TAG` or hand off to a
+context that carries its own. A feature code added later without a tag fails the
+build rather than silently joining the `rooms` bucket.
+
+**Writing that invariant immediately found a live collision.** The room-to-room
+tag was `room`, and the hangup extension's fallback is the context name `rooms` —
+so one character separated "a real room-to-room call" from "we could not classify
+this", and any `startswith` downstream merged the two. It is now `room-to-room`,
+and prefix collisions within a tag namespace are a test failure. No ledger rows
+carried the old value, so nothing is orphaned.
+
+One deliberate behaviour change: tagging the page as `page` puts it in
+`PLAYBACK_TAGS`, which stops a handset-dialled page from raising call-quality
+notifications, driving `sensor.switchboard_last_call`, and counting as a
+conversation in the device-health poller. That is the correct classification — a
+page is a broadcast, not a call — but it is a change, not a relabel.
+
+5 mutants applied, 5 killed. The first run reported three of them as "did not
+land" because the runner's landing check was inverted; it was corrected before
+the results were believed.
+
 ## 0.74.0
 
 **Hotfix.** v0.70.0's wake-up repair was inert on this system, and would have

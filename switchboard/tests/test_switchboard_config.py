@@ -1417,10 +1417,10 @@ def test_rtpqos_telemetry() -> None:
     # NONE of the four records tagged "rooms" was a room-to-room call.
     rooms_body = _ctx_body(e, "rooms")
     check("rtpqos: a genuine room-to-room call stamps its own kind",
-          "Set(SW_TAG=room)" in rooms_body)
+          "Set(SW_TAG=room-to-room)" in rooms_body)
     check("rtpqos: the stamp precedes the dial, so a hangup mid-dial still "
           "carries it",
-          rooms_body.index("Set(SW_TAG=room)") < rooms_body.index("Dial(PJSIP/"))
+          rooms_body.index("Set(SW_TAG=room-to-room)") < rooms_body.index("Dial(PJSIP/"))
     # v0.21.0: the telemetry context ALSO pushes each leg to switchboard-callqos
     # (HA sensor + poor-call notification + durable JSONL ledger). Backgrounded via
     # TrySystem so a script error can never delay or wedge the hangup, with every
@@ -1992,3 +1992,69 @@ def test_no_emergency_number_can_reach_the_trunk() -> None:
                   catch_all in e)
             check(f"prefix {prefix!r}: {prefix}{num} precedes the catch-all",
                   e.index(f"exten = {prefix}{num},1,") < e.index(catch_all))
+
+
+def test_every_rooms_extension_declares_what_kind_of_call_it_is() -> None:
+    """`rooms` must mean "unclassified", not "five different things".
+
+    [rooms] hosts room-to-room dialling, outbound PSTN, the talking clock,
+    paging, emergency numbers and the toll-fraud blocks — and all of them hang up
+    in [rooms], so all of them were filed under `tag=rooms`. An audit found that
+    NONE of the four records tagged "rooms" was actually a room-to-room call, so
+    any per-kind quality trend drawn from that field was wrong.
+
+    This is the invariant, not a list of today's extensions: every non-`h`
+    extension in [rooms] either stamps SW_TAG or hands off to another context
+    that carries its own tag. A new feature code added without a tag fails here
+    rather than silently joining the `rooms` bucket."""
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    for label, trunk in (
+        ("prefix mode", {"enabled": True, "provider_host": "example.net", "username": "u",
+                         "secret": "x", "dial_prefix": "9", "outbound_caller_id": "5555550100"}),
+        ("direct dial", {"enabled": True, "provider_host": "example.net", "username": "u",
+                         "secret": "x", "direct_dial": True, "outbound_caller_id": "5555550100"}),
+        ("no trunk", {"enabled": False}),
+    ):
+        e = sbc.render_extensions({"rooms": rooms, "trunk": trunk,
+                                   "operator": {"enabled": True}})
+        body = e[e.index("[rooms]"):]
+        body = body[:body.index("\n[", 1)]
+        cur, tag = None, {}
+        for line in body.splitlines():
+            m = re.match(r"exten = ([^,]+),1,", line)
+            if m:
+                cur = m.group(1)
+                tag.setdefault(cur, None)
+            if cur and re.search(r"Set\(SW_TAG=[a-z-]+\)", line):
+                tag[cur] = "stamped"
+            if cur and tag.get(cur) is None and re.search(r"Goto\([a-z-]+,s,1\)", line):
+                tag[cur] = "handed off"
+        # `h` is the hangup extension that READS the tag — it cannot carry one.
+        untagged = sorted(k for k, v in tag.items() if v is None and k != "h")
+        check(f"{label}: found extensions to check", len(tag) >= 5)
+        check(f"{label}: every [rooms] extension declares its call kind "
+              f"(untagged: {untagged})", not untagged)
+
+
+def test_no_call_kind_is_a_prefix_of_another_in_the_same_context() -> None:
+    """Tags that share an h-extension must not be prefix-related.
+
+    The ledger and several consumers match on the tag; if one value is a prefix
+    of another, a `startswith` anywhere downstream silently merges two call
+    kinds. Scoped deliberately to the tags that can reach the SAME h-extension —
+    `wakeup` and `wakeup-deliver` ARE prefix-related on purpose and can never
+    collide, because they hang up in different contexts."""
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    e = sbc.render_extensions({
+        "rooms": rooms,
+        "trunk": {"enabled": True, "provider_host": "example.net", "username": "u",
+                  "secret": "x", "dial_prefix": "9", "outbound_caller_id": "5555550100"},
+        "operator": {"enabled": True}})
+    body = e[e.index("[rooms]"):]
+    body = body[:body.index("\n[", 1)]
+    tags = set(re.findall(r"Set\(SW_TAG=([a-z-]+)\)", body))
+    tags.add("rooms")           # the h-extension's fallback shares the namespace
+    check(f"the [rooms] tag vocabulary is populated ({sorted(tags)})", len(tags) >= 5)
+    bad = [(a, b) for a in tags for b in tags if a != b and b.startswith(a)]
+    check(f"no [rooms] tag is a prefix of another (offenders: {bad})", not bad)
