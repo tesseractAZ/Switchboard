@@ -21,6 +21,10 @@ try:
 except Exception:  # noqa: BLE001
     ha_client = None
 try:
+    import delivery  # noqa: E402  (the answered-side ledger)
+except Exception:  # noqa: BLE001
+    delivery = None
+try:
     import ha_reports  # noqa: E402
 except Exception:  # noqa: BLE001
     ha_reports = None
@@ -41,6 +45,26 @@ def main() -> None:
     # Per-room scene first (the room this wake-up is ringing), then the
     # whole-house fallback.
     ext = sp.channel_ext(env)
+
+    # v0.70.0 — GROUND TRUTH THAT THE WAKE-UP WAS ANSWERED.
+    #
+    # This AGI runs from [wakeup-deliver], which the dialplan reaches only after
+    # the leg is answered. So reaching this line IS the answer, and it is the one
+    # fact the scheduler could never observe: an Async Originate reports "queued"
+    # the instant AMI accepts it, which is why a wake-up that rang out and one
+    # that woke somebody were recorded identically as `ring-queued`. Both the
+    # 2026-09-03 06:18 and 2026-09-04 06:12 wake-ups rang unanswered and left no
+    # record saying so.
+    #
+    # Written on the "scene" pass only — the dialplan invokes this AGI twice per
+    # delivery (scene on answer, speak after the time) and one answer must not
+    # produce two records.
+    if delivery is not None and do_scene and ext:
+        try:
+            delivery.record(ext, "wakeup", "answered")
+        except Exception as exc:  # noqa: BLE001  (never break the wake-up over telemetry)
+            sp.log("wakeup-deliver", f"could not record the answer: {exc}")
+
     scene = sp.wakeup_scene_for(wk, ext)
     if not do_scene:
         scene = None

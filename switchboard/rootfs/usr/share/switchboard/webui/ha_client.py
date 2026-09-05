@@ -342,6 +342,42 @@ def resolve_entities(entity_ids):
     return present, missing, True
 
 
+def push(message: str, title: str = "Switchboard", target: str = "", critical: bool = False) -> bool:
+    """Send a MOBILE PUSH via `notify.<target>` — a notification that makes a sound.
+
+    Deliberately separate from `notify()` above. That one posts to
+    `persistent_notification.create`, which is a badge in Home Assistant's bell
+    menu: durable, and completely silent. For a missed alarm clock at 06:18 a
+    badge on a web page nobody is looking at is not a notification at all, and an
+    audit of six days of logs found the phone system had no audible alert path of
+    any kind (`grep -rn mobile_app` over this repo returned nothing).
+
+    Not routed through `call_service()`: that guards a domain allow-list which
+    deliberately excludes `notify`, and widening it would let every caller reach
+    every notify service. This function reaches exactly one domain and returns a
+    bool the caller can act on.
+
+    `critical` attaches the companion app's documented critical payload so the
+    push sounds through Do Not Disturb / silent mode — the whole point when the
+    thing that failed is an alarm. Reserved for genuine delivery failures.
+
+    Returns False (never raises) when no target is configured, so a caller can
+    fall back to the drawer card.
+    """
+    tgt = (target or "").strip().replace("notify.", "", 1)
+    if not tgt or not message.strip():
+        return False
+    data: dict = {"message": message.strip(), "title": title}
+    if critical:
+        # iOS companion-app critical alert; Android ignores the extra keys.
+        data["data"] = {"push": {"sound": {"name": "default", "critical": 1, "volume": 1.0}}}
+    status, _ = _request("POST", f"/services/notify/{tgt}", data)
+    ok = status is not None and status < 300
+    if not ok:
+        _log(f"push to notify.{tgt} failed (status={status})")
+    return ok
+
+
 def notify(message: str, title: str = "Switchboard", notification_id: str = "") -> bool:
     """Create/replace a Home Assistant persistent notification (the bell menu), so
     an event that is otherwise log-only — a missed wake-up — is actually surfaced

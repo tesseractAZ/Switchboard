@@ -21,6 +21,16 @@ export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
 WRS="$(switchboard-opt wakeup_ring_seconds)"
 export WAKEUP_RING_SECONDS="${WRS:-60}"
 
+# v0.70.0 — the unanswered-wake-up escalation. An option is INERT until this
+# script exports it: the scheduler reads os.environ, and a value that only
+# reaches config.yaml never arrives.
+WRT="$(switchboard-opt wakeup_retry_seconds)"
+export WAKEUP_RETRY_SECONDS="${WRT:-90}"
+# The notify service an undelivered wake-up escalates to, without the `notify.`
+# prefix. Empty disables the push and leaves only the second ring.
+WPT="$(switchboard-opt wakeup_push_target)"
+export WAKEUP_PUSH_TARGET="${WPT:-mobile_app_iphone}"
+
 # Read options from the post-overlay snapshot (init-switchboard writes it);
 # falls back to /data/options.json when absent. Keeps every consumer on ONE
 # effective view of the config.

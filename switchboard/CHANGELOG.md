@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.70.0
+
+A wake-up call that nobody answers now rings again, and then makes a sound
+somewhere else.
+
+A six-day log audit found the alarm clock failed three times: on 2026-09-02 it
+answered and played **zero audio**, and on 09-03 06:18 and 09-04 06:12 it rang
+out unanswered. Every ledger, sensor and notification path read healthy through
+all three. On one of those mornings the user noticed and hand-set a replacement
+alarm thirteen seconds later; on the other, nothing followed at all.
+
+The cause was a mistaken definition of delivery. `originate_wakeup` returns true
+the instant the PBX *accepts* the request — not when the phone rings, and
+certainly not when anyone picks up. The scheduler treated that as success: it
+wrote `ring-queued` and immediately consumed the wake-up, so a ring-out and a
+wake-up that actually woke somebody produced byte-identical records and the alarm
+was gone either way.
+
+The answer was always knowable and never recorded. `[wakeup-deliver]` runs only
+after the leg is answered, so reaching it *is* the answer. It now writes that
+down, and the scheduler joins the two:
+
+- unanswered after `wakeup_retry_seconds` (default 90) → **the phone rings again**;
+- unanswered after the second ring → recorded `undelivered` and pushed to
+  `wakeup_push_target` (default `mobile_app_iphone`) as a **critical** alert that
+  sounds through Do Not Disturb.
+
+The second ring comes first deliberately. The phone is the loudest thing in the
+room and it is the device that was meant to wake you; the push is the fallback for
+when the handset itself is the problem.
+
+**`delivery-outcomes.jsonl` finally has a reader.** The v0.67.0 design was written
+down — "a ring-queued record with no matching call record IS the no-answer
+signal" — and then computed by nobody; a grep for it found only writers. The
+2026-09-04 ring-out was sitting correctly recorded in that file and raised
+nothing. `delivery.outcomes_since()` performs the join.
+
+**A new audible path.** `ha_client.notify()` posts to
+`persistent_notification.create` — a silent badge in Home Assistant's bell menu.
+A grep of this repo for `mobile_app` returned nothing: the phone system had no
+way to make a noise on a phone. `ha_client.push()` adds one, deliberately
+separate from the drawer card and not routed through the service allow-list.
+
+Also: a test now fails the build when a config option is read by a run script but
+never exported. That fourth edit is this project's most-repeated footgun, and unit
+tests structurally cannot catch it because they set the environment directly.
+
+7 mutants applied to the reconciliation and the join, 7 killed. 382 tests pass.
+
 ## 0.69.3
 
 Multi-turn context was listed as a future item. It is not one — Home Assistant's
