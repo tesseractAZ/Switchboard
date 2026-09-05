@@ -10,6 +10,7 @@ routing (dialplan drives the sensor; the notification is gate-able + dedup-keyed
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 from importlib.machinery import SourceFileLoader
@@ -99,7 +100,20 @@ def test_build_record() -> None:
     check("build: quality poor, notify true", rec["quality"] == "poor" and rec["notify"])
     check("build: MOS derived from worst MES", rec["mos_worst"] == 2.95)
     check("build: absent richer fields are null, not crashy",
-          rec["rtt_max_ms"] is None and rec["rx_octets"] is None)
+          rec["rtt_max_ms"] is None)
+    # v0.77.0: a field the running Asterisk cannot supply is OMITTED, not
+    # emitted as null in 100% of records. Asserting absence rather than
+    # null-ness is the stronger claim -- `rec["rx_octets"] is None` passed
+    # identically before and after the schema advertised a measurement that
+    # could never be made.
+    check("build: the uncollectable octet keys are absent, not null",
+          "rx_octets" not in rec and "tx_octets" not in rec)
+    with_octets = cq.build_record(_Args(source="dialplan", tag="rooms",
+                                        chan="PJSIP/12-1", rxcount="100",
+                                        txcount="100", rxmes="88", txmes="88",
+                                        rxoctet="16000", txoctet="16000"))
+    check("build: but a future Asterisk that DOES supply them still lands",
+          with_octets["rx_octets"] == 16000)
     # A no-RTCP leg (e.g. the VoIP.ms trunk) must degrade gracefully to unknown.
     rec2 = cq.build_record(_Args(source="dialplan", tag="from-trunk", chan="PJSIP/trunk-1",
                                  rxcount="", txcount="", rxmes="", txmes=""))
@@ -703,13 +717,13 @@ def test_unsampled_rtt_is_null_not_a_convincing_zero() -> None:
     # the one nulled field implies the others were checked.
     for f in ("rtt_mean_ms", "rtt_min_ms", "rtt_max_ms", "rtt_stdev_ms"):
         check(f"unsampled: {f} is null too, not 0.0", rec[f] is None)
-    check("unsampled: rx jitter is null, not 0.0", rec["jitter_rx_ms"] is None)
+    check("unsampled: rx jitter is null, not 0.0", rec["jitter_rx_last_ms"] is None)
     check("unsampled: MES stays null (pre-existing _credible behaviour)",
           rec["mes_worst"] is None)
     check("unsampled: quality reads unknown, not excellent",
           rec["quality"] == "unknown")
     # A direction that WAS measured must survive -- do not null the whole record.
-    check("unsampled: the measured tx jitter is kept", rec["jitter_tx_ms"] == 3.75)
+    check("unsampled: the measured tx jitter is kept", rec["jitter_tx_last_ms"] == 3.75)
 
     # ...and a genuinely fast call must NOT be nulled just for being fast.
     good = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
@@ -719,7 +733,7 @@ def test_unsampled_rtt_is_null_not_a_convincing_zero() -> None:
                                  rxmes="88", txmes="88"))
     check("measured: a real low RTT is preserved", good["rtt_ms"] == 4.0)
     check("measured: the mean survives on a sampled leg", good["rtt_max_ms"] == 12.0)
-    check("measured: real jitter is preserved", good["jitter_rx_ms"] == 2.0)
+    check("measured: real jitter is preserved", good["jitter_rx_last_ms"] == 2.0)
 
 
 def test_mean_and_min_rtt_are_recorded() -> None:
@@ -780,7 +794,7 @@ def test_outcome_is_mirrored_somewhere_readable(tmp_path) -> None:
     check("outcome: mirrors every ledger field, not a curated subset",
           set(r) == set(rec))
     for k in ("ts", "ext", "tag", "stage", "quality", "rtt_samples",
-              "loss_rx_pct", "jitter_rx_ms", "rtt_max_ms", "mes_rx", "reasons",
+              "loss_rx_pct", "jitter_rx_last_ms", "rtt_max_ms", "mes_rx", "reasons",
               "chan", "hcause", "rxcount"):
         check(f"outcome: carries {k}", k in r)
     check("outcome: says which extension", r["ext"] == "19")
@@ -849,3 +863,284 @@ def test_main_writes_both_the_ledger_and_the_readable_outcome(tmp_path) -> None:
     check("main: the mirror carries the mean RTT", o["rtt_mean_ms"] == 31.0)
     check("main: playback tags are recorded but never notify",
           o["notify"] is False)
+
+
+# --------------------------------------------------------------------------- #
+# v0.77.0 — the three scoring defects an audit measured against the live ledger.
+# Every fixture below is a REAL record's raw values, not an invented shape: the
+# point of the audit was that these calls were misgraded in production, so the
+# regression test has to be the call that was actually misgraded.
+# --------------------------------------------------------------------------- #
+def test_rtt_is_scored_on_the_distribution_not_the_last_draw() -> None:
+    """F06. `rtt_ms` is CHANNEL(rtcp,rtt) — the FINAL round, one arbitrary draw.
+
+    Across 55 measured legs its maximum was 163.62 ms, so the 400 ms threshold
+    tested against it was unreachable by construction while `rtt_max_ms` in the
+    same records reached 845.93 ms. The detector could not fire. Ledger record 30
+    (Sep 3 06:00:08, wake-up, 39 s) is the exemplar: classify() saw 1.3% of the
+    peak, a 79.4x understatement.
+    """
+    a = _Args(chan="PJSIP/19-0000001e", tag="wakeup", billsec="39",
+              rxcount="1950", txcount="1950", rxmes="86.0", txmes="86.0",
+              rtt="0.01065", minrtt="0.00462", normdevrtt="0.16948",
+              maxrtt="0.84593", stdevrtt="0.30441")
+    rec = cq.build_record(a)
+    check("F06: the 846ms peak reaches the record", rec["rtt_max_ms"] > 800)
+    check("F06: a call whose RTT peaked at 846ms now raises something",
+          rec["notify"] is True)
+    check("F06: and the reason names the peak, not the last round",
+          any("peak" in r for r in rec["reasons"]))
+    # The old threshold, on the old field, on the same record: still silent.
+    _, old_notify, _ = cq.classify(86.0, 0.0, rec["rtt_ms"])
+    check("F06: precondition — the OLD single-draw test really was unreachable",
+          old_notify is False)
+    # The mean and the peak are INDEPENDENT tests. No record in the measured
+    # population crosses the mean threshold (its observed maximum was 169.48 ms
+    # against a 250 ms line), so without this case the mean's threshold could be
+    # set to any number at all and every test would still pass — the mutation
+    # harness found exactly that. A sustained 300 ms mean with an unremarkable
+    # peak is a real shape: a steadily distant or congested path rather than a
+    # bursty one, and it is the one the peak test cannot see.
+    slow = _Args(chan="PJSIP/19-0000002a", tag="rooms", billsec="60",
+                 rxcount="3000", txcount="3000", rxmes="86.0", txmes="86.0",
+                 rtt="0.30", minrtt="0.28", normdevrtt="0.30",
+                 maxrtt="0.34", stdevrtt="0.02")
+    slow_rec = cq.build_record(slow)
+    check("F06: a sustained high MEAN alerts on its own",
+          slow_rec["notify"] is True)
+    check("F06: and says it was the mean, not the peak",
+          any("mean" in r for r in slow_rec["reasons"]))
+    check("F06: precondition — its peak is BELOW the peak threshold",
+          slow_rec["rtt_max_ms"] < 500)
+    # ...and a well-sampled call with an ordinary distribution stays quiet.
+    b = _Args(chan="PJSIP/16-00000004", tag="rooms", billsec="60",
+              rxcount="3000", txcount="3000", rxmes="88.0", txmes="88.0",
+              rtt="0.012", minrtt="0.008", normdevrtt="0.014",
+              maxrtt="0.031", stdevrtt="0.004")
+    check("F06: an ordinary well-sampled call is untouched",
+          cq.build_record(b)["notify"] is False)
+
+
+def test_the_no_measurement_mes_constant_is_not_graded_as_excellent() -> None:
+    """F27/F24. Asterisk leaves MES at 88.087887 when it has nothing to report.
+
+    Six of 55 legs carried that exact float, always beside rtt=0.000000 or
+    maxrtt==rtt with stdevrtt=0.000000. Three of them were graded `excellent`
+    while a fourth no-RTCP leg was graded `unknown` — the verdict was decided by
+    which of Asterisk's two no-data constants happened to land in the field.
+
+    Raw invocation, verbatim from asterisk.log (Sep 1 23:34:46, the second
+    zero-billsec call, which an earlier finding asserted did not exist):
+      codec=ulaw billsec=0 hcause=16 rxcount=53 txcount=54 rxploss=0 txploss=0
+      rxjitter=0.007250 txjitter=0.002625 rtt=0.000000
+      rxmes=88.087887 txmes=0.000000 tag=rooms
+    """
+    a = _Args(chan="PJSIP/19-00000014", cid="19", tag="rooms", codec="ulaw",
+              billsec="0", hcause="16", rxcount="53", txcount="54",
+              rxploss="0", txploss="0", rxjitter="0.007250",
+              txjitter="0.002625", rtt="0.000000",
+              rxmes="88.087887", txmes="0.000000")
+    rec = cq.build_record(a)
+    check("F27: no RTCP round completed", rec["rtt_samples"] == "none")
+    check("F27: the sentinel MES is no longer graded excellent",
+          rec["quality"] == "unknown")
+    check("F27: and no MES is published from it", rec["mes_worst"] is None)
+    check("F27: which is the SAME verdict the 0.0 sentinel already produced",
+          cq.build_record(_Args(chan="PJSIP/19-00000015", tag="rooms",
+                                rxcount="53", txcount="54",
+                                rxmes="0.0", txmes="0.0"))["quality"]
+          == rec["quality"])
+    # The guard must be narrow: a genuinely excellent WELL-SAMPLED call that
+    # happens to land near 88.09 keeps its score.
+    # BOTH directions at the sentinel value, on a well-sampled leg. With only
+    # one direction at 88.087887 the other one carries the score, so a guard
+    # that had dropped the `sampling != "multi"` condition entirely still looked
+    # correct — the mutation harness caught that. Requiring both closes it: if
+    # the guard widens, this call has no MES left at all and reads `unknown`.
+    b = _Args(chan="PJSIP/16-00000009", tag="rooms", billsec="45",
+              rxcount="2250", txcount="2250", rxmes="88.087887",
+              txmes="88.087887", rtt="0.012", maxrtt="0.031", stdevrtt="0.004")
+    rec_b = cq.build_record(b)
+    check("F27: precondition — this leg really is well sampled",
+          rec_b["rtt_samples"] == "multi")
+    check("F27: a well-sampled 88.09 is NOT discarded",
+          rec_b["quality"] == "excellent" and rec_b["mes_worst"] is not None)
+
+
+def test_a_demoted_record_always_explains_itself() -> None:
+    """F30. Loss between 0.5% and 3.0% moved the label and recorded no reason.
+
+    Sep 1 06:05:49, wake-up to ext 19: rxploss=10 against rxcount=765 = 1.307%
+    receive loss, rxmes 87.614 / txmes 84.417. It reached the ledger as
+    `quality: "good", reasons: [], notify: false` — the label said something was
+    wrong and every field that could say what was empty. Hit twice, both on
+    wake-ups, which is the one call kind nobody is awake to notice.
+    """
+    a = _Args(chan="PJSIP/19-00000011", tag="wakeup", billsec="15",
+              rxcount="765", txcount="750", rxploss="10", txploss="0",
+              rxmes="87.614", txmes="84.417",
+              rtt="0.02", maxrtt="0.04", stdevrtt="0.006")
+    rec = cq.build_record(a)
+    check("F30: still 'good' — the LABEL was never the bug",
+          rec["quality"] == "good")
+    check("F30: the demotion now explains itself", rec["reasons"] != [])
+    check("F30: and it names the loss that caused it",
+          any("loss" in r for r in rec["reasons"]))
+    check("F30: 1.3% loss still does NOT wake anyone — alerting is unchanged",
+          rec["notify"] is False)
+    # An excellent call explains nothing, because there is nothing to explain.
+    b = _Args(chan="PJSIP/16-0000000a", tag="rooms", billsec="30",
+              rxcount="1500", txcount="1500", rxmes="88.0", txmes="88.0",
+              rtt="0.01", maxrtt="0.02", stdevrtt="0.003")
+    rec_b = cq.build_record(b)
+    check("F30: an excellent record stays silent",
+          rec_b["quality"] == "excellent" and rec_b["reasons"] == [])
+
+
+def test_the_jitter_field_names_do_not_assert_a_false_relationship() -> None:
+    """F52. `jitter_rx_max_ms` read as the maximum OF `jitter_rx_ms`. It is not.
+
+    In 22 of 28 live records the "max" was SMALLER than the field it appeared to
+    bound — idx37: 19.88 vs 0.38, a 52.3x inversion. They are different
+    quantities: one is Asterisk's interarrival estimate read once at hangup, the
+    other its maxrxjitter, the peak of that estimate sampled at every RTCP report
+    instant. A name that implies an ordering the data contradicts sends a reader
+    looking for a bug in the data.
+    """
+    a = _Args(source="dialplan", tag="rooms", chan="PJSIP/16-00000025",
+              billsec="30", rxcount="1500", txcount="1500",
+              rxmes="88", txmes="88", rtt="0.01", maxrtt="0.02",
+              stdevrtt="0.003",
+              rxjitter="0.01988", rxmaxjitter="0.00038")   # the real idx37 pair
+    rec = cq.build_record(a)
+    check("F52: the honest names are what the record carries",
+          {"jitter_rx_last_ms", "jitter_rx_peak_local_ms",
+           "jitter_tx_last_ms"} <= set(rec))
+    check("F52: and the names that asserted a false ordering are gone",
+          not {"jitter_rx_ms", "jitter_rx_max_ms", "jitter_tx_ms"} & set(rec))
+    check("F52: the inversion itself is preserved, not 'corrected' away",
+          rec["jitter_rx_last_ms"] > rec["jitter_rx_peak_local_ms"])
+    check("F52: the usable peak reaches HA, not just the ledger",
+          "jitter_rx_peak_local_ms" in _ha_attrs_for(rec))
+
+
+def _ha_attrs_for(rec):
+    """The attribute dict push_ha would set, without touching HA."""
+    seen = {}
+
+    class _Stub:
+        @staticmethod
+        def set_state(eid, val, attrs):
+            seen.update(attrs)
+
+        @staticmethod
+        def notify(*a, **k):
+            pass
+    import sys
+    sys.modules["ha_client"] = _Stub
+    try:
+        cq.push_ha(dict(rec, source="dialplan", tag="rooms"))
+    finally:
+        sys.modules.pop("ha_client", None)
+    return seen
+
+
+def test_every_record_says_which_schema_it_is() -> None:
+    """F54. The /share mirror carried two shapes and no way to tell them apart.
+
+    An audit found 20 lines of 11 fields and 30 of 32 in one file, separated them
+    by counting keys, and reasonably concluded the other 21 fields were being
+    discarded before the write. They were not — they were in a ledger the audit
+    could not read. A version stamp is the difference between a reader inferring
+    the shape and being told it.
+    """
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms",
+                                chan="PJSIP/12-1", rxcount="100",
+                                txcount="100", rxmes="88", txmes="88"))
+    check("F54: the ledger record is versioned", rec.get("v") == 3)
+    d = tempfile.mkdtemp()
+    try:
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        cq.append_outcome(rec)
+        line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
+        check("F54: and so is the /share mirror, which is the only view an "
+              "outside audit gets", line.get("v") == 3)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_codec_reports_the_wire_format_not_the_read_format() -> None:
+    """F51/F57. `codec` carried CHANNEL(audioreadformat) — a different quantity.
+
+    pjsip.conf sets `disallow = all` / `allow = ulaw` on the shared
+    [room-endpoint](!) template and again on [trunk] — the only allow lines in
+    the whole generated file — so ulaw is the only codec that can ever be
+    negotiated, for handsets and trunk alike. Yet 3 of 30 records named "slin",
+    and two assistant rows on the SAME handset 87 seconds apart disagreed with
+    each other, which is impossible on the wire. All three slin rows were
+    record()-driven AGI legs: the field was reporting transcoding, not the
+    codec. That signal is real and is kept — under a name that means it.
+    """
+    a = _Args(source="dialplan", tag="assistant", chan="PJSIP/19-00000003",
+              codec="(ulaw)", readformat="slin", billsec="66",
+              rxcount="3300", txcount="3300", rxmes="88", txmes="88")
+    rec = cq.build_record(a)
+    check("F51: codec is the negotiated wire format", rec["codec"] == "ulaw")
+    check("F51: Asterisk's list rendering is unwrapped, not stored raw",
+          "(" not in rec["codec"])
+    check("F57: the transcoding signal survives under an honest name",
+          rec["read_format"] == "slin")
+    # Fail-safe: a channel that reports no native format must not regress the
+    # field to empty — being slightly wrong beats going blank.
+    b = _Args(source="dialplan", tag="rooms", chan="PJSIP/16-1",
+              codec="", readformat="ulaw", rxcount="100", txcount="100",
+              rxmes="88", txmes="88")
+    check("F51: falls back to the read format rather than emitting nothing",
+          cq.build_record(b)["codec"] == "ulaw")
+
+
+def test_a_call_that_carried_no_media_still_reaches_the_ledger() -> None:
+    """F31. An abandoned intercom call was indistinguishable from no call.
+
+    Sep 1 23:31, three genuine room-to-room calls: ext 19 dialled 14, then 15,
+    then 16; each rang and was abandoned before answer. asterisk.log has all
+    three (`PJSIP/14-0000000a is ringing`, then `Spawn extension (rooms, 14, 4)
+    exited non-zero`, then `has no audio media/RTP session`). The ledger has
+    none of them, because the no-RTCP guard jumped straight to `done`.
+
+    Silence in a quality ledger has to mean "nothing happened". Here it meant
+    "three calls happened and nothing was written", which is the one thing a
+    forensic record must never be able to say.
+    """
+    a = _Args(source="dialplan", tag="rooms", chan="PJSIP/19-00000009",
+              cid="19", billsec="0", hcause="16", nomedia=True)
+    rec = cq.build_record(a)
+    check("F31: the abandoned call IS a record", isinstance(rec, dict))
+    check("F31: labelled for what it is, not as a measurement failure",
+          rec["quality"] == "no-media")
+    check("F31: which is distinct from 'we measured and could not tell'",
+          rec["quality"] != "unknown")
+    check("F31: it says who", rec["ext"] == "19")
+    check("F31: and which leg", rec["tag"] == "rooms")
+    check("F31: it explains itself", rec["reasons"] == ["leg carried no RTP media"])
+    check("F31: and it never wakes anyone", rec["notify"] is False)
+    check("F31: no metrics are invented from a leg that measured nothing",
+          rec["mes_worst"] is None and rec["rtt_ms"] is None)
+    # The notify guard has to hold even when the scoring path WOULD have fired.
+    # As the dialplan calls it today no-media rows carry no packet counts, so
+    # nothing can raise an alert and the guard is unreachable — which means a
+    # test written against today's invocation proves nothing about it (the
+    # mutation harness confirmed: deleting the guard changed no result). Feed it
+    # the shape that trips one-way detection, so the guard is what keeps an
+    # abandoned call from paging the house if the invocation ever grows counts.
+    loud = _Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000b",
+                 cid="19", billsec="10", hcause="16", nomedia=True,
+                 rxcount="1000", txcount="0", rxmes="88", txmes="0")
+    check("F31: precondition — this shape DOES alert without the no-media flag",
+          cq.build_record(_Args(source="dialplan", tag="rooms",
+                                chan="PJSIP/19-0000000b", cid="19",
+                                billsec="10", hcause="16", rxcount="1000",
+                                txcount="0", rxmes="88",
+                                txmes="0"))["notify"] is True)
+    check("F31: a media-less leg never alerts, whatever else is in the record",
+          cq.build_record(loud)["notify"] is False)

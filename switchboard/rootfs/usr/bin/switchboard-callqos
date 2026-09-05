@@ -160,22 +160,63 @@ def rtt_sampling(rtt_ms, max_ms, stdev_ms):
     return "multi"
 
 
-def classify(worst_mes, worst_loss_pct, rtt_ms):
+def classify(worst_mes, worst_loss_pct, rtt_ms,
+             rtt_mean_ms=None, rtt_max_ms=None, sampling=None):
     """Return (label, notify: bool, reasons: list[str]).
 
-    Thresholds are deliberately conservative so a notification means "worth a
-    look", not "spam on every WiFi hiccup". Tune the numbers here to taste:
-      - MES ~88 ≈ MOS 4.4 (toll quality); 70 ≈ MOS 3.5; 60 ≈ MOS 3.0 (fair).
-      - loss under ~1% is inaudible on G.711; 3%+ is audible clipping.
-      - RTT under ~150 ms is unnoticed; 400 ms+ makes conversation stilted.
+    Two separate jobs, deliberately kept apart:
+
+      `notify` fires on the ALERT thresholds only — conservative, so a
+      notification means "worth a look", not "spam on every WiFi hiccup":
+        - MES ~88 ≈ MOS 4.4 (toll quality); 70 ≈ MOS 3.5; 60 ≈ MOS 3.0 (fair).
+        - loss under ~1% is inaudible on G.711; 3%+ is audible clipping.
+        - RTT under ~150 ms is unnoticed; 400 ms+ makes conversation stilted.
+
+      `reasons` explains the LABEL. Through v0.76.0 it was built from the alert
+      set alone, so any demotion below the alert line recorded nothing at all: a
+      wake-up leg with 1.307% receive loss landed in the ledger as
+      `quality: "good", reasons: [], notify: false` — the label said something
+      was wrong and every field that could say WHAT was empty. Two live records
+      showed exactly that shape. A demoted record must now always explain itself,
+      while the alerting line stays where it was.
+
+    RTT is scored on the DISTRIBUTION, not the last draw (v0.77.0). `rtt_ms` is
+    `CHANNEL(rtcp,rtt)`, the final RTCP round only; over 55 measured legs its
+    maximum was 163.62 ms, so the 400 ms alert below it could never fire, while
+    `rtt_max_ms` in the same records reached 845.93 ms and `rtt_mean_ms` 169.48.
+    Scoring the mean and the peak flags one call in that population — the right
+    answer, and not the zero the old test was structurally guaranteed to give.
+    `rtt_ms` remains the fallback for a caller that has no distribution to pass.
+
+    `sampling` is accepted for symmetry with the record but is NOT a veto here.
+    Zero completed RTCP rounds does not mean zero measurement: receive loss,
+    receive jitter and the MES are computed from LOCAL counters, so a peer that
+    never echoes an RTCP report (the VoIP.ms trunk does exactly this) still
+    yields a genuinely gradeable leg. Forcing `unknown` on `sampling == "none"`
+    was tried and reverted — it discarded real quality data on every trunk call.
+
+    The no-measurement case is handled where it belongs, at the source: Asterisk
+    leaves the MES field at one of two constants when it has nothing to report —
+    0.0, which `_credible()` has always rejected, or 88.087887, which reads as a
+    flawless call. Four live no-RTCP legs proved the split: one scored `unknown`
+    and three scored `excellent`, decided purely by which constant happened to
+    land in the field. `_credible()` now rejects both, so `worst_mes` is None and
+    the honest `unknown` falls out of the ordinary ladder below.
     """
-    reasons = []
+    alerts, reasons = [], []
     if worst_mes is not None and worst_mes < 70:
-        reasons.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
+        alerts.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
     if worst_loss_pct is not None and worst_loss_pct > 3.0:
-        reasons.append(f"loss {worst_loss_pct:.1f}%")
-    if rtt_ms is not None and rtt_ms > 400:
-        reasons.append(f"RTT {rtt_ms:.0f}ms")
+        alerts.append(f"loss {worst_loss_pct:.1f}%")
+    # Prefer the distribution; fall back to the single draw only when no
+    # distribution was supplied, so an old caller still gets the old check.
+    if rtt_mean_ms is not None or rtt_max_ms is not None:
+        if rtt_mean_ms is not None and rtt_mean_ms > 250:
+            alerts.append(f"RTT mean {rtt_mean_ms:.0f}ms")
+        if rtt_max_ms is not None and rtt_max_ms > 500:
+            alerts.append(f"RTT peak {rtt_max_ms:.0f}ms")
+    elif rtt_ms is not None and rtt_ms > 400:
+        alerts.append(f"RTT {rtt_ms:.0f}ms")
 
     if worst_mes is None:
         label = "unknown"
@@ -188,7 +229,18 @@ def classify(worst_mes, worst_loss_pct, rtt_ms):
     else:
         label = "poor"
 
-    return label, bool(reasons), reasons
+    reasons = list(alerts)
+    if label not in ("excellent", "unknown"):
+        # Name whatever actually moved the label, if the alert set has not
+        # already named it. These are explanations, never alerts.
+        if worst_loss_pct is not None and worst_loss_pct >= 0.5 and not any(
+                r.startswith("loss ") for r in reasons):
+            reasons.append(f"loss {worst_loss_pct:.2f}%")
+        if worst_mes is not None and worst_mes < 85 and not any(
+                r.startswith("MES ") for r in reasons):
+            reasons.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
+
+    return label, bool(alerts), reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -204,38 +256,19 @@ def build_record(a) -> dict:
     jit_rx = _ms(_num(a.rxjitter))
     jit_tx = _ms(_num(a.txjitter))
 
-    # A per-direction MES only drives the score if it is trustworthy. Asterisk
-    # reports 0.0 for a direction it could not score (short call / RTCP not yet
-    # converged) — never a genuine 0 MOS — and a COLLAPSED MES (<40 ≈ MOS 2.0)
-    # alongside ~0% loss, only-packetization jitter, and a low RTT is a
-    # re-INVITE/transfer glitch, not real audio (that MOS physically requires heavy
-    # loss/jitter). Either way, drop the reading from the worst-of aggregation so it
-    # can't fire a false "poor"; genuine degradation always brings real loss and/or
-    # jitter (kept) and one-way audio is caught separately by packet counts below.
-    # The RAW mes_rx/mes_tx are still recorded verbatim for transparency.
-    def _credible(mes, loss, jit):
-        if mes is None or mes == 0:
-            return None
-        incoherent = (mes < 40
-                      and (loss is None or loss < 0.5)
-                      and (jit is None or jit < 40)
-                      and (rtt_ms is None or rtt_ms < 80))
-        return None if incoherent else mes
-
-    mes_vals = [m for m in (_credible(rxmes, loss_rx, jit_rx),
-                            _credible(txmes, loss_tx, jit_tx)) if m is not None]
-    worst_mes = min(mes_vals) if mes_vals else None
-    loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
-    worst_loss = max(loss_vals) if loss_vals else None
-
-    label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms)
-
     # When NO RTCP round completed, Asterisk reports rtt, rxjitter, rxmes and
     # txmes as 0.000000 together -- and 0.0 is a convincing number. _credible()
     # already nulls the MES pair, but a 0 ms RTT and 0 ms jitter read as a
     # flawless call rather than as no measurement, and were being forwarded
     # unqualified into every aggregate. Four fields exactly zero at once is a
     # combination no real call produces, so treat it as the sentinel it is.
+    #
+    # v0.77.0 HOISTED this above the scoring. It used to run AFTER classify(),
+    # which is why classify() could only ever be handed rtt_ms -- the one RTT
+    # field that is a single arbitrary draw. An audit measured the cost: across
+    # 55 legs rtt_ms peaks at 163.62 ms, so the 400 ms threshold below it was
+    # unreachable BY CONSTRUCTION, while rtt_max_ms in the very same records
+    # reached 845.93 ms. Order of statements was the whole defect.
     rtt_max = _ms(_num(a.maxrtt))
     rtt_stdev = _ms(_num(a.stdevrtt))
     rtt_mean = _ms(_num(a.normdevrtt))
@@ -252,6 +285,43 @@ def build_record(a) -> dict:
         rtt_ms = rtt_max = rtt_stdev = rtt_mean = rtt_min = None
         if jit_rx == 0:
             jit_rx = None
+
+    # A per-direction MES only drives the score if it is trustworthy. Asterisk
+    # reports 0.0 for a direction it could not score (short call / RTCP not yet
+    # converged) — never a genuine 0 MOS — and a COLLAPSED MES (<40 ≈ MOS 2.0)
+    # alongside ~0% loss, only-packetization jitter, and a low RTT is a
+    # re-INVITE/transfer glitch, not real audio (that MOS physically requires heavy
+    # loss/jitter). Either way, drop the reading from the worst-of aggregation so it
+    # can't fire a false "poor"; genuine degradation always brings real loss and/or
+    # jitter (kept) and one-way audio is caught separately by packet counts below.
+    # The RAW mes_rx/mes_tx are still recorded verbatim for transparency.
+    # Asterisk's "I have nothing to report" MES constant. It is not a plausible
+    # score that happens to be high — it is the same literal float on every leg
+    # that completed no RTCP round (6 of 55 measured legs carried it, always
+    # beside rtt=0.000000 or maxrtt==rtt with stdevrtt=0.000000). Requiring
+    # non-'multi' sampling alongside it keeps a genuinely excellent well-sampled
+    # call from being thrown away for landing near the same number.
+    _MES_SENTINEL = 88.087887
+
+    def _credible(mes, loss, jit):
+        if mes is None or mes == 0:
+            return None
+        if _sampling != "multi" and abs(mes - _MES_SENTINEL) < 1e-4:
+            return None
+        incoherent = (mes < 40
+                      and (loss is None or loss < 0.5)
+                      and (jit is None or jit < 40)
+                      and (rtt_ms is None or rtt_ms < 80))
+        return None if incoherent else mes
+
+    mes_vals = [m for m in (_credible(rxmes, loss_rx, jit_rx),
+                            _credible(txmes, loss_tx, jit_tx)) if m is not None]
+    worst_mes = min(mes_vals) if mes_vals else None
+    loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
+    worst_loss = max(loss_vals) if loss_vals else None
+
+    label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms,
+                                      rtt_mean, rtt_max, _sampling)
 
     rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
 
@@ -307,13 +377,39 @@ def build_record(a) -> dict:
     m = re.match(r"PJSIP/(\d{2,6})-", a.chan or "")
     ext = m.group(1) if m else (a.cid or "").strip()
 
+    # Asterisk renders a native format list as "(ulaw)". Strip the wrapper so
+    # the field holds a codec name and not a rendering of one. Fall back to the
+    # read format if the channel gives us nothing — being slightly wrong beats
+    # regressing a populated field to empty.
+    _read_fmt = (a.readformat or "").strip()
+    _codec = (a.codec or "").strip().strip("()") or _read_fmt
+
     rec = {
+        # Schema version. A reader must be able to tell one shape from another
+        # without inferring it from a missing key -- an audit found TWO shapes in
+        # the /share mirror (20 lines of 11 fields, 30 of 32) and could only
+        # separate them by counting keys, then reasonably concluded the missing
+        # 21 fields were being discarded rather than merely unmirrored.
+        #   v1  the first /share mirror: 11 of the ledger's fields
+        #   v2  the full mirror (v0.62.0)
+        #   v3  v0.77.0 -- jitter fields renamed for their real provenance,
+        #       null-in-100% octet keys omitted, RTT scored on the distribution
+        "v": 3,
         "ts": int(time.time()),
         "source": a.source,
         "tag": a.tag or "",
         "chan": a.chan or "",
         "ext": ext,
-        "codec": (a.codec or "").strip(),
+        # ★ The NEGOTIATED wire format. Through v0.76.0 this field carried
+        # CHANNEL(audioreadformat) — Asterisk's internal read format, a
+        # different quantity — and so named codecs the configuration forbids:
+        # pjsip.conf sets disallow=all / allow=ulaw on both the room-endpoint
+        # template and the trunk, yet 3 of 30 records said "slin", and two
+        # assistant rows on the SAME handset 87 seconds apart disagreed with
+        # each other. That is impossible on the wire; what it was really
+        # reporting is that one leg transcoded for a record() AGI. Worth
+        # knowing, so it is kept — under its own name, below.
+        "codec": _codec, "read_format": _read_fmt,
         "dur": dur,
         "billsec_raw": billsec_raw,
         "hcause": _int(a.hcause),
@@ -323,18 +419,32 @@ def build_record(a) -> dict:
         "stage": (a.stage or "").strip(),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
-        # ★ DO NOT BUILD A RECEIVE-JITTER ALARM ON jitter_rx_ms.
+        # ★ DO NOT BUILD A RECEIVE-JITTER ALARM ON jitter_rx_last_ms.
         # On announce-tagged legs it is the degenerate constant 0.019875 s in
         # 7 of 7 observed records, across durations from 5 s to 72 s -- pinned a
         # hair under the 20 ms ulaw packet interval, i.e. the estimator is not
         # converging rather than reporting a real measurement. Wake-up legs sit
         # in the same narrow band (0.019000-0.019750). A threshold on this field
         # would read permanently green while measuring nothing, which is worse
-        # than having no check at all. jitter_tx_ms DOES vary
+        # than having no check at all. jitter_tx_last_ms DOES vary
         # (0.001000-0.008375) and is the usable direction.
-        # Nothing thresholds on jitter today; this note exists so that stays a
-        # decision rather than an accident.
-        "jitter_rx_ms": jit_rx, "jitter_tx_ms": jit_tx,
+        #
+        # ★ jitter_rx_peak_local_ms, however, IS usable, and the old names were
+        # steering implementers away from the one receive-jitter field that
+        # measures something. It was `jitter_rx_max_ms`, which reads as the
+        # maximum OF jitter_rx_ms -- and in 22 of 28 records it was SMALLER than
+        # the field it appeared to bound (idx37: 19.88 vs 0.38, a 52x inversion).
+        # They are not the same quantity: one is Asterisk's interarrival estimate
+        # read once at hangup, the other its maxrxjitter, the peak of that
+        # estimate sampled at every RTCP report instant. The peak behaves like a
+        # real physical measurement -- 0.38 ms on the wired FXS gateway (ext 16)
+        # against up to 58.25 ms on the WiFi cordless (ext 19) -- which is
+        # exactly the contrast a receive-jitter check would want.
+        #
+        # v0.77.0 renamed all three so no name asserts a relationship that does
+        # not hold. Nothing thresholds on jitter today; this note exists so that
+        # stays a decision rather than an accident.
+        "jitter_rx_last_ms": jit_rx, "jitter_tx_last_ms": jit_tx,
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
         # bumpy stream that a healthy AVERAGE would mask.
@@ -346,18 +456,28 @@ def build_record(a) -> dict:
         # matters: statistically empty but visually identical to a real reading.
         # Consumers computing any aggregate should drop anything but 'multi'.
         "rtt_samples": _sampling,
-        "jitter_rx_max_ms": _ms(_num(a.rxmaxjitter)),
-        "rx_octets": _int(a.rxoctet), "tx_octets": _int(a.txoctet),
+        "jitter_rx_peak_local_ms": _ms(_num(a.rxmaxjitter)),
         "mes_rx": round(rxmes, 1) if rxmes is not None else None,
         "mes_tx": round(txmes, 1) if txmes is not None else None,
         "mes_worst": round(worst_mes, 1) if worst_mes is not None else None,
         "mos_worst": round(worst_mes / 20.0, 2) if worst_mes is not None else None,
-        "quality": label,
+        "quality": "no-media" if a.nomedia else label,
         # Recorded, never alerted — see PLAYBACK_TAGS. Stored as the honest
         # False so the ledger says plainly that no alert was raised.
-        "notify": notify and (a.tag or "") not in PLAYBACK_TAGS,
-        "reasons": reasons,
+        "notify": False if a.nomedia else (notify and (a.tag or "") not in PLAYBACK_TAGS),
+        "reasons": ["leg carried no RTP media"] if a.nomedia else reasons,
     }
+    # Octet counters: PJSIP in Asterisk 20.11.1 exposes no CHANNEL(rtcp,...) name
+    # for them, so the dialplan stopped passing --rxoctet/--txoctet in v0.48.0 --
+    # but the record kept emitting both keys, null in 100% of 30 records. A key
+    # that is always null is worse than an absent one: it advertises a
+    # measurement the system cannot make. Emit them only if a future Asterisk
+    # actually supplies them. Same convention as delivery.record(): absent
+    # optionals are OMITTED, so a reader can tell "not applicable" from
+    # "measured as nothing".
+    for _k, _v in (("rx_octets", _int(a.rxoctet)), ("tx_octets", _int(a.txoctet))):
+        if _v is not None:
+            rec[_k] = _v
     return rec
 
 
@@ -368,6 +488,37 @@ def build_record(a) -> dict:
 SHARE_OUTCOME_PATH = os.environ.get(
     "SWITCHBOARD_CALLQOS_OUTCOME", "/share/switchboard/callqos-outcomes.jsonl")
 SHARE_OUTCOME_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
+    """Trim an append-only ledger to its newest records. Best-effort.
+
+    v0.77.0 — this used to be `open(path, "w")` followed by `pass`, which
+    truncates the file to ZERO BYTES. The comment above it read "Truncating keeps
+    the newest records, which are the ones a reader wants" — the exact opposite
+    of what the code did. At the cap the entire forensic history disappeared, and
+    silently: an empty ledger and a quiet system look identical, which is the
+    failure mode this whole file exists to prevent.
+
+    Keeps the last `keep_frac` of the cap, cut at a line boundary so the first
+    surviving record is not half a JSON object. Rewrites in place rather than
+    renaming, so a reader holding the path keeps reading the same inode.
+    """
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        keep = max(1, int(max_bytes * keep_frac))
+        with open(path, "rb") as fh:
+            fh.seek(-keep, os.SEEK_END)
+            tail = fh.read()
+        # Everything before the first newline is half a record. Drop it: a
+        # reader must never have to guess whether the first line is complete.
+        nl = tail.find(b"\n")
+        tail = tail[nl + 1:] if nl != -1 else b""
+        with open(path, "wb") as fh:
+            fh.write(tail)
+    except OSError:
+        pass                              # a trim must never break the write
 
 
 def append_outcome(rec: dict) -> None:
@@ -403,12 +554,7 @@ def append_outcome(rec: dict) -> None:
     out = dict(rec)
     try:
         os.makedirs(os.path.dirname(SHARE_OUTCOME_PATH), exist_ok=True)
-        try:
-            if os.path.getsize(SHARE_OUTCOME_PATH) > SHARE_OUTCOME_MAX_BYTES:
-                with open(SHARE_OUTCOME_PATH, "w", encoding="utf-8"):
-                    pass
-        except OSError:
-            pass
+        _rotate_tail(SHARE_OUTCOME_PATH, SHARE_OUTCOME_MAX_BYTES)
         with open(SHARE_OUTCOME_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(out) + "\n")
     except OSError:
@@ -497,8 +643,10 @@ def push_ha(rec: dict) -> None:
             "duration_s": rec["dur"],
             "loss_rx_pct": rec["loss_rx_pct"],
             "loss_tx_pct": rec["loss_tx_pct"],
-            "jitter_rx_ms": rec["jitter_rx_ms"],
-            "jitter_tx_ms": rec["jitter_tx_ms"],
+            "jitter_rx_last_ms": rec["jitter_rx_last_ms"],
+            "jitter_tx_last_ms": rec["jitter_tx_last_ms"],
+            # The usable receive-jitter figure — see the ★ note in build_record.
+            "jitter_rx_peak_local_ms": rec["jitter_rx_peak_local_ms"],
             "rtt_ms": rec["rtt_ms"],
             "rtt_max_ms": rec["rtt_max_ms"],
             "mes_rx": rec["mes_rx"],
@@ -538,6 +686,13 @@ def _parse_args(argv):
     p.add_argument("--chan", default="")
     p.add_argument("--cid", default="")
     p.add_argument("--codec", default="")
+    # Asterisk's internal read format. NOT the codec, though it was reported as
+    # one until v0.77.0 — see the codec note in build_record().
+    p.add_argument("--readformat", default="")
+    # This leg never had an RTP session. Set by the dialplan's `nomedia` branch
+    # so an abandoned call reaches the ledger as an honest fact rather than as
+    # the absence of a row.
+    p.add_argument("--nomedia", action="store_true")
     p.add_argument("--billsec", default="")
     p.add_argument("--hcause", default="")
     # How far a scripted leg (wake-up delivery, announce) got before hangup.
