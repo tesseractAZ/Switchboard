@@ -221,6 +221,13 @@ def summarize(phones: list, wired_exts: list | None = None,
                   if p["rtt_ms"] is not None and str(p["ext"]) in wired_set]
     other_rtts = [(str(p["ext"]), p["rtt_ms"]) for p in reachable
                   if p["rtt_ms"] is not None and str(p["ext"]) not in wired_set]
+    # Registered now, or measured at some point by this process. See the
+    # `expected` comment below for why both terms are load-bearing.
+    seen_before = measured_before or set()
+    expected_exts = {p["ext"] for p in phones if p.get("registered")} | {
+        p["ext"] for p in phones if p["ext"] in seen_before}
+    never_registered = {p["ext"] for p in phones
+                        if not p.get("registered") and p["ext"] not in seen_before}
     return {
         "wired_median_rtt_ms": _median(wired_rtts),
         "wired_max_rtt_ms": max(wired_rtts) if wired_rtts else None,
@@ -228,6 +235,18 @@ def summarize(phones: list, wired_exts: list | None = None,
         # Everything not on the gateway — in practice the Wi-Fi cordless.
         "other_rtt_ms": {e: v for e, v in other_rtts} or None,
         "total": len(phones),
+        # v0.72.0 — `expected` is the denominator a HUMAN should read. `total` is
+        # every configured room, which on this plant is 10 and includes an ext
+        # that has never registered in the lifetime of the system: a perfectly
+        # healthy fleet therefore reported "9 of 10" forever, and a reader had no
+        # way to tell that steady 9/10 from a genuine one-phone outage.
+        #
+        # Registered-OR-ever-measured, deliberately: a cordless that drops off
+        # WiFi must stay in the denominator (8 of 9, actionable), or a vanishing
+        # phone would quietly shrink the target it is measured against and the
+        # outage would read as full health.
+        "expected": len(expected_exts),
+        "never_registered_exts": sorted(never_registered),
         "reachable": len(reachable),
         "unreachable": len(unreachable),
         "unreachable_exts": [p["ext"] for p in unreachable],
@@ -609,8 +628,12 @@ HEARTBEAT_PATH = os.environ.get("SWITCHBOARD_HEARTBEAT",
 HEARTBEAT_MAX_BYTES = 4 * 1024 * 1024
 
 
+_last_heartbeat_mono: float | None = None
+
+
 def _heartbeat(summ: dict | None, trunk_status: str | None,
-               wired_down: list | None = None) -> None:
+               wired_down: list | None = None, settled: bool = True,
+               first: bool = False) -> None:
     """Append one liveness record to /share, readable from OUTSIDE the container.
 
     Two problems, one file.
@@ -632,12 +655,34 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
 
     Best-effort throughout -- a liveness record must never break the poll that
     produces it."""
+    # v0.72.0 — the record now describes THE CYCLE IT RAN IN, not a configured
+    # constant. `interval_s` used to report the steady-state poll interval on
+    # every row including warm-up ones, where the loop actually sleeps
+    # WARMUP_DELAY. A reader reconstructing a timeline from this file was told
+    # 300 s while the rows were 15 s apart, which is how restart convergence
+    # reads as an outage.
+    global _last_heartbeat_mono
+    now_mono = time.monotonic()
     rec = {
         "ts": _now_iso(),
         "poller": "rtpmon",
-        "interval_s": _poll_interval(),
+        "interval_s": WARMUP_DELAY if not settled else _poll_interval(),
+        "settled": bool(settled),
+        "phase": "steady" if settled else "warmup",
+        # Measured, not assumed. `interval_s` is what the loop INTENDS; this is
+        # what actually elapsed, from the monotonic clock so a wall-clock step
+        # (NTP, DST) cannot produce a negative gap. None on the first record of
+        # a process, which is itself the signal that the poller restarted.
+        "since_prev_s": (None if _last_heartbeat_mono is None
+                         else round(now_mono - _last_heartbeat_mono)),
         "trunk": trunk_status or "unknown",
     }
+    _last_heartbeat_mono = now_mono
+    if first:
+        # The poller's OWN first cycle. Precisely the rows that carry
+        # `ami: unreachable` after a restart, so a reader no longer has to join
+        # timestamps by hand to tell convergence from a fault.
+        rec["poller_started"] = True
     if summ:
         # Key names must match summarize() EXACTLY. The first shipped version of
         # this used "expected" and "worst_rtt", neither of which summarize()
@@ -645,9 +690,32 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         # passed a hand-made dict with the same wrong keys, so it confirmed the
         # mistake instead of catching it. The live file exposed it in one cycle.
         rec["reachable"] = summ.get("reachable")
+        # BOTH denominators, permanently. `expected` is what a human should read
+        # ("9 of 9"); `total` is every configured room. A reader needs both to
+        # tell a converging fleet from a healthy one, so neither may be dropped
+        # as a cleanup.
+        rec["expected"] = summ.get("expected")
         rec["total"] = summ.get("total")
+        # v0.72.0 — EVERY endpoint counted as down, not just the wired ones.
+        # `wired_down` below omits the cordless, so the four 8/10 rows in the
+        # live file carried `wired_down: []` and named nothing at all: the record
+        # said one phone was missing and refused to say which.
+        # Phones that SHOULD be up and are not. Deliberately excludes the
+        # never-registered ext 20 — it is absent by nature, not down, and folding
+        # it in would make `reachable + down` overshoot `expected` on every
+        # healthy cycle and train the reader to ignore the field.
+        _never = set(summ.get("never_registered_exts") or [])
+        rec["down"] = [e for e in (summ.get("unreachable_exts") or []) if e not in _never]
+        if summ.get("never_registered_exts"):
+            rec["never_registered"] = summ["never_registered_exts"]
         rec["worst_rtt_ms"] = summ.get("worst_rtt_ms")
         rec["worst_ext"] = summ.get("worst_ext")
+        # The rollup's worst_rtt_ms is a fleet max, which on this plant is almost
+        # always the WiFi cordless in power-save (~266 ms idle) and tells you
+        # nothing about the eight wired ports. Carry the wired figures too.
+        rec["wired_median_rtt_ms"] = summ.get("wired_median_rtt_ms")
+        rec["wired_max_rtt_ms"] = summ.get("wired_max_rtt_ms")
+        rec["wired_count"] = summ.get("wired_count")
     else:
         # AMI unreachable this cycle: say so rather than omitting the fields,
         # so a reader can tell "no data" from "zero phones up".
@@ -869,7 +937,8 @@ def run() -> int:
         # because steady-state contact refreshes do not log.
         _heartbeat(summ, trunk_status,
                    wired_down=[p["ext"] for p in (phones or [])
-                               if p.get("ext") in set(wired) and not p.get("reachable")])
+                               if p.get("ext") in set(wired) and not p.get("reachable")],
+                   settled=settled, first=(polls == 0))
         polls += 1
         # A cycle where AMI was down (summ is None) tells us nothing about the
         # fleet — don't let it end warm-up on a phantom "all wired ports up".
