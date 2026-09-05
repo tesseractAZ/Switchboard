@@ -20,10 +20,16 @@ it would need a persistent stream per call. Sending TEXT to HA and speaking the
 text it returns reuses what is already installed and keeps each call a couple of
 short local HTTP round-trips.
 
-Scope note: each utterance is a fresh one-shot request -- no conversation_id is
-threaded, so HA cannot ask a follow-up question ("which light?") and remember
-the answer. Multi-turn context is a deliberate v2 item; the phone flow instead
-re-prompts and treats every utterance as a complete command.
+Scope note: each utterance is a fresh one-shot request, and threading a
+conversation_id would NOT change that. Measured against this Home Assistant
+2026-09-05: `continue_conversation` comes back FALSE on every ambiguous
+utterance tried ("what is the temperature", "turn on the lights", "is the light
+on", "what is the humidity"), and a second turn sent WITH the returned
+conversation_id is matched as a fresh independent sentence rather than as a
+continuation. The built-in agent is a one-shot sentence matcher, not a dialogue
+manager -- it never asks "which light?", it just fails. So the phone flow
+re-prompts and treats every utterance as a complete command, which is the only
+shape this agent supports.
 
 Channel-safe by construction: the top-level handler swallows every exception so
 the channel never wedges, and a TTS, STT or HA failure degrades to a canned
