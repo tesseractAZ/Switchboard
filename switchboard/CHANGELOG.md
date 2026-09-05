@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.71.0
+
+A security warning you could not silence by complying with it.
+
+Both console services printed "UNAUTHENTICATED on the LAN" unconditionally. The
+operator console printed it **two lines after reading `console_bind`** — so
+setting `console_bind` to `127.0.0.1`, which is exactly what the notice tells you
+to do, did not stop it appearing. The web terminal was worse: its notice was
+gated on whether any users were configured, and `BIND` was not resolved until
+eight lines *below* the notice that claimed to know the exposure.
+
+A warning that fires when its own remedy is already in place is not a warning. It
+teaches the reader to skip the channel that carries the real ones — and this
+channel also carries the trunk-registration failures and the missed wake-ups.
+
+Both now decide on the bind. A loopback bind logs an INFO line stating what is
+still reachable rather than claiming safety: the add-on runs with host
+networking, so `127.0.0.1` is the *Home Assistant host's* loopback, and the web
+terminal bridges to the console and may itself be on the LAN.
+
+The guard is a POSIX `case` matching all of `127/8` — a bind of `127.0.1.1` is
+just as unreachable from the LAN as `127.0.0.1` — with an empty or unset read
+falling through to "not loopback", so the failure direction is a warning nobody
+needed rather than silence on an exposed console.
+
+The tests **execute** the shipped guard under `sh` against a table of eleven
+addresses rather than grepping for its source text: a source scan proves the
+characters are present, but only execution proves `127.*` covers `127.0.1.1`. 5
+mutants applied, 5 killed — including narrowing the pattern to a literal, and
+moving the web terminal's bind resolution back below its notice.
+
+Closes five audit findings. Log text only; no service behaviour changes.
+
 ## 0.70.0
 
 A wake-up call that nobody answers now rings again, and then makes a sound
