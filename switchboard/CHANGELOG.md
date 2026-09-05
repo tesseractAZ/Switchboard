@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.69.3
+
+Multi-turn context was listed as a future item. It is not one — Home Assistant's
+built-in agent cannot do it, so the note has been corrected to say so.
+
+v0.69.0 shipped with "no conversation_id is threaded, so HA cannot ask a
+follow-up question; multi-turn context is a deliberate v2 item". That framing was
+wrong in a way worth fixing, because it implied the capability was one release
+away. Measured against this Home Assistant: `continue_conversation` returns
+**false** for every ambiguous utterance tried — "what is the temperature", "turn
+on the lights", "is the light on", "what is the humidity" — and a second turn
+sent WITH the previous turn's `conversation_id` is matched as a fresh
+independent sentence rather than as a continuation.
+
+The built-in agent is a one-shot sentence matcher, not a dialogue manager. It
+never asks "which light?"; an ambiguous command simply fails. Threading a
+conversation id would therefore change nothing, and the re-prompt-and-retry shape
+the phone flow already uses is the only shape this agent supports.
+
+Documentation only; no behaviour change.
+
 ## 0.69.2
 
 Documentation for the voice assistant, corrected against how the system actually

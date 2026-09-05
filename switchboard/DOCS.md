@@ -432,10 +432,13 @@ sits in; a phone call carries no room, so name the area. This also means your
 thermostats must have an **area** assigned — without one, even the room-qualified
 question fails.
 
-Each utterance is a fresh request; the assistant does not carry context between
-turns, so a command that Home Assistant would normally answer with a follow-up
-question ("which light?") will not be resolvable over the phone. Say the whole
-command instead.
+**Say the whole command in one go.** Each utterance is a fresh request, and that
+is a property of Home Assistant's built-in agent rather than a shortcut taken
+here: it is a sentence matcher, not a dialogue manager. Measured on this system,
+`continue_conversation` comes back false for every ambiguous phrasing, and a
+second turn sent with the previous turn's conversation id is matched as a new
+independent sentence. It never asks "which light?" — an ambiguous command simply
+fails, so name the room or the device the first time.
 
 ---
 
