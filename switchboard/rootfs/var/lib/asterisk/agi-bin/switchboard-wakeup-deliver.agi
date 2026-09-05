@@ -41,6 +41,10 @@ def main() -> None:
     mode = (sys.argv[1].strip().lower() if len(sys.argv) > 1 else "")
     do_scene = mode in ("", "scene")
     do_speak = mode in ("", "speak")
+    # "heard" is a milestone-only pass: it writes the delivery record and returns
+    # without touching HA. It runs immediately after the greeting Playback, which
+    # is the earliest point at which audio has demonstrably reached the sleeper.
+    do_heard = mode in ("", "heard")
 
     # Per-room scene first (the room this wake-up is ringing), then the
     # whole-house fallback.
@@ -76,6 +80,31 @@ def main() -> None:
             sp.log("wakeup-deliver", f"scene failed: {exc}")
     elif not scene and do_scene:
         sp.log("wakeup-deliver", f"no wake-up scene configured for ext {ext or '?'}")
+
+    # v0.77.0 — GROUND TRUTH THAT THE SLEEPER ACTUALLY HEARD SOMETHING.
+    #
+    # `answered` above is written on the SCENE pass, which the dialplan reaches
+    # immediately after Answer() and before a single word is played. That made it
+    # proof of a pickup and nothing more, and the scheduler was treating it as
+    # proof of delivery. Live, on 2026-09-02 at 06:15:21, the difference was the
+    # whole story: the cordless answered, the far end dropped one second later
+    # during the Wait before the greeting, Asterisk transmitted ZERO audio
+    # packets — and the wake-up was filed as answered and consumed. Nobody was
+    # woken and nothing anywhere said so.
+    #
+    # WHERE this runs is the whole design. The dialplan invokes it immediately
+    # after Playback(greeting) and BEFORE SayUnixTime, because Asterisk abandons
+    # the extension when the channel drops: reaching this line at all proves the
+    # greeting played to a live channel. Putting it any later would make a
+    # perfectly ordinary wake-up — pick up, hear the greeting, hang up — look
+    # undelivered, and the escalation for an undelivered wake-up is a re-ring and
+    # a Do-Not-Disturb-bypassing push at six in the morning. The rule is that a
+    # false alarm here costs more than the extra precision would buy.
+    if do_heard and delivery is not None and ext:
+        try:
+            delivery.record(ext, "wakeup", "spoken")
+        except Exception as exc:  # noqa: BLE001  (telemetry never breaks the wake-up)
+            sp.log("wakeup-deliver", f"could not record the spoken milestone: {exc}")
 
     if not do_speak:
         return

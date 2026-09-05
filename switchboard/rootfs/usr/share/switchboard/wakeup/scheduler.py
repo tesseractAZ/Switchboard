@@ -114,21 +114,42 @@ def _reconcile_rings(now: float) -> None:
             _record(ext, "unjudgeable", hhmm=r["hhmm"], reason="ledger-not-writable")
             _ringing.pop(ext, None)
             continue
-        answered = False
+        # ★ THE JOIN IS ON `spoken`, NOT ON `answered`.
+        #
+        # `answered` is written the instant the leg is picked up, before a word
+        # is played, so it proves a pickup and not a delivery. Judging on it
+        # filed the single worst outcome this feature has as a success: on
+        # 2026-09-02 at 06:15:21 the cordless answered, dropped one second later
+        # during the Wait before the greeting, transmitted ZERO audio packets,
+        # and was recorded ANSWERED and consumed. `spoken` is written only after
+        # the greeting and the time have both played.
+        #
+        # Both are read, because the two failures are different and the person
+        # woken by the escalation deserves to be told which one happened: a
+        # phone that never rang through is a delivery problem, a phone that was
+        # picked up in silence is an audio problem.
+        answered = spoken = False
         if _delivery is not None:
             try:
-                answered = _delivery.outcomes_since(ext, "wakeup", "answered", r["started"])
+                spoken = _delivery.outcomes_since(ext, "wakeup", "spoken", r["started"])
+                answered = spoken or _delivery.outcomes_since(
+                    ext, "wakeup", "answered", r["started"])
             except Exception as exc:  # noqa: BLE001  (never let telemetry break the alarm)
                 log(f"could not read delivery outcomes for ext {ext}: {exc}")
                 _ringing.pop(ext, None)                 # unknowable -> stop tracking, do not guess
                 continue
-        if answered:
-            log(f"wake-up for ext {ext} ({r['hhmm']}) ANSWERED")
+        if spoken:
+            log(f"wake-up for ext {ext} ({r['hhmm']}) DELIVERED")
             _ringing.pop(ext, None)
             continue
+        # Everything below is an undelivered wake-up. `answered` now only
+        # changes what we CALL it and what the escalation says.
+        how = ("was answered but played nothing" if answered
+               else "went unanswered")
         if not r["retried"]:
-            log(f"wake-up for ext {ext} ({r['hhmm']}) went unanswered — ringing again")
-            _record(ext, "no-answer", hhmm=r["hhmm"], attempt=1)
+            log(f"wake-up for ext {ext} ({r['hhmm']}) {how} — ringing again")
+            _record(ext, "answered-silent" if answered else "no-answer",
+                    hhmm=r["hhmm"], attempt=1)
             try:
                 if ami.originate_wakeup(ext, RING):
                     r["retried"] = True
@@ -139,25 +160,28 @@ def _reconcile_rings(now: float) -> None:
                 log(f"re-ring for ext {ext} failed: {exc}")
             _ringing.pop(ext, None)
             continue
-        # Second ring also unanswered — this is a genuinely undelivered alarm.
+        # Second ring also failed — this is a genuinely undelivered alarm.
         log(f"wake-up for ext {ext} ({r['hhmm']}) UNDELIVERED after two rings")
-        _record(ext, "undelivered", hhmm=r["hhmm"], attempt=2)
+        _record(ext, "undelivered", hhmm=r["hhmm"], attempt=2,
+                reason="answered-silent" if answered else "no-answer")
         _ringing.pop(ext, None)
-        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not answered. "
-               f"The phone rang twice and nobody picked up.")
+        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not delivered. "
+               + (f"The phone was picked up but played no audio, twice."
+                  if answered else
+                  f"The phone rang twice and nobody picked up."))
         pushed = False
         if ha_client is not None and PUSH_TARGET:
             try:
                 # critical=True so it sounds through Do Not Disturb. An alarm
                 # clock that failed is exactly the case DND should not swallow.
-                pushed = ha_client.push(msg, title="Switchboard: wake-up not answered",
+                pushed = ha_client.push(msg, title="Switchboard: wake-up not delivered",
                                         target=PUSH_TARGET, critical=True)
             except Exception as exc:  # noqa: BLE001
                 log(f"could not push the undelivered wake-up: {exc}")
         if not pushed and ha_client is not None:
             # Fall back to the drawer card rather than losing the signal entirely.
             try:
-                ha_client.notify(msg, title="Switchboard: wake-up not answered",
+                ha_client.notify(msg, title="Switchboard: wake-up not delivered",
                                  notification_id=f"switchboard_undelivered_wakeup_{ext}")
             except Exception as exc:  # noqa: BLE001
                 log(f"could not post the undelivered-wake-up card: {exc}")

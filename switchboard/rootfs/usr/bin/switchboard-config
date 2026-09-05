@@ -746,6 +746,17 @@ def render_wakeup_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,Set(SW_STAGE=greeting)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        # ★ THE DELIVERY MILESTONE, and it belongs exactly here. Asterisk
+        # abandons the extension the moment the channel drops, so reaching this
+        # line proves the greeting played to a live channel — the earliest point
+        # at which audio has demonstrably reached the sleeper. The scheduler
+        # joins on the record this writes; before it, the join was on `answered`,
+        # which is written on Answer() before a word is played, so a wake-up that
+        # was picked up in silence was filed as delivered (live: 2026-09-02
+        # 06:15:21, txcount=0). Putting it after SayUnixTime instead would make
+        # the ordinary "pick up, hear the greeting, hang up" look undelivered and
+        # earn a DND-bypassing push at six in the morning.
+        " same = n,AGI(switchboard-wakeup-deliver.agi,heard)",
         " same = n,Set(SW_STAGE=time)",
         " same = n,SayUnixTime(,,IMp)",
         # Smart wake-up: fire the configured scene + speak weather / next calendar

@@ -638,6 +638,20 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     if not ok:
         # AMI accepted the connection but refused the Originate.
         _record_delivery(ext, "announce", "originate-refused")
+    else:
+        # v0.77.0 — the announce path recorded SIX failure outcomes and no
+        # success one, so an announcement that rang out left nothing in any
+        # ledger at all. Live, 2026-09-01 19:05:15: `Called 19` -> `is ringing`
+        # -> AMI hung the channel up four seconds later, never answered. No
+        # [switchboard-announce-play] ran, so no h-extension, so no callqos row
+        # either. The announcement is absent from BOTH ledgers, and absence in a
+        # delivery ledger reads as "we never tried".
+        #
+        # `ok` here means AMI ACCEPTED the Originate — the same thing
+        # `ring-queued` means on the wake-up side, and deliberately named to
+        # match, so one join covers both paths.
+        _record_delivery(ext, "announce", "originate-queued",
+                         sound=os.path.basename(sound))
     return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
 
 

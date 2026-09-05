@@ -73,6 +73,19 @@ PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
 # (rooms, operator, directory, from-trunk) and the interactive voice menus
 # (wakeup, automation, status) still alert exactly as before.
 PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
+
+# Contexts that narrate a script, and the stage each reaches when it finishes.
+# The dialplan enters both ONLY after Answer(), so a non-empty `stage` on one of
+# these legs is proof the call was picked up — which makes the pair (stage,
+# txcount) a complete delivery verdict: somebody answered, and this much audio
+# actually left the box.
+SCRIPTED_TERMINAL = {"wakeup-deliver": "complete", "announce": "complete"}
+
+# ...and the one scripted context with a hard deadline. A wake-up call that did
+# not wake anyone is a failure with a real-world cost; a page or an announcement
+# that was cut short is not worth an alert. So this is the only playback tag
+# permitted to break the PLAYBACK_TAGS silence.
+ALARM_TAG = "wakeup-deliver"
 # Asterisk-readable runtime staged by switchboard-config (root-only options.json is
 # not readable by the asterisk user the dialplan runs us as).
 FEATURES = os.environ.get("SWITCHBOARD_FEATURES", "/run/switchboard/features.json")
@@ -384,6 +397,44 @@ def build_record(a) -> dict:
     _read_fmt = (a.readformat or "").strip()
     _codec = (a.codec or "").strip().strip("()") or _read_fmt
 
+    # ★ THE WORST OUTCOME MUST NOT GET THE QUIETEST SCORE.
+    #
+    # Sep 2, 06:15:21. The cordless answered a wake-up call and the far end
+    # dropped one second later, during the Wait that precedes the greeting. The
+    # ledger recorded it as:
+    #
+    #   {"tag": "wakeup-deliver", "stage": "scene", "dur": 0,
+    #    "rxcount": 34, "txcount": 0, "quality": "unknown", "notify": false}
+    #
+    # Asterisk transmitted ZERO audio packets: the sleeper picked up the phone
+    # and heard nothing at all. That is the worst thing this feature can do, and
+    # it scored `unknown` with `notify: false` — the least alarming verdict the
+    # ledger can produce, because no rule read `stage` and MES-based scoring has
+    # nothing to score when no audio was sent.
+    #
+    # Both halves of the verdict are already in the record. A stage means the leg
+    # was answered; txcount says whether anything reached them.
+    _stage = (a.stage or "").strip()
+    _terminal = SCRIPTED_TERMINAL.get(a.tag or "")
+    undelivered = []
+    if _terminal and _stage:
+        if txc == 0:
+            undelivered.append("answered but transmitted no audio")
+        if _stage != _terminal:
+            undelivered.append(f"delivery stopped at stage {_stage!r}")
+
+    if undelivered:
+        _quality = "undelivered"
+        _reasons = undelivered + [r for r in reasons if r not in undelivered]
+        # An alarm clock that did not go off is worth saying out loud. Everything
+        # else scripted stays silent — a truncated page is not an emergency.
+        _notify = (a.tag or "") == ALARM_TAG
+    elif a.nomedia:
+        _quality, _reasons, _notify = "no-media", ["leg carried no RTP media"], False
+    else:
+        _quality, _reasons = label, reasons
+        _notify = notify and (a.tag or "") not in PLAYBACK_TAGS
+
     rec = {
         # Schema version. A reader must be able to tell one shape from another
         # without inferring it from a missing key -- an audit found TWO shapes in
@@ -461,11 +512,11 @@ def build_record(a) -> dict:
         "mes_tx": round(txmes, 1) if txmes is not None else None,
         "mes_worst": round(worst_mes, 1) if worst_mes is not None else None,
         "mos_worst": round(worst_mes / 20.0, 2) if worst_mes is not None else None,
-        "quality": "no-media" if a.nomedia else label,
+        "quality": _quality,
         # Recorded, never alerted — see PLAYBACK_TAGS. Stored as the honest
         # False so the ledger says plainly that no alert was raised.
-        "notify": False if a.nomedia else (notify and (a.tag or "") not in PLAYBACK_TAGS),
-        "reasons": ["leg carried no RTP media"] if a.nomedia else reasons,
+        "notify": _notify,
+        "reasons": _reasons,
     }
     # Octet counters: PJSIP in Asterisk 20.11.1 exposes no CHANNEL(rtcp,...) name
     # for them, so the dialplan stopped passing --rxoctet/--txoctet in v0.48.0 --
