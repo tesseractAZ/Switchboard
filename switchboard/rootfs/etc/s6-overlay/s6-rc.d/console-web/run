@@ -48,15 +48,14 @@ sys.path.insert(0, '/usr/share/switchboard/console-web')
 import webauth
 print(len(webauth.parse_users(os.environ.get('CONSOLE_WEB_USERS', ''))))
 " 2>/dev/null || echo 0)"
-if [ "${VALID_USERS}" = "0" ]; then
-    bashio::log.notice "The console web terminal is UNAUTHENTICATED on the LAN and drives the operator console (ring/connect/hang up). Add console_users entries to require a sign-in, or set console_web_enabled:false to turn it off."
-else
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s))."
-fi
-
 export CONSOLE_WEB_PORT="${PORT}"
 # Bind address: explicit console_web_bind wins; otherwise follow console_bind so
 # locking the telnet console to loopback also locks the web terminal.
+#
+# v0.71.0 — RESOLVED BEFORE THE NOTICE BELOW, not after. The warning used to be
+# printed here-1 and BIND computed here+8, so the line claiming the terminal was
+# "UNAUTHENTICATED on the LAN" could not see the bind that decided whether it was
+# on the LAN at all.
 BIND="$(switchboard-opt console_web_bind)"
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     BIND="$(switchboard-opt console_bind)"
@@ -65,6 +64,33 @@ if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     BIND="0.0.0.0"
 fi
 export CONSOLE_WEB_BIND="${BIND}"
+
+# v0.71.0 — is this bind address loopback-only?
+#
+# POSIX `case`, so macOS bash 3.2 and the container's ash both run it unchanged.
+# `127.*` rather than a literal 127.0.0.1: the whole 127/8 block is loopback and
+# a bind of 127.0.1.1 is just as unreachable from the LAN.
+#
+# The DEFAULT (0.0.0.0, and an empty read) deliberately falls through to "not
+# loopback", so the failure direction is a warning nobody needed rather than a
+# silence on a genuinely exposed terminal.
+sw_is_loopback() {
+    case "${1:-}" in
+        127.*|::1|\[::1\]|localhost) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Unauthenticated AND reachable is the condition worth a notice. Either alone is
+# not: a loopback-bound terminal with no users is not "on the LAN", and an
+# authenticated one on 0.0.0.0 has a gate.
+if [ "${VALID_USERS}" = "0" ] && ! sw_is_loopback "${BIND}"; then
+    bashio::log.notice "The console web terminal is UNAUTHENTICATED on ${BIND} and drives the operator console (ring/connect/hang up). Add console_users entries to require a sign-in, or set console_web_enabled:false to turn it off."
+elif [ "${VALID_USERS}" = "0" ]; then
+    bashio::log.info "Console web terminal has no login gate, but is bound to ${BIND} — not reachable from the LAN directly."
+else
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s))."
+fi
 # Bridge to the operator console on loopback; mirror its configured port so a
 # non-default console_port still works.
 TARGET_PORT="$(switchboard-opt console_port 2300)"

@@ -19,6 +19,7 @@ permanently idle the resident recognizer. It now uses the explicit-``false`` for
 too, and the lint below is multi-line-aware so any idle gate keying off
 ``bashio::config.true`` (single- or multi-flag) is caught.
 """
+import subprocess
 import re
 import sys
 from pathlib import Path
@@ -151,3 +152,84 @@ def test_every_option_read_is_also_exported():
     check(f"run scripts: found switchboard-opt reads to check ({seen})", seen >= 5)
     check("run scripts: every option read reaches the process via export\n    "
           + "\n    ".join(bad), not bad)
+
+
+# ── v0.71.0: a LAN warning that fires when you are not on the LAN ────────────
+#
+# Both console run scripts printed "UNAUTHENTICATED on the LAN" unconditionally.
+# The operator console printed it two lines after reading `console_bind` — so
+# setting console_bind to 127.0.0.1, which is exactly what the notice tells you
+# to do, did not silence it. The web terminal was worse: its notice was gated on
+# whether users were configured, and BIND was not resolved until EIGHT LINES
+# BELOW the notice that claimed to know the exposure.
+#
+# A warning you cannot silence by complying is not a warning; it teaches the
+# reader to skip the channel that carries the real ones.
+#
+# These tests EXECUTE the shipped guard under bash against a table, rather than
+# grepping for its source text. A source scan proves the characters are present;
+# it cannot tell you that `127.*` also covers 127.0.1.1, which is the property
+# that matters.
+_LOOPBACK_CASES = [
+    ("127.0.0.1", True), ("127.0.1.1", True), ("127.53.0.1", True),
+    ("::1", True), ("[::1]", True), ("localhost", True),
+    ("0.0.0.0", False), ("::", False),
+    ("192.0.2.10", False),          # TEST-NET-1 (RFC 5737) — never a real address
+    ("", False),                    # an empty read must NOT be treated as safe
+    ("garbage", False),
+]
+
+
+def _extract_guard(run_path):
+    """Pull the sw_is_loopback function body out of a run script."""
+    src = run_path.read_text()
+    m = re.search(r"^sw_is_loopback\(\)\s*\{.*?^\}", src, re.M | re.S)
+    return m.group(0) if m else None
+
+
+def test_the_loopback_guard_is_correct_where_it_actually_runs():
+    root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+    scripts = [root / "operator-console" / "run", root / "console-web" / "run"]
+    checked = 0
+    for run in scripts:
+        guard = _extract_guard(run)
+        check(f"{run.parent.name}/run defines sw_is_loopback", guard is not None)
+        if not guard:
+            continue
+        for value, want_loopback in _LOOPBACK_CASES:
+            # Run the REAL function body. `sh` rather than bash: the container's
+            # shell is ash, and a bashism here would pass the test and fail on the Pi.
+            r = subprocess.run(
+                ["sh", "-c",
+                 f'{guard}\nif sw_is_loopback "$1"; then echo LOOPBACK; else echo LAN; fi',
+                 "_", value],
+                capture_output=True, text=True)
+            got = "LOOPBACK" in r.stdout
+            check(f"{run.parent.name}: {value!r} -> {'loopback' if want_loopback else 'LAN'}",
+                  got is want_loopback)
+            checked += 1
+    check(f"the guard was actually executed ({checked} cases)", checked == len(_LOOPBACK_CASES) * 2)
+
+
+def test_the_bind_is_resolved_before_the_warning_that_depends_on_it():
+    """console-web resolved BIND eight lines BELOW the notice that used it."""
+    root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+    for name in ("operator-console", "console-web"):
+        src = (root / name / "run").read_text().splitlines()
+        assign = next((i for i, l in enumerate(src) if re.match(r'^\s*BIND="\$\(switchboard-opt', l)), None)
+        notice = next((i for i, l in enumerate(src) if "bashio::log.notice" in l and "UNAUTHENTICATED" in l), None)
+        check(f"{name}: both the bind assignment and the notice exist",
+              assign is not None and notice is not None)
+        if assign is not None and notice is not None:
+            check(f"{name}: BIND is resolved before the notice reads it", assign < notice)
+
+
+def test_the_warning_is_inside_a_guard_not_at_the_top_level():
+    """The wiring half: the notice must sit under a conditional in both scripts."""
+    root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+    for name in ("operator-console", "console-web"):
+        src = (root / name / "run").read_text().splitlines()
+        for line in src:
+            if "bashio::log.notice" in line and "UNAUTHENTICATED" in line:
+                check(f"{name}: the notice is nested inside a conditional",
+                      line.startswith((" ", "\t")))
