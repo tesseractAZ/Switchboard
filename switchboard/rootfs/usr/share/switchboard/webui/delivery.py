@@ -46,3 +46,42 @@ def record(ext: str, kind: str, outcome: str, **extra) -> None:
             fh.write(json.dumps(rec) + "\n")
     except OSError as exc:
         print(f"[switchboard-delivery] record: {exc}", flush=True)
+
+
+def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
+    """True if `ext` has a `kind`/`outcome` record at or after `since_ts` (epoch).
+
+    v0.70.0 — THE READER THIS FILE NEVER HAD.
+
+    The v0.67.0 design is written down in the changelog: "a ring-queued record
+    with no matching call record IS the no-answer signal, and both now live in
+    /share where they can be read together." Nothing ever read them together.
+    `grep -rn delivery-outcomes` found only writers, so the join was defined in
+    prose and computed by nobody -- which is why the 2026-09-04 06:12 ring-out
+    sat in this file, correctly recorded, and raised nothing.
+
+    Scans from the END backwards and stops at the first record older than
+    `since_ts`: the file is append-only and the caller always asks about the last
+    couple of minutes, so this touches a handful of lines rather than the whole
+    2 MB cap. A malformed line is skipped, never fatal -- this is consulted on
+    the alarm-clock path and must not raise there.
+    """
+    try:
+        with open(OUTCOME_PATH, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+            ts = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
+        except (ValueError, KeyError, TypeError):
+            continue
+        if ts < since_ts:
+            break          # append-only: everything earlier is older still
+        if rec.get("ext") == ext and rec.get("kind") == kind and rec.get("outcome") == outcome:
+            return True
+    return False

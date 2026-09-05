@@ -357,3 +357,187 @@ def test_tick_records_the_attempt_it_actually_made(tmp_path) -> None:
           and by_ext.get("14", {}).get("device_state") == "In use")
     check("tick: both are tagged as wake-ups, not announcements",
           all(r["kind"] == "wakeup" for r in recs))
+
+
+# ── v0.70.0: a ring that is never answered must be DETECTED ─────────────────
+#
+# THE FAILURE THIS PINS. `ami.originate_wakeup` returns True the moment AMI
+# accepts the request. The scheduler treated that as delivery — it wrote
+# `ring-queued` and consumed the wake-up — so a ring-out and a wake-up that
+# actually woke somebody produced byte-identical records. Measured on the live
+# system: 2026-09-03 06:18 and 2026-09-04 06:12 both rang ext 19 unanswered and
+# every ledger read healthy.
+#
+# [wakeup-deliver] runs ONLY on answer and now records `answered`, so the two
+# facts can finally be joined. These tests assert the join, not the strings.
+
+def _reconciler(tmp_path):
+    """Load the scheduler with delivery pointed at a temp ledger."""
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    _sys.path.insert(0, str(webui))
+    delivery = SourceFileLoader("delivery", str(webui / "delivery.py")).load_module()
+    delivery.OUTCOME_PATH = str(tmp_path / "d.jsonl")
+
+    class _Pre:
+        @staticmethod
+        def due(now): return ([], [])
+        @staticmethod
+        def cancel_if(ext, epoch): return True
+        @staticmethod
+        def get_endpoints(): return []
+        @staticmethod
+        def originate_wakeup(ext, ring): return True
+        @staticmethod
+        def notify(*a, **k): return True
+        @staticmethod
+        def push(*a, **k): return True
+
+    pre = {k: _sys.modules.get(k) for k in ("store", "ami", "ha_client", "delivery")}
+    for k in ("store", "ami", "ha_client"):
+        _sys.modules[k] = _Pre
+    _sys.modules["delivery"] = delivery
+    try:
+        sched = SourceFileLoader(
+            "sw_sched_reconcile",
+            str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+                / "switchboard" / "wakeup" / "scheduler.py")).load_module()
+    finally:
+        for k, v in pre.items():
+            if v is None: _sys.modules.pop(k, None)
+            else: _sys.modules[k] = v
+    sched._delivery = delivery
+    return sched, delivery
+
+
+def test_ringout_is_detected_and_rung_again(tmp_path):
+    sched, delivery = _reconciler(tmp_path)
+    rings, pushes = [], []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): rings.append(ext); return True
+    class _HA:
+        @staticmethod
+        def push(msg, title="", target="", critical=False):
+            pushes.append({"critical": critical, "target": target}); return True
+        @staticmethod
+        def notify(*a, **k): return True
+    sched.ami, sched.ha_client = _AMI, _HA
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": False}
+
+    # Too early to judge — the phone may still be ringing.
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER - 1)
+    check("reconcile: does not judge a ring that is still in its window",
+          rings == [] and "19" in sched._ringing)
+
+    # Past the window with no `answered` record: ring again.
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    check("reconcile: an unanswered ring is rung a SECOND time", rings == ["19"])
+    check("reconcile: the retry is remembered", sched._ringing["19"]["retried"] is True)
+    check("reconcile: no push yet — the second ring has not been judged", pushes == [])
+
+
+def test_an_answered_wakeup_is_never_escalated(tmp_path):
+    """The control. Without this, a fix that escalates everything would pass."""
+    sched, delivery = _reconciler(tmp_path)
+    rings, pushes = [], []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): rings.append(ext); return True
+    class _HA:
+        @staticmethod
+        def push(*a, **k): pushes.append(1); return True
+        @staticmethod
+        def notify(*a, **k): return True
+    sched.ami, sched.ha_client = _AMI, _HA
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": False}
+    # [wakeup-deliver] reached — the leg answered.
+    delivery.record("19", "wakeup", "answered")
+
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    check("reconcile: an ANSWERED wake-up is not rung again", rings == [])
+    check("reconcile: an ANSWERED wake-up raises no alert", pushes == [])
+    check("reconcile: the answered ring stops being tracked", "19" not in sched._ringing)
+
+
+def test_two_unanswered_rings_escalate_audibly(tmp_path):
+    sched, delivery = _reconciler(tmp_path)
+    pushes, cards = [], []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): return True
+    class _HA:
+        @staticmethod
+        def push(msg, title="", target="", critical=False):
+            pushes.append({"critical": critical, "target": target, "msg": msg}); return True
+        @staticmethod
+        def notify(msg, title="", notification_id=""): cards.append(msg); return True
+    sched.ami, sched.ha_client = _AMI, _HA
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": True}
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+
+    check("escalate: a second unanswered ring pushes to the phone", len(pushes) == 1)
+    check("escalate: the push is CRITICAL so it sounds through Do Not Disturb",
+          pushes and pushes[0]["critical"] is True)
+    check("escalate: it names the time so the message is actionable",
+          pushes and "06:18" in pushes[0]["msg"])
+    check("escalate: no duplicate drawer card when the push succeeded", cards == [])
+    check("escalate: tracking stops after the final verdict", "19" not in sched._ringing)
+
+
+def test_push_failure_falls_back_to_the_drawer_card(tmp_path):
+    """A dead push target must not swallow the signal entirely."""
+    sched, delivery = _reconciler(tmp_path)
+    cards = []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): return True
+    class _HA:
+        @staticmethod
+        def push(*a, **k): return False        # e.g. the companion app is gone
+        @staticmethod
+        def notify(msg, title="", notification_id=""): cards.append(msg); return True
+    sched.ami, sched.ha_client = _AMI, _HA
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": True}
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    check("escalate: a failed push falls back to the notification card", len(cards) == 1)
+
+
+def test_outcomes_since_respects_ext_kind_outcome_and_time(tmp_path):
+    """The join itself. A reader that matches too loosely would mark a ring-out
+    answered — the exact failure it exists to catch, inverted."""
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    delivery = SourceFileLoader("delivery_join", str(webui / "delivery.py")).load_module()
+    delivery.OUTCOME_PATH = str(tmp_path / "j.jsonl")
+    import time as _t
+    t0 = _t.time()
+    delivery.record("19", "wakeup", "answered")
+    check("join: finds the matching record", delivery.outcomes_since("19", "wakeup", "answered", t0 - 5))
+    check("join: a different ext does not match", not delivery.outcomes_since("14", "wakeup", "answered", t0 - 5))
+    check("join: a different kind does not match", not delivery.outcomes_since("19", "announce", "answered", t0 - 5))
+    check("join: a different outcome does not match", not delivery.outcomes_since("19", "wakeup", "ring-queued", t0 - 5))
+    check("join: a record from BEFORE the ring does not count",
+          not delivery.outcomes_since("19", "wakeup", "answered", t0 + 3600))
+    check("join: a missing file is not an answer",
+          not SourceFileLoader("d2", str(webui / "delivery.py")).load_module().outcomes_since("19", "wakeup", "answered", 0))

@@ -119,3 +119,35 @@ def test_value_reads_use_switchboard_opt_not_bashio():
     for o in offenders:
         print("   ", o)
     assert not offenders, "value reads bypassing the overlay: " + "; ".join(offenders)
+
+
+# ── v0.70.0: an option is INERT until a run script EXPORTS it ────────────────
+#
+# The project's most-repeated footgun. Adding a feature knob takes FOUR edits —
+# config.yaml options, config.yaml schema, translations/en.yaml, and an `export`
+# in the service's run script — and the fourth is the one that gets forgotten,
+# because everything still parses, the UI still shows the field, the tests still
+# pass, and the service simply never sees the value.
+#
+# Unit tests cannot catch it: they set os.environ directly, so the code under
+# test reads exactly the value the test just wrote no matter what the shell does.
+# This asserts the SHELL side, which nothing else does.
+def test_every_option_read_is_also_exported():
+    root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+    assign = re.compile(r'^([A-Z_][A-Z0-9_]*)="\$\(switchboard-opt\s+([a-z0-9_.]+)\s*\)"', re.M)
+    bad = []
+    seen = 0
+    for run in sorted(root.glob("*/run")):
+        src = run.read_text()
+        for var, opt in assign.findall(src):
+            seen += 1
+            # The captured value must reach the process. Either the shell var
+            # itself is exported, or (the common idiom) it is defaulted into an
+            # exported name: VAR="$(switchboard-opt x)"; export NAME="${VAR:-d}".
+            exported = re.search(rf'^export\s+[A-Z_][A-Z0-9_]*="\$\{{{var}(:-[^}}]*)?\}}"', src, re.M) \
+                or re.search(rf'^export\s+{var}\b', src, re.M)
+            if not exported:
+                bad.append(f"{run.parent.name}/run: reads option '{opt}' into ${var} but never exports it")
+    check(f"run scripts: found switchboard-opt reads to check ({seen})", seen >= 5)
+    check("run scripts: every option read reaches the process via export\n    "
+          + "\n    ".join(bad), not bad)

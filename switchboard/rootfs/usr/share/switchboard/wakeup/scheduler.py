@@ -45,6 +45,18 @@ except Exception:  # noqa: BLE001 — HA integration is optional; never break th
 
 POLL = int(os.environ.get("WAKEUP_POLL_SECONDS", "20"))
 RING = int(os.environ.get("WAKEUP_RING_SECONDS", "60"))
+# v0.70.0 — how long after a ring STARTS before we decide it went unanswered.
+# Must exceed RING or we would judge a call that is still ringing.
+RETRY_AFTER = int(os.environ.get("WAKEUP_RETRY_SECONDS", str(RING + 30)))
+# The notify service an unanswered wake-up escalates to, WITHOUT the `notify.`
+# prefix. Empty disables the push and leaves only the second ring.
+PUSH_TARGET = os.environ.get("WAKEUP_PUSH_TARGET", "mobile_app_iphone").strip()
+
+# ext -> {"target_epoch", "hhmm", "started", "retried"} for rings we have
+# dispatched but not yet reconciled. In memory on purpose: the window is ~90 s,
+# and a restart inside it loses at most one reconciliation rather than requiring
+# a schema change to the on-disk store.
+_ringing: dict = {}
 
 _stop = False
 
@@ -58,8 +70,82 @@ def _sig(*_):
     _stop = True
 
 
+def _reconcile_rings(now: float) -> None:
+    """Decide what happened to every ring we dispatched but never confirmed.
+
+    THE BUG THIS FIXES. `ami.originate_wakeup` returns True the instant AMI
+    ACCEPTS the request -- not when the phone rings, and certainly not when
+    anyone picks it up. The scheduler treated that as delivery: it wrote
+    `ring-queued` and immediately consumed the wake-up. So a wake-up that rang
+    out and one that woke somebody produced byte-identical records, and the
+    entry was gone either way. Measured on this system: 2026-09-03 06:18 and
+    2026-09-04 06:12 both rang ext 19 unanswered, and every ledger, sensor and
+    notification path read healthy through both.
+
+    The answer is now knowable because [wakeup-deliver] -- which the dialplan
+    reaches ONLY on answer -- records `answered`. This joins the two.
+
+    Escalation is deliberately audible-first: ring the phone a SECOND time
+    before pushing. The phone is the device that failed to wake someone, and it
+    is also the loudest thing in the room; a push is the fallback for when the
+    handset itself is the problem.
+    """
+    for ext in list(_ringing):
+        r = _ringing[ext]
+        if now - r["started"] < RETRY_AFTER:
+            continue                                    # still ringing; too early to judge
+        answered = False
+        if _delivery is not None:
+            try:
+                answered = _delivery.outcomes_since(ext, "wakeup", "answered", r["started"])
+            except Exception as exc:  # noqa: BLE001  (never let telemetry break the alarm)
+                log(f"could not read delivery outcomes for ext {ext}: {exc}")
+                _ringing.pop(ext, None)                 # unknowable -> stop tracking, do not guess
+                continue
+        if answered:
+            log(f"wake-up for ext {ext} ({r['hhmm']}) ANSWERED")
+            _ringing.pop(ext, None)
+            continue
+        if not r["retried"]:
+            log(f"wake-up for ext {ext} ({r['hhmm']}) went unanswered — ringing again")
+            _record(ext, "no-answer", hhmm=r["hhmm"], attempt=1)
+            try:
+                if ami.originate_wakeup(ext, RING):
+                    r["retried"] = True
+                    r["started"] = now
+                    _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                log(f"re-ring for ext {ext} failed: {exc}")
+            _ringing.pop(ext, None)
+            continue
+        # Second ring also unanswered — this is a genuinely undelivered alarm.
+        log(f"wake-up for ext {ext} ({r['hhmm']}) UNDELIVERED after two rings")
+        _record(ext, "undelivered", hhmm=r["hhmm"], attempt=2)
+        _ringing.pop(ext, None)
+        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not answered. "
+               f"The phone rang twice and nobody picked up.")
+        pushed = False
+        if ha_client is not None and PUSH_TARGET:
+            try:
+                # critical=True so it sounds through Do Not Disturb. An alarm
+                # clock that failed is exactly the case DND should not swallow.
+                pushed = ha_client.push(msg, title="Switchboard: wake-up not answered",
+                                        target=PUSH_TARGET, critical=True)
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not push the undelivered wake-up: {exc}")
+        if not pushed and ha_client is not None:
+            # Fall back to the drawer card rather than losing the signal entirely.
+            try:
+                ha_client.notify(msg, title="Switchboard: wake-up not answered",
+                                 notification_id=f"switchboard_undelivered_wakeup_{ext}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not post the undelivered-wake-up card: {exc}")
+
+
 def tick() -> None:
     now = time.time()
+    _reconcile_rings(now)
     fired, missed = store.due(now)
     for ext, entry in missed:
         late = int((now - entry.get("target_epoch", now)) / 60)
@@ -121,6 +207,12 @@ def tick() -> None:
         if ok:
             _record(ext, "ring-queued", hhmm=entry.get("hhmm"),
                     ring_seconds=RING)
+            # Track it for reconciliation. The store entry is still consumed
+            # below (so the next 20 s tick cannot re-fire it into a ring storm);
+            # this is what remembers that the ring is unresolved.
+            _ringing[ext] = {"target_epoch": entry.get("target_epoch"),
+                             "hhmm": entry.get("hhmm"), "started": now,
+                             "retried": False}
         elif not ok:
             _record(ext, "originate-refused", hhmm=entry.get("hhmm"))
         if ok:

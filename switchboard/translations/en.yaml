@@ -178,6 +178,20 @@ configuration:
   assistant_ext:
     name: Assistant Extension
     description: Dial this to reach the local voice assistant. 2–6 digits. Default 47.
+  wakeup_retry_seconds:
+    name: Wake-up Retry Delay
+    description: >-
+      Seconds after a wake-up starts ringing before an unanswered call is rung a
+      second time. Must be longer than the ring time or a call still ringing
+      would be judged unanswered. Default 90.
+  wakeup_push_target:
+    name: Wake-up Failure Push Target
+    description: >-
+      Home Assistant notify service (without the "notify." prefix) that an
+      undelivered wake-up escalates to after two unanswered rings — e.g.
+      mobile_app_iphone. Sent as a critical alert so it sounds through Do Not
+      Disturb, because a failed alarm clock is exactly what silent mode should
+      not swallow. Leave empty to disable the push and rely on the second ring.
   status_power_grid:
     name: Status Menu — Grid Power Entity
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.

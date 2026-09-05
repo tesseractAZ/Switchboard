@@ -135,6 +135,8 @@ its default is fine.
 | `clock_enabled` / `clock_ext` | `true` / `41` | The talking clock and its dial code (2–6 digits). |
 | `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
+| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
+| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to after two unanswered rings, as a critical/DND-bypassing alert. Empty disables the push. |
 | `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
 | `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
 | `wakeup_weather` | `true` | Speak a short local weather summary during the wake-up call. |
@@ -458,6 +460,28 @@ back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
   and time.
 - If the room is busy or offline through a **10-minute grace window**, the wake-up
   is dropped and surfaced as a Home Assistant persistent notification.
+
+**If nobody answers** (v0.70.0). Ringing a phone is not the same as waking
+somebody, and until this release the system could not tell the difference: an
+originate reports "queued" the moment the PBX accepts it, so a wake-up that rang
+out and one that woke you were recorded identically. Now the delivery leg — which
+runs *only* after the call is answered — records that fact, and the scheduler
+checks for it:
+
+1. The phone rings for `wakeup_ring_seconds` (default 60).
+2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
+   answered, **the phone rings a second time**.
+3. If that is unanswered too, the wake-up is recorded `undelivered` and pushed to
+   `wakeup_push_target` (default `mobile_app_iphone`) as a **critical** alert, so
+   it sounds through Do Not Disturb.
+
+The second ring comes first on purpose: the phone is the loudest thing in the
+room and it is the device that was supposed to wake you. The push is the fallback
+for when the handset itself is the problem. Set `wakeup_push_target` to empty to
+disable the push and keep only the second ring.
+
+`wakeup_retry_seconds` must exceed `wakeup_ring_seconds`, or a call still ringing
+would be judged unanswered.
 
 **Smart extras** (during the wake-up call):
 
