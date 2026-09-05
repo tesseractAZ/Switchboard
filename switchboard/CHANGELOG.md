@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.76.0
+
+Four smaller dialplan repairs, and a guard that would have caught the last one.
+
+**A long misdial now explains itself.** Dialling a bare 10-digit number matches
+no outbound pattern (direct mode routes only `_1NXXNXXXXXX`), so it fell to the
+room test, failed, and produced a fast busy identical to a trunk failure or a
+dead network. A real caller hit this on 2026-09-01 and redialled 77 seconds
+later, having learned nothing. Dials of seven digits or more now hear "that
+number needs a one in front"; a short misdial still gets a plain busy, because a
+mis-typed extension is a different mistake.
+
+**Inbound calls take one path instead of two.** `[from-trunk]` carried two
+byte-identical `Dial` blocks — one for a call with a DID, one without — so a
+change to inbound ringing had to be made twice, and a change made once applied to
+only half of inbound calls, silently, depending on what the provider sent. They
+are now one path, and the dialled number rides along as `__SW_DID` for the call
+record and any future per-DID branch.
+
+**Generated files are dated.** An audit pulled `extensions.conf` out of the
+container and reasoned about six days of logs against it, with no way to tell the
+file had been regenerated twice inside that window. Line one now carries the
+generation time, so "is this the dialplan that produced these logs?" is
+answerable instead of assumed.
+
+**The docs stop recommending a code that is taken.** `clock_ext: 47` was offered
+as a way to avoid the `41`/`411` inter-digit pause. `47` is now the voice
+assistant, and a collided feature code is skipped with a log line rather than an
+error — so following that advice would have silently disabled one of the two.
+
+**And a guard for the class:** every `Playback(switchboard/…)` in the generated
+dialplan must exist as a shipped `.wav`. A Playback of a missing file is a silent
+no-op — Asterisk warns and carries on, and the caller simply hears nothing where
+the explanation should be. The new misdial prompt was generated with the add-on's
+own piper voice at 8 kHz mono to match the existing prompts, and the guard was
+verified by pointing a Playback at a file that does not exist and watching the
+build fail.
+
 ## 0.75.0
 
 Every call in `[rooms]` now says what kind of call it is.
