@@ -443,8 +443,17 @@ def test_ringout_is_detected_and_rung_again(tmp_path):
     check("reconcile: no push yet — the second ring has not been judged", pushes == [])
 
 
-def test_an_answered_wakeup_is_never_escalated(tmp_path):
-    """The control. Without this, a fix that escalates everything would pass."""
+def test_a_delivered_wakeup_is_never_escalated(tmp_path):
+    """The control. Without this, a fix that escalates everything would pass.
+
+    v0.77.0 — this used to record only `answered` and assert no escalation. That
+    made it the control for the WRONG claim: `answered` is written the instant
+    the leg is picked up, before a word is played, so the test was asserting
+    that a pickup is a delivery. It is not, and the difference was live on
+    2026-09-02 at 06:15:21. The control now records the milestone that means the
+    time was actually spoken; `test_a_wakeup_answered_in_silence_escalates`
+    covers the case this one used to swallow.
+    """
     sched, delivery = _reconciler(tmp_path)
     rings, pushes = [], []
 
@@ -461,13 +470,78 @@ def test_an_answered_wakeup_is_never_escalated(tmp_path):
     t0 = 1_000_000.0
     sched._ringing.clear()
     sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:18", "started": t0, "retried": False}
-    # [wakeup-deliver] reached — the leg answered.
+    # [wakeup-deliver] ran to the point where the greeting and the time have
+    # both played — the sleeper demonstrably heard it.
     delivery.record("19", "wakeup", "answered")
+    delivery.record("19", "wakeup", "spoken")
 
     sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
-    check("reconcile: an ANSWERED wake-up is not rung again", rings == [])
-    check("reconcile: an ANSWERED wake-up raises no alert", pushes == [])
-    check("reconcile: the answered ring stops being tracked", "19" not in sched._ringing)
+    check("reconcile: a DELIVERED wake-up is not rung again", rings == [])
+    check("reconcile: a DELIVERED wake-up raises no alert", pushes == [])
+    check("reconcile: the delivered ring stops being tracked", "19" not in sched._ringing)
+
+
+def test_a_wakeup_answered_in_silence_escalates(tmp_path):
+    """The single worst outcome this feature has, and it read as a success.
+
+    2026-09-02 06:15:21 MST. asterisk.log: `PJSIP/19-00000002 answered` ->
+    `Set(SW_STAGE=scene)` -> `Wait("1")` -> `Spawn extension (wakeup-deliver, s,
+    7) exited non-zero`. The far end dropped one second after answering, during
+    the Wait that precedes the greeting. Telemetry on that leg: `billsec=0
+    rxcount=34 txcount=0` — Asterisk transmitted ZERO audio packets.
+
+    Somebody picked up an alarm call and heard nothing, and because `answered`
+    had already been written the scheduler filed it as ANSWERED, consumed the
+    wake-up, and every ledger and notification path read healthy.
+    """
+    sched, delivery = _reconciler(tmp_path)
+    rings, pushes = [], []
+
+    class _AMI:
+        @staticmethod
+        def originate_wakeup(ext, ring): rings.append(ext); return True
+
+    class _HA:
+        @staticmethod
+        def push(msg, **k): pushes.append(msg); return True
+
+        @staticmethod
+        def notify(*a, **k): return True
+    sched.ami, sched.ha_client = _AMI, _HA
+    # The operator's diagnostic is the only place the two failures are
+    # distinguished before the second ring, so it is worth asserting: a mutant
+    # that collapsed the wording survived the whole suite when only the push
+    # was checked.
+    logged = []
+    _real_log = sched.log
+    sched.log = lambda m: logged.append(m)
+
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
+                            "started": t0, "retried": False}
+    delivery.record("19", "wakeup", "answered")     # picked up...
+    # ...and nothing else. No `spoken`: the greeting never played.
+
+    try:
+        sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    finally:
+        pass
+    check("silent-answer: the phone is rung a SECOND time", rings == ["19"])
+    import json as _j
+    recs = [_j.loads(l) for l in
+            open(delivery.OUTCOME_PATH).read().splitlines() if l.strip()]
+    check("silent-answer: recorded as answered-silent, not as a delivery",
+          any(o["outcome"] == "answered-silent" for o in recs))
+
+    sched._reconcile_rings(t0 + 2 * sched.RETRY_AFTER + 2)
+    check("silent-answer: the second failure escalates audibly", len(pushes) == 1)
+    check("silent-answer: and the push says WHICH failure it was",
+          "picked up" in pushes[0] and "played no audio" in pushes[0])
+    check("silent-answer: the ring stops being tracked", "19" not in sched._ringing)
+    check("silent-answer: the log names WHICH failure, not just 'unanswered'",
+          any("answered but played nothing" in m for m in logged))
+    sched.log = _real_log
 
 
 def test_two_unanswered_rings_escalate_audibly(tmp_path):

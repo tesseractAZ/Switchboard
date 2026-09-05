@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.78.0
+
+The alarm clock. A wake-up call is the only feature here with a hard deadline,
+and the audit found the system was quietest about its worst failure.
+
+**A wake-up that was picked up in silence counted as delivered.** On 2026-09-02
+at 06:15:21 the cordless answered a wake-up and the far end dropped one second
+later, during the pause before the greeting. Asterisk transmitted zero audio
+packets: somebody reached for a ringing phone at six in the morning and heard
+nothing at all. The scheduler filed it as ANSWERED and consumed the alarm, and
+every ledger, sensor and notification path read healthy.
+
+The cause was a milestone that meant less than it looked like it meant.
+`answered` is written the instant the leg is picked up, before a word is played,
+so it proved a pickup and was being read as proof of delivery. There is now a
+second milestone, `spoken`, written from the dialplan immediately after the
+greeting has played — Asterisk abandons an extension the moment the channel
+drops, so reaching that line is proof the greeting reached a live channel. The
+scheduler joins on it instead.
+
+It sits after the greeting and *before* the time is read, deliberately. A
+sleeper who picks up, hears "Good morning" and hangs up is awake, and the
+penalty for calling that a failure is a second ring and a Do-Not-Disturb-
+bypassing push at six in the morning. A false alarm there costs more than the
+extra precision would buy.
+
+**And the ledger scores it honestly.** That same call reached the quality ledger
+as `quality: "unknown", notify: false` — the least alarming verdict it can
+produce, because score-based grading has nothing to grade when no audio was
+sent, and no rule read the `stage` breadcrumb the record already carried. Both
+facts were in the record: a stage at all means the leg was answered, and
+`txcount` says whether anything reached them. An answered delivery that
+transmitted nothing, or that stopped before its final stage, is now
+`undelivered` and says which. Only the wake-up alerts on it — a page or an
+announcement cut short is worth recording and not worth waking anyone over.
+
+**The escalation says which failure it was.** A phone that never rang through
+and a phone that was picked up in silence are different problems, and the person
+woken by the push at the end of the ladder is the one who has to tell them
+apart.
+
+**Announcements record their dispatch.** The announce path wrote six different
+failure outcomes and no success one, so an announcement that rang out left
+nothing in any ledger — no delivery record, and no call-quality record either,
+because the leg was never answered. Absence in a delivery ledger reads as "we
+never tried". It now records `originate-queued`, named to match the wake-up
+side so one join covers both.
+
 ## 0.77.0
 
 The call-quality ledger, audited against six days of its own output. Fourteen

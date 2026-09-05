@@ -1144,3 +1144,70 @@ def test_a_call_that_carried_no_media_still_reaches_the_ledger() -> None:
                                 txmes="0"))["notify"] is True)
     check("F31: a media-less leg never alerts, whatever else is in the record",
           cq.build_record(loud)["notify"] is False)
+
+
+def test_an_answered_wakeup_that_played_nothing_is_not_scored_quietly() -> None:
+    """F04/F36/F50/F62. The worst outcome this feature has, scored as the least.
+
+    Sep 2 06:15:21 MST, verbatim from the ledger:
+
+      {"tag": "wakeup-deliver", "stage": "scene", "ext": "19", "dur": 0,
+       "rxcount": 34, "txcount": 0, "quality": "unknown", "notify": false,
+       "reasons": [], "mes_worst": null, "hcause": 16}
+
+    The cordless answered and the far end dropped one second later, during the
+    `Wait(1)` that precedes the greeting Playback. Asterisk transmitted ZERO
+    audio packets: somebody picked up an alarm call and heard nothing.
+
+    It scored `unknown` with `notify: false` — the quietest verdict the ledger
+    can produce — because MES-based scoring has nothing to score when no audio
+    was sent, and no rule read `stage`. Both facts were already in the record.
+    """
+    a = _Args(source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-00000002",
+              cid="19", billsec="0", hcause="16", stage="scene",
+              rxcount="34", txcount="0", rxmes="0.000000", txmes="0.000000",
+              rtt="0.000000")
+    rec = cq.build_record(a)
+    check("F04: no longer the quietest verdict in the ledger",
+          rec["quality"] == "undelivered")
+    check("F04: and it is not 'unknown' — we know exactly what happened",
+          rec["quality"] != "unknown")
+    check("F04: the alarm-clock contract makes this alertable",
+          rec["notify"] is True)
+    check("F04: it says no audio was transmitted",
+          any("no audio" in r for r in rec["reasons"]))
+    check("F50/F62: and names the stage it stopped at",
+          any("scene" in r for r in rec["reasons"]))
+
+
+def test_a_truncated_delivery_is_named_but_only_the_alarm_clock_alerts() -> None:
+    """F36. `wakeup-deliver` is the one playback tag with a hard deadline.
+
+    A page or an announcement cut short is worth recording and not worth waking
+    anyone over. A wake-up call that did not wake anyone is the opposite.
+    """
+    def leg(tag, stage, txcount="1500"):
+        return cq.build_record(_Args(
+            source="dialplan", tag=tag, chan="PJSIP/19-00000004", cid="19",
+            billsec="30", stage=stage, rxcount="1500", txcount=txcount,
+            rxmes="88", txmes="88", rtt="0.01", maxrtt="0.02", stdevrtt="0.003"))
+
+    cut = leg("wakeup-deliver", "greeting")
+    check("F36: a wake-up cut off mid-script is undelivered",
+          cut["quality"] == "undelivered")
+    check("F36: and it alerts", cut["notify"] is True)
+
+    ann = leg("announce", "playing")
+    check("F36: a truncated announcement is recorded as undelivered",
+          ann["quality"] == "undelivered")
+    check("F36: but stays silent — no alarm-clock contract",
+          ann["notify"] is False)
+
+    done = leg("wakeup-deliver", "complete")
+    check("F36: a wake-up that ran to completion is untouched",
+          done["quality"] == "excellent" and done["notify"] is False)
+    # The control that matters most: a leg with no stage at all is an ordinary
+    # call, not a scripted delivery, and must not be dragged into this rule.
+    plain = leg("rooms", "")
+    check("F36: an ordinary call with no stage is unaffected",
+          plain["quality"] == "excellent" and plain["notify"] is False)
