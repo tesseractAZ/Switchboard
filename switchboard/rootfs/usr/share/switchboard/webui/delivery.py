@@ -26,6 +26,37 @@ OUTCOME_PATH = os.environ.get("SWITCHBOARD_DELIVERY_OUTCOME",
 MAX_BYTES = 2 * 1024 * 1024
 
 
+def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
+    """Trim an append-only ledger to its newest records. Best-effort.
+
+    v0.77.0 — this used to be `open(path, "w")` followed by `pass`, which
+    truncates the file to ZERO BYTES. The comment above it read "Truncating keeps
+    the newest records, which are the ones a reader wants" — the exact opposite
+    of what the code did. At the cap the entire forensic history disappeared, and
+    silently: an empty ledger and a quiet system look identical, which is the
+    failure mode this whole file exists to prevent.
+
+    Keeps the last `keep_frac` of the cap, cut at a line boundary so the first
+    surviving record is not half a JSON object. Rewrites in place rather than
+    renaming, so a reader holding the path keeps reading the same inode.
+    """
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        keep = max(1, int(max_bytes * keep_frac))
+        with open(path, "rb") as fh:
+            fh.seek(-keep, os.SEEK_END)
+            tail = fh.read()
+        # Everything before the first newline is half a record. Drop it: a
+        # reader must never have to guess whether the first line is complete.
+        nl = tail.find(b"\n")
+        tail = tail[nl + 1:] if nl != -1 else b""
+        with open(path, "wb") as fh:
+            fh.write(tail)
+    except OSError:
+        pass                              # a trim must never break the write
+
+
 def record(ext: str, kind: str, outcome: str, **extra) -> bool:
     """Append one delivery-attempt record. Returns True iff it was WRITTEN.
 
@@ -47,12 +78,7 @@ def record(ext: str, kind: str, outcome: str, **extra) -> bool:
     rec.update({k: v for k, v in extra.items() if v is not None})
     try:
         os.makedirs(os.path.dirname(OUTCOME_PATH), exist_ok=True)
-        try:
-            if os.path.getsize(OUTCOME_PATH) > MAX_BYTES:
-                with open(OUTCOME_PATH, "w", encoding="utf-8"):
-                    pass
-        except OSError:
-            pass
+        _rotate_tail(OUTCOME_PATH, MAX_BYTES)
         with open(OUTCOME_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
         # Group-writable: the scheduler (root) and the AGI (asterisk) both append

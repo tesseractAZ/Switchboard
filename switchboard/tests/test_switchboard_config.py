@@ -503,9 +503,17 @@ def test_every_call_carrying_context_feeds_the_quality_ledger() -> None:
     announcements and the voice menus produced no record at all (ten legs ran
     in one observed window and exactly one was logged).
 
-    A context that can carry audio must account for it. `internal-xfer` and
-    `sw-alert` are excluded deliberately — neither terminates a leg of its own
-    (one re-enters a room, the other only stamps a SIP header)."""
+    A context that can carry audio must account for it.
+
+    v0.77.0 — `internal-xfer` used to be excluded here on the stated ground that
+    it "re-enters a room" rather than terminating a leg of its own. That was
+    simply wrong: the context runs `Dial(PJSIP/<ext>,30,rtT)` followed by
+    `Hangup()`, so a transferred call is answered, carried and torn down right
+    here. Every room and outbound extension sets `__TRANSFER_CONTEXT` to point
+    at it and dials with the t/T flags, which makes it a live path — and the one
+    a caller takes when a call is going badly enough to hand off was the path
+    with no quality record. `sw-alert` stays excluded, correctly: it only stamps
+    a SIP header and carries no leg."""
     import re as _re
     rooms = sbc.valid_rooms([{"ext": "11", "name": "Family", "secret": "s1"},
                              {"ext": "12", "name": "Kitchen", "secret": "s2"}])
@@ -529,15 +537,19 @@ def test_every_call_carrying_context_feeds_the_quality_ledger() -> None:
             if mm:
                 tagged[cur] = mm.group(1)
 
-    expected = {"rooms", "operator", "directory", "from-trunk", "wakeup",
-                "wakeup-deliver", "page", "automation", "status", "announce"}
-    for ctx in sorted(expected):
+    # ctx -> the tag its legs carry. Every one but internal-xfer tags itself;
+    # a transfer is a call kind, not a context name, and reads better in the
+    # ledger as what it is.
+    expected = {c: c for c in ("rooms", "operator", "directory", "from-trunk",
+                               "wakeup", "wakeup-deliver", "page", "automation",
+                               "status", "announce")}
+    expected["internal-xfer"] = "transfer"
+    for ctx, tag in sorted(expected.items()):
         check(f"ledger: [{ctx}] has a hangup extension", tagged.get(ctx) is not None)
-        check(f"ledger: [{ctx}] tags its legs as {ctx!r}", tagged.get(ctx) == ctx)
-    # Helper contexts deliberately excluded.
-    for ctx in ("internal-xfer", "sw-alert"):
-        if ctx in tagged:
-            check(f"ledger: [{ctx}] deliberately has none", tagged[ctx] is None)
+        check(f"ledger: [{ctx}] tags its legs as {tag!r}", tagged.get(ctx) == tag)
+    # sw-alert only stamps a SIP header — no leg, nothing to account for.
+    if "sw-alert" in tagged:
+        check("ledger: [sw-alert] deliberately has none", tagged["sw-alert"] is None)
 
 
 def test_trunk_inbound_routing() -> None:
@@ -1394,8 +1406,19 @@ def test_rtpqos_telemetry() -> None:
     check("rtpqos: logs the key quality metrics",
           all(k in e for k in ("rxjitter=", "txjitter=", "rxploss=", "txploss=", "rtt=",
                                "rxmes=", "txmes=", "rxcount=", "txcount=")))
-    check("rtpqos: skips a leg with NO RTCP stats (no media / no-RTCP trunk); logs one-way legs",
-          '("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done' in e)
+    check("rtpqos: a leg with NO RTCP stats skips the metrics; logs one-way legs",
+          '("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?nomedia' in e)
+    # ...and lands in the ledger anyway. Jumping straight to `done` wrote
+    # NOTHING, so an abandoned intercom call was indistinguishable from no call:
+    # three real room-to-room calls (Sep 1 23:31, ext 19 -> 14, 15, 16, each
+    # ringing then abandoned) left no trace at all.
+    check("rtpqos: a media-less leg still reaches the ledger",
+          "--nomedia" in e and "n(nomedia)" in e)
+    # The media check must precede the reads it exists to avoid — that ordering
+    # IS the fix; a correct guard placed after the reads silences nothing.
+    check("rtpqos: the media check runs BEFORE any CHANNEL(rtcp,...) read",
+          e.index('${CHANNEL(audionativeformat)}" = ""]?nomedia')
+          < e.index("Set(RXC=${CHANNEL(rtcp,rxcount)})"))
     check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
           "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
     # It is read in an h-extension (not a hangup handler — the RTP is gone by then),

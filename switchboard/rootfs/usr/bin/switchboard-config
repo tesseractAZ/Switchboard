@@ -1143,6 +1143,13 @@ def render_internal_xfer_context(exts: list, operator_on: bool) -> list:
             f" same = n,Dial(PJSIP/{e},30,rtT)",
             " same = n,Hangup()",
         ]
+    # A transferred call is a real call and was structurally invisible to the
+    # quality ledger: 12 of 15 contexts carry this hangup hook and this was one
+    # of the three that did not, while every room and outbound extension sets
+    # __TRANSFER_CONTEXT to point here and dials with the t/T flags. So the one
+    # path a caller takes when a call is going badly enough to hand off was the
+    # path with no quality record.
+    lines += rtpqos_h("transfer")
     lines.append("")
     return lines
 
@@ -1205,7 +1212,18 @@ def render_rtpqos_context() -> list:
         " same = n,TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan"
         ' --tag "${ARG1}" --chan "${CHANNEL(name)}"'
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
-        ' --codec "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
+        # ★ codec = the NEGOTIATED wire format; read_format = Asterisk's internal
+        # read format, which is a DIFFERENT thing and was being reported as the
+        # codec. pjsip.conf sets disallow=all / allow=ulaw on both the shared
+        # room-endpoint template and the trunk, so ulaw is the only codec that
+        # can ever be negotiated here -- yet 3 of 30 records named "slin", a
+        # codec the config forbids. Two assistant rows 87 seconds apart on the
+        # SAME handset disagreed, which is impossible on the wire and was really
+        # reporting that one leg was transcoding for a record() AGI. That signal
+        # is worth keeping; it just is not the codec. Both are passed and the
+        # sink prefers the native one, falling back if Asterisk gives it nothing.
+        ' --codec "${CHANNEL(audionativeformat)}"'
+        ' --readformat "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
         ' --hcause "${HANGUPCAUSE}" --rxcount "${RXC}" --txcount "${TXC}"'
         # How far a scripted leg got before hangup. Empty for contexts that set
         # no stage (a normal room call has no stages to reach).
@@ -1238,26 +1256,60 @@ def render_rtpqos_context() -> list:
         f' --normdevrtt {q("normdevrtt")} --minrtt {q("minrtt")}'
         f' --rxmaxjitter {q("local_maxjitter")} &)'
     )
+    callqos_nomedia = (
+        " same = n,TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan"
+        ' --nomedia --tag "${ARG1}" --chan "${CHANNEL(name)}"'
+        ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
+        ' --billsec "${CDR(billsec)}" --hcause "${HANGUPCAUSE}"'
+        ' --stage "${FILTER(a-z,${SW_STAGE})}" &)'
+    )
     return [
         "",
         ";; ----- Per-call RTP quality telemetry (logged from each context's h-exten) -----",
         "[switchboard-rtpqos]",
         "exten = s,1,NoOp(RTP quality summary)",
+        # ★ MEDIA CHECK FIRST. Every CHANNEL(rtcp,...) read on a channel that
+        # never negotiated an RTP session logs two
+        #   "Channel PJSIP/...: has no audio media/RTP session"
+        # WARNINGs into the durable log -- four per unanswered call, from the two
+        # reads below. The RXC/TXC guard that follows is correct and stays, but
+        # it runs AFTER the reads it exists to avoid, so it silences nothing.
+        # audionativeformat is a core func_channel property, not a PJSIP RTCP
+        # read, so testing it costs no warning.
+        ' same = n,GotoIf($["${CHANNEL(audionativeformat)}" = ""]?nomedia)',
         f" same = n,Set(RXC={_q('rxcount')})",
         f" same = n,Set(TXC={_q('txcount')})",
         # Skip a leg with no RTCP stats — no media, or a peer that sends no RTCP
         # (the VoIP.ms trunk). A one-way-audio leg (tx>0, rx=0) is still logged.
-        ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?done)',
+        # Kept as defence in depth behind the media check above: if
+        # audionativeformat is ever populated on a media-less channel, this still
+        # catches it and the behaviour is exactly what it was before.
+        ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?nomedia)',
         # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);
         # FILTER to phone chars so it can't forge log fields or inject a line.
         " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${FILTER(0-9+*#,${CALLERID(num)})} "
-        "codec=${CHANNEL(audioreadformat)} billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
+        "codec=${CHANNEL(audionativeformat)} readfmt=${CHANNEL(audioreadformat)} "
+        "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
         f"rxcount=${{RXC}} txcount=${{TXC}} "
         f"rxploss={_q('rxploss')} txploss={_q('txploss')} "
         f"rxjitter={_q('rxjitter')} txjitter={_q('txjitter')} rtt={_q('rtt')} "
         f"rxmes={_q('rxmes')} txmes={_q('txmes')} tag=${{ARG1}} "
         "stage=${FILTER(a-z,${SW_STAGE})})",
         callqos,
+        " same = n,Return()",
+        # ★ A call that never carried media STILL REACHES THE LEDGER. It used to
+        # jump straight to done and write nothing, so an abandoned intercom call
+        # was indistinguishable from no call at all: three genuine room-to-room
+        # calls occurred in one audit window (Sep 1 23:31, ext 19 -> 14, 15, 16,
+        # each ringing then abandoned before answer) and not one reached the
+        # ledger. Silence in a quality ledger has to mean "nothing happened", and
+        # it did not. The row carries only what is actually known -- who, which
+        # leg, how far it got, why it ended -- and invents no metrics.
+        " same = n(nomedia),Verbose(0,[rtpqos] chan=${CHANNEL(name)} "
+        "cid=${FILTER(0-9+*#,${CALLERID(num)})} nomedia=1 "
+        "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} tag=${ARG1} "
+        "stage=${FILTER(a-z,${SW_STAGE})})",
+        callqos_nomedia,
         " same = n(done),Return()",
     ]
 

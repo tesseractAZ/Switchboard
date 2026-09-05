@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.77.0
+
+The call-quality ledger, audited against six days of its own output. Fourteen
+findings, and most of them are the same shape: a field that read as a
+measurement while measuring nothing.
+
+**The ledgers no longer delete themselves.** All three append-only JSONL files —
+call quality, wake-up delivery, and the RTP heartbeat — enforced their size cap
+with `open(path, "w")` followed by `pass`, which truncates to zero bytes. The
+comment above one of them read "Truncating keeps the newest records, which are
+the ones a reader wants", describing the exact opposite of what the code did. At
+the cap the entire forensic history vanished, and vanished silently: an empty
+ledger and a quiet, healthy system look identical to every reader. They now keep
+the newest half, cut at a record boundary and rewritten in place so anything
+tailing the file keeps reading it.
+
+**The 400 ms round-trip alert could not fire.** It was tested against
+`CHANNEL(rtcp,rtt)` — the last RTCP round, one arbitrary draw — whose observed
+maximum across 55 legs was 163.62 ms. The same records carried a peak of 845.93
+ms in a field the scorer was never handed, because the distribution was derived
+ten lines *after* the call that needed it. Round-trip is now scored on the mean
+and the peak. On the measured population that flags exactly one call, which is
+the right answer and not the zero the old ordering guaranteed.
+
+**A call that measured nothing no longer scores "excellent".** When no RTCP
+round completes, Asterisk leaves the Media Experience Score at one of two
+constants: `0.0`, which was already rejected, or `88.087887`, which reads as
+toll quality. Four no-RTCP legs proved the split — one graded `unknown`, three
+graded `excellent`, decided purely by which constant landed in the field. Both
+are now recognised for what they are.
+
+**A demoted call explains itself.** Receive loss between 0.5% and 3.0% moved the
+quality label and recorded no reason at all: `quality: "good", reasons: [],
+notify: false`. The label said something was wrong and every field that could
+say what was empty. It happened twice, both on wake-ups — the one call kind
+nobody is awake to notice. The alerting thresholds are unchanged; only the
+explanation is new.
+
+**An abandoned call reaches the ledger.** Three genuine room-to-room calls rang
+and were abandoned before answer, and not one produced a record, because a leg
+with no RTP jumped straight past the write. Silence in a quality ledger has to
+mean "nothing happened", and here it meant "three calls happened and nothing was
+written". Those legs now record what is actually known — who, which leg, how far
+it got, why it ended — and invent no metrics. Transfers, likewise, were one of
+three contexts with no hangup hook, so the path a caller takes when a call is
+going badly enough to hand off was the path with no record of it.
+
+**`codec` reports the codec.** It carried Asterisk's internal read format, and
+so named codecs the configuration forbids: `ulaw` is the only allowed format on
+every endpoint and the trunk, yet three records said `slin` and two rows from
+the same handset 87 seconds apart disagreed with each other. That field was
+really reporting transcoding for a recording AGI — worth knowing, and now kept
+under its own name.
+
+**Names that asserted false relationships are gone.** `jitter_rx_max_ms` read as
+the maximum of `jitter_rx_ms` and was *smaller* than it in 22 of 28 records, by
+as much as 52x; they are different quantities. Both are renamed for their real
+provenance, and the peak — which does behave like a physical measurement, 0.38
+ms on the wired gateway against 58.25 ms on the WiFi cordless — is now published
+to Home Assistant as well. `rx_octets` and `tx_octets`, null in 100% of records
+because no Asterisk 20 channel function supplies them, are omitted rather than
+advertised. Every record now carries a schema version, so a reader is told its
+shape instead of inferring it from a missing key.
+
+**And the log stops filling with warnings about it.** Reading any
+`CHANNEL(rtcp,…)` field on a channel that never negotiated media logs two
+warnings; the guard that skips those legs was correct but ran *after* the reads
+it existed to avoid, so it silenced nothing. The media check now comes first.
+
 ## 0.76.0
 
 Four smaller dialplan repairs, and a guard that would have caught the last one.
