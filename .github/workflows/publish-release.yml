@@ -32,6 +32,7 @@ on:
 permissions:
   contents: write   # create the GitHub Release
   packages: write   # push to GHCR
+  actions: write    # dispatch docs.yml to build and attach the manual
 
 concurrency:
   group: publish-release-${{ github.ref }}
@@ -217,6 +218,12 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
+          # Needs `actions: write`. Without it this is HTTP 403 "Resource not
+          # accessible by integration" — which is how v0.81.0 shipped: the
+          # release was created and the manual was not. Failing here is
+          # deliberate. A release without its manual is incomplete, and the
+          # fifteen releases that shipped that way did so because nothing ever
+          # said a word about it.
           gh workflow run docs.yml --ref "$TAG" -f tag="$TAG"
           echo "::notice::Dispatched docs.yml for $TAG."
 
