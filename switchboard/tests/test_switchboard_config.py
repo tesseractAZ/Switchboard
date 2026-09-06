@@ -1006,7 +1006,13 @@ def test_logger_durable_persistent_file() -> None:
     check("logger: durable file scoped to notice,warning,error",
           "/data/state/asterisk.log => notice,warning,error" in lg)
     file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
-    check("logger: durable file excludes verbose (keeps it low-volume)", "verbose" not in file_line)
+    # v0.84.0 — the durable channel now carries verbose(2) and ONLY level 2.
+    # The level number is the whole design: bare `verbose` inherits the console
+    # level and drags the verb-3 dialplan trace onto the persistent volume;
+    # `verbose(1)` selects nothing, because the reachability lines this exists
+    # for are ast_verb(2).
+    check("logger: durable file takes verbose(2) exactly — not bare, not (1)",
+          file_line.endswith("=> notice,warning,error,verbose(2)"))
     check("logger: no legacy ephemeral 'messages' file channel", "messages =>" not in lg)
 
 
@@ -1039,7 +1045,7 @@ def test_logger_durable_file_stays_low_volume_at_debug() -> None:
     lg = sbc.render_logger({"log_level": "debug"})
     file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
     check("logger: durable file is notice,warning,error even at debug",
-          file_line.endswith("=> notice,warning,error"))
+          file_line.endswith("=> notice,warning,error,verbose(2)"))
     check("logger: console DOES escalate to debug", "console => notice,warning,error,debug,verbose" in lg)
 
 
@@ -2194,3 +2200,54 @@ def test_every_prompt_ships_in_the_codec_the_phones_actually_use() -> None:
             mismatched.append(f"{w.name}: {ns} samples vs {u.stat().st_size} bytes")
     check(f"prompts: every .wav has a .ulaw sibling (missing: {missing})", not missing)
     check(f"prompts: and they are the same audio ({mismatched})", not mismatched)
+
+
+def test_the_durable_log_is_bounded_and_keeps_its_tail() -> None:
+    """/data/state/asterisk.log had never been capped or rotated by anything.
+
+    It sat at 116 KB across 26 days carrying notice/warning/error only; v0.84.0
+    added verbose(2) so it finally records endpoint reachability, roughly
+    tripling that. Small either way — and unbounded is the wrong shape for a
+    file on a persistent volume that nobody prunes.
+
+    Keep-the-tail, NOT truncate-to-zero. Three ledgers in this repo shipped the
+    `open(path, "w")` + `pass` version and destroyed their own history at the
+    cap; a forensic log that erases itself when it gets interesting is worse
+    than one that grows.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    real = sbc.STATE_DIR
+    try:
+        sbc.STATE_DIR = d
+        p = d / "asterisk.log"
+        # Well under the cap: untouched.
+        p.write_text("[Sep  6 00:00:00] NOTICE: small\n")
+        before = p.read_bytes()
+        sbc._trim_durable_log()
+        check("durable log: a small file is left alone", p.read_bytes() == before)
+
+        # Over the cap: trimmed, but NOT emptied, and cut at a line boundary.
+        line = "[Sep  6 00:00:00] VERBOSE[1] Endpoint 14 is now Reachable\n"
+        n = (sbc.DURABLE_LOG_MAX_BYTES // len(line)) + 500
+        with open(p, "w") as fh:
+            for i in range(n):
+                fh.write(line.replace("14", str(i % 90 + 10)))
+        sbc._trim_durable_log()
+        size = p.stat().st_size
+        check("durable log: it was actually trimmed", size < sbc.DURABLE_LOG_MAX_BYTES)
+        check("durable log: and NOT emptied — the v0.77.0 defect", size > 0)
+        text = p.read_text()
+        check("durable log: the first surviving line is whole",
+              text.startswith("[Sep"))
+        check("durable log: the NEWEST lines are the ones kept",
+              text.rstrip().endswith(line.replace("14", str((n - 1) % 90 + 10)).rstrip()))
+        # A missing file must not raise — this runs in the boot oneshot.
+        p.unlink()
+        sbc._trim_durable_log()
+    finally:
+        sbc.STATE_DIR = real
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)

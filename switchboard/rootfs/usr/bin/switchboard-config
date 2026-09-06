@@ -2027,7 +2027,23 @@ def render_logger(opts: dict) -> str:
         "\n"
         "[logfiles]\n"
         f"console => {base}\n"
-        "/data/state/asterisk.log => notice,warning,error\n"
+        # ★ verbose(2), not bare `verbose`. The durable channel needs endpoint
+        # reachability and nothing else that verbose carries.
+        #
+        # `Endpoint <n> is now Unreachable` (res_pjsip/pjsip_configuration.c) and
+        # `Contact <n>/... is now Unreachable` (res_pjsip/pjsip_options.c) are
+        # both emitted at ast_verb(2). Until v0.84.0 this channel was
+        # notice,warning,error only, so it carried ZERO reachability information
+        # across 25 days — and the 2026-09-01 whole-fleet outage, the single
+        # event this log exists to explain, was unanswerable from it. The
+        # world-readable /share twin had the data and is byte-capped, so the
+        # forensic record aged out of the only copy that kept it.
+        #
+        # The LEVEL NUMBER is load-bearing in both directions. A bare `verbose`
+        # inherits the console's level and would drag the entire verb-3 dialplan
+        # trace onto the persistent volume; `verbose(1)` captures nothing,
+        # because these lines are level 2. Only `verbose(2)` selects them.
+        "/data/state/asterisk.log => notice,warning,error,verbose(2)\n"
         # The readable twin. Same severities PLUS verbose, because the container
         # log stamps NOTICE/WARNING/ERROR but NOT ast_verbose -- the dialplan
         # trace that shows what a call actually did. A file channel stamps every
@@ -2153,6 +2169,37 @@ def ensure_share_log_dir() -> None:
         log(f"WARN share log dir unavailable ({exc}); /data/state/asterisk.log only")
 
 
+DURABLE_LOG_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _trim_durable_log() -> None:
+    """Keep the newest half of /data/state/asterisk.log. Best-effort.
+
+    The same keep-the-tail shape the three JSONL ledgers use, and deliberately
+    NOT the `open(path, "w")` + `pass` that all three of those used until
+    v0.77.0 — that truncates to zero bytes and destroys the forensic record the
+    cap exists to preserve. Cut at a line boundary so the first surviving line
+    is a whole log entry.
+
+    Safe only because the caller runs before Asterisk opens the file.
+    """
+    p = STATE_DIR / "asterisk.log"
+    try:
+        if p.stat().st_size <= DURABLE_LOG_MAX_BYTES:
+            return
+        keep = DURABLE_LOG_MAX_BYTES // 2
+        with open(p, "rb") as fh:
+            fh.seek(-keep, os.SEEK_END)
+            tail = fh.read()
+        nl = tail.find(b"\n")
+        tail = tail[nl + 1:] if nl != -1 else b""
+        with open(p, "wb") as fh:
+            fh.write(tail)
+        log(f"trimmed the durable log to its newest {len(tail)} bytes")
+    except OSError as exc:
+        log(f"WARNING: could not trim the durable log: {exc}")
+
+
 def ensure_state_dir() -> None:
     """Create /data/state, owned by the asterisk user, for the runtime JSON stores.
 
@@ -2216,6 +2263,21 @@ def ensure_state_dir() -> None:
         #
         # A blanket sweep cannot tell a shared file from a private one, so it no
         # longer tries. A new store that needs group access must say so here.
+        # ★ BOUND THE DURABLE LOG, and do it HERE specifically.
+        #
+        # /data/state/asterisk.log has never been capped or rotated by anything.
+        # It sat at 116 KB over 26 days while carrying notice/warning/error only;
+        # v0.84.0 added verbose(2) so it finally records endpoint reachability,
+        # which roughly triples that to ~6 MB a year. That is nothing against the
+        # free space on this volume, and unbounded is still the wrong shape for a
+        # file nobody prunes.
+        #
+        # Trimming happens in this oneshot because this oneshot runs BEFORE
+        # Asterisk starts. Asterisk holds the log open with its own write offset;
+        # rewriting the file underneath that fd is how you get a sparse file and
+        # lost lines. With no process holding it, a keep-the-tail rewrite is safe.
+        _trim_durable_log()
+
         SHARED_0664 = {"wakeups.json", "mwi.json", "callqos.jsonl"}
         for f in STATE_DIR.iterdir():
             base = f.name[:-5] if f.name.endswith(".lock") else f.name

@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.84.0
+
+The last of the open findings from the September audit, and one of them turned
+out to rest on something none of the findings had noticed.
+
+**The system could not tell a phone that rang from a phone that never rang.**
+Every call this add-on places is asked for asynchronously: it hands the request
+to Asterisk and is told "accepted" immediately, long before anything reaches a
+handset. If Asterisk then cannot reach the phone — because it has not
+re-registered after a restart, say — that failure happens later, on its own
+thread, and is announced on a channel nothing here was listening to. Five such
+failures are in the log, four of them to the cordless, three during the minute
+after a restart.
+
+So a wake-up that never rang anybody was recorded as rung, the alarm was used
+up, and ninety seconds later the same request went out again unchecked. Then, if
+that also produced nothing, somebody was woken by a critical alert on their
+phone at six in the morning reading *"The phone rang twice and nobody picked
+up"* — about a phone that had not rung once.
+
+The second attempt now gets the same check the first one does, and is recorded
+when it is skipped. The alert says only what is known: rung twice, rung once, or
+not rung at all because the handset was not there.
+
+**The long-term log recorded everything about this system except whether the
+phones were reachable.** Those events are emitted at a detail level the durable
+log did not keep, so across twenty-five days it held none of them — and the
+one whole-house outage this system has had, the event that log exists to
+explain, was unanswerable from it. The readable copy did have them and is
+size-capped, so the record aged out of the only copy that kept it. The durable
+log now keeps reachability and only reachability: one level up, not the entire
+call trace, which would put a great deal of noise on a disk that never forgets.
+
+That disk never forgetting was itself the problem — nothing had ever bounded
+that file. It is bounded now, at boot, before Asterisk opens it, keeping the
+newest half rather than deleting everything, which is the mistake three other
+logs here made before.
+
+**A silent assistant now says so and hangs up.** Its own documentation promised
+that a voice failure ends in a spoken apology rather than silence. It did not:
+one line had no recorded fallback at all, so with the voice engine down a caller
+heard a beep, eight seconds of nothing, "one moment", and then nothing — five
+times, for a minute and a half, holding a handset to a machine that had stopped
+talking. Two failures now end the call properly.
+
+Two, not one, and the reason is measurable: a long answer can outrun the voice
+engine's time limit while the engine is perfectly healthy, so one failure is a
+slow sentence and two is a broken voice.
+
+**Also closed from the same audit, by evidence rather than by code:** dial `47`
+now reaches the assistant from the wired handsets, which the audit could not
+confirm at the time; the wake-up documentation already describes what happens
+when nobody answers; and the device-health monitor the audit thought was
+undocumented has had its own section all along.
+
 ## 0.83.0
 
 **A fix that did not work, and said it did.** Since v0.77.0 the call-quality

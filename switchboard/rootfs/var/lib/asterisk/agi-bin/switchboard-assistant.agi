@@ -71,6 +71,16 @@ RECORD_MS = 8000        # a sentence-length command needs longer than a room nam
 SILENCE_S = 3
 MAX_TURNS = 5           # hard cap so a stuck line cannot hold the channel open
 MAX_EMPTY = 2           # consecutive silent/unrecognized turns before goodbye
+# Cumulative espeak failures before the call ends. CUMULATIVE, not consecutive:
+# silence is about the caller and can genuinely alternate, so that counter
+# resets; a failing voice is about the machine, and resetting on an intervening
+# success would walk a caller through all five turns of a flapping engine.
+#
+# TWO, not one. switchboard-tts allows espeak 15 s per utterance, and a long
+# Home Assistant answer can exceed that while the engine is perfectly healthy —
+# so one failure is a slow answer, and two is a broken voice. Ending on the
+# first would turn a wordy reply into a dropped call.
+MAX_TTS_FAILS = 2
 
 # Canned prompts shipped with the add-on (used for the greeting + apology so the
 # flow still has *some* voice even if TTS is broken).
@@ -95,6 +105,7 @@ BIAS_VERBS = (
 )
 
 _tts_seq = 0  # monotonically increasing so each utterance gets a unique file
+_tts_fails = 0  # cumulative espeak failures on THIS call — see MAX_TTS_FAILS
 
 
 # --------------------------------------------------------------------------- #
@@ -185,6 +196,25 @@ def say(text: str) -> bool:
             pass
 
 
+def _speak(text: str) -> bool:
+    """say(), plus the call-level failure count. THE ONLY counting chokepoint.
+
+    The count lived inside say() in a first draft, which was both harder to test
+    and easier to bypass: any new call site that used say() directly would be
+    invisible to the latch. Here every speaking path in the conversation goes
+    through one function, so adding a call site cannot silently escape it.
+
+    apologize_and_bye() deliberately calls say() directly instead — by the time
+    it runs the latch is already spent, and counting its own failure would only
+    obscure how many the CALL had.
+    """
+    global _tts_fails
+    ok = say(text)
+    if not ok:
+        _tts_fails += 1
+    return ok
+
+
 def say_or(text: str, fallback_prompt: str) -> bool:
     """Speak dynamic `text`; if TTS fails, play a canned prompt so there's never
     dead air. Returns True if the DYNAMIC text was spoken.
@@ -194,7 +224,7 @@ def say_or(text: str, fallback_prompt: str) -> bool:
     place. That distinction is the difference between "answered correctly" and
     "said something unrelated", and the ledger has to be able to record it.
     """
-    if say(text):
+    if _speak(text):
         return True
     stream(fallback_prompt)
     return False
@@ -462,6 +492,9 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001  (telemetry never ends a call)
             log(f"could not write the assistant ledger: {exc}")
 
+    global _tts_fails
+    _tts_fails = 0          # per CALL, not per process: the test harness loads
+                            # this module repeatedly in one interpreter
     agi("ANSWER")
     call_t0 = time.monotonic()
 
@@ -526,8 +559,23 @@ def main() -> None:
              turn_ms=int((time.monotonic() - turn_t0) * 1000),
              tts_fallback=(True if spoke is False else None), **meta)
 
+        # ★ THE PROMISE THIS MODULE MAKES, KEPT. The docstring says a TTS
+        # failure "degrades to a canned spoken apology + graceful hangup -- the
+        # caller is never left in silence." It did not. Every dynamic line has a
+        # canned fallback except the re-prompt below, which has none: if espeak
+        # is down the caller hears a beep, eight seconds of recording silence,
+        # "one moment", and then nothing, five times over. That is the loop this
+        # ends.
+        if _tts_fails >= MAX_TTS_FAILS:
+            log(f"tts has failed {_tts_fails} times — ending the call")
+            note("tts-failed", turn=turn, tts_fails=_tts_fails,
+                 turns_used=turn,
+                 call_ms=int((time.monotonic() - call_t0) * 1000))
+            apologize_and_bye()
+            return
+
         if turn < MAX_TURNS:
-            say("Anything else?")
+            _speak("Anything else?")
 
     note("ended-max-turns", turns_used=MAX_TURNS,
          call_ms=int((time.monotonic() - call_t0) * 1000))
