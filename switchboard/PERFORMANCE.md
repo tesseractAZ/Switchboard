@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Data as of 2026-09-06.** Software version 0.87.0. Quantiles are nearest-rank.
+**Data as of 2026-09-06.** Software version 0.88.0. Quantiles are nearest-rank.
 
 ---
 
@@ -254,7 +254,10 @@ The second was avoidable and is now gone. All 28 shipped prompts were 8 kHz
 16-bit PCM with no u-law copy, so Asterisk converted each one in real time on
 every playback — including all eight legs of a house-wide page, simultaneously.
 0.82.0 ships a `.ulaw` sibling for each; Asterisk selects the file matching the
-channel, so the conversion simply stops happening.
+channel, so the conversion simply stops happening. Observed directly on
+2026-09-06, in the log line for an emergency notice played to a wired handset:
+`Playing 'switchboard/sw-no-emergency.ulaw'` — Asterisk naming the µ-law file,
+not the PCM master.
 
 **The ledger under-reports this, and that is worth knowing before trusting it.**
 `read_format` is sampled once, in the hangup extension. 23 of 246 legacy legs
@@ -276,15 +279,21 @@ quiet because the system is healthy or because they cannot fire.
 | Detector | Fired | Why |
 | --- | --- | --- |
 | Poor-call alert | 11 legs | Working. |
+| Emergency notice (`911`) | 1 call | **Verified from a wired handset** 2026-09-06: `[911@rooms]` ran on `PJSIP/12`, played `sw-no-emergency.ulaw`, and wrote an `emergency`-tagged row. `933` has still never been dialled here. |
+| Unanswered-leg media gate | 2 legs | **Verified** 2026-09-06. Two unanswered PJSIP legs since the gate shipped, both routed to `no-media` with **zero** warnings; the last media warning anywhere in the log is 13:17:35, the final unanswered call before it. |
 | Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
 | Wake-up undelivered | 0 | Unexercised (§3) — and since 0.84.0 the re-ring it depends on is itself gated, so the path has two untested links, not one. |
 | Assistant health | — | No ledger before 0.80.0 (§4). |
 
-**Five of six have never fired.** One is genuinely quiet, two have not been
+**Five of eight have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
-incapable of firing and is now fixed.
+incapable of firing and is now fixed. Two more were verified by hand on
+2026-09-06 — the emergency notice and the unanswered-leg gate — because neither
+could be exercised without somebody picking up a telephone. That is the honest
+limit of this table: a detector nobody can trigger from a shell stays unproven
+until a person walks to a handset.
 Separating those three cases is the only reason this table is worth keeping — a
 detector that cannot fire and a healthy system produce identical silence.
 
