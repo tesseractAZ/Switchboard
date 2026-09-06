@@ -1,12 +1,14 @@
 # WP826 config automation — API + P-code reference
 
-Scriptable, no-browser configuration of the Grandstream **WP826** WiFi cordless
-(reference deployment: extension 19; **DHCP-assigned IP — currently `192.168.1.84`**,
-previously `.71`; give it an Eero DHCP reservation, and override the tool with
-`WP826_HOST=<ip>` if it moves). Reverse-engineered from the
-phone's own React bundle + `tl.*.js` schema files (firmware Prog **1.0.3.35** /
-Core 1.0.3.9). The admin password is read from `/tmp/.wp_pass` (persistent copy
-`~/.wp_pass`).
+Scriptable, no-browser configuration of the Grandstream **WP826** WiFi cordless.
+Reverse-engineered from the phone's own React bundle + `tl.*.js` schema files
+(firmware Prog **1.0.3.35** / Core 1.0.3.9).
+
+The phone takes its address from DHCP, so give it a reservation on your router
+and point the tool at it with `WP826_HOST=<ip>`; examples below use
+`192.168.1.x`. The admin password is read from a file rather than passed on the
+command line, so it does not land in shell history or the process list — set
+`WP826_PASS_FILE` to choose it.
 
 This document pairs with the client at [`wp826.mjs`](wp826.mjs). Everything here is
 device/runtime knowledge, not encoded in the tool — the tool is generic and
@@ -185,7 +187,7 @@ Access grid), `P2923` CUST_CALL_KEY_LAYOUT, `P22639` QUICK_APP_LONG_PRESS.
 
 ## Reference configured state
 
-- **Phonebook:** `P330=1` (HTTP), `P331=192.168.1.152:8099/phonebook.xml`,
+- **Phonebook:** `P330=1` (HTTP), `P331=<add-on host>:8099/phonebook.xml`,
   `P332=60` (auto-refresh).
 - **Distinctive outside-line ring + vintage tone:** the cordless registers on
   **account 1** (required — see the gotchas above); `office_ring.wav` uploaded as

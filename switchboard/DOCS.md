@@ -152,6 +152,7 @@ its default is fine.
 | `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
+| `assistant_transcripts` | `true` | Keep what was said to the assistant, and its replies, in the add-on's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder). Turn it off to keep every timing and failure reason without the words. |
 
 ### Outside line (SIP trunk)
 
@@ -387,6 +388,67 @@ built-in `conversation.home_assistant` agent, and the reply is spoken by this
 add-on's own voice. No cloud speech-to-text, no cloud text-to-speech, no cloud
 conversation agent — an internet outage does not affect it. (Home Assistant
 Cloud's assistant is *not* used even if you have a subscription.)
+
+**Where it leaves — and does not leave — a record.** "Nothing leaves the
+machine" is a statement about the network. It is not, on its own, a statement
+about what stays behind, so here is that separately.
+
+Each turn writes one line to `/data/state/assistant.jsonl` inside the add-on:
+what was heard, what was replied, how long recognition, Home Assistant and the
+voice took, and — when a turn produced nothing — which of the several possible
+reasons applied. It holds the last 400 turns and then discards the oldest.
+
+That file is inside the add-on's private data, not the shared folder. It cannot
+be read from a file browser, a Samba share, or another add-on; the container
+shell is closed while protection mode is on, and add-on backups are encrypted.
+It is also never copied to `/share`, which the rest of this add-on uses
+precisely *because* that directory is readable from outside — the call-quality
+and delivery ledgers live there for that reason, and this one deliberately does
+not. Nothing spoken is written to either `asterisk.log`.
+
+Set `assistant_transcripts: false` to keep the diagnostics without the words.
+Every timing, outcome and failure reason is still recorded; only what was said
+is withheld, replaced by its length. The switch is meant to cost privacy, not
+visibility — a setting that also made the feature undebuggable would just be
+left on.
+
+To read it, open a terminal in the add-on and:
+
+```
+tail -n 20 /data/state/assistant.jsonl
+```
+
+A turn that worked looks like this (wrapped for print):
+
+```json
+{"v":1,"ts":1788700000,"outcome":"answered","chan":"PJSIP/19-0000000c",
+ "call":"1788700000.42","ext":"19","turn":1,
+ "heard":"turn on the kitchen lights","reply":"Turned on 2 lights",
+ "response_type":"action_done","stt_ms":1840,"converse_ms":410,"tts_ms":900,
+ "turn_ms":9200,"rec_ms":4300,"rec_end":"timeout","wav_bytes":68844}
+```
+
+`outcome` is the field to read first:
+
+| `outcome` | What happened |
+| --- | --- |
+| `answered` | A command was heard, sent to Home Assistant, and the reply spoken. |
+| `no-speech` | The turn produced no text. `reason` says which: `silence` (nothing was said, and the recogniser is healthy), `timeout`, `spawn-error` or `error`. |
+| `goodbye` | The caller ended it themselves. |
+| `ended-unheard` | Two turns in a row produced nothing, so it gave up. |
+| `ended-max-turns` | Five recordings were used without a goodbye. |
+| `ha-unavailable` | Home Assistant could not be reached at all; the call was apologised out. |
+| `bias-failed` | The recogniser's hint list could not be built. The call continued with a smaller one. |
+| `fatal` | The assistant crashed. `detail` carries the exception. |
+
+`rec_end` says how the recording finished — `timeout` (the caller stopped
+talking), `hangup` (they put the phone down mid-sentence) or `dtmf` (they
+pressed a key). Those three used to be one event, which made an abandoned call
+and a silent one impossible to tell apart.
+
+`call` is Asterisk's unique id for the leg, so a row here lines up with the
+matching row in the call-quality ledger (§11) for the same call — "it gave a
+wrong answer" and "the audio was bad" become one question rather than two.
 
 **Who can reach it.** Anyone who can pick up a house phone: family, guests, a
 child, a visitor left alone in a room with an extension. **Not** an outside

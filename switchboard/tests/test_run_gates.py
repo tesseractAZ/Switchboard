@@ -233,3 +233,63 @@ def test_the_warning_is_inside_a_guard_not_at_the_top_level():
             if "bashio::log.notice" in line and "UNAUTHENTICATED" in line:
                 check(f"{name}: the notice is nested inside a conditional",
                       line.startswith((" ", "\t")))
+
+
+def test_every_option_has_both_an_options_entry_and_a_schema_entry() -> None:
+    """Nothing anywhere asserted that config.yaml's two halves agree.
+
+    Add a key to `options:` and forget `schema:` and the whole suite stays green:
+    the Supervisor validates the add-on only on the target, and a schema-less
+    option is silently DROPPED from /data/options.json — so the default in the
+    options block never reaches the container and the feature is simply absent,
+    with no error anywhere. The reverse (schema without options) leaves an option
+    with no default at all.
+    """
+    import yaml
+    _ROOT = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((_ROOT / "config.yaml").read_text())
+    opts, schema = set(cfg.get("options") or {}), set(cfg.get("schema") or {})
+    missing_schema = sorted(opts - schema)
+    missing_option = sorted(schema - opts)
+    assert not missing_schema, (
+        f"in options: but not schema: (silently dropped): {missing_schema}")
+    assert not missing_option, (
+        f"in schema: but not options: (no default): {missing_option}")
+
+
+def test_an_option_the_agis_consume_reaches_features_json() -> None:
+    """★ THE BRIDGE THE OTHER GATE CANNOT SEE.
+
+    `test_every_option_read_is_also_exported` walks the s6 run scripts, which is
+    the right check for a SERVICE option and the wrong one for an AGI option.
+    Asterisk forks an AGI — s6 does not — so no env export can ever reach it, and
+    /run/switchboard/options-effective.json is 0600 root-only while the AGI runs
+    as the asterisk user. features.json (0640 root:asterisk) is the only channel
+    that reaches an AGI at all.
+
+    So an AGI option can be added to config.yaml, schema and en.yaml, be fully
+    green, and be completely inert. `assistant_enabled` is a misleading exemplar
+    to copy here: it is exported by no run script because nothing at call time
+    needs it — it gates the dialplan at render time instead.
+    """
+    import re as _re
+    _ROOT = Path(__file__).resolve().parents[1]
+    cfg_src = (_ROOT / "rootfs" / "usr" / "bin" / "switchboard-config").read_text()
+    payload = cfg_src[cfg_src.index("def write_features_runtime"):]
+    payload = payload[:payload.index("fp = RUN_DIR")]
+
+    # Options whose ONLY consumer is an AGI, and the key each must appear under.
+    AGI_OPTIONS = {"assistant_transcripts": "assistant"}
+    for opt, section in AGI_OPTIONS.items():
+        assert f'opts.get("{opt}"' in payload, (
+            f"{opt} never reaches features.json, so the AGI cannot read it — it "
+            f"is inert no matter what the user sets")
+        assert f'"{section}"' in payload, f"no {section!r} section in features.json"
+
+    # ...and the AGI must actually read the file it is staged into.
+    agi = (_ROOT / "rootfs" / "var" / "lib" / "asterisk" / "agi-bin"
+           / "switchboard-assistant.agi").read_text()
+    assert "features.json" in agi, "the assistant AGI reads no configuration at all"
+    assert _re.search(r'\("assistant"\)[^\n]*\.get\("transcripts"', agi) or \
+           'get("transcripts"' in agi, \
+           "the assistant AGI never reads its transcripts policy"

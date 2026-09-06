@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.79.0"
+version: "0.80.0"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX for analog home phones via a Grandstream GXW4216 V2.
@@ -97,6 +97,7 @@ options:
   status_enabled: true
   status_ext: "45"
   assistant_enabled: false
+  assistant_transcripts: true
   assistant_ext: "47"
   wakeup_retry_seconds: 90
   wakeup_push_target: "mobile_app_iphone"
@@ -185,6 +186,7 @@ schema:
   status_enabled: bool?
   status_ext: "match(^[0-9]{2,6}$)?"
   assistant_enabled: bool?
+  assistant_transcripts: bool?
   assistant_ext: "match(^[0-9]{2,6}$)?"
   wakeup_retry_seconds: int(30,600)?
   wakeup_push_target: str?

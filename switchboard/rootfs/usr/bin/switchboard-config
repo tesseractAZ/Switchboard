@@ -2357,6 +2357,14 @@ def write_features_runtime(opts: dict) -> None:
         "callqos": {
             "alerts": bool(opts.get("call_quality_alerts", True)),
         },
+        # The dial-47 assistant's ledger policy. It MUST arrive here and not via
+        # an env export: Asterisk forks the AGI, not s6, so a run-script export
+        # cannot reach it, and /run/switchboard/options-effective.json is 0600
+        # root-only while the AGI runs as the asterisk user. features.json (0640
+        # root:asterisk) is the only channel that reaches an AGI at all.
+        "assistant": {
+            "transcripts": bool(opts.get("assistant_transcripts", True)),
+        },
         # Dial-a-status "power" entities. These used to be hardcoded to THIS
         # author's EcoFlow sensor ids with a comment claiming they were
         # overridable here — they were not: nothing ever passed an override, so
