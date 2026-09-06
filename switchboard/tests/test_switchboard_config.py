@@ -1435,8 +1435,26 @@ def test_rtpqos_telemetry() -> None:
     gate = gate[:gate.index("Set(RXC=")]
     check("rtpqos: the gate reads no CHANNEL() property at all",
           "CHANNEL(" not in gate)
-    check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
-          "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
+    # ★ The Verbose line lands in /share/switchboard/asterisk.log, which is
+    # host-mounted and world-readable. On a trunk leg CALLERID(num) is the
+    # calling party's telephone number, and 14 such lines with 2 distinct
+    # numbers were measured in that file. v0.81.0 redacted the JSONL mirror and
+    # left this one, so the number kept reaching the readable copy by a second
+    # route. It is now truncated to its last four digits here, matching the
+    # mirror's rule; the full value still goes to the private ledger via --cid.
+    check("rtpqos: the readable log never carries a full telephone number",
+          "cid=${FILTER(0-9+*#,${CALLERID(num)})} " not in e)
+    check("rtpqos: the Verbose cid is length-gated and truncated",
+          "${FILTER(0-9+*#,${CALLERID(num)}):-4}" in e
+          and "${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6" in e)
+    check("rtpqos: an ordinary extension is still shown in full",
+          e.count("cid=${IF(") >= 1)
+    # ...but the SINK still receives the whole thing — the private ledger keeps
+    # it, and the /share mirror redacts on write.
+    check("rtpqos: the sink is still passed the full cid",
+          ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"' in e)
+    check("rtpqos: raw CALLERID is never emitted unsanitised",
+          "cid=${CALLERID(num)}" not in e)
     # It is read in an h-extension (not a hangup handler — the RTP is gone by then),
     # in every context a call can hang up in. The Gosub passes the originating
     # context as ARG1 so the sink/log can attribute the leg.

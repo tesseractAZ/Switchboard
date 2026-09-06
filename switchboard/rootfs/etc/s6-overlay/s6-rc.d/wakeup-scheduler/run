@@ -27,9 +27,15 @@ export WAKEUP_RING_SECONDS="${WRS:-60}"
 WRT="$(switchboard-opt wakeup_retry_seconds)"
 export WAKEUP_RETRY_SECONDS="${WRT:-90}"
 # The notify service an undelivered wake-up escalates to, without the `notify.`
-# prefix. Empty disables the push and leaves only the second ring.
+# prefix. Empty disables the PUSH; the escalation still posts a Home Assistant
+# notification card, so the signal is not lost — it just stops sounding through
+# Do Not Disturb.
 WPT="$(switchboard-opt wakeup_push_target)"
-export WAKEUP_PUSH_TARGET="${WPT:-mobile_app_iphone}"
+# ${WPT-default}, NOT ${WPT:-default}. With the colon an EMPTY value also takes
+# the default, so setting the option blank did not disable the push — it quietly
+# restored mobile_app_iphone. Three documents and this script's own comment all
+# said empty disables it; the code was the one that was wrong.
+export WAKEUP_PUSH_TARGET="${WPT-mobile_app_iphone}"
 
 # Read options from the post-overlay snapshot (init-switchboard writes it);
 # falls back to /data/options.json when absent. Keeps every consumer on ONE

@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Data as of 2026-09-06.** Software version 0.86.0. Quantiles are nearest-rank.
+**Data as of 2026-09-06.** Software version 0.87.0. Quantiles are nearest-rank.
 
 ---
 
@@ -347,10 +347,18 @@ Most belong to people who called this house. Two are numbers it called — which
 is the more sensitive direction, and the one a first draft of this section
 asserted was not present.
 
-**Fixed in 0.81.0.** The `/share` mirror now keeps only the last four digits of
-anything longer than an extension and marks the row redacted; the private `/data`
-ledger keeps the number in full. The one historical row already in the mirror was
-remediated at the same time, and the live file now contains no complete number.
+**Fixed across 0.81.0 and 0.86.0, and the gap between them is the lesson.** The
+`/share` mirror keeps only the last four digits of anything longer than an
+extension and marks the row redacted; the private `/data` ledger keeps the number
+in full, and the one historical row already in the mirror was remediated.
+
+That was 0.81.0, and it was only half. The same number reached the same directory
+by a second route: the per-call hangup hook also writes a human-readable
+`Verbose` line, and `/share/switchboard/asterisk.log` takes the full verbose
+class. Measured on the live system after the "fix": **14 such lines carrying 2
+distinct telephone numbers.** Redacting one writer and not the other left the
+disclosure intact and the record of it looking closed. 0.86.0 truncates the
+number in that line too, on the same six-digit rule.
 
 > The commands in this document print raw ledger rows, which contain the data
 > described above. Read them on the machine; do not paste the output anywhere.

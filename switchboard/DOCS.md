@@ -1,4 +1,4 @@
-# Switchboard
+# Switchboard — complete system reference
 
 A self-hosted **Asterisk 20 + PJSIP** phone system for the analog phones in your
 home, packaged as a Home Assistant add-on. Each FXS port on a **Grandstream
@@ -112,7 +112,7 @@ its default is fine.
 |--------|---------|-------|
 | `announce_enabled` | `true` | The announce feature on dial `46`. |
 | `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
-| `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. Empty until you set it. |
+| `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. **Required for the feature to work:** while this list is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up. |
 | `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
 
 ### Operator console
@@ -422,10 +422,15 @@ is withheld, replaced by its length. The switch is meant to cost privacy, not
 visibility — a setting that also made the feature undebuggable would just be
 left on.
 
-To read it, open a terminal in the add-on and:
+To read it you need host-level access to the container — which is exactly the
+access the paragraph above says an ordinary reader does not have, and both
+statements are meant to be true at once. The file is out of reach of a file
+browser, a Samba share or another add-on; it is not out of reach of whoever
+administers the machine. With the add-on's protection mode turned off and a
+shell on the host:
 
 ```
-tail -n 20 /data/state/assistant.jsonl
+sudo docker exec addon_<slug> tail -n 20 /data/state/assistant.jsonl
 ```
 
 A turn that worked looks like this (wrapped for print):
@@ -1044,6 +1049,13 @@ a call ever drops. Publishes:
 - `sensor.switchboard_link_health` — a rollup (worst RTT; counts of reachable /
   unreachable / offline; the down extensions).
 
+A **second detector**, added in v0.79.0, covers the outage no sample can see.
+Asterisk logs every reachability change as it happens, and those lines are read
+each cycle; if half the fleet went unreachable *between* two polls and was back
+before the next one, that is reported too. The one whole-house outage this
+system has had lasted 119 seconds and fell entirely inside a single five-minute
+gap, so both surrounding samples read healthy.
+
 It raises **one** notification on a mass outage — at least half the fleet *and* at
 least 3 phones unreachable for 2 consecutive cycles — so a shared-gateway failure
 (e.g. the GXW loses power) can't go unnoticed. Recovery posts a second
@@ -1057,8 +1069,10 @@ and by device health below.
 Every context that can carry audio writes a record to the ledger
 (`/data/state/callqos.jsonl`): room-to-room calls, the operator, directory
 assistance and outside calls, **and** — since v0.55.0 — wake-up set and
-delivery, paging, announcements and the voice menus. Before that only the first
-four reported, so the ledger under-reported activity roughly fivefold.
+delivery, paging, announcements and the voice menus — and, since v0.77.0,
+**transfers**, which were one of three contexts without the hook. Before v0.55.0
+only the first four reported, so the ledger under-reported activity roughly
+fivefold.
 
 **Recorded is not the same as alerted.** The legs the PBX originates to play
 something *at* a phone — wake-up delivery, paging, announcements — are scored and
@@ -1074,14 +1088,6 @@ detector (which exists to catch a broken conversation) would fire on their
 perfectly normal shape. Conversations and the interactive menus alert exactly
 as before.
 
-> HA-pushed announcements **are** measured. Since v0.57.0 `/api/announce`
-> originates into the thin `[switchboard-announce-play]` context rather than
-> straight into `Playback`, so it has a hangup extension and writes an ordinary
-> `announce`-tagged record — recorded, never alerting, like the other playback
-> legs. What has no quality record is an announcement that never became a call
-> at all: one refused as too long, suppressed as a duplicate, skipped because
-> the handset was busy, or turned away because it was not registered. Those are
-> in the delivery ledger instead.
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
@@ -1097,7 +1103,13 @@ only from the authoritative hangup record written by the dialplan
 `0.0` for a direction it could not score — a short call, or RTCP that never
 converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
 alongside ~0 % loss, packetization-only jitter and a low RTT, which is the
-signature of a re-INVITE/transfer glitch rather than of bad audio. If neither
+signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
+v0.77.0, when it reports its *other* nothing-to-report constant, the literal
+`88.087887`, on a leg where no RTCP round completed. That one reads as a flawless
+call rather than an absent one: three such legs were scored `excellent` while a
+fourth, identical but carrying the `0.0` constant, was scored `unknown`. The
+verdict was decided by which of two placeholders Asterisk happened to leave
+behind. If neither
 direction is credible there is no score to publish and the sensor simply keeps
 its previous value; the raw per-direction numbers are still in the ledger. The
 alerting is independent of this: a call with no credible MES can still notify on
@@ -1133,6 +1145,15 @@ recovery notice when they return to normal — again under that device's shared
 > restart until the next push — that's expected.
 
 ---
+
+**Where to read them.** The full call-quality ledger is
+`/data/state/callqos.jsonl`, inside the add-on and not readable from outside.
+Three mirrors are written to the host-mounted `/share/switchboard/` so an audit
+can reach them without a shell: `callqos-outcomes.jsonl` (the same records, with
+any telephone number truncated to its last four digits), `delivery-outcomes.jsonl`
+(every wake-up and announcement outcome), and `heartbeat.jsonl` (one row per
+health cycle). The assistant's own ledger is deliberately **not** mirrored — see
+[§4](#4-the-voice-operator--directory-assistance).
 
 ## 12. How it's built
 
@@ -1203,7 +1224,7 @@ stay: they are the editable source, and a build check fails if a prompt and its
 |--------|-------|
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
-| Investigating something that happened **before** a restart/reboot | Notices, warnings, and errors are also written durably to `/data/state/asterisk.log` on the persistent data volume — it survives restarts and reboots, unlike the Log tab, whose buffer rotates within hours. Registration flaps, trunk timeouts, and RTP errors from before a crash live there. |
+| Investigating something that happened **before** a restart/reboot | Notices, warnings, errors **and endpoint reachability** (`Endpoint <n> is now Unreachable`, added in v0.84.0 — before that the durable log held none of it, and the one whole-house outage could not be investigated from it) | Notices, warnings, and errors are also written durably to `/data/state/asterisk.log` on the persistent data volume — it survives restarts and reboots, unlike the Log tab, whose buffer rotates within hours. Registration flaps, trunk timeouts, and RTP errors from before a crash live there. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
