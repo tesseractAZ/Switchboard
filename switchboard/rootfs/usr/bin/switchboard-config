@@ -1279,21 +1279,35 @@ def render_rtpqos_context() -> list:
         ";; ----- Per-call RTP quality telemetry (logged from each context's h-exten) -----",
         "[switchboard-rtpqos]",
         "exten = s,1,NoOp(RTP quality summary)",
-        # ★ MEDIA CHECK FIRST. Every CHANNEL(rtcp,...) read on a channel that
-        # never negotiated an RTP session logs two
-        #   "Channel PJSIP/...: has no audio media/RTP session"
-        # WARNINGs into the durable log -- four per unanswered call, from the two
-        # reads below. The RXC/TXC guard that follows is correct and stays, but
-        # it runs AFTER the reads it exists to avoid, so it silences nothing.
-        # audionativeformat is a core func_channel property, not a PJSIP RTCP
-        # read, so testing it costs no warning.
-        ' same = n,GotoIf($["${CHANNEL(audionativeformat)}" = ""]?nomedia)',
+        # ★ ANSWERED CHECK FIRST. Every CHANNEL(rtcp,...) read on a channel with
+        # no RTP instance logs FOUR WARNINGs per call into the durable log:
+        #   pjsip/dialplan_functions.c: Channel PJSIP/...: has no audio media/RTP session
+        #   func_channel.c: Unknown or unavailable item requested: 'rtcp,rxcount'
+        # ...twice, from the two reads below. The RXC/TXC guard after them is
+        # correct and stays, but it runs AFTER the reads it exists to avoid.
+        #
+        # v0.77.0 gated on CHANGELOG(audionativeformat) here and that was WRONG,
+        # proven on a live call (2026-09-06 13:16:57):
+        #   [s@switchboard-rtpqos:2] GotoIf("PJSIP/19-...", "0?nomedia")
+        # It evaluated FALSE. The channel running this h-extension is the CALLING
+        # party — it negotiated a format perfectly well when it dialled in. What
+        # it never got is a bridged RTP session, because nobody answered. So
+        # audionativeformat reports the negotiated capability and is populated on
+        # exactly the legs this was meant to catch. Two releases claimed the
+        # warnings were gone; the log said otherwise the first time a handset
+        # rang out.
+        #
+        # CDR(answer) is empty until the leg is answered, is pure CDR, and
+        # touches no media. It also does NOT catch the case the RXC/TXC guard
+        # exists for — an ANSWERED leg that carried early media and no RTCP —
+        # which is why that guard stays behind it rather than being replaced.
+        ' same = n,GotoIf($["${CDR(answer)}" = ""]?nomedia)',
         f" same = n,Set(RXC={_q('rxcount')})",
         f" same = n,Set(TXC={_q('txcount')})",
         # Skip a leg with no RTCP stats — no media, or a peer that sends no RTCP
         # (the VoIP.ms trunk). A one-way-audio leg (tx>0, rx=0) is still logged.
-        # Kept as defence in depth behind the media check above: if
-        # audionativeformat is ever populated on a media-less channel, this still
+        # Kept as defence in depth behind the answered check above: if a leg is
+        # answered but still has no RTP instance, this still
         # catches it and the behaviour is exactly what it was before.
         ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?nomedia)',
         # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);

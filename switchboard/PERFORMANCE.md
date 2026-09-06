@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Data as of 2026-09-06.** Software version 0.82.0. Quantiles are nearest-rank.
+**Data as of 2026-09-06.** Software version 0.83.0. Quantiles are nearest-rank.
 
 ---
 
@@ -347,9 +347,10 @@ Most belong to people who called this house. Two are numbers it called — which
 is the more sensitive direction, and the one a first draft of this section
 asserted was not present.
 
-**Not yet fixed.** The narrow remedy is to withhold or truncate `ext` in the
-`/share` mirror when it is not an extension, leaving the private `/data` ledger
-complete.
+**Fixed in 0.81.0.** The `/share` mirror now keeps only the last four digits of
+anything longer than an extension and marks the row redacted; the private `/data`
+ledger keeps the number in full. The one historical row already in the mirror was
+remediated at the same time, and the live file now contains no complete number.
 
 > The commands in this document print raw ledger rows, which contain the data
 > described above. Read them on the machine; do not paste the output anywhere.

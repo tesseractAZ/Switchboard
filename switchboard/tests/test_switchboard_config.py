@@ -1416,9 +1416,19 @@ def test_rtpqos_telemetry() -> None:
           "--nomedia" in e and "n(nomedia)" in e)
     # The media check must precede the reads it exists to avoid — that ordering
     # IS the fix; a correct guard placed after the reads silences nothing.
-    check("rtpqos: the media check runs BEFORE any CHANNEL(rtcp,...) read",
-          e.index('${CHANNEL(audionativeformat)}" = ""]?nomedia')
+    check("rtpqos: the answered check runs BEFORE any CHANNEL(rtcp,...) read",
+          e.index('${CDR(answer)}" = ""]?nomedia')
           < e.index("Set(RXC=${CHANNEL(rtcp,rxcount)})"))
+    # ...and it must not be a CHANNEL() read itself. v0.77.0 gated on
+    # CHANNEL(audionativeformat), which is populated on the calling party's own
+    # channel — the very leg this catches — so the gate evaluated false and the
+    # warnings kept coming for two releases while the comment said they had
+    # stopped. Whatever probe is used here has to be true of a leg NOBODY
+    # ANSWERED, not of one that merely failed to bridge.
+    gate = e[e.index("[switchboard-rtpqos]"):]
+    gate = gate[:gate.index("Set(RXC=")]
+    check("rtpqos: the gate reads no CHANNEL() property at all",
+          "CHANNEL(" not in gate)
     check("rtpqos: attacker-controlled inbound cid is FILTER-sanitized",
           "cid=${FILTER(0-9+*#,${CALLERID(num)})}" in e and "cid=${CALLERID(num)}" not in e)
     # It is read in an h-extension (not a hangup handler — the RTP is gone by then),
