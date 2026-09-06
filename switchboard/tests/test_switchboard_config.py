@@ -2021,6 +2021,78 @@ def test_emergency_numbers_do_not_depend_on_the_trunk() -> None:
           "exten = 9911,1," not in direct and "exten = 9933,1," not in direct)
 
 
+def _exten_block(rendered: str, num: str) -> str:
+    """The dialplan lines belonging to ONE extension.
+
+    From `exten = <num>,1,` up to the next `exten =` or the next `[context]`.
+    Everything between is that extension's own `same = n,` continuation lines.
+    """
+    lines = rendered.split("\n")
+    start = next(i for i, l in enumerate(lines)
+                 if l.startswith(f"exten = {num},1,"))
+    out = [lines[start]]
+    for l in lines[start + 1:]:
+        s = l.strip()
+        if s.startswith("exten =") or s.startswith("["):
+            break
+        out.append(l)
+    return "\n".join(out)
+
+
+def test_each_emergency_number_is_independently_complete() -> None:
+    """★ 933 is not a footnote to 911, and no test could tell them apart.
+
+    `test_emergency_numbers_do_not_depend_on_the_trunk` asserts
+    `"sw-no-emergency" in e` against the WHOLE rendered dialplan. That string is
+    satisfied by the 911 block alone, so it still passes on a dialplan where 933
+    answers the call and then sits in silence — which is the entire failure the
+    extension exists to prevent. Measured, not argued: unrolling the renderer's
+    shared loop to drop 933's Playback leaves all 485 other tests green.
+
+    Today the two numbers cannot diverge, because render_emergency_notices()
+    emits them from one loop. That is an implementation fact, not an invariant,
+    and it is the first thing that goes when someone gives 933 its own behaviour
+    — a live possibility: this repo's CHANGELOG records a reader concluding that
+    933 reads back what a carrier would see, and adding that means unrolling the
+    loop.
+
+    WHAT THIS DOES NOT ADD. `Set(SW_TAG=emergency)` is checked here for
+    completeness, but it is NOT this test's contribution: dropping it from one
+    number is already caught by
+    `test_every_rooms_extension_declares_what_kind_of_call_it_is`. A first draft
+    of this docstring claimed the tag was the hole, on the strength of a `-k`
+    filter that had silently matched zero tests and reported "81 deselected" as
+    though it were a pass. The two mutants this test genuinely catches are the
+    missing Playback and the Answer/Playback inversion.
+    """
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
+                             {"ext": "12", "name": "Office", "secret": "s2"}])
+    base = {"enabled": True, "provider_host": "example.net", "username": "u",
+            "secret": "x", "outbound_caller_id": "5555550100"}
+    modes = {
+        "trunk disabled": {"enabled": False},
+        "prefix mode": dict(base, dial_prefix="9"),
+        "direct dial": dict(base, direct_dial=True),
+    }
+    for name, trunk in modes.items():
+        e = sbc.render_extensions({"rooms": rooms, "trunk": trunk,
+                                   "operator": {"enabled": True}})
+        for num in ("911", "933"):
+            blk = _exten_block(e, num)
+            # Answer() first: Playback on an unanswered channel plays to early
+            # media, which an analog handset behind an FXS gateway may never
+            # render — the caller would hear ringing and then a dead line.
+            check(f"{name}: {num} answers before it speaks",
+                  "Answer()" in blk
+                  and blk.index("Answer()") < blk.index("Playback("))
+            check(f"{name}: {num} plays the notice ITSELF",
+                  "Playback(switchboard/sw-no-emergency)" in blk)
+            check(f"{name}: {num} tags its OWN ledger row",
+                  "Set(SW_TAG=emergency)" in blk)
+            # ...and never reaches a Dial. This is the 911->"11" / 933->"33"
+            # family: the failure mode is not silence, it is a real PSTN call.
+            check(f"{name}: {num} never dials anything", "Dial(" not in blk)
+
 def test_no_emergency_number_can_reach_the_trunk() -> None:
     """The property, not the strings: nothing that starts with a dialled
     emergency number may fall through to an outbound pattern.
