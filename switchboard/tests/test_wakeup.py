@@ -816,13 +816,34 @@ def test_the_escalation_does_not_claim_a_ring_that_never_happened(tmp_path):
     check("re-ring: it says the second attempt was not made",
           "second attempt was not made" in pushes[0])
 
-    # ...and when the second ring DID go out, it may say so.
+    # ★ ...and when the second ring DID go out, it must say so — driven END TO
+    # END, never by hand-setting the flag in the fixture.
+    #
+    # A first version of this test wrote `"rang_again": True` into the dict
+    # itself, which asserted the MESSAGE FORMATTING given a flag and nothing
+    # about whether the code ever sets it. It did not: `rang_again` was a local
+    # stored after the if/else, and the success branch `continue`d past the
+    # store, so the flag was False on every re-ring that actually happened. The
+    # escalation added to stop the alert over-claiming was under-claiming
+    # instead, and this test passed throughout.
     pushes.clear()
+    rings = []
     sched.ami = type("A", (), {
-        "originate_wakeup": staticmethod(lambda e, r: True),
-        "get_endpoints": staticmethod(lambda: [{"name": "19", "state": "Not in use"}])})
+        "originate_wakeup": staticmethod(lambda e, r: rings.append(e) or True),
+        "get_endpoints": staticmethod(
+            lambda: [{"name": "19", "state": "Not in use"}])})
+    sched._ringing.clear()
     sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
-                            "started": t0, "retried": True, "rang_again": True}
-    sched._reconcile_rings(t0 + 3 * sched.RETRY_AFTER + 3)
+                            "started": t0, "retried": False}
+    # Pass 1: the handset is available, so the re-ring goes out and the code —
+    # not the fixture — records that it did.
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)
+    check("re-ring: an available handset IS rung a second time", rings == ["19"])
+    check("re-ring: and the code itself records that it rang",
+          sched._ringing.get("19", {}).get("rang_again") is True)
+    # Pass 2: that second ring also goes unanswered -> escalate.
+    sched._reconcile_rings(t0 + 2 * sched.RETRY_AFTER + 2)
     check("re-ring: a real second ring IS reported as one",
           pushes and "rung twice" in pushes[0])
+    check("re-ring: and it does NOT claim the attempt was skipped",
+          pushes and "second attempt was not made" not in pushes[0])

@@ -180,3 +180,65 @@ def test_backup_hooks_leave_evidence_outside_the_container() -> None:
              "SWITCHBOARD_BACKUP_STAMP": "/proc/cannot/write/here.jsonl",
              "PATH": "/usr/bin:/bin"})
     assert r.returncode == 0, f"unwritable stamp failed the backup: {r.stderr[:200]}"
+
+
+def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
+    """The manual now lists the delivery and assistant outcome names by hand.
+
+    A hand-maintained list of identifiers is the shape that rots: this sweep
+    found DOCS.md asserting a durable log level that had changed two releases
+    earlier, an announce path described as unmeasurable since v0.57.0, and a
+    sentence claiming seven speech flags while listing six. Those were prose. An
+    outcome name is checkable, so it should be checked.
+
+    A reader greps the ledger for a name the manual gave them. If the code never
+    writes it, they conclude the event never happened.
+
+    ★ The names are taken FROM THE DOCUMENT, not from a list kept here. A first
+    version intersected the document against a hand-written vocabulary, so an
+    invented name simply fell outside the set and was never checked — renaming
+    `re-ring-skipped` to something the code has never written passed cleanly.
+    A checker whose allowlist decides what it checks validates only itself.
+    """
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / "DOCS.md").read_text()
+    code = "".join((root / p).read_text() for p in (
+        "rootfs/usr/share/switchboard/wakeup/scheduler.py",
+        "rootfs/usr/share/switchboard/webui/app.py",
+        "rootfs/var/lib/asterisk/agi-bin/switchboard-wakeup-deliver.agi",
+        "rootfs/var/lib/asterisk/agi-bin/switchboard-assistant.agi",
+    ))
+
+    def region(anchor, span=1400):
+        i = docs.index(anchor)
+        return docs[i:i + span]
+
+    # The two places the manual enumerates outcome names: the wake-up ledger
+    # paragraph and the announce one. Every hyphenated identifier in them is a
+    # claim about a string the code writes.
+    cited = set()
+    for anchor in ("Every step above is recorded in",
+                   "**Every outcome is recorded**",
+                   # ...and the §5 narrative, which names outcomes in prose. A
+                   # mutation that renamed one HERE survived a version of this
+                   # test that scanned only the ledger paragraphs, because the
+                   # same name appears twice and only one copy was covered.
+                   "1. The phone rings for `wakeup_ring_seconds`"):
+        cited |= set(re.findall(r"`([a-z]+(?:-[a-z]+)+)`", region(anchor)))
+    # ...plus the assistant outcome table, whose first column is the same kind
+    # of claim.
+    tbl = docs[docs.index("| `outcome` | What happened |"):]
+    tbl = tbl[:tbl.index("\n\n")]
+    # ...from AFTER the separator row, so the header cell `outcome` is not
+    # mistaken for one of the values the column lists.
+    tbl = tbl[tbl.index("| --- | --- |"):]
+    cited |= set(re.findall(r"^\| `([a-z]+(?:-[a-z]+)*)` \|", tbl, re.M))
+
+    # Filenames and paths are not outcomes.
+    cited = {c for c in cited if not c.endswith(".jsonl") and "/" not in c}
+    check(f"outcomes: the manual enumerates some ({len(cited)})", len(cited) >= 15)
+    missing = sorted(n for n in cited if f'"{n}"' not in code)
+    check(f"outcomes: every name the manual cites is one the code writes "
+          f"({missing})", not missing)

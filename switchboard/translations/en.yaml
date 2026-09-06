@@ -201,7 +201,7 @@ configuration:
       undelivered wake-up escalates to after two unanswered rings — e.g.
       mobile_app_iphone. Sent as a critical alert so it sounds through Do Not
       Disturb, because a failed alarm clock is exactly what silent mode should
-      not swallow. Leave empty to disable the push and rely on the second ring.
+      not swallow. Leave empty and the escalation falls back to a Home Assistant notification card instead — the signal is not lost, it just stops sounding through Do Not Disturb.
   status_power_grid:
     name: Status Menu — Grid Power Entity
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.

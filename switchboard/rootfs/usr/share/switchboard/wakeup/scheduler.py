@@ -169,7 +169,14 @@ def _reconcile_rings(now: float) -> None:
                          for e in ami.get_endpoints()}.get(ext, "")
             except Exception as exc:  # noqa: BLE001  (AMI down -> unknown, below)
                 log(f"endpoint state unavailable before re-ring for ext {ext}: {exc}")
-            rang_again = False
+            # ★ Written onto `r`, never a local. v0.84.0 set a local here and
+            # stored it AFTER the if/else — but the success branch `continue`s,
+            # so the store was unreachable on the one path that needed it. The
+            # flag was therefore False on every re-ring that actually went out,
+            # and the escalation this release added to stop the alert
+            # over-claiming ended up under-claiming instead: it told the owner
+            # "the second attempt was not made" about a phone that rang twice.
+            r["rang_again"] = False
             if state.strip().lower() != "not in use":
                 # Deliberately NOT a deferral. The wake-up is already late and
                 # this is its last chance; recording that the second ring never
@@ -182,12 +189,11 @@ def _reconcile_rings(now: float) -> None:
                     if ami.originate_wakeup(ext, RING):
                         r["retried"] = True
                         r["started"] = now
-                        rang_again = True
+                        r["rang_again"] = True
                         _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
                         continue
                 except Exception as exc:  # noqa: BLE001
                     log(f"re-ring for ext {ext} failed: {exc}")
-            r["rang_again"] = rang_again
             _ringing.pop(ext, None)
             continue
         # Second ring also failed — this is a genuinely undelivered alarm.

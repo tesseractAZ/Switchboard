@@ -68,7 +68,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — but only **three** of the seven behave differently. The Asterisk console channel always carries `notice,warning,error`; `info` adds `verbose`; `debug` and `trace` add `verbose` **and** `debug` and are identical to each other. `notice`, `warning`, `error` and `critical` all produce the same bare `notice,warning,error` — this is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose, then set back (it is very noisy). The durable `/data/state/asterisk.log` copy stays at `notice,warning,error` whatever you pick. |
+| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — but only **three** of the seven behave differently. The Asterisk console channel always carries `notice,warning,error`; `info` adds `verbose`; `debug` and `trace` add `verbose` **and** `debug` and are identical to each other. `notice`, `warning`, `error` and `critical` all produce the same bare `notice,warning,error` — this is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose, then set back (it is very noisy). The durable `/data/state/asterisk.log` copy does not follow this setting at all: it is fixed at `notice,warning,error,verbose(2)`. That one verbose level, added in v0.84.0, exists for a single class of line — `Endpoint <n> is now Unreachable` and its `Contact` twin, which Asterisk emits at verbosity 2 — so the durable log records whether the phones were reachable without carrying the whole dialplan trace. It is trimmed at boot, before Asterisk opens it, keeping the newest half whenever it has grown past 8 MB. |
 | `rtp_start` | `10000` | First UDP port for live call audio (RTP). Must be below `rtp_end`. |
 | `rtp_end` | `10200` | Last RTP port. The default 200-port window is far more than a home needs (~2 ports per call). |
 
@@ -90,7 +90,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `call_quality_alerts` | `true` | Notify when a **conversation's** audio is poor (low MOS, high loss, one-way). Every leg is measured and written to the ledger regardless; machine-initiated legs (wake-up delivery, paging, announcements) are recorded but never alert — see §11. |
+| `call_quality_alerts` | `true` | Notify when a **conversation's** audio is poor (low MOS, high loss, one-way). Every leg is measured and written to the ledger regardless; machine-initiated legs (wake-up delivery, paging, announcements) are recorded but do not alert — except an *undelivered* wake-up, which does (v0.78.0). See §11. |
 | `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
 | `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 | `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage). |
@@ -136,7 +136,7 @@ its default is fine.
 | `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
 | `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
-| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to after two unanswered rings, as a critical/DND-bypassing alert. Empty disables the push. |
+| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
 | `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
 | `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
 | `wakeup_weather` | `true` | Speak a short local weather summary during the wake-up call. |
@@ -151,9 +151,9 @@ its default is fine.
 | `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
 | `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
 | `status_power_grid` | `""` | Entity whose on/off state says whether utility power is present, spoken by the **power** branch of dial-`45`. Accepts `input_boolean`, `binary_sensor`, `sensor` or `switch`. |
-| `status_power_battery` | `""` | `sensor` giving stored battery energy, spoken by the same branch. |
+| `status_power_battery` | `""` | `sensor` giving battery charge as a **percentage** — the menu says "the home battery is at N percent", so a sensor reporting kWh will be read out as if it were a percent. |
 | `status_power_runway` | `""` | `sensor` giving hours of runway remaining. |
-| `status_power_solar` | `""` | `sensor` giving the solar share of current load. |
+| `status_power_solar` | `""` | `sensor` giving the solar share of current load as a **percentage** — spoken as "solar is covering N percent of the load". |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
 | `assistant_transcripts` | `true` | Keep what was said to the assistant, and its replies, in the add-on's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder). Turn it off to keep every timing and failure reason without the words. |
@@ -223,7 +223,8 @@ from the **saved** options even when the overlay names them:
 - `wakeup_enabled` (the wake-up scheduler),
 - `stt_resident` and the seven speech-feature flags the resident recognizer gates
   its RAM on (`operator.enabled`, `wakeup_enabled`, `automation_enabled`,
-  `status_enabled`, `announce_enabled`, `directory_enabled`),
+  `status_enabled`, `announce_enabled`, `directory_enabled`,
+  `assistant_enabled`),
 - `device_health_alerts`.
 
 Note the asymmetry: an overlay `{"link_health_enabled": false}` still leaves the
@@ -382,7 +383,12 @@ Assistant's own voice assistant understands works here too.
 It re-asks "anything else?" after each answer. The loop is bounded: it stops
 after **5 recordings**, and it gives up as soon as **two turns in a row** are
 silent or unintelligible. Say "goodbye", "cancel", "never mind", "that's all"
-or "thanks" to leave early — the phrase has to be the whole utterance, so
+or "thanks" to leave early — and, since v0.82.0, simply **"no"** works too, along
+with "nope", "nah", "no thanks" and "that's it". That is the natural answer to
+"anything else?", and until then it was sent to Home Assistant, matched nothing,
+and came back "Sorry, I couldn't understand that". A decline only ends the call
+when it is the *whole* utterance, so "no, turn on the kitchen light" is still a
+command. The same whole-utterance rule applies to the other endings, so
 "turn off the porch light" and "stop the music" are treated as commands, not
 as hang-ups.
 
@@ -443,6 +449,7 @@ A turn that worked looks like this (wrapped for print):
 | `ended-max-turns` | Five recordings were used without a goodbye. |
 | `ha-unavailable` | Home Assistant could not be reached at all; the call was apologised out. |
 | `bias-failed` | The recogniser's hint list could not be built. The call continued with a smaller one. |
+| `tts-failed` | The voice failed twice on one call, so it apologised and hung up rather than continuing in silence. `tts_fails` carries the count. One failure is tolerated: a long answer can outrun the synthesiser's time limit while it is perfectly healthy, so one is a slow sentence and two is a broken voice. |
 | `fatal` | The assistant crashed. `detail` carries the exception. |
 
 `rec_end` says how the recording finished — `timeout` (the caller stopped
@@ -547,18 +554,35 @@ joins on that, not on the pickup:
 
 1. The phone rings for `wakeup_ring_seconds` (default 60).
 2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
-   answered, **the phone rings a second time**.
-3. If that is unanswered too, the wake-up is recorded `undelivered` and pushed to
-   `wakeup_push_target` (default `mobile_app_iphone`) as a **critical** alert, so
-   it sounds through Do Not Disturb.
+   answered, the scheduler re-checks the room and — if the handset is registered
+   and idle — **rings it a second time**. The second attempt gets the same check
+   the first one does, because an origination reports "queued" the moment
+   Asterisk accepts it and says nothing about whether a channel was ever
+   created. If the handset is not there, the re-ring is **skipped** and recorded
+   as `re-ring-skipped` with the state that caused it.
+3. If the wake-up still has not been delivered, it is recorded `undelivered` and
+   pushed to `wakeup_push_target` (default `mobile_app_iphone`) as a **critical**
+   alert, so it sounds through Do Not Disturb. The alert says only what is known
+   — picked up but silent, rung twice, or rung once with the second attempt
+   skipped — rather than asserting a second ring it cannot confirm.
 
 The second ring comes first on purpose: the phone is the loudest thing in the
 room and it is the device that was supposed to wake you. The push is the fallback
-for when the handset itself is the problem. Set `wakeup_push_target` to empty to
-disable the push and keep only the second ring.
+for when the handset itself is the problem. Set `wakeup_push_target` to empty and
+the escalation falls back to a Home Assistant notification card instead — the
+signal is not lost, it just stops sounding through Do Not Disturb.
 
 `wakeup_retry_seconds` must exceed `wakeup_ring_seconds`, or a call still ringing
 would be judged unanswered.
+
+Every step above is recorded in `/share/switchboard/delivery-outcomes.jsonl`:
+`ring-queued`, `deferred` (the room was busy or offline at the appointed time),
+`answered` and `spoken`, `no-answer` or `answered-silent`, `ring-requeued` or
+`re-ring-skipped`, and finally `undelivered`. One more is worth knowing:
+`unjudgeable` means the ledger itself could not be written, so the scheduler
+refused to guess whether anyone answered rather than escalate on a broken
+instrument. Reading that file end to end tells you what happened to a wake-up
+without needing the call log.
 
 **Smart extras** (during the wake-up call):
 
@@ -644,6 +668,25 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   proceeds (the guard fails open, so a state-read hiccup never suppresses an
   alert). The guard applies only to this endpoint — ordinary inbound/outbound
   calling, paging, and wake-up calls are unaffected.
+- **Duplicate suppression:** the same audio sent to the same phone again within a
+  few minutes is not played twice. Every render gets a fresh filename, so the
+  clip is compared by content rather than by name.
+
+  The window starts when an announcement is **actually played**, and nowhere
+  else. Until v0.85.0 it started when the request arrived — before the guards
+  above had run — so an announcement refused because the handset was not
+  registered began a suppression window anyway, and each retry pushed that
+  window forward. An announcement turned away once could never be delivered
+  while the caller kept trying, which is the opposite of what a retry is for.
+  Every refusal path now leaves the window untouched.
+
+  It is a rate limit, not a lock: identical content repeated on a timer plays
+  once per window, rather than once and then never again.
+- **Every outcome is recorded**, in `/share/switchboard/delivery-outcomes.jsonl`:
+  `originate-queued` when the call was placed, and `too-long`,
+  `duplicate-suppressed`, `skipped-busy`, `unreachable`, `originate-error` or
+  `originate-refused` when it was not. An announcement that never became a call
+  has no call-quality record, so this ledger is the only place it appears.
 
 ---
 
@@ -895,8 +938,7 @@ mobile — in **both** dial modes, and before any trunk pattern can match.
 That explicit handling matters: in prefix mode the outbound pattern `_9.` also
 matches `911`, and before v0.49.0 it would strip the prefix and dial the
 remainder (`11`) out to the PSTN — a wrong call placed during an emergency.
-Anyone relying on these phones should be told to keep a mobile for emergencies;
-anyone relying on these phones should be told to keep a mobile for
+Anyone relying on these phones should be told to keep a mobile for
 emergencies.
 
 ### Registration resilience
@@ -1032,9 +1074,14 @@ detector (which exists to catch a broken conversation) would fire on their
 perfectly normal shape. Conversations and the interactive menus alert exactly
 as before.
 
-> One path stays unmeasurable: an announcement pushed from Home Assistant via
-> `/api/announce` is originated straight into `Playback` with no dialplan
-> context, so there is no hangup extension for it to report from.
+> HA-pushed announcements **are** measured. Since v0.57.0 `/api/announce`
+> originates into the thin `[switchboard-announce-play]` context rather than
+> straight into `Playback`, so it has a hangup extension and writes an ordinary
+> `announce`-tagged record — recorded, never alerting, like the other playback
+> legs. What has no quality record is an announcement that never became a call
+> at all: one refused as too long, suppressed as a duplicate, skipped because
+> the handset was busy, or turned away because it was not registered. Those are
+> in the delivery ledger instead.
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
@@ -1077,7 +1124,7 @@ recovery notice when they return to normal — again under that device's shared
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever any phone is missing — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
-| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise call-quality alerts — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. |
+| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered and played nothing, or stopped before the end of its script: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
@@ -1116,7 +1163,9 @@ recovery notice when they return to normal — again under that device's shared
 
 Switchboard uses **G.711 µ-law only**, everywhere — every endpoint (rooms and the
 trunk) is pinned to `disallow = all` / `allow = ulaw`. There is no codec option; it
-isn't configurable, and no HD/Opus module is even installed. This is deliberate:
+isn't configurable, and no HD/Opus module is even installed. **Nothing is ever
+transcoded between codecs, and nothing ever has been** — no other codec can be
+negotiated. This is deliberate:
 
 - **Antique analog handsets are narrowband by physics** — the carbon/electret
   element and the two-wire loop top out around 300–3400 Hz. Wrapping that in Opus
@@ -1133,6 +1182,20 @@ and operator console show the negotiated codec per active call, so you can confi
 it reads "µ-law".
 
 ---
+
+**One thing is converted, and it is not a codec.** Asterisk's internal working
+format is signed linear, so anything that needs raw samples converts to and from
+µ-law inside the box. Speech recognition does — a recording has to be decoded
+before it can be transcribed, and that is unavoidable.
+
+Playing a prompt used to as well, and that one was avoidable: all 28 shipped
+prompts were 16-bit PCM with no µ-law copy, so every greeting, wake-up prompt and
+page was converted in real time — eight legs at once during a house-wide page.
+Since v0.82.0 each prompt also ships as `.ulaw`, and Asterisk picks the file that
+matches the channel, so the conversion simply does not happen. The `.wav` masters
+stay: they are the editable source, and a build check fails if a prompt and its
+µ-law twin ever drift apart.
+
 
 ## 14. Troubleshooting
 

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.86.0
+
+The manual, checked line by line against the code it describes — and a bug in
+last release's own fix.
+
+**The alert that was fixed for over-claiming had started under-claiming.** Two
+releases ago the wake-up escalation stopped asserting "the phone rang twice"
+when it could not know that. The replacement recorded whether the second ring
+went out — into a variable that was discarded a line before it was saved, on the
+one path where the ring actually happened. So the alert now said the second
+attempt had been skipped on every call where it had not been. The flag is
+written where it is read, and the test that missed it no longer sets it by hand:
+it rings the phone and lets the code record what it did.
+
+**The security policy understated what a log holds.** Its table of where
+Asterisk writes said the private log carries only notices, warnings and errors.
+That stopped being true two releases ago, when that log started recording
+whether the phones were reachable. A document a reader consults specifically to
+learn what is written down should not be the last to know.
+
+**Thirty-one other statements were wrong**, most of them about behaviour that
+changed underneath them. The manual said the durable log ignored one setting
+when it now ignores it differently; that announcements pushed from Home
+Assistant could not be measured, which stopped being true nine months ago; that
+seven speech features hold the recogniser in memory, while listing six. It told
+readers that `933` reads back what a carrier would see — it does not, and that
+one mattered more than the rest, because it describes something a person might
+rely on in an emergency and it is answered here with the same "not carried"
+notice as `911`.
+
+One sentence appeared twice in a row, joined by a semicolon, in the emergency
+section. That was mine, from five releases ago.
+
+**And four releases of behaviour were undocumented.** Saying "no" now ends a call
+with the assistant; two voice failures end one rather than looping in silence;
+prompts ship in the format the phones actually speak, so playing one no longer
+converts it; and an announcement refused once no longer suppresses its own
+retry. The manual now also names the ledger files by path and lists every
+outcome each one writes — which it had never done, so a reader could see that
+outcomes existed without being able to find them.
+
+That last part is now checked rather than trusted. The outcome names in the
+manual are read out of the manual itself and each one must be a string the code
+actually writes, so a name that drifts or is invented fails the build. Deriving
+them from the document rather than from a list kept beside the test is the whole
+point: a checker that decides for itself what to check is only checking itself.
+
 ## 0.85.0
 
 **An announcement that was refused once could never be delivered again.**
