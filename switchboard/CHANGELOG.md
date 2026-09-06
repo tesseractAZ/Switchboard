@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.82.0
+
+Two findings from the first calls made after the assistant learned to keep a
+record of itself.
+
+**Declining did not end the call.** The assistant asks "Anything else?", and the
+natural answer to that is "no" — which was sent to Home Assistant, matched
+nothing, and came back "Sorry, I couldn't understand that." The caller then had
+to say something longer to get out. It happened on a real call and it is now
+fixed: a bare decline ends the call, as do "nope", "nah", "no I'm good" and
+"that's it".
+
+The reason it was not simply added to the list of words that hang up is that
+"no" appears inside real commands — "no, the kitchen one" — and a hang-up word
+ends the call wherever it appears. A decline only ends the call when the whole
+sentence is one, so "no, turn on the kitchen light" is still a command.
+
+This was invisible before this release's predecessor. Nothing had ever recorded
+what the assistant said back, so a turn that answered the caller and a turn that
+told them it had not understood looked identical everywhere.
+
+**Every spoken prompt was being converted, on every playback.** All 28 recorded
+prompts ship as 16-bit PCM, while every phone in the house speaks G.711 u-law
+and nothing else. Asterisk converted each prompt in real time each time it
+played — including all eight legs of a house-wide page at once. Each prompt now
+also ships in u-law, and Asterisk picks the one that matches the phone, so the
+conversion stops happening. The originals stay: they are the editable masters,
+and a test now fails the build if the two ever drift apart or if a new prompt
+arrives without its pair.
+
+To answer the question that prompted the look: **nothing is transcoded between
+codecs, and nothing ever has been.** Every phone and the outside line are
+configured to speak u-law only, so no other codec can be agreed on. The
+conversions above are between u-law and Asterisk's internal working format,
+which is a different thing — one is unavoidable (speech recognition needs raw
+audio) and the other, until now, was not.
+
+**Also measured for the first time:** a turn with the voice assistant costs the
+caller 10 to 17 seconds, about seven of which are the machine thinking. Speech
+recognition is the floor at a very consistent 2.7 seconds. Recorded in
+[PERFORMANCE.md](PERFORMANCE.md), along with the wired-versus-cordless jitter
+gap, which is two orders of magnitude on the same PBX at the same moment.
+
+**And a correction:** the documentation screenshots were reported as 37 releases
+stale. They are not. The refresh job could not run at all until the previous
+release fixed it; now that it can, it re-renders both images from the live
+interface code and produces files identical to the committed ones — because
+neither rendered surface has changed since. They were dated by their last commit
+rather than checked, which is the same mistake as calling a field's ship date a
+measurement.
+
 ## 0.81.0
 
 Documentation, checked against the code rather than against memory — and one

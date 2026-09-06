@@ -342,7 +342,15 @@ GOODBYE_PHRASES = (
     ("never mind", "nevermind"),
     ("that s all", "goodbye"),
     ("that is all", "goodbye"),
+    ("that s it", "goodbye"),
+    ("that is it", "goodbye"),
 )
+
+# A bare decline. These are NOT goodbye words — a goodbye word ends the call
+# whenever it appears in an otherwise-filler utterance, and "no" appears inside
+# real commands ("no, the kitchen one"). They end the call only when the whole
+# utterance is a decline, which the rule in is_goodbye() enforces.
+DECLINE_WORDS = {"no", "nope", "nah"}
 
 
 def is_goodbye(text: str) -> bool:
@@ -363,9 +371,32 @@ def is_goodbye(text: str) -> bool:
     # Nothing here may also be a goodbye word: a word in both sets would satisfy
     # the `any` clause on its own and turn a filler-only utterance into a hangup.
     filler = {"that", "s", "m", "it", "all", "ok", "okay", "you", "please", "no",
-              "im", "i", "am", "for", "now", "mind", "never", "much", "a", "lot"}
-    return (any(w in GOODBYE_WORDS for w in words)
-            and all(w in GOODBYE_WORDS or w in filler for w in words))
+              "im", "i", "am", "for", "now", "mind", "never", "much", "a", "lot",
+              # "no i'm good" — filler alone can never end a call (the `any`
+              # clause needs a goodbye or a decline word), so widening this set
+              # only ever makes an existing terminator reachable through more
+              # natural phrasing.
+              # ...but NOT a goodbye word. "done" was added here in a first
+              # draft and is already a terminator, which is precisely the
+              # collision the paragraph above forbids.
+              "good", "were", "we", "re", "fine"}
+    if (any(w in GOODBYE_WORDS for w in words)
+            and all(w in GOODBYE_WORDS or w in filler for w in words)):
+        return True
+    # ★ A BARE DECLINE ENDS THE CALL. The assistant asks "Anything else?" and the
+    # natural answer is "no" — which until v0.82.0 was sent to Home Assistant,
+    # matched nothing, and came back "Sorry, I couldn't understand that." Measured
+    # on a live call on 2026-09-06: turn 4 of 5 was the caller saying "no" and
+    # being told the assistant did not understand, then having to say "no thank
+    # you, goodbye" to get out.
+    #
+    # The whole-utterance rule is what keeps this safe. A decline hangs up only
+    # when every other word is filler, so "no" and "nope" end the call while
+    # "no, turn on the kitchen light" is still a command — which is exactly why
+    # these are kept out of GOODBYE_WORDS, where any one of them would end a call
+    # from inside a sentence.
+    return (any(w in DECLINE_WORDS for w in words)
+            and all(w in DECLINE_WORDS or w in filler for w in words))
 
 
 def build_bias(by_area: dict) -> str:

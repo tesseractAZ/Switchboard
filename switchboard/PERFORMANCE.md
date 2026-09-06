@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Data as of 2026-09-06.** Software version 0.80.0. Quantiles are nearest-rank.
+**Data as of 2026-09-06.** Software version 0.82.0. Quantiles are nearest-rank.
 
 ---
 
@@ -136,6 +136,12 @@ ports mid-warmup and are excluded).
 | Median across the eight ports | 1.79 ms | 2.37 ms | 2.54 ms | 3.51 ms |
 | Worst single port | 2.14 ms | 3.84 ms | 4.49 ms | **5.60 ms** |
 
+**Receive-jitter peak, wired versus cordless.** The four legs recorded on wired
+handsets since the field was renamed read 0.12, 0.88, 1.12 and 1.25 ms. The
+cordless reaches 58.25 ms. Two orders of magnitude, on the same PBX, at the same
+moment — which is why a single fleet figure is useless and the two are separated
+everywhere in this document.
+
 **Fleet worst, including the cordless** — a third population again:
 
 | | n | median | p90 | max |
@@ -190,16 +196,74 @@ in production.** Its behaviour is covered by tests, which is a different claim.
 
 ## 4. Voice assistant
 
-**No data. Accrual begins 2026-09-06.**
+**7 turns across 2 calls, 2026-09-06.** The ledger shipped in 0.80.0; before it,
+nothing the assistant did survived the call, so this is the entire history.
 
-`/data/state/assistant.jsonl` does not exist yet — the ledger shipped in 0.80.0
-and nobody has dialled `47` since. Before 0.80.0 nothing the assistant did
-survived the call, so there is no history to report and no way to reconstruct
-one.
+| | n | min | median | max |
+| --- | ---: | ---: | ---: | ---: |
+| Speech recognition | 7 | 2.69 s | 2.72 s | **8.01 s** |
+| Home Assistant round-trip | 5 | 0.02 s | 0.10 s | 1.30 s |
+| Speech synthesis | 5 | 1.33 s | 1.63 s | 2.79 s |
+| **Whole turn** | 5 | **10.2 s** | 10.6 s | **16.7 s** |
+| Recording captured | 7 | 2.64 s | 3.56 s | 5.06 s |
 
-Its fields are documented in [DOCS §4](DOCS.md#4-the-voice-operator--directory-assistance).
-Recognition, Home Assistant round-trip and speech-synthesis timings have never
-been measured on this system; the script did not import `time` until 0.80.0.
+Recognition is the floor and it is remarkably flat — six of seven turns landed
+between 2.69 and 2.87 seconds regardless of how much was said, which says the
+cost is model load and round-trip rather than audio length. The seventh took
+8.01 s on the longest recording (5.06 s of audio).
+
+A turn costs the caller **10 to 17 seconds**, of which roughly seven are the
+machine thinking. All seven recordings ended on the silence timeout; none was cut
+off by a hangup.
+
+**Three of seven turns did not do what was asked.** Two were Home Assistant
+declining to match a sentence (`response_type: error`) — notably, one phrasing of
+a brightness command failed while a differently-worded version of the same
+request, in the very next turn, succeeded. That is the sentence matcher's
+behaviour, not this system's. The third was this system's fault: the caller
+declined the *Anything else?* prompt and was told "Sorry, I couldn't understand
+that", because a bare decline was not recognised as an ending.
+
+(The utterances themselves are deliberately not quoted here. They are in the
+ledger, which is why the ledger is not in the shared folder.) Fixed in 0.82.0 — and worth stating plainly that it was invisible
+until this ledger existed, because nothing had ever recorded what the assistant
+said back.
+
+```
+sudo docker exec app_<slug> sh -c 'tail /data/state/assistant.jsonl'
+```
+
+---
+
+## 4a. Is anything transcoded?
+
+**On the wire, never.** `pjsip.conf` sets `disallow = all` / `allow = ulaw` on
+the shared endpoint template and on the trunk, so G.711 u-law is the only codec
+that can be negotiated. Every leg recorded since 0.77.0 carries
+`codec: ulaw`. No call has ever been converted between codecs, and none can be
+without a configuration change.
+
+**Inside Asterisk, on nearly every scripted call.** Two conversions run:
+
+| | Why | Cost |
+| --- | --- | ---: |
+| u-law → slin | `RECORD` for speech recognition needs raw samples | 9,000 µs/s |
+| slin → u-law | every prompt playback, until 0.82.0 | 9,000 µs/s |
+
+The second was avoidable and is now gone. All 28 shipped prompts were 8 kHz
+16-bit PCM with no u-law copy, so Asterisk converted each one in real time on
+every playback — including all eight legs of a house-wide page, simultaneously.
+0.82.0 ships a `.ulaw` sibling for each; Asterisk selects the file matching the
+channel, so the conversion simply stops happening.
+
+**The ledger under-reports this, and that is worth knowing before trusting it.**
+`read_format` is sampled once, in the hangup extension. 23 of 246 legacy legs
+recorded `slin`, concentrated entirely in the recognition paths — operator 17,
+directory 3, wake-up 1, status 1, assistant 1, and zero on room-to-room,
+announce or trunk legs. But *every* operator call runs `RECORD`, so if the field
+reported occurrence it would read `slin` on all 83 of them, not 17. It captures
+whichever format the channel happened to be in at hangup. Read it as evidence
+that conversion happens on those paths, never as a count of how often.
 
 ---
 
