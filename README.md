@@ -133,10 +133,14 @@ configuration — **the add-on options are the single source of truth**; hand ed
 | `44`  | Page all — house-wide intercom | `page_ext` |
 | `45`  | Dial-a-status (live Home Assistant readings) | `status_ext` |
 | `46`  | Announce out your Home Assistant speakers | `announce_ext` |
+| `47`  | Local voice assistant — ask Home Assistant anything (**off by default**) | `assistant_ext` |
 | `411` | Directory assistance | `directory_ext` |
+| `911` | Answered with a spoken notice that these phones **cannot reach emergency services** | always on |
+| `933` | The FCC's number for testing an emergency line — reads back what a carrier would see | always on |
 
-Every feature code `41`–`411` is configurable and can be disabled; dial `0` (the
-operator) can be turned off but not re-assigned. On a live call, analog phones
+Every feature code `41`–`47` and `411` is configurable (`*_ext`) and can be
+disabled (`*_enabled`); dial `0` (the operator) can be turned off but not
+re-assigned. `911` and `933` are always emitted and cannot be moved. On a live call, analog phones
 blind-transfer with `##` and attended-transfer with `*2` (internal destinations
 only). The table shows the defaults.
 
@@ -184,9 +188,14 @@ WP826 WiFi cordless ──────WiFi────────────�
 - **[Security](switchboard/SECURITY.md)** — the security model, toll-fraud defenses,
   the accepted LAN-local risks, what you must configure, and how to report an issue.
 - **[Changelog](switchboard/CHANGELOG.md)** — the full release history.
-- **Printable manual** — every [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
-  ships the README + Security + reference assembled into a **Word (`.docx`)** and
-  **PDF** you can download and read offline.
+- **[Measured behaviour](switchboard/PERFORMANCE.md)** — what the system is
+  observed doing in service, from its own ledgers: call quality, link health,
+  which alarms have ever actually fired.
+- **Printable manual** — a [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
+  carries the README + Security + reference assembled into a **Word (`.docx`)**
+  and **PDF** you can read offline. Releases v0.69.0 through v0.80.0 shipped
+  without one: the workflow that builds it waited on an event that a
+  bot-created release does not emit. Fixed in v0.81.0.
 
 Every version is tagged and released, so `git checkout vX.Y.Z` reproduces the exact
 source that built any release — see

@@ -4,7 +4,7 @@
 
 The point of this feature is that a phone can reach Home Assistant's intent
 matcher with NOTHING on the path leaving the Pi -- this add-on's whisper, this
-add-on's piper, Home Assistant's built-in agent. The dialplan wiring is asserted
+add-on's own espeak-ng voice, Home Assistant's built-in agent. The dialplan wiring is asserted
 in test_switchboard_config.py; THIS file asserts the AGI's own behaviour, which
 a source scan cannot: that a command containing a goodbye word is not mistaken
 for a hangup, that the turn loop is bounded, and that an unreachable Home

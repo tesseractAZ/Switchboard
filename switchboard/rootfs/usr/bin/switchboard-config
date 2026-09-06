@@ -815,7 +815,7 @@ def render_assistant_context() -> list[str]:
 
     Reached by dialing assistant_ext. Everything the AGI does stays on the Pi:
     the add-on's own whisper transcribes, Home Assistant's BUILT-IN conversation
-    agent matches the intent, and the add-on's own piper voice speaks the reply.
+    agent matches the intent, and the add-on's own espeak-ng voice speaks the reply.
     Default OFF -- the flow can only act on entities that have been exposed to
     Assist, so it is opt-in rather than something a stock install answers with."""
     return [

@@ -1211,3 +1211,58 @@ def test_a_truncated_delivery_is_named_but_only_the_alarm_clock_alerts() -> None
     plain = leg("rooms", "")
     check("F36: an ordinary call with no stage is unaffected",
           plain["quality"] == "excellent" and plain["notify"] is False)
+
+
+def test_a_telephone_number_is_not_mirrored_to_the_readable_folder() -> None:
+    """v0.81.0. `ext` holds a full telephone number on trunk legs, and the
+    /share mirror is readable from outside the container.
+
+    Measured on the live ledger: 45 of 252 rows carried a complete number — 10
+    inbound trunk legs where `ext` correctly holds the calling party, 32 internal
+    `rooms` legs where a number had reached the field via the caller-ID rewrite,
+    and 3 `operator` legs, two of which carry the trunk prefix plus a number this
+    house DIALLED.
+
+    /share is host-mounted and captured in add-on backups. The private /data
+    ledger keeps the number in full; the mirror keeps only enough to correlate
+    two legs of one call.
+    """
+    d = tempfile.mkdtemp()
+    try:
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        inbound = cq.build_record(_Args(source="dialplan", tag="from-trunk",
+                                        chan="PJSIP/trunk-0000000a",
+                                        cid="2025550147", billsec="30",
+                                        rxcount="1500", txcount="1500",
+                                        rxmes="88", txmes="88"))
+        check("redact: the PRIVATE ledger keeps the number in full",
+              inbound["ext"] == "2025550147")
+        cq.append_outcome(inbound)
+        line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+        check("redact: the readable mirror does NOT",
+              line["ext"] != "2025550147")
+        check("redact: only the last four survive", line["ext"] == "******0147")
+        check("redact: and the mirror says it was redacted",
+              line.get("ext_redacted") is True)
+        check("redact: nothing else is withheld — this is not a curated mirror",
+              set(line) - {"ext_redacted"} == set(inbound))
+
+        # An ordinary extension is untouched: it is not personal data, and
+        # withholding it would break every reader of this file.
+        room = cq.build_record(_Args(source="dialplan", tag="rooms",
+                                     chan="PJSIP/16-00000004", billsec="30",
+                                     rxcount="1500", txcount="1500",
+                                     rxmes="88", txmes="88"))
+        cq.append_outcome(room)
+        line2 = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+        check("redact: a real extension is mirrored unchanged",
+              line2["ext"] == "16" and "ext_redacted" not in line2)
+
+        # A 6-digit extension is the longest the schema allows and must survive.
+        long_ext = dict(room, ext="123456")
+        cq.append_outcome(long_ext)
+        line3 = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+        check("redact: the longest legal extension is not mistaken for a number",
+              line3["ext"] == "123456")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)

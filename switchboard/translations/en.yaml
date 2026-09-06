@@ -83,7 +83,7 @@ configuration:
     description: Dial this extension to record/trigger an announcement to the speakers. Must be 2–6 digits and not clash with a room or another feature code.
   announce_players:
     name: Announce Target Speakers
-    description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.west_hallway). Add one entity ID per line.
+    description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.kitchen_speaker). Add one entity ID per line. Empty until you set it.
   announce_token:
     name: Announce API Token
     description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / another add-on to speak alerts on the cordless). Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.

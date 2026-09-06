@@ -3,9 +3,10 @@ name: Publish release
 # Second half of the release pipeline: gate on the tests, build the add-on image
 # for every declared architecture, and cut the GitHub Release.
 #
-# It does NOT attach the manual — docs.yml already does that on
-# `release: published`, so creating the release here triggers it. Two workflows
-# building the same .docx would just race to upload the same asset.
+# It does not BUILD the manual — docs.yml does — but it must DISPATCH it. A
+# release created here with GITHUB_TOKEN does not fire `release: published`
+# (GitHub's recursion guard), so relying on that event silently shipped fifteen
+# releases with no manual attached. See the dispatch step at the end.
 #
 # Triggered by tag-release.yml via workflow_dispatch (a tag pushed with
 # GITHUB_TOKEN cannot trigger this on its own), or by a `v*` tag pushed by a
@@ -196,7 +197,28 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
           fi
-          echo "Release $TAG is live; docs.yml will attach the manual."
+          echo "Release $TAG is live."
+
+      # ★ THE MANUAL DOES NOT ATTACH ITSELF.
+      #
+      # docs.yml triggers on `release: published`. A release created above with
+      # the default GITHUB_TOKEN does NOT emit that event — GitHub's recursion
+      # guard, the same one tag-release.yml documents and works around for its
+      # own tag push. The consequence was silent and lasted fifteen releases:
+      # v0.68.0 was the last one to ship a manual, every release from v0.69.0 to
+      # v0.80.0 shipped zero assets, and every workflow in the chain stayed
+      # green throughout because each did its own job correctly.
+      #
+      # workflow_dispatch via the API is exempt from the guard, so dispatch it
+      # explicitly — exactly the remedy tag-release.yml applies one link up.
+      - name: Build and attach the manual
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run docs.yml --ref "$TAG" -f tag="$TAG"
+          echo "::notice::Dispatched docs.yml for $TAG."
 
       - name: Summary
         if: always()

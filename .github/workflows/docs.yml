@@ -17,6 +17,18 @@ on:
     branches: [main]
   release:
     types: [published]
+  # ★ The release path CANNOT rely on the event above. publish-release.yml
+  # creates the Release with the default GITHUB_TOKEN, and GitHub does not emit
+  # `release: published` for a release created that way — its recursion guard.
+  # Fifteen releases (v0.69.0 to v0.80.0) shipped no manual because of it, with
+  # every workflow green. workflow_dispatch is exempt from the guard, so
+  # publish-release.yml now dispatches this explicitly and passes the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build the manual for and attach it to"
+        required: false
+        type: string
 
 # Read is enough for the PR/push artifact path; the release path needs write to
 # upload assets onto the Release.
@@ -68,10 +80,10 @@ jobs:
       # On a published release, attach both files (versioned filenames) as release
       # assets. Race-free: the release already exists when this event fires.
       - name: Attach to release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.tag != '' || inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           v="${TAG#v}"
           cp Switchboard-Documentation.docx "Switchboard-Documentation-${TAG}.docx"
@@ -121,7 +133,7 @@ jobs:
   # refresh may shift their appearance once and then stay stable.
   screenshots-refresh:
     name: Refresh committed screenshots (on release)
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || inputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -140,7 +152,7 @@ jobs:
 
       - name: Commit only if the render actually changed
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           if git diff --quiet -- switchboard/docs/img; then
             echo "screenshots unchanged — nothing to commit"

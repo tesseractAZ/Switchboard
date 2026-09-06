@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.81.0
+
+Documentation, checked against the code rather than against memory — and one
+disclosure the checking turned up.
+
+**Other people's telephone numbers were being written where they could be read.**
+On a trunk call the call-quality record has no extension to store, so it stores
+the number instead: the caller's on the way in, the dialled digits on the way
+out. That record is mirrored to the shared folder, which is readable from
+outside the add-on and included in backups. Forty-five of the last 252 calls had
+a complete number in them. Most belong to people who rang this house and had no
+say in the matter.
+
+The mirror now keeps only the last four digits; the private copy, which cannot
+be read from outside, still holds the number in full. The mirror was made
+deliberately complete on the argument that a partial copy is "not a smaller
+truth, it is a different claim" — which was reasoned about having every field
+for auditing, and never about who could read them.
+
+**The printable manual stopped being attached to releases fifteen releases ago.**
+Every release from v0.69.0 to v0.80.0 shipped without one while the README
+promised it with each. Nothing was broken, exactly: the workflow that builds the
+manual waits for a release to be published, and a release created by automation
+does not announce itself that way. Every workflow in the chain stayed green
+because each did its own job correctly and no one owned the gap between them.
+The release now asks for the manual explicitly instead of waiting to be told.
+
+While looking, two more: the manual has been carrying two tables of contents
+because the code that removes the hand-written one was looking for a heading
+that does not exist and quietly gave up when it could not find it; and the
+committed screenshots are from v0.42.2.
+
+**The add-on shipped this author's own two speakers as everyone's default.**
+`announce_players` came preset to two entity IDs that exist in exactly one
+house. Anyone else installing it got announcements aimed at devices they do not
+have, and this household's room names in a public repository. It now ships
+empty.
+
+**Corrections to things the manual asserted that were no longer true:** the
+wake-up reconciler waits for a *spoken* milestone rather than a pickup; the
+round-trip alert fires on a call's mean or peak, not on a 400 ms last reading;
+seven speech features hold the recogniser in memory, not six; a wake-up that was
+answered and played nothing now alerts, which is the one exception to playback
+legs never alerting; and the reference gateway dial plan admitted neither the
+voice assistant on `47` nor `911` — which meant following the manual exactly
+produced a house where the emergency notice could not be dialled.
+
+The README had never mentioned the voice assistant, `911`, or `933`. The
+security policy sat somewhere GitHub does not look for one, so the repository
+offered no way to report a vulnerability privately; there is now a policy at the
+root. And that policy described two places Asterisk writes its log when there
+are three — the omitted one being the copy readable from outside the add-on.
+
+**New: [a record of what the system actually does](PERFORMANCE.md)**, measured
+from its own ledgers rather than from intent. Call quality over 252 legs, link
+health over 1,704 cycles, and — the part worth reading — which alarms have ever
+gone off. Five of six never have, and the document separates the ones that are
+quiet because nothing is wrong from the one that could not have fired if
+something were.
+
+Its first draft got eight numbers wrong, including counting the day a field
+shipped as though it were a measurement. That is recorded in the document
+itself, because the mistake it describes is the one it exists to catch.
+
 ## 0.80.0
 
 The voice assistant kept no record of itself, and now keeps one that stays where
