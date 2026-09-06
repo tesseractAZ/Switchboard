@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.87.0
+
+Finishing the documentation sweep turned up two things that were not
+documentation problems.
+
+**Leaving the wake-up alert target blank never turned it off.** The setting is
+read into a variable and given a default, and the form used gives that default
+to an *empty* value as well as a missing one. So blanking the field quietly put
+the original target back. Three documents and the script's own comment all said
+blank disables the alert; they were describing the intention, and the one line
+that decides it disagreed. The line now treats blank as blank, which makes every
+one of those statements true as written.
+
+**A caller's telephone number was still reaching the shared folder.** Five
+releases ago the call-quality records written there were changed to keep only
+the last four digits of anything that is not an extension. The same number was
+also being written a second time, in the human-readable log line beside each
+record, and that log goes to the same shared folder in full. Measured on the
+running system after the earlier fix: fourteen such lines, two distinct numbers.
+Redacting one writer and not the other left the disclosure in place and the
+record of it looking closed. Both are truncated now, by the same rule.
+
+**And the manual, finished.** The previous release corrected the statements that
+had become false; this one fills what was missing and settles two places where
+the document argued with itself.
+
+It explained that the assistant's log cannot be read without a shell and then,
+fourteen lines later, told the reader to open a shell and read it. Both were
+meant to be true — the file is out of reach of a file browser or another add-on,
+and not out of reach of whoever administers the machine — and now they say so.
+It described announcements pushed from Home Assistant as unmeasurable in a
+paragraph directly beneath a sentence listing them among the things that are
+measured; the first was nine months out of date and is gone.
+
+Newly written down: the second outage detector, which catches a failure that
+begins and ends between two health checks — the only one this system has had
+lasted 119 seconds and fell inside a single gap; the third reason a quality
+reading is thrown away, which is the one that decides whether a call reads
+"excellent" or "unknown"; transfers, which have been writing quality records
+since v0.77.0 and were listed nowhere; where each ledger actually lives, so a
+reader can find the files the manual keeps referring to; and that the announce
+feature needs speakers configured before it will do anything at all — the
+default is now empty, so a fresh install dialling that code is told there are
+none.
+
 ## 0.86.0
 
 The manual, checked line by line against the code it describes — and a bug in

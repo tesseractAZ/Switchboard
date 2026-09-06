@@ -1312,7 +1312,7 @@ def render_rtpqos_context() -> list:
         ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?nomedia)',
         # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);
         # FILTER to phone chars so it can't forge log fields or inject a line.
-        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${FILTER(0-9+*#,${CALLERID(num)})} "
+        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${IF($[${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6]?****${FILTER(0-9+*#,${CALLERID(num)}):-4}:${FILTER(0-9+*#,${CALLERID(num)})})} "
         "codec=${CHANNEL(audionativeformat)} readfmt=${CHANNEL(audioreadformat)} "
         "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
         f"rxcount=${{RXC}} txcount=${{TXC}} "
@@ -1331,7 +1331,7 @@ def render_rtpqos_context() -> list:
         # it did not. The row carries only what is actually known -- who, which
         # leg, how far it got, why it ended -- and invents no metrics.
         " same = n(nomedia),Verbose(0,[rtpqos] chan=${CHANNEL(name)} "
-        "cid=${FILTER(0-9+*#,${CALLERID(num)})} nomedia=1 "
+        "cid=${IF($[${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6]?****${FILTER(0-9+*#,${CALLERID(num)}):-4}:${FILTER(0-9+*#,${CALLERID(num)})})} nomedia=1 "
         "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} tag=${ARG1} "
         "stage=${FILTER(a-z,${SW_STAGE})})",
         callqos_nomedia,

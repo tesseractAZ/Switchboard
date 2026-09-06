@@ -83,7 +83,7 @@ configuration:
     description: Dial this extension to record/trigger an announcement to the speakers. Must be 2–6 digits and not clash with a room or another feature code.
   announce_players:
     name: Announce Target Speakers
-    description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.kitchen_speaker). Add one entity ID per line. Empty until you set it.
+    description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.kitchen_speaker). Add one entity ID per line. REQUIRED for announcements to work — while this is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up.
   announce_token:
     name: Announce API Token
     description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / another add-on to speak alerts on the cordless). Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.
@@ -191,9 +191,11 @@ configuration:
   wakeup_retry_seconds:
     name: Wake-up Retry Delay
     description: >-
-      Seconds after a wake-up starts ringing before an unanswered call is rung a
-      second time. Must be longer than the ring time or a call still ringing
-      would be judged unanswered. Default 90.
+      Seconds after a wake-up starts ringing before an unanswered call is
+      re-checked and, if the handset is registered and idle, rung a second time.
+      If it is not there the second ring is skipped and recorded rather than
+      placed into nothing. Must be longer than the ring time, or a call still
+      ringing would be judged unanswered. Default 90.
   wakeup_push_target:
     name: Wake-up Failure Push Target
     description: >-
@@ -207,13 +209,13 @@ configuration:
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.
   status_power_battery:
     name: Status Menu — Battery Level Entity
-    description: Numeric entity for stored battery energy or state of charge, spoken by the "power" branch of the status menu. Blank omits it.
+    description: Entity giving battery charge as a PERCENTAGE, spoken by the "power" branch of the status menu as "the home battery is at N percent". A sensor reporting kWh will be read out as if it were a percent. Blank omits it.
   status_power_runway:
     name: Status Menu — Battery Runway Entity
     description: Numeric entity for how many hours of battery run time remain, spoken by the "power" branch of the status menu. Blank omits it.
   status_power_solar:
     name: Status Menu — Solar Fraction Entity
-    description: Numeric entity for the fraction of current load being met by solar, spoken by the "power" branch of the status menu. Blank omits it.
+    description: Entity giving the solar share of current load as a PERCENTAGE, spoken as "solar is covering N percent of the load". Blank omits it.
   directory_enabled:
     name: Voice Directory (411)
     description: Enable the spoken room directory — dial the extension below and say (or hear) a room name to be connected, like calling 411.

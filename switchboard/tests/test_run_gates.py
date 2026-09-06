@@ -145,7 +145,14 @@ def test_every_option_read_is_also_exported():
             # The captured value must reach the process. Either the shell var
             # itself is exported, or (the common idiom) it is defaulted into an
             # exported name: VAR="$(switchboard-opt x)"; export NAME="${VAR:-d}".
-            exported = re.search(rf'^export\s+[A-Z_][A-Z0-9_]*="\$\{{{var}(:-[^}}]*)?\}}"', src, re.M) \
+            # Both `${VAR:-d}` and `${VAR-d}` are exports. They are NOT the
+            # same thing and the difference was a live defect: with the colon an
+            # EMPTY value also takes the default, so blanking
+            # wakeup_push_target silently restored `mobile_app_iphone` while
+            # three documents and the script's own comment said blank disabled
+            # the push. Without the colon only an ABSENT key defaults, which is
+            # what "leave it empty to turn this off" has to mean.
+            exported = re.search(rf'^export\s+[A-Z_][A-Z0-9_]*="\$\{{{var}(:?-[^}}]*)?\}}"', src, re.M) \
                 or re.search(rf'^export\s+{var}\b', src, re.M)
             if not exported:
                 bad.append(f"{run.parent.name}/run: reads option '{opt}' into ${var} but never exports it")
