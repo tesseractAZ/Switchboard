@@ -217,6 +217,13 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
     household transcripts were already in the world-readable log. They were not,
     and the false belief nearly justified adding more.
     """
-    hits = [str(p.relative_to(ROOT)) for p, t in _text_files() if claim in t]
+    # ...excluding this file, which necessarily contains the string it forbids.
+    # It passed locally and failed in CI for exactly that reason: `git ls-files`
+    # does not list an untracked file, so the scan could not see itself until the
+    # commit landed. A scanner that matches its own pattern is a self-inflicted
+    # false positive, and the fix is scoping, not weakening the pattern.
+    me = Path(__file__).resolve()
+    hits = [str(p.relative_to(ROOT)) for p, t in _text_files()
+            if claim in t and p.resolve() != me]
     assert not hits, (f"{claim!r} is false — AGI stderr is inherited fd 2 and "
                       f"never reaches Asterisk's logger. Found in: {hits}")
