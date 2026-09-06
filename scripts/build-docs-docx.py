@@ -59,14 +59,24 @@ def read_version(repo_root: Path) -> str:
 
 
 def strip_manual_toc(docs: str) -> str:
-    """Remove DOCS.md's hand-maintained '## Table of Contents' block so it does
-    not duplicate Pandoc's generated one. Cuts from that heading up to the first
+    """Remove DOCS.md's hand-maintained contents block so it does not duplicate
+    Pandoc's generated one. Cuts from the contents anchor up to the first
     numbered chapter heading ('## 1. ...'); title-agnostic so it survives
-    chapter renames. If either anchor is missing, leaves the text untouched."""
-    m_toc = re.search(r'^## Table of Contents\b', docs, re.M)
+    chapter renames.
+
+    The anchor accepts both spellings. Until v0.81.0 it matched only
+    '## Table of Contents', while DOCS.md's list is a bold '**Contents**'
+    paragraph — so this function had been a silent no-op and every manual built
+    since carried two contents lists, one of them stale. The fallback below is
+    now LOUD: a strip function that quietly does nothing is indistinguishable
+    from one that worked."""
+    m_toc = re.search(r'^(?:## Table of Contents\b|\*\*Contents\*\*)', docs, re.M)
     m_ch1 = re.search(r'^## \d+\.\s', docs, re.M)
     if m_toc and m_ch1 and m_ch1.start() > m_toc.start():
         return docs[: m_toc.start()].rstrip() + "\n\n" + docs[m_ch1.start():]
+    print("WARNING: the hand-maintained contents block was NOT found "
+          f"(anchor={'yes' if m_toc else 'NO'}, chapter-1={'yes' if m_ch1 else 'NO'}) "
+          "— the manual will carry a duplicate contents list.", file=sys.stderr)
     return docs
 
 

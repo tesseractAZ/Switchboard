@@ -9,7 +9,7 @@ whole loop is:
 Nothing on that path leaves the Pi. The recording is transcribed by the
 add-on's own whisper server (``switchboard-stt``), the text is handed to Home
 Assistant's BUILT-IN intent matcher (``conversation.home_assistant`` via
-``ha_client.converse``), and the reply is synthesized by the add-on's own piper
+``ha_client.converse``), and the reply is synthesized by the add-on's own espeak-ng
 voice (``switchboard-tts``). No cloud STT, no cloud TTS, no cloud agent -- an
 internet outage does not disturb it.
 

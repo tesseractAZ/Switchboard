@@ -112,7 +112,7 @@ its default is fine.
 |--------|---------|-------|
 | `announce_enabled` | `true` | The announce feature on dial `46`. |
 | `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
-| `announce_players` | `media_player.west_hallway`, `media_player.guest_thermostat` | Home Assistant `media_player` entity IDs an announcement plays on. One per line. |
+| `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. Empty until you set it. |
 | `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
 
 ### Operator console
@@ -150,6 +150,10 @@ its default is fine.
 | `page_enabled` / `page_ext` | `true` / `44` | All-call paging / intercom and its dial code. |
 | `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
 | `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
+| `status_power_grid` | `""` | Entity whose on/off state says whether utility power is present, spoken by the **power** branch of dial-`45`. Accepts `input_boolean`, `binary_sensor`, `sensor` or `switch`. |
+| `status_power_battery` | `""` | `sensor` giving stored battery energy, spoken by the same branch. |
+| `status_power_runway` | `""` | `sensor` giving hours of runway remaining. |
+| `status_power_solar` | `""` | `sensor` giving the solar share of current load. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
 | `assistant_transcripts` | `true` | Keep what was said to the assistant, and its replies, in the add-on's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder). Turn it off to keep every timing and failure reason without the words. |
@@ -217,7 +221,7 @@ from the **saved** options even when the overlay names them:
 - `console_enabled`, `console_web_enabled` (telnet console, web terminal),
 - `link_health_enabled`, `device_health_enabled` (the two pollers),
 - `wakeup_enabled` (the wake-up scheduler),
-- `stt_resident` and the six speech-feature flags the resident recognizer gates
+- `stt_resident` and the seven speech-feature flags the resident recognizer gates
   its RAM on (`operator.enabled`, `wakeup_enabled`, `automation_enabled`,
   `status_enabled`, `announce_enabled`, `directory_enabled`),
 - `device_health_alerts`.
@@ -523,12 +527,23 @@ back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
 - If the room is busy or offline through a **10-minute grace window**, the wake-up
   is dropped and surfaced as a Home Assistant persistent notification.
 
-**If nobody answers** (v0.70.0). Ringing a phone is not the same as waking
-somebody, and until this release the system could not tell the difference: an
-originate reports "queued" the moment the PBX accepts it, so a wake-up that rang
-out and one that woke you were recorded identically. Now the delivery leg — which
-runs *only* after the call is answered — records that fact, and the scheduler
-checks for it:
+**If nobody answers** (v0.70.0, corrected in v0.78.0). Ringing a phone is not
+the same as waking somebody, and until v0.70.0 the system could not tell the
+difference: an originate reports "queued" the moment the PBX accepts it, so a
+wake-up that rang out and one that woke you were recorded identically.
+
+v0.70.0 had the delivery leg record that it was answered, and joined on that.
+That turned out to be the wrong fact. The record was written the instant the
+handset was picked up, before a word had played — so a wake-up that was answered
+in **silence** counted as delivered. It happened: on 2026-09-02 at 06:15:21 a
+handset answered and the far end dropped a second later, before the greeting,
+with zero audio packets transmitted. Somebody reached for a ringing phone at six
+in the morning, heard nothing, and every ledger read healthy.
+
+The delivery leg now records a `spoken` milestone written immediately **after
+the greeting has played** — Asterisk abandons the script the moment the channel
+drops, so reaching that point proves audio reached a live line. The scheduler
+joins on that, not on the pickup:
 
 1. The phone rings for `wakeup_ring_seconds` (default 60).
 2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
@@ -710,10 +725,13 @@ A dial plan that supports **prefix-free direct dial** (`direct_dial: true`, §9)
 reference home's `11`–`20` extensions:
 
 ```
-{ 0 | 1[1-9] | 20 | 4[1-6] | 411 | 1[2-9]xxxxxxxxx | \+x+ | *x+ | *xx*x+ }
+{ 0 | 1[1-9] | 20 | 4[1-7] | 411 | 911 | 933 | 1[2-9]xxxxxxxxx | \+x+ | *x+ | *xx*x+ }
 ```
 
-- `1[1-9]` = rooms 11–19; `20` = the softphone; `4[1-6]`/`411` = feature codes.
+- `1[1-9]` = rooms 11–19; `20` = the softphone; `4[1-7]`/`411` = feature codes
+  (`47` is the voice assistant, added in 0.69.0); `911`/`933` are always
+  emitted by the add-on and must be dialable from the gateway or the spoken
+  emergency notice cannot be reached at all.
 - `1[2-9]xxxxxxxxx` = 1 + 10-digit direct dial. This **overlaps** rooms 12–19
   (each is both a complete room *and* the start of an 11-digit number), so those
   extensions send only after the **No Key Entry Timeout** (`P85`) — or immediately
@@ -738,7 +756,8 @@ reference home's `11`–`20` extensions:
 For **pulse/rotary** phones, enable the **Pulse Dialing** option on that FXS port.
 
 If you're not using direct dial, a simpler prefix-mode plan works:
-`{ 1x | 20 | 4[1-6] | 411 | 0 | 9xxxxxxxxxx }` (dial `9` for an outside line).
+`{ 1x | 20 | 4[1-7] | 411 | 911 | 933 | 0 | 9911 | 9933 | 9xxxxxxxxxx }` (dial
+`9` for an outside line; `911` and `933` are accepted both bare and prefixed).
 Here rooms `11`–`19` send instantly (nothing longer starts with `1`), but the
 `41`/`411` overlap above is unchanged — it comes from the feature codes
 themselves, not from direct dial.
@@ -877,7 +896,8 @@ That explicit handling matters: in prefix mode the outbound pattern `_9.` also
 matches `911`, and before v0.49.0 it would strip the prefix and dial the
 remainder (`11`) out to the PSTN — a wrong call placed during an emergency.
 Anyone relying on these phones should be told to keep a mobile for emergencies;
-the printable guest card in the repo says exactly that.
+anyone relying on these phones should be told to keep a mobile for
+emergencies.
 
 ### Registration resilience
 
@@ -998,10 +1018,15 @@ assistance and outside calls, **and** — since v0.55.0 — wake-up set and
 delivery, paging, announcements and the voice menus. Before that only the first
 four reported, so the ledger under-reported activity roughly fivefold.
 
-**Recorded is not the same as alerted.** The three legs the PBX originates to
-play something *at* a phone — wake-up delivery, paging, announcements — are
-scored and stored honestly but never notify and never move
-`sensor.switchboard_last_call`. Nobody is on the line to act on an alert about
+**Recorded is not the same as alerted.** The legs the PBX originates to play
+something *at* a phone — wake-up delivery, paging, announcements — are scored and
+stored honestly but never move `sensor.switchboard_last_call`, and never raise an
+ordinary poor-quality alert.
+
+**One exception, added in v0.78.0.** A wake-up delivery that was answered and then
+transmitted no audio, or that stopped before the end of its script, is recorded
+`undelivered` and *does* alert. A page cut short is not worth waking anyone over;
+an alarm clock that did not go off is the one thing on this list with a deadline. Nobody is on the line to act on an alert about
 a chime, and those legs are one-directional by design, so the one-way-audio
 detector (which exists to catch a broken conversation) would fire on their
 perfectly normal shape. Conversations and the interactive menus alert exactly
@@ -1014,7 +1039,9 @@ as before.
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
-— low score, high loss, high latency (RTT over 400 ms), or **one-way audio**.
+— low score, high loss, high latency (a round-trip **mean over 250 ms** or a
+**peak over 500 ms**, scored across the whole call rather than from the last
+RTCP round), or **one-way audio**.
 
 **Not every call updates the sensor.** Each leg is appended to the durable JSONL
 ledger, but the sensor is only pushed when the leg produced a *credible* MES, and

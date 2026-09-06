@@ -114,11 +114,32 @@ control.
   whole trunk is skipped) on the same risks. Display names are stripped of control
   characters, `"`, and `;` before entering quoted caller-ID/comments.
 - **No secrets in logs.** Validation failures log the extension only, never the
-  secret. Logging goes to the console channel captured by journald, plus a durable
-  notice/warning/error copy at `/data/state/asterisk.log` for post-incident
-  forensics — that file carries no verbose/debug output and (with
-  `res_security_log` not loaded) no per-REGISTER security flood, so no secrets
-  and negligible growth.
+  secret. Asterisk logging goes to **three** destinations, and the difference
+  between them matters:
+
+  | Destination | Carries | Readable from outside the add-on |
+  | --- | --- | --- |
+  | console → journald | notice, warning, error, verbose | via the Supervisor |
+  | `/data/state/asterisk.log` | notice, warning, error | **no** |
+  | `/share/switchboard/asterisk.log` | notice, warning, error, **verbose** | **yes** |
+
+  The `/data` copy carries no verbose output and (with `res_security_log` not
+  loaded) no per-REGISTER flood, so no secrets and negligible growth. The
+  `/share` copy is the one to reason about: `/share` is host-mounted, readable by
+  anything with access to the shared folder, and captured in add-on backups. It
+  carries the verbose class deliberately — the link-health poller reconstructs
+  endpoint outages from `Endpoint <n> is now Unreachable`, which is a verbose
+  line, and moving the class to `/data` would silently blind that detector.
+
+  What this means in practice: **the dialplan trace is public within your home
+  network, and the recognised speech is not.** Speech-recognition output is
+  written by the AGIs to their own stderr, which never passes through Asterisk's
+  logger — verified on a running system, both `asterisk.log` copies contain zero
+  transcript lines. The voice assistant's transcripts go to
+  `/data/state/assistant.jsonl`, which is not readable from outside at all, and
+  are not mirrored to `/share`. A test (`test_privacy_invariants.py`) fails the
+  build if any voice script starts routing speech through the logger, because
+  that single change would move it into the readable copy.
 - `/data/options.json` (which holds the SIP secrets, trunk secret, and announce
   token) stays root-only; runtime state that the voice AGIs need is written to a
   separate `asterisk`-owned `/data/state` directory instead.
