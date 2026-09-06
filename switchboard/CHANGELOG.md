@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.85.0
+
+**An announcement that was refused once could never be delivered again.**
+
+The add-on suppresses an identical announcement repeated to the same phone
+within a few minutes, on the reasonable ground that the same words twice in a
+row are noise. The suppression window was started by the check itself, before
+any of the reasons an announcement can be turned away had been considered —
+before the handset was found to be unreachable, before it was found to be busy,
+before the clip was found to be too long.
+
+So an announcement refused because the handset was not registered started a
+suppression window anyway. The caller retried, as an alerting system should;
+that retry was answered "duplicate" and pushed the window forward. The next
+retry did the same, and the next. Every attempt renewed the very window it was
+trying to outlast, and nothing was ever played. The systems that retry are the
+ones announcing something worth repeating.
+
+The window now begins where an announcement is actually sent to the phone, and
+nowhere else. Every path that turns one away leaves it untouched, so a retry
+after a refusal is treated as what it is: a fresh attempt at something that
+never happened.
+
+This also restores the behaviour the window was meant to have. Because a
+suppressed repeat used to extend it, a system sending the same words on a timer
+faster than the window could be locked out permanently after its first success.
+Suppression is a rate limit — one playback per window — not a gate that closes
+for good the first time you knock twice.
+
 ## 0.84.0
 
 The last of the open findings from the September audit, and one of them turned

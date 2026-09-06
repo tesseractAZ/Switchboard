@@ -589,24 +589,48 @@ def test_announce_duration_guard_and_dedup(tmp_path) -> None:
     try:
         check("dedup: the first announcement is never a duplicate",
               app._is_duplicate_announce("19", d1, now=1000.0) is False)
-        check("dedup: the same payload moments later IS a duplicate",
+        # v0.85.0 — the check is PURE. Nothing is suppressed until something has
+        # actually played, which is what _mark_announce_played records.
+        check("dedup: merely CHECKING does not start the window",
+              app._is_duplicate_announce("19", d1, now=1001.0) is False)
+        app._mark_announce_played("19", d1, now=1000.0)
+        check("dedup: the same payload moments after a PLAYBACK is a duplicate",
               app._is_duplicate_announce("19", d1, now=1030.0) is True)
         check("dedup: a DIFFERENT payload is not suppressed",
               app._is_duplicate_announce("19", d2, now=1040.0) is False)
-        # The window is measured from the last ATTEMPT, so a producer retrying
-        # every 30 s cannot walk past it.
+
+        # ★ THE LOCKOUT. Until v0.85.0 the check recorded the attempt itself,
+        # before any guard had run — so an announcement REFUSED (handset
+        # unreachable, 503) started a suppression window anyway, and every retry
+        # pushed that window forward. The announcement could never be delivered
+        # again while the caller kept trying, and the callers that retry are the
+        # alerting ones.
         app._ANNOUNCE_LAST.clear()
-        app._is_duplicate_announce("19", d1, now=0.0)
+        t = 0.0
+        for _ in range(20):                 # twenty refused attempts, 30 s apart
+            check_silent = app._is_duplicate_announce("19", d1, now=t)
+            assert check_silent is False, (
+                f"a refused announcement was called a duplicate at t={t} — "
+                "nothing had ever played")
+            t += 30.0
+        check("dedup: a refused announcement never suppresses its own retry",
+              app._is_duplicate_announce("19", d1, now=t) is False)
+
+        # ...and once it DOES play, retrying inside the window is suppressed
+        # WITHOUT extending it, so the window is a rate limit and not a lockout.
+        app._ANNOUNCE_LAST.clear()
+        app._mark_announce_played("19", d1, now=0.0)
         t = 0.0
         for _ in range(20):
             t += 30.0
-            app._is_duplicate_announce("19", d1, now=t)
-        check("dedup: a repeating producer cannot outlast the window by retrying",
-              app._is_duplicate_announce("19", d1, now=t + 30.0) is True)
-        # ...but a genuine repeat after the window is allowed through.
+            app._is_duplicate_announce("19", d1, now=t)   # suppressed, no effect
+        check("dedup: retrying while suppressed does not renew the window",
+              app._is_duplicate_announce(
+                  "19", d1, now=app.ANNOUNCE_DEDUP_WINDOW_S + 1) is False)
+        # ...and a genuine repeat after the window is allowed through.
         check("dedup: the same payload after the window is allowed",
               app._is_duplicate_announce(
-                  "19", d1, now=t + 30.0 + app.ANNOUNCE_DEDUP_WINDOW_S + 1) is False)
+                  "19", d1, now=app.ANNOUNCE_DEDUP_WINDOW_S + 5) is False)
         # Suppression must be per-extension.
         app._ANNOUNCE_LAST.clear()
         app._is_duplicate_announce("19", d1, now=1000.0)
@@ -714,3 +738,46 @@ def test_announce_handler_suppresses_an_identical_repeat(tmp_path) -> None:
     check("dedup: the suppression is recorded",
           rec["outcome"] == "duplicate-suppressed")
     check("dedup: the record carries the payload digest", len(rec["digest"]) == 12)
+
+
+def test_the_suppression_window_starts_only_where_something_played() -> None:
+    """★ The wiring, not the function.
+
+    `_is_duplicate_announce` being pure is necessary and not sufficient: the
+    window still has to be started in exactly one place, and that place has to
+    be after every refusal path. A version that made the check pure and then
+    called `_mark_announce_played` at the top would behave identically to the
+    lockout it replaced, and every behavioural test above would still pass.
+
+    The refusal paths this must sit below: too-long (413), duplicate,
+    skipped-busy, unreachable (503), originate-error (502), originate-refused.
+    """
+    import inspect
+    import re
+    src = inspect.getsource(app)
+    # A CALL passes arguments, so require a non-`)` after the paren — that
+    # excludes the bare `_mark_announce_played()` written in prose in the
+    # sibling docstring, which a looser pattern counts as a third call site.
+    calls = [m.start() for m in re.finditer(r"(?<!def )_mark_announce_played\([^)]", src)]
+    check(f"wiring: exactly one call site starts the window ({len(calls)})",
+          len(calls) == 1)
+
+    # It must come after the success record, which is the last thing on the
+    # dispatch path — and therefore after every early return above it.
+    queued = src.index('"announce", "originate-queued"')
+    check("wiring: the window starts AFTER the announcement was dispatched",
+          calls and calls[0] > queued)
+
+    # And every refusal must return before reaching it.
+    for outcome in ("too-long", "duplicate-suppressed", "skipped-busy",
+                    "unreachable", "originate-error", "originate-refused"):
+        pos = src.index(f'"announce", "{outcome}"')
+        check(f"wiring: the {outcome} path precedes the window start",
+              pos < calls[0])
+
+    # The checker itself must not write. A single assignment inside it is how
+    # the lockout existed in the first place.
+    body = src[src.index("def _is_duplicate_announce("):
+               src.index("def _mark_announce_played(")]
+    check("wiring: the duplicate CHECK does not touch the window",
+          "_ANNOUNCE_LAST[" not in body)
