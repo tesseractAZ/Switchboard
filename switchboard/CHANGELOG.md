@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.88.0
+
+Two test calls settled two things that no amount of reading could.
+
+**A phone that rings out no longer fills the log with warnings.** Every
+unanswered call used to leave four warnings behind, because the code asked
+Asterisk about audio statistics that a call nobody answered does not have. The
+first attempt to stop that, three releases ago, asked the wrong question — it
+checked whether the call had negotiated audio, which the calling phone always
+has — and the warnings kept coming while two releases of notes said they had
+stopped. It now asks whether anyone answered.
+
+That could not be tested from a keyboard: it needs a real handset ringing out,
+and the machine cannot make one do that. Two have now happened, and the last
+warning of that kind anywhere in the log is from the final unanswered call
+before the change. The record is closed by evidence rather than by argument.
+
+**Dialling 911 from a wired phone reaches the spoken notice.** Also unprovable
+without a handset, and it now has one: the call ran the emergency extension,
+played the "these phones cannot reach emergency services" recording, and left a
+record of the attempt. That confirms three things at once — the gateway passes
+`911` through to the add-on, the notice plays rather than a busy tone, and the
+attempt is logged.
+
+It also confirmed something incidental and pleasing: the log names the µ-law
+copy of the recording, not the original. Prompts began shipping in the format
+the phones actually speak in 0.82.0 so that playing one stops converting it in
+real time, and this is the first direct sight of Asterisk choosing the converted
+file. Until now that was inference from file listings.
+
+`933`, the number for testing an emergency line, has still never been dialled
+here — it is answered by the same notice, but nobody has confirmed it out loud.
+
 ## 0.87.0
 
 Finishing the documentation sweep turned up two things that were not
