@@ -457,3 +457,49 @@ def test_the_real_listen_classifies_every_empty_turn() -> None:
           not _os.listdir(tmpdir))
     import shutil as _sh
     _sh.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_the_word_sets_do_not_overlap() -> None:
+    """The invariant is stated in the source and was violated the same day.
+
+    `filler` is what may SURROUND a terminator without changing the meaning. A
+    word in both `filler` and `GOODBYE_WORDS` satisfies the `any` clause on its
+    own, so a purely-incidental utterance becomes a hang-up. A draft of the
+    v0.82.0 decline rule added "done" to filler, where it was already a goodbye
+    word — the exact collision the comment above the set warns about.
+
+    `no` is deliberately in both `filler` and `DECLINE_WORDS`: a decline needs
+    the whole utterance to be filler-or-decline, so it cannot fire on a command.
+    """
+    import re as _re
+    src = _AGI.read_text()
+    filler = {w.strip().strip('"') for w in
+              _re.search(r"filler = \{(.*?)\}", src, _re.S).group(1)
+              .replace("\n", " ").split(",") if '"' in w}
+    mod, _, _ = _load()
+    overlap = filler & set(mod.GOODBYE_WORDS)
+    check(f"word sets: no filler word is also a goodbye word ({overlap})",
+          not overlap)
+    check("word sets: filler is non-empty (the regex still matches)", len(filler) > 5)
+
+
+def test_a_bare_decline_ends_the_call() -> None:
+    """Measured on a live call, 2026-09-06 10:32:58.
+
+    The assistant asks "Anything else?"; the caller answered "no"; the ledger
+    recorded `reply: "Sorry, I couldn't understand that"` and the call carried
+    on to a fifth turn. A bare "no" was being sent to Home Assistant, which has
+    no sentence for it. This is the first defect the v0.80.0 assistant ledger
+    surfaced, and it was invisible before it because nothing recorded the reply.
+    """
+    mod, _, _ = _load()
+    for utterance in ("no", "nope", "nah", "no i'm good", "that's it",
+                      "no thanks", "no thank you"):
+        check(f"decline: {utterance!r} ends the call", mod.is_goodbye(utterance))
+    # ...and the whole-utterance rule is what keeps that safe. Every one of these
+    # contains a decline or terminator word inside a real command.
+    for utterance in ("no, turn on the kitchen light", "no lights",
+                      "stop the music", "cancel my seven a m wake up",
+                      "turn off all the lights", "turn on the office lights"):
+        check(f"decline: {utterance!r} is still a command",
+              not mod.is_goodbye(utterance))

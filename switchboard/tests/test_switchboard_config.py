@@ -2135,3 +2135,52 @@ def test_generated_files_are_dated() -> None:
               bool(stamp.match(first)))
         checked += 1
     check(f"both generated files were checked ({checked})", checked == 2)
+
+
+def test_every_prompt_ships_in_the_codec_the_phones_actually_use() -> None:
+    """Asterisk converts a prompt on every playback unless it has a native copy.
+
+    All 28 shipped prompts were 8 kHz 16-bit PCM — signed linear — while every
+    endpoint and the trunk negotiate G.711 u-law and nothing else
+    (`disallow = all` / `allow = ulaw`). Asterisk's own translation table prices
+    slin8 to ulaw at 9,000 microseconds per second of audio, so every greeting,
+    every wake-up prompt and every one of the eight legs of a house-wide page was
+    being converted in real time for no reason.
+
+    Asterisk picks the file whose format matches the channel, so shipping a
+    `.ulaw` sibling removes the conversion without changing a line of dialplan.
+    The `.wav` masters stay: they are the human-inspectable source, and a future
+    non-ulaw endpoint would need them.
+    """
+    import struct
+    d = (Path(__file__).resolve().parents[1] / "rootfs" / "var" / "lib"
+         / "asterisk" / "sounds" / "en" / "switchboard")
+    wavs = sorted(d.glob("*.wav"))
+    check(f"prompts: there are prompts to check ({len(wavs)})", len(wavs) >= 20)
+
+    def wav_samples(p):
+        raw = p.read_bytes()
+        i = 12
+        while i + 8 <= len(raw):
+            cid = raw[i:i + 4]
+            sz = struct.unpack("<I", raw[i + 4:i + 8])[0]
+            if cid == b"data":
+                return sz // 2                      # 16-bit mono
+            i += 8 + sz + (sz % 2)
+        return None
+
+    missing, mismatched = [], []
+    for w in wavs:
+        u = w.with_suffix(".ulaw")
+        if not u.exists():
+            missing.append(w.name)
+            continue
+        # u-law is one byte per sample; the .wav is two. A length mismatch means
+        # the pair drifted — a prompt re-recorded without regenerating the copy,
+        # which would play the OLD wording to a u-law phone and the new one to
+        # anything else.
+        ns = wav_samples(w)
+        if ns is None or abs(ns - u.stat().st_size) > 1:
+            mismatched.append(f"{w.name}: {ns} samples vs {u.stat().st_size} bytes")
+    check(f"prompts: every .wav has a .ulaw sibling (missing: {missing})", not missing)
+    check(f"prompts: and they are the same audio ({mismatched})", not mismatched)
