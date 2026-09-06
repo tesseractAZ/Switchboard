@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.83.0
+
+**A fix that did not work, and said it did.** Since v0.77.0 the call-quality
+hook has claimed to stop four warnings appearing in the log every time a phone
+rings out unanswered. It never stopped them. A handset rang out for the first
+time since that release, and the log recorded all four exactly as before.
+
+The check asked whether the channel had negotiated an audio format, on the
+theory that a call carrying no audio would not have. But the channel running the
+check is the one that *placed* the call — it negotiated audio perfectly well when
+it dialled. What it never got was the far end picking up. So the check asked a
+question that was always answered "yes, there is audio here", on precisely the
+calls it existed to catch.
+
+It now asks whether the call was ever answered, which is a plain call-record
+fact and touches no audio at all. The older check that follows it stays, because
+the two catch different things: a call nobody answered, and a call that was
+answered but still carried nothing.
+
+**Recorded here because the manner of the failure matters more than the
+failure.** This was shipped as fixed, described as fixed in two releases, and
+covered by a test that confirmed the check ran in the right place — which it
+did. Nothing verified that the check could ever be true. It took a real phone
+ringing out, twice, to find out. The test now also requires the check not to ask
+the audio layer anything, which is the property that was actually missing.
+
+**Two corrections to the measured-behaviour record.** It still described the
+telephone-number exposure in the shared folder as unfixed; that was repaired two
+releases ago, including the one historical entry, and the file now holds none.
+And it carried the wrong version stamp.
+
 ## 0.82.1
 
 **Hotfix: the assistant's ledger was being reopened to the group on every
