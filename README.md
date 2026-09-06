@@ -59,9 +59,13 @@ telnet or in the browser:
   phone, including a WiFi cordless, into an announce target.
 - **An outside line, dialed like a cell phone.** Enable a SIP trunk for real
   inbound and outbound calls. With **direct dial** you dial `1` + the 10-digit
-  number with no prefix, while your extensions and feature codes still ring
-  instantly — all behind layered toll-fraud protection. Off by default; room-to-room
-  needs no trunk.
+  number with no prefix. Requiring that leading `1` is what keeps the operator,
+  rooms `11` and `20`, and the feature codes dialling instantly — a bare-10
+  pattern would make each of them look like the *start* of a phone number and
+  stall on the gateway's inter-digit timer. Rooms `12`–`19` are the exception:
+  they are both a complete extension and the first two digits of an 11-digit
+  number, so those wait out the timer. All behind layered toll-fraud protection.
+  Off by default; room-to-room needs no trunk.
 - **A live dashboard** in the Home Assistant sidebar (Ingress): every phone's
   registration and call state, the trunk's registration and the speech engine's
   health, per-phone latency, one-click test-ring, patch-two-rooms, hang-up,
@@ -136,7 +140,7 @@ configuration — **the add-on options are the single source of truth**; hand ed
 | `47`  | Local voice assistant — ask Home Assistant anything (**off by default**) | `assistant_ext` |
 | `411` | Directory assistance | `directory_ext` |
 | `911` | Answered with a spoken notice that these phones **cannot reach emergency services** | always on |
-| `933` | The FCC's number for testing an emergency line — reads back what a carrier would see | always on |
+| `933` | The FCC's number for testing an emergency line — answered with the **same spoken notice as `911`**, never dialled out. Nothing is read back: there is no carrier registration to read. | always on |
 
 Every feature code `41`–`47` and `411` is configurable (`*_ext`) and can be
 disabled (`*_enabled`); dial `0` (the operator) can be turned off but not
@@ -193,9 +197,9 @@ WP826 WiFi cordless ──────WiFi────────────�
   which alarms have ever actually fired.
 - **Printable manual** — a [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
   carries the README + Security + reference assembled into a **Word (`.docx`)**
-  and **PDF** you can read offline. Releases v0.69.0 through v0.80.0 shipped
-  without one: the workflow that builds it waited on an event that a
-  bot-created release does not emit. Fixed in v0.81.0.
+  and **PDF** you can read offline. (Releases v0.69.0 through v0.80.0 shipped
+  without one — the build waited on an event a bot-created release does not
+  emit. Repaired in v0.81.0; every release since carries both files.)
 
 Every version is tagged and released, so `git checkout vX.Y.Z` reproduces the exact
 source that built any release — see

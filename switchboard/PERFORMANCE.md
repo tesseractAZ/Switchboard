@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Data as of 2026-09-06.** Software version 0.83.0. Quantiles are nearest-rank.
+**Data as of 2026-09-06.** Software version 0.86.0. Quantiles are nearest-rank.
 
 ---
 
@@ -279,7 +279,7 @@ quiet because the system is healthy or because they cannot fire.
 | Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
-| Wake-up undelivered | 0 | Unexercised (§3). |
+| Wake-up undelivered | 0 | Unexercised (§3) — and since 0.84.0 the re-ring it depends on is itself gated, so the path has two untested links, not one. |
 | Assistant health | — | No ledger before 0.80.0 (§4). |
 
 **Five of six have never fired.** One is genuinely quiet, two have not been

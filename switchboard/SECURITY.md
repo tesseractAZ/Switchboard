@@ -79,10 +79,12 @@ The Manager account deliberately **withholds the `command` write class** — Ast
 CLI `Command` action is remote code execution, and it is the one dangerous
 privilege the account does not have. The account holds `originate` (for the
 test-ring, connect, page, wake-up, and announce actions), but every web-app
-origination is pinned to a **fixed internal target**: test-ring and announce run a
-fixed `Playback` to a known room, while connect, wake-up, and page originate into a
-fixed internal dialplan context (`rooms`, `wakeup-deliver`, and `page`
-respectively). Every extension is validated against the configured room set before
+origination is pinned to a **fixed internal target**: test-ring runs a fixed
+`Playback` to a known room, while connect, wake-up, page and announce originate
+into a fixed internal dialplan context (`rooms`, `wakeup-deliver`, `page` and
+`switchboard-announce-play` respectively). Announce moved off `Playback` in
+v0.57.0 so that it has a hangup extension and therefore a quality record; the
+target is no less fixed for it. Every extension is validated against the configured room set before
 the call, so an origination can only ever ring an internal phone — it cannot be
 steered into an outside call even with the privilege.
 
@@ -120,12 +122,22 @@ control.
   | Destination | Carries | Readable from outside the add-on |
   | --- | --- | --- |
   | console → journald | notice, warning, error, verbose | via the Supervisor |
-  | `/data/state/asterisk.log` | notice, warning, error | **no** |
+  | `/data/state/asterisk.log` | notice, warning, error, **verbose(2)** | **no** |
   | `/share/switchboard/asterisk.log` | notice, warning, error, **verbose** | **yes** |
 
-  The `/data` copy carries no verbose output and (with `res_security_log` not
-  loaded) no per-REGISTER flood, so no secrets and negligible growth. The
-  `/share` copy is the one to reason about: `/share` is host-mounted, readable by
+  The `/data` copy takes exactly one level of verbose output, and the level is
+  the point. Endpoint reachability — `Endpoint <n> is now Unreachable` and its
+  `Contact` twin — is emitted by Asterisk at verbosity 2, and until v0.84.0 the
+  durable log did not keep it: across twenty-five days it held no record of
+  whether the phones were reachable, so the one whole-fleet outage this system
+  has had could not be investigated from the copy that survives. `verbose(2)`
+  selects those lines and stops short of the verb-3 dialplan trace, which is
+  where the call detail — and any spoken content a future change might route
+  through the logger — would be. The file is trimmed at boot to its newest half
+  whenever it passes 8 MB.
+
+  With `res_security_log` not loaded there is no per-REGISTER flood, so still no
+  secrets and negligible growth. The `/share` copy is the one to reason about: `/share` is host-mounted, readable by
   anything with access to the shared folder, and captured in add-on backups. It
   carries the verbose class deliberately — the link-health poller reconstructs
   endpoint outages from `Endpoint <n> is now Unreachable`, which is a verbose
