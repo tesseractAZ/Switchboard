@@ -178,6 +178,16 @@ configuration:
   assistant_ext:
     name: Assistant Extension
     description: Dial this to reach the local voice assistant. 2–6 digits. Default 47.
+  assistant_transcripts:
+    name: Record Assistant Transcripts
+    description: >-
+      Keep what was said to the assistant, and what it replied, in the add-on's
+      own diagnostic log. Nothing is sent anywhere: the file lives inside the
+      add-on where it cannot be read from outside the container, and it is never
+      copied to the shared folder. It holds the last 400 turns and is the only
+      way to answer "why did it do that?" after the call has ended. Turn this off
+      and the log still records every timing, outcome and failure reason — only
+      the words themselves are withheld.
   wakeup_retry_seconds:
     name: Wake-up Retry Delay
     description: >-

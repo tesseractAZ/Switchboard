@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.80.0
+
+The voice assistant kept no record of itself, and now keeps one that stays where
+it belongs.
+
+**Nothing it did survived the call.** Its diagnostics went to a plain
+`stderr.write`, and an AGI's stderr never reaches Asterisk's logger — it lands
+raw in the container's own log and is gone when that rotates. Verified on the
+running system rather than assumed: neither durable log file contains a single
+line from it. Nothing measured how long anything took. And the assistant's
+*reply* was in a worse position than the question, because the code built the
+sentence to speak inline as a function argument and never kept it — so the half
+of "what it heard and said" that tells you whether the answer was actually
+correct existed nowhere at all.
+
+Each turn now writes one line to `/data/state/assistant.jsonl`: what was heard,
+what was replied, how long recognition, Home Assistant and the voice each took,
+and why a turn that produced nothing produced nothing.
+
+**That last one used to be five different things wearing the same face.** A
+recogniser that failed to start, one that timed out, one that errored, a
+whisper-server that hung, and a person who simply said nothing all arrived as an
+empty string and were counted identically. Silence is the only one of the five
+that means the system is healthy, and it was indistinguishable from the four
+that mean it is not. Each now says which it was. Asterisk's reply to the
+recording request — which carries how much audio was captured and whether the
+caller stopped talking, hung up, or pressed a key — was being discarded
+entirely; a caller who put the phone down mid-sentence and one who said nothing
+were the same event.
+
+Rows are written as each turn ends rather than collected and saved at the end.
+Asterisk terminates the assistant outright when the caller hangs up — no
+handler, no cleanup — so anything held back for a tidy write at the end would be
+lost on precisely the calls that went wrong.
+
+**Where it is kept was the whole design.** The obvious way to make a diagnostic
+durable here is to send it through Asterisk's logger. That would have been the
+worst available choice: the log class it lands in is written to the shared
+folder, which is readable from outside the add-on and captured in backups *by
+design* — that is what the folder is for. A single line carrying a transcript
+would have moved household speech out of a temporary log and into a permanent,
+readable one. So the ledger is written to the add-on's private data instead,
+which cannot be read from outside at all, and it has no shared-folder copy —
+unlike every other ledger here, deliberately.
+
+`assistant_transcripts: false` keeps every timing, outcome and failure reason
+and withholds only the words, replaced by their length. A privacy switch that
+also blinded the operator would simply be left on.
+
+**And the rules are now tests rather than habit.** There was no check anywhere
+stopping a real address, a real phone number or a transcript from being
+committed to what is a public repository — the discipline was one person
+remembering. There is now: the build fails on any of them, on any ledger that
+writes speech where it can be read from outside, and on any voice script that
+routes speech through the logger. One source comment claimed AGI output reached
+the Asterisk log; it does not, and being wrong it very nearly justified sending
+more speech that way on the grounds that it "already leaked".
+
+**Also fixed:** a recogniser that timed out and then failed to die quietly could
+raise a second error from inside the cleanup for the first one, which would end
+a live call. And the cordless-handset tool now takes its password file from the
+environment instead of a fixed path, and its notes no longer read as one
+person's installation.
+
 ## 0.79.0
 
 Two detectors that could not fire. Both had been built, shipped, and wired to

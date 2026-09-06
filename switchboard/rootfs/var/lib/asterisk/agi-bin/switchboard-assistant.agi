@@ -38,16 +38,31 @@ spoken apology + graceful hangup -- the caller is never left in silence.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
+import time
 
-# Foundation module: ha_client (HA Core API, incl. the local conversation agent).
+# Foundation modules: ha_client (HA Core API, incl. the local conversation agent)
+# and assistant_log (the durable per-turn ledger — see its module docstring for
+# why this does NOT go through Asterisk's logger).
 sys.path.insert(0, "/usr/share/switchboard/webui")
 try:
     import ha_client  # noqa: E402
 except Exception:  # noqa: BLE001  (degrade gracefully if the client won't import)
     ha_client = None
+try:
+    import assistant_log  # noqa: E402
+except Exception:  # noqa: BLE001  (telemetry must never stop the assistant)
+    assistant_log = None
+
+# Staged by switchboard-config for processes running as the asterisk user. This
+# is the ONLY configuration channel that reaches an AGI: Asterisk forks it, not
+# s6, so an env export from a run script cannot reach here, and
+# /run/switchboard/options-effective.json is 0600 root-only.
+FEATURES = "/run/switchboard/features.json"
 
 STT = "/usr/bin/switchboard-stt"
 TTS = "/usr/bin/switchboard-tts"
@@ -97,6 +112,35 @@ def read_env() -> dict:
     return env
 
 
+def load_features() -> dict:
+    """The staged /run/switchboard/features.json, or {} — same shape and same
+    failure behaviour as agi_speech.load_features(). Copied rather than imported
+    because this AGI is deliberately self-contained (it does not import
+    agi_speech at all) and one dict read is not worth taking that dependency."""
+    try:
+        with open(FEATURES, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def call_id(env: dict) -> dict:
+    """The join key back to callqos.jsonl, from the AGI environment.
+
+    `read_env()`'s return value used to be discarded on the very next line, which
+    threw away the only identifiers this process ever sees. Without them a row in
+    the assistant ledger could not be lined up against the call-quality row for
+    the same call, so "the assistant gave a wrong answer" and "the audio was
+    poor" stayed unrelated facts about the same sixty seconds.
+    """
+    chan = env.get("agi_channel", "")
+    m = re.match(r"PJSIP/(\d{2,6})-", chan)
+    return {"chan": chan or None,
+            "call": env.get("agi_uniqueid") or None,
+            "ext": (m.group(1) if m else None)}
+
+
 def agi(command: str) -> str:
     sys.stdout.write(command + "\n")
     sys.stdout.flush()
@@ -141,11 +185,19 @@ def say(text: str) -> bool:
             pass
 
 
-def say_or(text: str, fallback_prompt: str) -> None:
+def say_or(text: str, fallback_prompt: str) -> bool:
     """Speak dynamic `text`; if TTS fails, play a canned prompt so there's never
-    dead air."""
-    if not say(text):
-        stream(fallback_prompt)
+    dead air. Returns True if the DYNAMIC text was spoken.
+
+    v0.80.0 — this returned None, so a caller could not tell whether the person
+    on the phone heard the assistant's actual answer or a canned beep in its
+    place. That distinction is the difference between "answered correctly" and
+    "said something unrelated", and the ledger has to be able to record it.
+    """
+    if say(text):
+        return True
+    stream(fallback_prompt)
+    return False
 
 
 def apologize_and_bye() -> None:
@@ -158,23 +210,64 @@ def apologize_and_bye() -> None:
 # --------------------------------------------------------------------------- #
 # Recording + recognition
 # --------------------------------------------------------------------------- #
-def listen(tag: str, attempt: int, bias: str = "") -> str:
-    """Record one utterance and return the raw transcript ('' on nothing)."""
+def _record_result(raw: str) -> dict:
+    """Decode Asterisk's RECORD FILE reply.
+
+    It answers ``200 result=<0|-1|digit> (timeout|hangup|dtmf) endpos=<samples>``,
+    and this AGI used to throw the whole string away. That one line carries the
+    two facts most needed to explain an empty turn: how much audio was actually
+    captured, and whether the recording ended because the caller stopped talking,
+    hung up, or pressed a key. Without it, a caller who hung up mid-sentence and a
+    caller who said nothing are the same event — and they are not.
+
+    endpos is a sample count at the channel rate (8 kHz here), so /8 is
+    milliseconds.
+    """
+    out = {}
+    m = re.search(r"endpos=(\d+)", raw or "")
+    if m:
+        out["rec_ms"] = int(m.group(1)) // 8
+    for word in ("hangup", "dtmf", "timeout"):
+        if f"({word})" in (raw or ""):
+            out["rec_end"] = word
+            break
+    return out
+
+
+def listen(tag: str, attempt: int, bias: str = "") -> tuple:
+    """Record one utterance. Returns (text, meta) — '' and a REASON on nothing.
+
+    The meta dict exists because five distinct failures used to collapse into the
+    same empty string and be counted identically: a spawn error, a timeout, a
+    whisper-server hang, an STT error, and genuine silence. A ledger that only
+    recorded "empty" would reproduce exactly the blindness it was built to fix,
+    so every one of them now carries its own `stt` reason.
+    """
     rec = f"{ASR_DIR}/asst-{os.getpid()}-{tag}-{attempt}"
     stream(PROMPT_BEEP)
-    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    meta = _record_result(agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}'))
     wav = rec + ".wav"
+    try:
+        # Measured BEFORE the unlink below, which is where the only after-the-fact
+        # evidence of what RECORD actually captured used to be destroyed. The
+        # operator AGI has always kept this; the assistant never did.
+        meta["wav_bytes"] = os.path.getsize(wav)
+    except OSError:
+        meta["wav_bytes"] = 0
     text = ""
     cmd = [STT, "--in", wav, "--mode", "transcribe"]
     if bias:
         cmd += ["--bias", bias]
     # Start STT before the "one moment" prompt so inference overlaps its playback
     # (the child only touches the WAV + loopback whisper-server, not the channel).
+    t0 = time.monotonic()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 stdin=subprocess.DEVNULL, text=True)
     except OSError as exc:
         log(f"stt spawn error: {exc}")
+        meta["stt"] = "spawn-error"
+        meta["stt_err"] = str(exc)[:200]
         proc = None
     stream(PROMPT_ONEMOMENT)
     try:
@@ -183,27 +276,53 @@ def listen(tag: str, attempt: int, bias: str = "") -> str:
             text = (so or "").strip()
             if se:
                 sys.stderr.write(se)
+                # Whisper's own account of what it did, kept only when the turn
+                # produced nothing — that is when it is the whole explanation.
+                if not text:
+                    meta["stt_err"] = se.strip()[:200]
     except subprocess.TimeoutExpired:
         proc.kill()
         try:
-            proc.communicate()
-        except OSError:
+            # ...and collect what it managed to say before the kill. Both handlers
+            # used to drop the child's stderr entirely, losing whisper's
+            # explanation of the failure at precisely the moment it mattered.
+            #
+            # `except Exception`, not `except OSError`: this SECOND communicate()
+            # can itself raise TimeoutExpired — a killed child whose pipe has not
+            # closed yet is exactly the state we are in — and OSError does not
+            # catch that. It would then propagate out of listen(), out of main(),
+            # and end a live call from inside the cleanup path of an error that
+            # was already being handled.
+            _, se = proc.communicate()
+            if se:
+                meta["stt_err"] = se.strip()[:200]
+        except Exception:  # noqa: BLE001  (cleanup must never end the call)
             pass
         log("stt timeout")
+        meta["stt"] = "timeout"
     except OSError as exc:
         if proc is not None:
             try:
                 proc.kill()
-                proc.communicate()
-            except OSError:
+                _, se = proc.communicate()
+                if se:
+                    meta["stt_err"] = se.strip()[:200]
+            except Exception:  # noqa: BLE001  (same hazard as above)
                 pass
         log(f"stt error: {exc}")
+        meta["stt"] = "error"
+        meta.setdefault("stt_err", str(exc)[:200])
     finally:
+        meta["stt_ms"] = int((time.monotonic() - t0) * 1000)
         try:
             os.unlink(wav)
         except OSError:
             pass
-    return text
+    if not text and "stt" not in meta:
+        # Nothing went wrong and nothing was said. That IS a distinct outcome and
+        # the only one of the five that means the recogniser is healthy.
+        meta["stt"] = "silence"
+    return text, meta
 
 
 # --------------------------------------------------------------------------- #
@@ -288,11 +407,36 @@ def reply_text(speech: str | None, response_type: str | None) -> str:
 # Flow
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    read_env()
+    env = read_env()
+    ident = call_id(env)
+    # Transcripts are recorded by default and can be turned off without a code
+    # change. When off, every timing, outcome and reason still lands — only the
+    # words are withheld. See assistant_log._redact: a privacy switch that also
+    # blinded the operator would simply get left on.
+    feats = load_features()
+    transcripts = bool((feats.get("assistant") or {}).get("transcripts", True))
+
+    def note(outcome, **f):
+        """One ledger row, written NOW rather than buffered for the end.
+
+        Asterisk sends SIGHUP on caller hangup, nothing here installs a handler,
+        and AGISIGHUP is never set in the dialplan — so this process is killed
+        outright with no `finally` and no `atexit`. Anything held in memory to be
+        flushed later is lost on exactly the calls that ended badly.
+        """
+        if assistant_log is None:
+            return
+        try:
+            assistant_log.record(outcome, transcripts=transcripts, **ident, **f)
+        except Exception as exc:  # noqa: BLE001  (telemetry never ends a call)
+            log(f"could not write the assistant ledger: {exc}")
+
     agi("ANSWER")
+    call_t0 = time.monotonic()
 
     if ha_client is None or not ha_client.available():
         log("home assistant unavailable")
+        note("ha-unavailable", turns_used=0)
         apologize_and_bye()
         return
 
@@ -300,33 +444,62 @@ def main() -> None:
         bias = build_bias(ha_client.lights_by_area())
     except Exception as exc:  # noqa: BLE001  (a bias failure must not end the call)
         log(f"bias build failed: {exc}")
+        note("bias-failed", detail=str(exc)[:200])
         bias = BIAS_VERBS
 
     say_or("Home assistant. What would you like?", PROMPT_BEEP)
 
     empty = 0
     for turn in range(1, MAX_TURNS + 1):
-        text = listen("ask", turn, bias)
+        turn_t0 = time.monotonic()
+        text, meta = listen("ask", turn, bias)
         if not text:
             empty += 1
+            # `meta["stt"]` is the whole point: silence, timeout, spawn-error and
+            # error all reach this branch and used to be counted identically.
+            note("no-speech", turn=turn, reason=meta.pop("stt", None),
+                 turn_ms=int((time.monotonic() - turn_t0) * 1000), **meta)
             if empty >= MAX_EMPTY:
+                note("ended-unheard", turn=turn, turns_used=turn,
+                     call_ms=int((time.monotonic() - call_t0) * 1000))
                 say_or("I didn't catch that. Goodbye.", PROMPT_GOODBYE)
                 return
             say_or("Sorry, I didn't hear anything. Please say that again.", PROMPT_BEEP)
             continue
 
+        meta.pop("stt", None)
         if is_goodbye(text):
+            # Distinct from the loop-exhaustion goodbye below. Both used to emit
+            # the identical say_or("Goodbye.") and record nothing, so a caller who
+            # rang off politely and one who used up five turns without being
+            # understood were the same event in every log.
+            note("goodbye", turn=turn, heard=text, turns_used=turn,
+                 call_ms=int((time.monotonic() - call_t0) * 1000), **meta)
             say_or("Goodbye.", PROMPT_GOODBYE)
             return
 
         empty = 0
         log(f"turn {turn}: {text!r}")
+        c_t0 = time.monotonic()
         speech, response_type = ha_client.converse(text)
-        say_or(reply_text(speech, response_type), PROMPT_GOODBYE)
+        converse_ms = int((time.monotonic() - c_t0) * 1000)
+        # ★ BOUND, not passed inline. reply_text(...) used to be evaluated as a
+        # call argument and never stored, so the half of "what the assistant heard
+        # and said" that tells you whether it answered correctly existed nowhere.
+        reply = reply_text(speech, response_type)
+        s_t0 = time.monotonic()
+        spoke = say_or(reply, PROMPT_GOODBYE)
+        note("answered", turn=turn, heard=text, reply=reply,
+             response_type=response_type or None, converse_ms=converse_ms,
+             tts_ms=int((time.monotonic() - s_t0) * 1000),
+             turn_ms=int((time.monotonic() - turn_t0) * 1000),
+             tts_fallback=(True if spoke is False else None), **meta)
 
         if turn < MAX_TURNS:
             say("Anything else?")
 
+    note("ended-max-turns", turns_used=MAX_TURNS,
+         call_ms=int((time.monotonic() - call_t0) * 1000))
     say_or("Goodbye.", PROMPT_GOODBYE)
 
 
@@ -335,6 +508,14 @@ if __name__ == "__main__":
         main()
     except Exception as exc:  # noqa: BLE001  (never wedge the channel)
         sys.stderr.write(f"[assistant] fatal: {exc}\n")
+        # A crash is the one outcome that most needs a durable record and the one
+        # least likely to leave any other trace: this stderr line goes to the
+        # RAM-backed container log and nowhere else.
+        try:
+            if assistant_log is not None:
+                assistant_log.record("fatal", detail=f"{type(exc).__name__}: {exc}"[:200])
+        except Exception:  # noqa: BLE001
+            pass
         try:
             apologize_and_bye()
         except Exception:

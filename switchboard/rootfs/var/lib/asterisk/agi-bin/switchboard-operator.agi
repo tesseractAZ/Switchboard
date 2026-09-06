@@ -114,7 +114,15 @@ def _stt_finish(proc) -> str:
         sys.stderr.write(f"[operator] stt error: {exc}\n")
         return ""
     if err:
-        sys.stderr.write(err)  # transcript/decision -> Asterisk log
+        # NOT the Asterisk log, despite what this line claimed until v0.80.0.
+        # AGI stderr is inherited fd 2: it goes to the Asterisk process's own
+        # stderr and lands raw in the RAM-backed container log, never through
+        # Asterisk's logger and so into neither durable file channel. Verified on
+        # the running system — both asterisk.log copies contain zero `heard=`.
+        # The wrong comment mattered: an audit read it, concluded household
+        # transcripts were already in the world-readable /share log, and nearly
+        # justified adding more on the grounds that it "already leaks".
+        sys.stderr.write(err)  # -> container log only; see test_privacy_invariants
     return (out or "").strip()
 
 

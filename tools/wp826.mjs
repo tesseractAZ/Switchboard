@@ -9,11 +9,14 @@ import tls from 'node:tls';
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 
-// DHCP has moved the cordless before (.71 → .84) — override with WP826_HOST=<ip>,
-// or better, give the WP826 a DHCP reservation so this default stays true.
+// The handset takes its address from DHCP and will move. Give it a reservation
+// on your router and set WP826_HOST=<ip>; the default below is only a placeholder.
 const HOST = process.env.WP826_HOST || '192.168.1.84';
 const USER = 'admin';
-const PASS = readFileSync('/tmp/.wp_pass', 'utf8').trim();
+// Read from a file, never an argv or an env value: both land in shell
+// history and in `ps` output for every process on the box.
+const PASS_FILE = process.env.WP826_PASS_FILE || '/tmp/.wp_pass';
+const PASS = readFileSync(PASS_FILE, 'utf8').trim();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 // ── Certificate pinning ─────────────────────────────────────────────────────
