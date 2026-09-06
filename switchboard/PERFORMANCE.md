@@ -255,9 +255,11 @@ The second was avoidable and is now gone. All 28 shipped prompts were 8 kHz
 every playback — including all eight legs of a house-wide page, simultaneously.
 0.82.0 ships a `.ulaw` sibling for each; Asterisk selects the file matching the
 channel, so the conversion simply stops happening. Observed directly on
-2026-09-06, in the log line for an emergency notice played to a wired handset:
-`Playing 'switchboard/sw-no-emergency.ulaw'` — Asterisk naming the µ-law file,
-not the PCM master.
+2026-09-06, in the log line for an emergency notice — `Playing
+'switchboard/sw-no-emergency.ulaw'`, Asterisk naming the µ-law file rather than
+the PCM master — on a wired FXS port (`PJSIP/12`) and again on the WiFi cordless
+(`PJSIP/19`), which are the two handset families on this system and reach
+Asterisk by different paths.
 
 **The ledger under-reports this, and that is worth knowing before trusting it.**
 `read_format` is sampled once, in the hangup extension. 23 of 246 legacy legs
@@ -279,8 +281,8 @@ quiet because the system is healthy or because they cannot fire.
 | Detector | Fired | Why |
 | --- | --- | --- |
 | Poor-call alert | 11 legs | Working. |
-| Emergency notice (`911`) | 1 call | **Verified from a wired handset** 2026-09-06: `[911@rooms]` ran on `PJSIP/12`, played `sw-no-emergency.ulaw`, and wrote an `emergency`-tagged row. `933` has still never been dialled here. |
-| Unanswered-leg media gate | 2 legs | **Verified** 2026-09-06. Two unanswered PJSIP legs since the gate shipped, both routed to `no-media` with **zero** warnings; the last media warning anywhere in the log is 13:17:35, the final unanswered call before it. |
+| Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
+| Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
 | Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
@@ -289,11 +291,18 @@ quiet because the system is healthy or because they cannot fire.
 
 **Five of eight have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
-incapable of firing and is now fixed. Two more were verified by hand on
-2026-09-06 — the emergency notice and the unanswered-leg gate — because neither
-could be exercised without somebody picking up a telephone. That is the honest
-limit of this table: a detector nobody can trigger from a shell stays unproven
-until a person walks to a handset.
+incapable of firing and is now fixed. Two more were verified by hand across
+three calls on 2026-09-06 — the emergency notice and the unanswered-leg gate —
+because neither could be exercised without somebody picking up a telephone. That
+is the honest limit of this table: a detector nobody can trigger from a shell
+stays unproven until a person walks to a handset.
+
+The gate is the one to learn from. Its first verification looked complete and
+was half a result: "zero warnings" is equally consistent with a gate that works
+and a gate jammed shut, and only an *answered* call — which nothing in a shell
+can produce — separates them. Two of the five silent detectors above are silent
+for exactly that reason, and no amount of reading the code would have told them
+apart either.
 Separating those three cases is the only reason this table is worth keeping — a
 detector that cannot fire and a healthy system produce identical silence.
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.89.0
+
+**`933` works, and it is no longer the number nobody has dialled.** `933` is the
+FCC's number for testing an emergency setup without engaging dispatch, and until
+now it had been reasoned about rather than tried — it shares a dialplan block
+with `911`, so it "almost certainly" worked. A test call from the cordless
+handset confirmed it end to end: the call answered, played the spoken notice
+from the µ-law file, was tagged as an emergency attempt in the call ledger, and
+finished with no warning, error or notice anywhere in the log.
+
+It also happened to cover the one handset the earlier `911` test could not. That
+test came from a wired phone; this one came over WiFi, and the two reach
+Asterisk by different paths. The µ-law prompt shipped in 0.82.0 is now confirmed
+on both.
+
+**The unanswered-call fix is confirmed in the direction that actually matters.**
+Its first verification counted warnings and found none, which looked like a
+complete answer and was half of one: a check jammed permanently "on" would
+produce exactly the same silence, while quietly throwing away the call-quality
+figures for every call in the house. The `933` call was an *answered* call, so it
+exercised the other side — the check correctly declined to skip, and the call's
+audio statistics were read as normal. Both directions are now observed rather
+than argued.
+
+**`933` could have gone silent without any test noticing.** The tests that
+covered the emergency numbers searched the whole dialplan for the spoken notice,
+and `911` alone satisfied that search. A `933` that answered the call and then
+sat in silence — the exact failure the extension exists to prevent — passed all
+485 of them. So did a `933` that spoke *before* answering, which on an analog
+handset can mean the caller hears nothing at all. Both are now caught, checked
+against each number's own block instead of the file as a whole.
+
 ## 0.88.0
 
 Two test calls settled two things that no amount of reading could.
