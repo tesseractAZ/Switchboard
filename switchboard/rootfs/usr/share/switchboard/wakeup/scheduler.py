@@ -150,14 +150,44 @@ def _reconcile_rings(now: float) -> None:
             log(f"wake-up for ext {ext} ({r['hhmm']}) {how} — ringing again")
             _record(ext, "answered-silent" if answered else "no-answer",
                     hhmm=r["hhmm"], attempt=1)
+            # ★ THE RE-RING GETS THE SAME GATE THE FIRST RING GETS.
+            #
+            # The initial fire defers unless the room reads "Not in use"
+            # (see tick()), precisely because an Async Originate reports
+            # "queued" the instant AMI accepts it and says nothing about
+            # whether a channel was ever created. This path had no such check:
+            # it re-ran the identical unguarded originate ninety seconds later.
+            #
+            # That is not hypothetical. Five ERRORs of the form
+            #   Endpoint '19': Could not create dialog to invalid URI '19'
+            # are in the durable log, four of them for the cordless and three
+            # inside an add-on restart window — an originate that returned True
+            # to a caller that had no way to learn it had failed.
+            state = ""
             try:
-                if ami.originate_wakeup(ext, RING):
-                    r["retried"] = True
-                    r["started"] = now
-                    _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
-                    continue
-            except Exception as exc:  # noqa: BLE001
-                log(f"re-ring for ext {ext} failed: {exc}")
+                state = {e.get("name"): (e.get("state") or "")
+                         for e in ami.get_endpoints()}.get(ext, "")
+            except Exception as exc:  # noqa: BLE001  (AMI down -> unknown, below)
+                log(f"endpoint state unavailable before re-ring for ext {ext}: {exc}")
+            rang_again = False
+            if state.strip().lower() != "not in use":
+                # Deliberately NOT a deferral. The wake-up is already late and
+                # this is its last chance; recording that the second ring never
+                # went out is what keeps the escalation from claiming it did.
+                log(f"re-ring for ext {ext} SKIPPED — room '{state or 'unknown'}'")
+                _record(ext, "re-ring-skipped", hhmm=r["hhmm"], attempt=2,
+                        device_state=state or "unknown")
+            else:
+                try:
+                    if ami.originate_wakeup(ext, RING):
+                        r["retried"] = True
+                        r["started"] = now
+                        rang_again = True
+                        _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    log(f"re-ring for ext {ext} failed: {exc}")
+            r["rang_again"] = rang_again
             _ringing.pop(ext, None)
             continue
         # Second ring also failed — this is a genuinely undelivered alarm.
@@ -165,10 +195,21 @@ def _reconcile_rings(now: float) -> None:
         _record(ext, "undelivered", hhmm=r["hhmm"], attempt=2,
                 reason="answered-silent" if answered else "no-answer")
         _ringing.pop(ext, None)
-        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not delivered. "
-               + (f"The phone was picked up but played no audio, twice."
+        # ★ SAY ONLY WHAT IS KNOWN. This used to assert "The phone rang twice and
+        # nobody picked up" on every undelivered wake-up — a claim the scheduler
+        # cannot support. An Async Originate returns success the moment AMI
+        # accepts it; if Asterisk then fails to create the dialog (five such
+        # ERRORs are in the durable log) the phone never rang at all, and the
+        # person woken by this push at 6am was being told something false about
+        # their own house.
+        detail = ("The phone was picked up but played no audio."
                   if answered else
-                  f"The phone rang twice and nobody picked up."))
+                  "The phone was rung twice and nobody picked up."
+                  if r.get("rang_again") else
+                  "The phone was rung once and nobody picked up; the second "
+                  "attempt was not made because the handset was not available.")
+        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not "
+               f"delivered. {detail}")
         pushed = False
         if ha_client is not None and PUSH_TARGET:
             try:

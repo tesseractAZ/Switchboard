@@ -419,6 +419,15 @@ def test_ringout_is_detected_and_rung_again(tmp_path):
     class _AMI:
         @staticmethod
         def originate_wakeup(ext, ring): rings.append(ext); return True
+
+        @staticmethod
+        def get_endpoints():
+            # v0.84.0 — the RE-RING is now gated on the same endpoint state the
+            # first ring is, because an Async Originate returns success whether
+            # or not a channel is ever created. A stub without this makes the
+            # reconciler skip the second ring and the test reads as a failure of
+            # the reconciler rather than of the stub.
+            return [{"name": "19", "state": "Not in use"}]
     class _HA:
         @staticmethod
         def push(msg, title="", target="", critical=False):
@@ -460,6 +469,15 @@ def test_a_delivered_wakeup_is_never_escalated(tmp_path):
     class _AMI:
         @staticmethod
         def originate_wakeup(ext, ring): rings.append(ext); return True
+
+        @staticmethod
+        def get_endpoints():
+            # v0.84.0 — the RE-RING is now gated on the same endpoint state the
+            # first ring is, because an Async Originate returns success whether
+            # or not a channel is ever created. A stub without this makes the
+            # reconciler skip the second ring and the test reads as a failure of
+            # the reconciler rather than of the stub.
+            return [{"name": "19", "state": "Not in use"}]
     class _HA:
         @staticmethod
         def push(*a, **k): pushes.append(1); return True
@@ -500,6 +518,15 @@ def test_a_wakeup_answered_in_silence_escalates(tmp_path):
     class _AMI:
         @staticmethod
         def originate_wakeup(ext, ring): rings.append(ext); return True
+
+        @staticmethod
+        def get_endpoints():
+            # v0.84.0 — the RE-RING is now gated on the same endpoint state the
+            # first ring is, because an Async Originate returns success whether
+            # or not a channel is ever created. A stub without this makes the
+            # reconciler skip the second ring and the test reads as a failure of
+            # the reconciler rather than of the stub.
+            return [{"name": "19", "state": "Not in use"}]
 
     class _HA:
         @staticmethod
@@ -638,6 +665,15 @@ def test_an_unwritable_ledger_is_not_read_as_nobody_answered(tmp_path):
     class _AMI:
         @staticmethod
         def originate_wakeup(ext, ring): rings.append(ext); return True
+
+        @staticmethod
+        def get_endpoints():
+            # v0.84.0 — the RE-RING is now gated on the same endpoint state the
+            # first ring is, because an Async Originate returns success whether
+            # or not a channel is ever created. A stub without this makes the
+            # reconciler skip the second ring and the test reads as a failure of
+            # the reconciler rather than of the stub.
+            return [{"name": "19", "state": "Not in use"}]
     class _HA:
         @staticmethod
         def push(*a, **k): pushes.append(1); return True
@@ -716,3 +752,77 @@ def test_is_writable_actually_probes_the_filesystem(tmp_path):
     blocker.write_text("not a directory")
     d.OUTCOME_PATH = str(blocker / "nested" / "x.jsonl")
     check("an uncreatable path reports NOT writable", d.is_writable() is False)
+
+
+def test_the_escalation_does_not_claim_a_ring_that_never_happened(tmp_path):
+    """★ The push used to assert "The phone rang twice and nobody picked up".
+
+    The scheduler cannot know that. `ami.originate_wakeup` issues an Async
+    Originate, which AMI answers "queued" the instant it accepts the request —
+    before any channel exists. If Asterisk then fails to create the dialog, the
+    phone never rings. Five such errors are in the durable log:
+
+      Endpoint '19': Could not create dialog to invalid URI '19'
+
+    four of them for the cordless, three inside an add-on restart window. On
+    those the alarm-clock escalation woke somebody at 6am to tell them their
+    phone had rung twice, which it had not.
+
+    The re-ring is now gated on the same endpoint state the first ring is, so
+    the scheduler knows whether it went out — and says only that.
+    """
+    sched, delivery = _reconciler(tmp_path)
+    pushes = []
+
+    class _HA:
+        @staticmethod
+        def push(msg, **k): pushes.append(msg); return True
+
+        @staticmethod
+        def notify(msg, **k): pushes.append(msg); return True
+
+    class _AMIUnavailable:
+        @staticmethod
+        def originate_wakeup(ext, ring):
+            raise AssertionError("the re-ring must not be attempted at all")
+
+        @staticmethod
+        def get_endpoints():
+            # The restart-convergence shape: the handset has not re-registered.
+            return [{"name": "19", "state": "Unavailable"}]
+
+    sched.ami, sched.ha_client = _AMIUnavailable, _HA
+    t0 = 1_000_000.0
+    sched._ringing.clear()
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
+                            "started": t0, "retried": False}
+
+    sched._reconcile_rings(t0 + sched.RETRY_AFTER + 1)     # first judgement
+    import json as _j
+    recs = [_j.loads(l) for l in
+            open(delivery.OUTCOME_PATH).read().splitlines() if l.strip()]
+    check("re-ring: an unavailable handset is NOT rung a second time",
+          any(r["outcome"] == "re-ring-skipped" for r in recs))
+    check("re-ring: and the skip records the device state that caused it",
+          any(r.get("device_state") == "Unavailable" for r in recs))
+
+    # Now let the ring be judged again: it should escalate, honestly.
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
+                            "started": t0, "retried": True, "rang_again": False}
+    sched._reconcile_rings(t0 + 2 * sched.RETRY_AFTER + 2)
+    check("re-ring: the failure still escalates", len(pushes) == 1)
+    check("re-ring: and does NOT claim the phone rang twice",
+          "rung twice" not in pushes[0])
+    check("re-ring: it says the second attempt was not made",
+          "second attempt was not made" in pushes[0])
+
+    # ...and when the second ring DID go out, it may say so.
+    pushes.clear()
+    sched.ami = type("A", (), {
+        "originate_wakeup": staticmethod(lambda e, r: True),
+        "get_endpoints": staticmethod(lambda: [{"name": "19", "state": "Not in use"}])})
+    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
+                            "started": t0, "retried": True, "rang_again": True}
+    sched._reconcile_rings(t0 + 3 * sched.RETRY_AFTER + 3)
+    check("re-ring: a real second ring IS reported as one",
+          pushes and "rung twice" in pushes[0])

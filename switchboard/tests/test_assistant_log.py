@@ -207,12 +207,30 @@ def test_the_boot_sweep_does_not_reopen_the_speech_ledger(tmp_path):
         p.write_text("{}\n")
         os.chmod(p, 0o600)
 
+    # An oversized durable log in the same directory. ensure_state_dir() is the
+    # only thing that trims it, and it is the only place it CAN be trimmed
+    # safely — this oneshot runs before Asterisk opens the file for writing.
+    # Asserting the trim function in isolation is not enough: a mutant that
+    # deleted the CALL, leaving the function intact, survived that test.
+    big = d / "asterisk.log"
+    line = "[Sep  6 00:00:00] VERBOSE[1] Endpoint 14 is now Reachable\n"
+    with open(big, "w") as fh:
+        for _ in range((sbc.DURABLE_LOG_MAX_BYTES // len(line)) + 400):
+            fh.write(line)
+    oversized = big.stat().st_size
+    assert oversized > sbc.DURABLE_LOG_MAX_BYTES, "fixture must exceed the cap"
+
     real = sbc.STATE_DIR
     try:
         sbc.STATE_DIR = d
         sbc.ensure_state_dir()      # the chown to `asterisk` fails off-box and warns
     finally:
         sbc.STATE_DIR = real
+
+    assert big.stat().st_size < oversized, (
+        "ensure_state_dir() did not trim the durable log — the boot path is the "
+        "only place it is bounded, and Asterisk holds it open afterwards")
+    assert big.stat().st_size > 0, "trimmed to zero — the v0.77.0 defect"
 
     def mode(name):
         return stat.S_IMODE(os.stat(d / name).st_mode)

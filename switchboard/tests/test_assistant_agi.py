@@ -503,3 +503,75 @@ def test_a_bare_decline_ends_the_call() -> None:
                       "turn off all the lights", "turn on the office lights"):
         check(f"decline: {utterance!r} is still a command",
               not mod.is_goodbye(utterance))
+
+
+def test_a_dead_voice_ends_the_call_instead_of_looping_in_silence() -> None:
+    """F33. The module docstring promises "a TTS, STT or HA failure degrades to a
+    canned spoken apology + graceful hangup -- the caller is never left in
+    silence." On the TTS path it did not.
+
+    Every dynamic line has a canned fallback except the "Anything else?"
+    re-prompt, which has none. With espeak down the caller heard a beep, eight
+    seconds of recording silence, "one moment", and then nothing — five times,
+    for a minute and a half, holding a handset to a machine that had stopped
+    talking. Two cumulative failures now end the call the way the docstring says.
+    """
+    mod, spoken, _ = _load(heard=["lights on", "fan on", "and the porch"])
+    mod.say = lambda text: False                 # espeak is dead
+    mod.main()
+    ends = [r for r in mod.ledger if r["outcome"] == "tts-failed"]
+    check("tts-latch: the call ends on a dead voice", ends)
+    check("tts-latch: and the ledger says why", ends and ends[0]["tts_fails"] >= mod.MAX_TTS_FAILS)
+    check("tts-latch: it does not burn all five turns",
+          len(mod.listened) < mod.MAX_TURNS)
+    check("tts-latch: and the caller hears a canned goodbye, not silence",
+          any("sw-goodbye" in s for s in spoken))
+
+
+def test_one_slow_utterance_does_not_end_a_working_call() -> None:
+    """★ TWO strikes, not one, and the reason is measurable.
+
+    switchboard-tts gives espeak 15 s per utterance. A long Home Assistant answer
+    — this house exposes 148 entities — can exceed that while the engine is
+    perfectly healthy. Ending on the first failure would turn a wordy reply into
+    a dropped call and file it as a broken voice.
+    """
+    mod, _, _ = _load(heard=["lights on", "fan on", "goodbye"])
+    calls = {"n": 0}
+
+    def _flaky(text):
+        calls["n"] += 1
+        return calls["n"] != 1          # only the FIRST utterance fails
+    mod.say = _flaky
+    mod.main()
+    check("tts-latch: one failure does not end the call",
+          not [r for r in mod.ledger if r["outcome"] == "tts-failed"])
+    check("tts-latch: the call runs on to its natural goodbye",
+          [r for r in mod.ledger if r["outcome"] == "goodbye"])
+
+
+def test_the_failure_counter_is_per_call_not_per_process() -> None:
+    """The AGI is one process per call in production, so a module-level counter
+    is safe there — but the test harness loads this module repeatedly in ONE
+    interpreter. A counter left set by an earlier test would end the next call
+    before it started, and the failure would look like a latch bug rather than a
+    fixture leak."""
+    mod, _, _ = _load(heard=["lights on"])
+    mod.say = lambda text: False
+    mod.main()
+    check("tts-latch: first call latched", mod._tts_fails >= mod.MAX_TTS_FAILS)
+
+    # ★ The SAME module object, a second call. Loading a fresh one would re-run
+    # the module-level `_tts_fails = 0` and prove nothing about main()'s own
+    # reset — a mutant that deleted that reset survived exactly that mistake.
+    mod.ledger.clear()
+    mod.listened.clear()
+    healthy = ["lights on", "goodbye"]
+    mod.listen = lambda tag, attempt, bias="": (
+        (healthy.pop(0), {}) if healthy else ("", {"stt": "silence"}))
+    mod.say = lambda text: True                  # espeak is fine again
+    mod.main()
+    check("tts-latch: the next call on the same process is not poisoned",
+          not [r for r in mod.ledger if r["outcome"] == "tts-failed"])
+    check("tts-latch: and it runs to its own goodbye",
+          [r for r in mod.ledger if r["outcome"] == "goodbye"])
