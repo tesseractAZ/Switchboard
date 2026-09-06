@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.82.1
+
+**Hotfix: the assistant's ledger was being reopened to the group on every
+restart.** The file that can contain the words people say in their own home is
+created private to the one process that writes it. A separate routine that
+prepares the state directory at boot then set every file in that directory to be
+group-readable — which is right for the three stores that a background service
+and a phone script genuinely share, and wrong for this one.
+
+So the file was created correctly and quietly widened a few minutes later, and
+had been group-readable on the running system since the first call. It stays
+inside the add-on either way, where nothing outside can reach it, so nothing
+escaped. But the design said private and the machine said otherwise.
+
+The boot routine now widens only the three files that are actually shared, and
+leaves everything else alone. A new store that needs group access has to say so.
+
+**The test that should have caught this was agreeing with the code and
+disagreeing with the machine.** It asserted the mode of a file it had just
+written itself, so it never saw the boot routine at all. It now runs that
+routine against a temporary directory and checks what comes out — including the
+lock files, whose first version of the fix I would also have got wrong.
+
 ## 0.82.0
 
 Two findings from the first calls made after the assistant learned to keep a

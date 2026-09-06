@@ -163,3 +163,69 @@ def test_the_ledger_never_names_a_share_path():
     assert al.PATH.startswith("/data/") or "SWITCHBOARD_ASSISTANT_LOG" in os.environ
     import re
     assert not re.findall(r'["\']/share/[^"\']*["\']', src)
+
+
+def test_the_boot_sweep_does_not_reopen_the_speech_ledger(tmp_path):
+    """★ The mode is set correctly and was being undone at boot.
+
+    `ensure_state_dir()` runs as root on every start and used to chmod EVERY file
+    in /data/state to 0664 — correct for the stores a root service and an
+    asterisk-user AGI genuinely share, wrong for this one. So `record()` created
+    the ledger 0600, the next restart reopened it to the group, and
+    `test_the_file_is_private_to_its_writer` above passed the whole time, because
+    it only ever saw the file its own call had just written.
+
+    Observed on the running system: `-rw-rw-r--` on
+    `/data/state/assistant.jsonl`, hours after a release whose tests asserted
+    0600. A test that agrees with the code and disagrees with production is worse
+    than no test — it is evidence pointing the wrong way.
+
+    This RUNS the function rather than reading it. A first version asserted only
+    that the allowlist existed and what was in it, and a mutant that restored the
+    blanket sweep — leaving the allowlist untouched and simply not consulting it
+    — survived the whole suite.
+    """
+    import os
+    import stat
+    from importlib.machinery import SourceFileLoader
+    from pathlib import Path
+    sbc = SourceFileLoader("switchboard_config", str(
+        Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "bin"
+        / "switchboard-config")).load_module()
+
+    d = tmp_path / "state"
+    d.mkdir()
+    # The .lock siblings matter as much as the stores. callqos.jsonl.lock is
+    # flock'd by a root service AND an asterisk-user AGI, so it needs the same
+    # group access its store does; assistant.jsonl.lock has one writer and does
+    # not. The sweep decides by stripping the suffix, and a mutant that stopped
+    # stripping survived a fixture that had no lock files in it.
+    for name in ("assistant.jsonl", "callqos.jsonl", "wakeups.json", "mwi.json",
+                 "assistant.jsonl.lock", "callqos.jsonl.lock",
+                 "wakeups.json.lock", "mwi.json.lock"):
+        p = d / name
+        p.write_text("{}\n")
+        os.chmod(p, 0o600)
+
+    real = sbc.STATE_DIR
+    try:
+        sbc.STATE_DIR = d
+        sbc.ensure_state_dir()      # the chown to `asterisk` fails off-box and warns
+    finally:
+        sbc.STATE_DIR = real
+
+    def mode(name):
+        return stat.S_IMODE(os.stat(d / name).st_mode)
+
+    assert mode("assistant.jsonl") == 0o600, (
+        f"the boot sweep reopened the speech ledger to "
+        f"{oct(mode('assistant.jsonl'))} — it has one writer and must stay 0600")
+    # ...and the stores that DO need group access must still get it, or the
+    # dial-42 wake-up and the MWI clear go back to failing with EPERM.
+    for shared in ("callqos.jsonl", "wakeups.json", "mwi.json",
+                   "callqos.jsonl.lock", "wakeups.json.lock", "mwi.json.lock"):
+        assert mode(shared) == 0o664, (
+            f"{shared} is written by BOTH a root service and an asterisk-user "
+            f"AGI and needs group access; got {oct(mode(shared))}")
+    assert mode("assistant.jsonl.lock") == 0o600, (
+        "the speech ledger's lock was widened too — it has one writer")

@@ -2188,7 +2188,25 @@ def ensure_state_dir() -> None:
         # chmod FIRST (always works as root) so an absent asterisk user off-box can't
         # leave the modes unset; then hand the dir + files to the asterisk user.
         os.chmod(STATE_DIR, 0o2775)  # setgid → children inherit the asterisk group  # intentional: shared state dir; the asterisk user needs it (setgid keeps the group)
+        # ★ WIDEN ONLY WHAT IS ACTUALLY SHARED.
+        #
+        # This used to chmod EVERY file in the directory to 0664, which is right
+        # for the stores below — each is written by both a root service and an
+        # asterisk-user AGI, so group access is the whole point. It is wrong for
+        # anything else, and v0.80.0 put something else here: the voice
+        # assistant's ledger, the one file in this system that can contain the
+        # words people say in their own home. It is created 0600 by design, has
+        # exactly one writer, and this loop reopened it to the group on every
+        # single boot. The module's own test asserted 0600 and passed, while the
+        # running system had been 0664 since the first call.
+        #
+        # A blanket sweep cannot tell a shared file from a private one, so it no
+        # longer tries. A new store that needs group access must say so here.
+        SHARED_0664 = {"wakeups.json", "mwi.json", "callqos.jsonl"}
         for f in STATE_DIR.iterdir():
+            base = f.name[:-5] if f.name.endswith(".lock") else f.name
+            if base not in SHARED_0664:
+                continue          # leave a private file's mode alone
             try:
                 os.chmod(f, 0o664)  # intentional: root services AND the asterisk-user AGIs share this file; group access is required
             except OSError:
