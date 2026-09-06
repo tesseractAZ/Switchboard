@@ -463,17 +463,45 @@ def _announce_digest(path: str) -> str:
 
 
 def _is_duplicate_announce(ext: str, digest: str, now: float | None = None) -> bool:
-    """True when this exact payload already played to this ext very recently.
+    """True when this exact payload ALREADY PLAYED to this ext very recently.
 
-    Records the attempt either way, so a repeat pushes the window forward rather
-    than letting a producer retry past it every N seconds."""
+    ★ PURE. It reads the window and does not touch it. Marking is
+    `_mark_announce_played()`, called only where an announcement is actually
+    dispatched.
+
+    v0.85.0 — this used to record the attempt itself, before any of the guards
+    below it had run, and its docstring called that deliberate: "a repeat pushes
+    the window forward rather than letting a producer retry past it every N
+    seconds." That reasoning holds for an announcement that PLAYED. Applied to
+    one that was refused it produces a lockout with no exit:
+
+        t=0    payload D arrives -> window set to t=0 -> handset unreachable, 503
+        t=30   caller retries D  -> window pushed to t=30 -> "duplicate", suppressed
+        t=60   caller retries D  -> window pushed to t=60 -> suppressed
+        ...
+
+    Every retry renewed the very window it was trying to outlast, so an
+    announcement refused once could never be delivered again while the caller
+    kept trying. The callers that retry are the alerting ones.
+
+    Anchoring the window to a real playback also turns it back into a rate limit
+    rather than a lockout: a producer repeating identical content gets one
+    playback per window, instead of one and then silence forever.
+    """
     now = now if now is not None else time.monotonic()
     prev = _ANNOUNCE_LAST.get(ext)
-    _ANNOUNCE_LAST[ext] = (digest, now)
     if not prev:
         return False
     prev_digest, prev_ts = prev
     return prev_digest == digest and (now - prev_ts) < ANNOUNCE_DEDUP_WINDOW_S
+
+
+def _mark_announce_played(ext: str, digest: str, now: float | None = None) -> None:
+    """Start the suppression window. Called ONLY once an announcement has been
+    dispatched to the handset — never on a refusal, because a refusal did not
+    play anything and must not silence the retry."""
+    if digest:
+        _ANNOUNCE_LAST[ext] = (digest, now if now is not None else time.monotonic())
 
 
 def _announce_name(ext: str) -> str:
@@ -652,6 +680,12 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         # match, so one join covers both paths.
         _record_delivery(ext, "announce", "originate-queued",
                          sound=os.path.basename(sound))
+        # ...and only NOW does the suppression window start. Every path above
+        # this one — too-long, busy, unreachable, originate-error,
+        # originate-refused — leaves it untouched, so a caller that retries a
+        # refusal is not answered with a duplicate verdict for something that
+        # never played.
+        _mark_announce_played(ext, digest)
     return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
 
 
