@@ -1512,7 +1512,28 @@ async function refresh() {
     });
     roomDirectory = data.rooms.map(r => ({ext: r.ext, label: r.label, registered: r.registered}));
     const grid = document.getElementById('rooms');
-    grid.innerHTML = data.rooms.map(r => {
+
+    // ★ Do NOT rebuild the grid while someone is typing in it.
+    //
+    // refresh() runs every 4 s and replaces every room card wholesale. Each card
+    // carries a wake-up <input type="time">, so setting a wake-up meant racing
+    // the poll: type the hour, and four seconds later the node you were typing
+    // into no longer existed and the box had snapped back to the server's value.
+    //
+    // Saving and restoring the value does NOT work here. A partially-entered
+    // <input type="time"> reports value === "" until every segment is filled, so
+    // mid-entry there is literally nothing to preserve. The only fix is to leave
+    // the node alone.
+    //
+    // Only the GRID assignment is skipped — not the rest of refresh(). The
+    // header, the banner, the active-call list and the wake-up list are rendered
+    // outside this block and keep updating on schedule, so the page does not go
+    // stale while one field is focused.
+    const active = document.activeElement;
+    const typingInGrid = !!(active && grid.contains(active) &&
+                            /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+
+    const gridHtml = data.rooms.map(r => {
       // "Not in use" means registered-and-idle (green) — only an active call
       // state ("In use", "Ringing", "Busy", "On Hold") is busy (orange).
       const ds = (r.device_state||'').toLowerCase();
@@ -1584,6 +1605,7 @@ async function refresh() {
              '<div class="actions">' + ringBtn + connBtn + hangBtn + xferBtn + mwiBtn + '</div>' +
              wakeRow + '</div>';
     }).join('');
+    if (!typingInGrid) grid.innerHTML = gridHtml;
     updateConnectHint();
 
     const callsEl = document.getElementById('calls');

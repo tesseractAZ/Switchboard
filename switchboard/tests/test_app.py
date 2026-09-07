@@ -802,3 +802,50 @@ def test_the_suppression_window_starts_only_where_something_played() -> None:
                src.index("def _mark_announce_played(")]
     check("wiring: the duplicate CHECK does not touch the window",
           "_ANNOUNCE_LAST[" not in body)
+
+
+def test_the_room_grid_is_not_rebuilt_while_a_field_is_focused() -> None:
+    """★ Setting a wake-up in the panel was a race against the 4-second poll.
+
+    `refresh()` replaces every room card wholesale, and each card carries a
+    wake-up `<input type="time">`. Type the hour, and four seconds later the node
+    you were typing into no longer existed and the box had snapped back to the
+    server's value. Reported from live use: "the numbers keep overwriting."
+
+    Save-and-restore is not available as a fix: a partially-entered
+    `<input type="time">` reports `value === ""` until every segment is filled,
+    so mid-entry there is nothing to preserve. The node has to be left alone.
+
+    THIS IS A SOURCE-STRUCTURE ASSERTION, and it is a last resort. The panel's
+    JavaScript lives inside a Python string literal and there is no DOM in this
+    suite, so no behavioural test is available. It is written to pin the three
+    things that would actually regress rather than to match a phrase: that the
+    assignment is guarded, that the guard consults the focused element, and —
+    the one a careless fix gets wrong — that the guard does NOT swallow the rest
+    of the refresh.
+    """
+    html = app.INDEX_HTML
+    body = html[html.index("async function refresh()"):html.index("async function refreshLights()")]
+
+    assert "grid.innerHTML = gridHtml" in body, "the grid assignment was renamed"
+    assert "grid.innerHTML = data.rooms.map" not in body, (
+        "the room grid is assigned unconditionally again — a poll landing "
+        "mid-entry will destroy the field being typed into")
+    assert "if (!typingInGrid) grid.innerHTML" in body, "the assignment is not guarded"
+    assert "document.activeElement" in body and "grid.contains(active)" in body, (
+        "the guard does not consult the focused element")
+
+    # ...and the guard must not become an early return. The active-call list and
+    # the wake-up list render AFTER the grid; a `return` here would freeze both
+    # for as long as a field is focused, which is a worse bug than the one being
+    # fixed and looks identical in a screenshot.
+    guard_at = body.index("const typingInGrid")
+    assign_at = body.index("if (!typingInGrid) grid.innerHTML")
+    between = body[guard_at:assign_at]
+    assert "return;" not in between, (
+        "the focus guard short-circuits refresh() instead of skipping just the "
+        "grid assignment — the calls and wake-up lists would stop updating")
+    for later in ("getElementById('calls')", "getElementById('wakeups')"):
+        assert body.index(later) > assign_at, (
+            f"{later} now renders before the grid assignment; the guard's "
+            f"'everything else keeps updating' claim no longer holds")

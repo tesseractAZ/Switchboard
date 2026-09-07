@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.94.0
+
+**Setting a wake-up in the dashboard no longer fights you.** The room cards are
+rebuilt every four seconds to keep their status current, and that rebuild threw
+away whatever you were typing into a room's wake-up time box — reported from use
+as the numbers overwriting themselves. Saving the half-typed value and putting it
+back is not possible; a time field reports nothing at all until every part of it
+is filled. So the cards now simply hold still while a field in them is focused,
+and resume the moment you click away. Everything else on the page — the header,
+the banner, the active-call list, the list of wake-ups already set — keeps
+updating throughout.
+
+**Both console listeners now default to your Home Assistant machine only.** The
+telnet console and the standalone browser terminal used to listen on every
+network interface, and neither has authentication of its own that is on by
+default. Since the previous release the same board is available in the Home
+Assistant sidebar, where your HA login is the only login, so there is no longer
+any reason for either to be on the network. Existing installations keep whatever
+you have configured — this changes what a fresh install starts with, and the
+live setting is changed separately.
+
+**A transient glitch could put the terminal back on the network.** If the add-on
+read a blank configuration value mid-reload — which does happen during a config
+change — the browser terminal's address fell back to "all interfaces" until the
+next restart. It now falls back to the local machine instead. A terminal that is
+briefly reachable from fewer places is a far cheaper failure than one briefly
+reachable from more.
+
+**The manual's default values are now checked against the schema.** Nothing
+compared them before, and this project has already shipped a documented default
+that had been wrong for two releases — an error that is invisible in review,
+because each file looks right on its own, and costly in use, because the reader
+believes the manual.
+
 ## 0.93.0
 
 **The operator console is now in the Home Assistant sidebar.** Open the

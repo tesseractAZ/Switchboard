@@ -119,11 +119,11 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `console_bind` | `0.0.0.0` | Interface it listens on. `127.0.0.1` restricts it to the host. |
+| `console_bind` | `127.0.0.1` | Interface it listens on. `127.0.0.1` restricts it to the host. |
 | `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **Unauthenticated on the LAN** — keep it trusted or bind to loopback, or disable. |
 | `console_port` | `2300` | TCP port for the telnet console. |
 | `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
-| `console_web_bind` | `""` | Blank = follow `console_bind` (→ all interfaces); `127.0.0.1` restricts it to the host. |
+| `console_web_bind` | `127.0.0.1` | Blank = follow `console_bind`. Both default to loopback since 0.94.0: the browser console is served through the Home Assistant sidebar instead (§10), so neither listener needs to be on your network. |
 | `console_web_enabled` | `true` | Browser version of the console (xterm.js). Unauthenticated on the LAN **only while `console_users` is empty** — configure a user and both the page and the terminal socket require a sign-in (see below). Idles if `console_enabled` is off. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 
