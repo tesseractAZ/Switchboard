@@ -44,10 +44,23 @@
     "use strict";
 
     var statusEl = document.getElementById("status");
+    // Reconnect delay, grown on each failed attempt and reset on a real
+    // connection. Declared here so onclose and onopen share one value.
+    var backoff = 2000;
     function setStatus(text) {
       if (!text) { statusEl.style.display = "none"; return; }
       statusEl.style.display = "block";
       statusEl.textContent = text;
+    }
+
+    // If xterm.js did not load, `new Terminal(...)` throws and the page is left
+    // showing "Connecting to the operator console…" forever — indistinguishable
+    // from a live page whose telnet socket is dead. Under Ingress the asset URLs
+    // are relative, so a missing trailing slash on /console resolves them one
+    // directory up and produces exactly that silent failure.
+    if (typeof Terminal === "undefined") {
+      setStatus("Terminal assets failed to load (xterm.js). Check the /console/ URL ends with a slash.");
+      return;
     }
 
     var term = new Terminal({
@@ -116,6 +129,7 @@
       ws.binaryType = "arraybuffer";
 
       ws.onopen = function () {
+        backoff = 2000;   // a real connection resets the ladder
         setStatus("");
         applySize(true);
       };
@@ -127,10 +141,25 @@
           term.write(data);
         }
       };
-      ws.onclose = function () {
-        setStatus("Disconnected. Reconnecting in 2s…");
+      ws.onclose = function (ev) {
         ws = null;
-        setTimeout(connect, 2000);
+        // 1000 = we closed cleanly; 1013 = the server said "all sessions busy".
+        // Reconnecting on either produces a hot loop that occupies the very
+        // session slots it is waiting for, and re-opens a console session on a
+        // page nobody is looking at.
+        if (ev && (ev.code === 1000 || ev.code === 1013)) {
+          setStatus(ev.code === 1013
+            ? "Console busy — all sessions in use. Reload to try again."
+            : "Session ended. Reload to reconnect.");
+          return;
+        }
+        // Capped exponential backoff with jitter. A flat 2 s retry against a
+        // service that is down hammers it, and against an Ingress session that
+        // has expired it reconnects forever behind a panel nobody is watching.
+        backoff = Math.min(Math.round(backoff * 1.7), 30000);
+        var wait = backoff + Math.floor(Math.random() * 750);
+        setStatus("Disconnected. Reconnecting in " + Math.round(wait / 1000) + "s…");
+        setTimeout(connect, wait);
       };
       ws.onerror = function () {
         try { ws.close(); } catch (e) {}

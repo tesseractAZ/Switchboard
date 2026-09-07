@@ -94,6 +94,25 @@ COPY --from=whisper-builder /out/ /
 
 # Add-on rootfs: s6 service definitions, the config generator, the web UI, and
 # the voice-operator scripts + prompt audio.
+# WebSocket support for uvicorn, used ONLY by the Ingress operator console
+# (/console/ws). Its own late layer, immediately before `COPY rootfs /`: folding
+# it into the pip RUN above would invalidate the apk install, the sounds
+# download and the whisper build stage on every future dependency touch.
+#
+# `websockets`, not `wsproto`: uvicorn's wsproto backend silently ignores
+# --ws-max-size (and the ping/keepalive knobs), so the 64 KiB inbound cap the
+# console has always enforced would become advisory. Pinned exactly, because
+# uvicorn 0.32 drives the LEGACY websockets API, which upstream has announced
+# for removal.
+#
+# The import assert runs in the SAME layer as the install so it can never be
+# served from a cache whose parent changed. It is load-bearing: `--ws websockets`
+# with the package missing makes uvicorn exit BEFORE binding, and s6 restarts it
+# forever — taking the panel, every call-control route, /phonebook.xml and the
+# announce WAVs with it. Fail at build time instead.
+RUN pip install --no-cache-dir --break-system-packages "websockets==17.1" \
+    && python3 -c "import websockets, uvicorn.protocols.websockets.websockets_impl"
+
 COPY rootfs /
 
 RUN chmod +x /usr/bin/switchboard-config \
@@ -133,4 +152,4 @@ LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.92.0"
+    io.hass.version="0.93.0"

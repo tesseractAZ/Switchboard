@@ -307,12 +307,33 @@ def test_route_handlers_defined() -> None:
 
 
 def test_client_guard() -> None:
-    # The Ingress/Supervisor-only client guard is unchanged and reused by every
-    # new POST (via the middleware).
+    """★ EXACTLY ONE ADDRESS — and never a subnet.
+
+    Loopback used to be allowed here "for local health checks". It was removed
+    in 0.93.0 when this port gained a terminal onto the operator console:
+    the add-on runs host_network, so 127.0.0.1 is the HOST's loopback, shared
+    with every other host-network add-on and every process on the Pi (the SSH
+    add-on's root shell included). It is a location, not an identity. Verified
+    before removal that nothing dials 127.0.0.1:8099.
+
+    The subnet assertions are the important ones. The sibling Z-Wave add-on
+    shipped a check matching the whole 172.30.32.0/23 hassio bridge — which is
+    where every sibling add-on container lives — so its address term was always
+    true and the whole expression collapsed to "did the client send a header it
+    chose to send". Any sibling add-on, or an SSRF in a third-party one, got a
+    login-free operator session. A "helpful" widening here must fail.
+    """
     check("guard: Supervisor IP allowed", app._client_allowed("172.30.32.2") is True)
-    check("guard: loopback allowed", app._client_allowed("127.0.0.1") is True)
     check("guard: LAN client rejected", app._client_allowed("192.168.1.10") is False)
     check("guard: empty rejected", app._client_allowed("") is False)
+    check("guard: HOST loopback is NOT an identity under host_network",
+          app._client_allowed("127.0.0.1") is False and app._client_allowed("::1") is False)
+    # The /23 the zwave defect matched. Both ends and a middle address.
+    for sibling in ("172.30.32.1", "172.30.32.3", "172.30.33.4", "172.30.32.255"):
+        check(f"guard: sibling add-on {sibling} rejected (never a CIDR)",
+              app._client_allowed(sibling) is False)
+    check("guard: the allowlist is exactly one address",
+          app._ALLOWED_CLIENTS == frozenset({"172.30.32.2"}))
 
 
 def test_cached_status_bundle() -> None:

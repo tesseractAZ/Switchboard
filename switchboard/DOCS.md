@@ -982,13 +982,31 @@ and control **lights**. The board fills the whole terminal: each room row shows 
 registration, any live call + peer, and its idle **round-trip latency** (RTT); a
 status line under the header shows the **SIP trunk registration** (Registered /
 Unregistered) and **resident-STT health** (resident / CLI-fallback) — the same
-signals the Ingress dashboard surfaces. Two front-ends onto the same board:
+signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 
 ![The full-screen operator console](docs/img/console.png)
 
-- **Browser sign-in** — when `console_users` is configured the web terminal
-  first shows a sign-in page; the terminal socket itself also requires the
-  signed-in session, and repeated failures from one address are throttled.
+- **In the Home Assistant sidebar** *(recommended, added in 0.93.0)* — open the
+  **Switchboard** panel and press **🖥️ Console**, or go straight to `/console/`
+  under the panel's URL. This is the same board, served from the Ingress port, so
+  **Home Assistant's own login is the only login** — there is no separate
+  password to configure, forget, or leave switched off, and nothing is exposed on
+  your network. It works in the HA mobile app.
+
+  Two things worth knowing about it. The URL must end in a **slash**: the page
+  loads its assets relatively, so `/console` alone resolves them one directory up
+  and you get a terminal that never finishes connecting. `/console` redirects to
+  `/console/` for you, and the page now says so plainly if the assets are
+  missing. And because it is served inside the Home Assistant frontend, the
+  terminal shares HA's browser *origin* — a scripting bug in this page would be a
+  bug against your HA session, not merely against a terminal on its own port. The
+  page is served only `xterm.js` and `xterm.css`, from a two-entry allowlist, for
+  that reason.
+
+- **Browser sign-in** *(the standalone `:8100` terminal only)* — when
+  `console_users` is configured that terminal first shows a sign-in page; its
+  socket also requires the signed-in session, and repeated failures from one
+  address are throttled. The sidebar console above needs none of this.
 - **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,

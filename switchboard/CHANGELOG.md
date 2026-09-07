@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.93.0
+
+**The operator console is now in the Home Assistant sidebar.** Open the
+Switchboard panel and press **Console**. It is the same board as the telnet and
+`:8100` terminals, but served from the Ingress port — so Home Assistant's own
+login is the only login. There is no second password to configure, and nothing
+new is exposed on your network. It works in the mobile app.
+
+The `:8100` terminal still runs and is unchanged; a later release will turn it
+off once the new one has been used in earnest.
+
+**Two costs of that move, stated rather than buried.** The terminal now runs
+inside Home Assistant's own browser origin, so a scripting bug in the console
+page would be a bug against your Home Assistant session and not merely against a
+terminal on its own port; the page is therefore served only the two files it
+needs, from a fixed list. And the console URL must end in a slash — the page
+loads its assets relatively, so the slashless form resolves them one level up.
+That form now redirects, and the page says plainly when its assets are missing
+instead of showing a spinner that never resolves.
+
+**The guard on the management port was the wrong shape for this.** It rejected
+any caller that was not the Supervisor, which is what makes that port safe
+despite being reachable on the network — but it only ever ran for ordinary web
+requests. A terminal socket is not an ordinary web request, and would have
+arrived with no check at all, on the one port that cannot be switched off
+because it is the panel itself. The guard now covers both, and the network
+exemptions that exist for two devices which cannot use Ingress are confined to
+the request type they were written for. The list of permitted callers is now a
+single address: the loopback entries it used to carry are, on this add-on, the
+*host's* loopback and shared with everything else on the box.
+
+**A resize message would have rung a phone.** The browser sends its window size
+as text, and the check that recognises it was written for a different transport
+where it arrives as raw bytes — a comparison that is simply false for text, with
+no error. The message would have been typed into the board as keystrokes
+instead, and the board reads single letters as commands: `r` rings, `c`
+connects, `p` pages the house. The page sends that message the instant it
+opens. Opening the console would have rung a room and then walked the board
+through connect, page and lights. Found before shipping; the check now
+normalises the message first, and refuses to type anything that looks like a
+control message.
+
+**The console runs without blocking the phone system.** The web server handles
+one thing at a time, and the older terminal's design waits on its socket — which
+on a quiet board means waiting for seconds at a stretch. Lifted as-is, opening
+the console would have taken the dashboard and every call-control button offline
+for as long as the tab stayed open. The new bridge never waits.
+
 ## 0.92.0
 
 Groundwork for moving the browser terminal behind Home Assistant's own login.

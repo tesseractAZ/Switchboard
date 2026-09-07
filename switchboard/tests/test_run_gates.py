@@ -300,3 +300,65 @@ def test_an_option_the_agis_consume_reaches_features_json() -> None:
     assert _re.search(r'\("assistant"\)[^\n]*\.get\("transcripts"', agi) or \
            'get("transcripts"' in agi, \
            "the assistant AGI never reads its transcripts policy"
+
+
+def test_the_uvicorn_ws_flag_and_the_installed_package_agree() -> None:
+    """★ A cross-FILE invariant: the flag in the run script and the pip list.
+
+    `--ws websockets` with no `websockets` package does NOT degrade to a 404 on
+    one route. uvicorn's Config.load() imports the backend eagerly and re-raises
+    the ModuleNotFoundError, so the process exits BEFORE it binds. `webui` is an
+    s6 longrun with no finish script, so s6-supervise restarts it forever, and
+    config.yaml declares no watchdog, so the Supervisor never notices. Dead: the
+    Ingress panel, every call-control route, /phonebook.xml, and the announce
+    WAVs (a handset records fine and then plays silence).
+
+    That loud failure is the deliberate choice over `--ws auto`, which would fail
+    SOFT to a dead terminal — and the likely remedy for a dead terminal is
+    re-enabling the unauthenticated :8100, which is the door this whole change
+    exists to close. Choosing the loud failure is only defensible with this test
+    and the Dockerfile's build-time import assert holding it up.
+
+    Fails closed: if either file stops being parseable, that is a failure, not a
+    silent pass over an empty set.
+    """
+    import shlex
+    root = Path(__file__).resolve().parents[1]
+    run = (root / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "webui" / "run").read_text()
+    dockerfile = (root / "Dockerfile").read_text()
+
+    exec_lines = [ln for ln in run.replace("\\\n", " ").split("\n")
+                  if ln.strip().startswith("exec ") and "uvicorn" in ln]
+    assert len(exec_lines) == 1, f"expected one uvicorn exec line, found {len(exec_lines)}"
+    line = exec_lines[0]
+    assert "--port 8099" in line, "scanned the wrong service's run script"
+
+    argv = shlex.split(line)
+    impl = None
+    for i, a in enumerate(argv):
+        if a == "--ws" and i + 1 < len(argv):
+            impl = argv[i + 1]
+        elif a.startswith("--ws="):
+            impl = a.split("=", 1)[1]
+    assert impl is not None, "no --ws flag found; uvicorn would pick one implicitly"
+    assert impl in {"auto", "none", "websockets", "wsproto"}, f"unknown --ws {impl!r}"
+
+    pkgs = set()
+    for m in re.finditer(r'"([A-Za-z][A-Za-z0-9._-]*)(?:\[[^\]]*\])?[=<>!~]{1,2}[^"]*"', dockerfile):
+        pkgs.add(m.group(1).lower().replace("-", "_"))
+    assert {"fastapi", "uvicorn", "jinja2"} <= pkgs, (
+        f"the Dockerfile pip list did not parse — this check would pass over an "
+        f"empty set. Got: {sorted(pkgs)}")
+
+    if impl not in ("auto", "none"):
+        assert impl.lower() in pkgs, (
+            f"webui/run passes --ws {impl} but the Dockerfile never installs it. "
+            f"uvicorn exits before binding, s6 restarts it forever, and the panel "
+            f"plus all call control stay down. Installed: {sorted(pkgs)}")
+
+    # The reverse direction is the one that rots quietly: the package stays in
+    # the image long after the flag that needed it is gone.
+    if "websockets" in pkgs or "wsproto" in pkgs:
+        assert impl not in ("auto", "none"), (
+            "a WebSocket backend is installed but --ws does not name one; the "
+            "console would depend on uvicorn's autodetection")
