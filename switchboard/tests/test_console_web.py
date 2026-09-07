@@ -1,5 +1,5 @@
 """Behavioral tests for the console web terminal's pure framing helpers
-(console-web/wsproto.py).
+(console-web/consoleproto.py).
 
 Run with plain Python (no deps):
 
@@ -14,13 +14,17 @@ exercised here (same split as console.py's pure parser vs. its socket server).
 import os
 import struct
 from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 
-WSPROTO_PATH = (
+CONSOLEPROTO_PATH = (
     Path(__file__).resolve().parents[1]
-    / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "wsproto.py"
+    / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "consoleproto.py"
 )
-ws = SourceFileLoader("switchboard_wsproto", str(WSPROTO_PATH)).load_module()
+_spec = spec_from_loader("switchboard_consoleproto",
+                        SourceFileLoader("switchboard_consoleproto", str(CONSOLEPROTO_PATH)))
+ws = module_from_spec(_spec)
+_spec.loader.exec_module(ws)
 
 _failures = 0
 

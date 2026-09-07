@@ -33,8 +33,21 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+# server.py imports its siblings by BARE name (`consoleproto`, `webauth`), so
+# loading it here necessarily puts that directory on sys.path and those names in
+# sys.modules. Both must be put back, or this helper leaks global state into
+# every test that runs after it — the console-web directory would stay on
+# sys.path for the rest of the session, and a later `import consoleproto`
+# anywhere would silently resolve to the copy this function cached.
+_BARE_SIBLINGS = ("consoleproto", "webauth")
+
+
 def _load_server(mod_name: str, users_env: str):
     """Import server.py fresh with a given CONSOLE_WEB_USERS (import-time gate)."""
+    # Snapshot the WHOLE list: server.py:39 inserts this directory a second time
+    # from inside exec_module, so a single sys.path.remove() leaves it behind.
+    saved_path = list(sys.path)
+    saved_mods = {n: sys.modules.get(n) for n in _BARE_SIBLINGS}
     sys.path.insert(0, str(CONSOLE_WEB))
     old = os.environ.get("CONSOLE_WEB_USERS")
     os.environ["CONSOLE_WEB_USERS"] = users_env
@@ -46,6 +59,12 @@ def _load_server(mod_name: str, users_env: str):
         loader.exec_module(mod)
         return mod
     finally:
+        sys.path[:] = saved_path
+        for n, m in saved_mods.items():
+            if m is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = m
         if old is None:
             os.environ.pop("CONSOLE_WEB_USERS", None)
         else:
