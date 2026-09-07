@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.90.0
+
+A sweep of every document, test, workflow and note against the code as it now
+stands. Nothing here changes how the phone system behaves — it corrects things
+the project said about itself that were no longer true.
+
+**A stray file has been removed from the top of the public repository.** A
+mis-quoted shell command in the v0.81.0 release captured its own error message —
+`zsh:1: unmatched "` — into a 19-byte file whose name was the broken quoting.
+It had been committed, published, and sorted to the very top of the repository's
+file listing, above the README, in every release since. It contained nothing
+private; it was simply the first thing a visitor saw. Nothing local would ever
+have flagged it: the working tree was clean and the ignore rules did not cover it.
+
+**The release-pipeline summary described the mechanism that does not work.** Every
+release printed a note saying the manual attaches when the release is published.
+That is precisely the event GitHub withholds for a release created by a bot — the
+cause of fifteen releases shipping without a manual, which v0.81.0 fixed by
+dispatching the documentation build explicitly. Two files were corrected then and
+this third was left describing the broken path. A duplicated condition in the
+documentation workflow is tidied at the same time.
+
+**Two documents claimed every version is tagged. One is not.** `v0.42.1` has a
+changelog entry and a merge commit but no tag and no release — tagging was a
+manual step until `v0.46.1`, and that one was missed. Rather than mint a tag now
+(which would set the release machinery running against four-month-old sources),
+both documents now state the exception and name the commit.
+
+**The performance notes carried a stale version, a stale test count, and one
+date too many.** They said version 0.88.0 at head 0.89.0, and 473 tests where
+there are 486. The date line was worse than stale: a single "data as of" across
+the whole document is the exact mistake its own rules warn about, since the call
+figures were measured on one day and the hand-verified emergency calls happened
+after. Each figure now states its own scope, and there is no file-level date.
+
 ## 0.89.0
 
 **`933` works, and it is no longer the number nobody has dialled.** `933` is the

@@ -95,5 +95,8 @@ jobs:
             echo
             echo "If a new \`v*\` tag was created above, **\`publish-release.yml\`** is now"
             echo "building the amd64 + aarch64 images and cutting the GitHub Release."
-            echo "\`docs.yml\` then attaches the .docx/.pdf manual on \`release: published\`."
+            echo "\`publish-release.yml\` then DISPATCHES \`docs.yml\` explicitly to attach the"
+            echo ".docx/.pdf manual. It cannot wait on \`release: published\` — GitHub does not"
+            echo "emit that event for a release created with the default token, which cost"
+            echo "v0.69.0-v0.80.0 their manuals with every workflow green."
           } >> "$GITHUB_STEP_SUMMARY"
