@@ -1661,7 +1661,34 @@ function flash(btn, msg) {
   setTimeout(() => { if (btn.textContent === msg) btn.textContent = prev; }, 1600);
 }
 
-// All per-room actions are delegated off the (rebuilt-every-refresh) grid.
+// ★ Own the button's busy state; never rely on the grid being rebuilt to undo it.
+//
+// Every action here used to do `btn.disabled = true`, restore it only in the
+// catch, and let the 4-second refresh replace the whole card on success. That
+// worked by accident. Once the grid stopped being rebuilt while a field inside
+// it holds focus — so typing a wake-up time is not destroyed mid-entry — the
+// success path had nothing left to re-enable the button. And because this
+// delegated handler opens with `if (!btn || btn.disabled) return;`, a stranded
+// button silently swallows every later click, which is exactly what "clicking
+// Set doesn't set anything" looks like from the outside.
+//
+// It bites where you would least expect: macOS Safari and Firefox do not move
+// focus to a <button> when it is clicked, so after typing a time the focus is
+// STILL in the time input when refresh() runs.
+function busy(btn, label) {
+  const prev = btn.textContent;
+  btn.disabled = true;
+  if (label) btn.textContent = label;
+  return function done(msg) {
+    btn.disabled = false;
+    btn.textContent = prev;
+    if (msg) flash(btn, msg);
+  };
+}
+
+// All per-room actions are delegated off the grid, which is rebuilt on most
+// refreshes but deliberately NOT while a field inside it holds focus — so no
+// handler here may depend on that rebuild to undo its own button state.
 document.getElementById('rooms').addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn || btn.disabled) return;
@@ -1669,10 +1696,10 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
   // Test ring.
   let ext = btn.getAttribute('data-ring');
   if (ext) {
-    btn.disabled = true; btn.textContent = 'Ringing…';
+    const done = busy(btn, 'Ringing…');
     ringingUntil[ext] = Date.now() + 9000;
-    try { await post('./api/ring/' + encodeURIComponent(ext)); }
-    catch (err) { ringingUntil[ext] = 0; btn.disabled = false; flash(btn, 'Failed'); }
+    try { await post('./api/ring/' + encodeURIComponent(ext)); done(); }
+    catch (err) { ringingUntil[ext] = 0; done('Failed'); }
     return;
   }
 
@@ -1683,9 +1710,9 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     if (connectArm === null) { connectArm = ext; updateConnectHint(); refresh(); return; }
     if (connectArm === ext) { connectArm = null; updateConnectHint(); refresh(); return; }
     const a = connectArm, b = ext; connectArm = null; updateConnectHint();
-    btn.disabled = true; btn.textContent = 'Connecting…';
-    try { await post('./api/connect/' + encodeURIComponent(a) + '/' + encodeURIComponent(b)); refresh(); }
-    catch (err) { btn.disabled = false; flash(btn, 'Failed'); }
+    const done = busy(btn, 'Connecting…');
+    try { await post('./api/connect/' + encodeURIComponent(a) + '/' + encodeURIComponent(b)); done(); refresh(); }
+    catch (err) { done('Failed'); }
     return;
   }
 
@@ -1694,9 +1721,9 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
   if (ext) {
     const ch = (roomChannels[ext] || '');
     if (!ch) { flash(btn, '—'); return; }
-    btn.disabled = true;
-    try { await postJSON('./api/hangup', {channel: ch}); refresh(); }
-    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    const done = busy(btn);
+    try { await postJSON('./api/hangup', {channel: ch}); done(); refresh(); }
+    catch (err) { done('✖'); }
     return;
   }
 
@@ -1715,10 +1742,10 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     const raw = (prompt('Transfer call to which room?\\n' + opts.join('\\n'), '') || '');
     const target = (raw.match(/^\\s*([0-9]+)/) || ['', ''])[1];
     if (!target) return;
-    btn.disabled = true;
+    const done = busy(btn);
     // postJSON throws on a non-ok response (bad target / Redirect failed).
-    try { await postJSON('./api/transfer', {channel: ch, target: target}); refresh(); }
-    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    try { await postJSON('./api/transfer', {channel: ch, target: target}); done(); refresh(); }
+    catch (err) { done('✖'); }
     return;
   }
 
@@ -1726,9 +1753,9 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
   ext = btn.getAttribute('data-mwi');
   if (ext) {
     const state = btn.getAttribute('data-state');
-    btn.disabled = true;
-    try { await post('./api/mwi/' + encodeURIComponent(ext) + '/' + state); refresh(); }
-    catch (err) { btn.disabled = false; flash(btn, '✖'); }
+    const done = busy(btn);
+    try { await post('./api/mwi/' + encodeURIComponent(ext) + '/' + state); done(); refresh(); }
+    catch (err) { done('✖'); }
     return;
   }
 
@@ -1738,9 +1765,12 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     const inp = document.querySelector('input[data-waketime="' + ext + '"]');
     const hhmm = inp ? inp.value : '';
     if (!hhmm) { flash(btn, 'pick a time'); return; }
-    btn.disabled = true;
-    try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/set', {hhmm: hhmm}); refresh(); }
-    catch (err) { btn.disabled = false; flash(btn, 'Failed'); }
+    const done = busy(btn);
+    // Confirm out loud. A silent success is why a dead button and a working one
+    // were indistinguishable here.
+    try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/set', {hhmm: hhmm});
+          done('Set ✓'); refresh(); }
+    catch (err) { done('Failed'); }
     return;
   }
 });

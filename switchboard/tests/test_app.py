@@ -849,3 +849,55 @@ def test_the_room_grid_is_not_rebuilt_while_a_field_is_focused() -> None:
         assert body.index(later) > assign_at, (
             f"{later} now renders before the grid assignment; the guard's "
             f"'everything else keeps updating' claim no longer holds")
+
+
+def test_no_grid_action_depends_on_the_rebuild_to_re_enable_its_button() -> None:
+    """★ The bug that made "clicking Set doesn't set anything" true.
+
+    Every action in the room grid disabled its button, restored it only in the
+    `catch`, and let the 4-second refresh replace the whole card on success.
+    That worked by accident: a stranded button self-healed within four seconds.
+
+    Once the grid stopped being rebuilt while a field inside it holds focus
+    (v0.94.0, so typing a wake-up time is not destroyed mid-entry), the success
+    path had nothing left to re-enable the button — and this handler opens with
+    `if (!btn || btn.disabled) return;`, so a stranded button silently swallows
+    every later click.
+
+    It bites hardest exactly where the wake-up field is: macOS Safari and
+    Firefox do not move focus to a `<button>` when it is clicked, so after
+    typing a time the focus is STILL in the time input when refresh() runs, the
+    grid is held, and the Set button never comes back.
+
+    Source-structure assertion (the panel's JS lives in a Python string and
+    there is no DOM here), but it pins the invariant rather than a phrase: the
+    handler must own its button state and never write `btn.disabled` directly.
+    """
+    html = app.INDEX_HTML
+    start = html.index("document.getElementById('rooms').addEventListener")
+    end = html.index("document.getElementById('pageall').addEventListener")
+    assert end > start, "handler slice is empty — this check would measure nothing"
+    handler = html[start:end]
+
+    assert "function busy(btn, label)" in html, "the busy() helper is gone"
+    assert "btn.disabled = true" not in handler, (
+        "a grid action disables its button directly again; on success nothing "
+        "re-enables it while a field in the grid holds focus, and every later "
+        "click on it is swallowed")
+    assert "btn.disabled = false" not in handler, (
+        "a grid action restores its button directly; use the done() callback so "
+        "success and failure cannot diverge")
+
+    # Every busy() must be paired — one call on success, one on failure.
+    n_busy = handler.count("busy(btn")
+    n_done = handler.count("done(")
+    assert n_busy >= 6, f"expected at least 6 grid actions, found {n_busy}"
+    assert n_done == n_busy * 2, (
+        f"{n_busy} busy() sites but {n_done} done() calls — each action needs "
+        f"one on the success path and one on the failure path; an unpaired site "
+        f"is a button that never comes back")
+
+    # The reported symptom specifically: setting a wake-up must confirm itself.
+    assert "done('Set ✓')" in handler, (
+        "the wake-up Set button gives no success feedback — a silent success is "
+        "indistinguishable from a dead button, which is how this shipped")
