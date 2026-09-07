@@ -297,3 +297,33 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_the_startup_line_reports_reachability_not_just_the_gate():
+    """★ Two log lines from one service must not disagree about a security fact.
+
+    This line read "DISABLED (open on the LAN)" whenever no user was configured,
+    whatever the bind. When console_web_bind moved to loopback in v0.94.0 it
+    contradicted the NOTICE printed three lines above it, which correctly said
+    the terminal was not reachable from the LAN. Whichever line a reader
+    believes, they have no way to tell which is stale — and this is exactly the
+    class of wrong-about-where-data-goes comment that has misled an audit of
+    this repo before.
+    """
+    src = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+           / "switchboard" / "console-web" / "server.py").read_text()
+    # Scan CODE, not comments. The block above this line in server.py explains
+    # the defect by quoting the very string being forbidden, so a whole-file
+    # substring test matches its own explanation — the third self-match of this
+    # shape in this repo (test_privacy_invariants and test_ingress_guard were
+    # the others). Forbid the CONSTRUCT, not the characters.
+    code = "\n".join(ln for ln in src.split("\n")
+                     if not ln.lstrip().startswith("#"))
+    assert 'gate = "DISABLED (open on the LAN)"' not in code, (
+        "the startup line still claims LAN reachability from the gate state "
+        "alone, independent of the bind")
+    block = src[src.index("loopback = host in"):src.index("console web terminal listening on")]
+    assert '"127.0.0.1"' in block and '"::1"' in block, (
+        "the reachability check does not recognise both loopback forms")
+    assert "AUTH_REQUIRED" in block, "the gate state is no longer consulted"
+    assert "not reachable from the LAN" in src and "reachable from the LAN" in src

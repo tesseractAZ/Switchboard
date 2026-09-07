@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.94.1
+
+**Two log lines were disagreeing about whether the console was reachable from
+the network.** Moving the browser terminal to the local machine in 0.94.0 left
+its own startup line still saying "open on the LAN", three lines below a notice
+that correctly said the opposite. Whichever one a reader believed, there was no
+way to tell which was stale — and on a question about who can reach a terminal
+that rings phones, that is worse than either line alone. It now reports where
+the terminal is actually reachable from, rather than inferring it from whether a
+password is configured.
+
 ## 0.94.0
 
 **Setting a wake-up in the dashboard no longer fights you.** The room cards are

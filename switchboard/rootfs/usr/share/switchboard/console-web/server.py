@@ -418,9 +418,24 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    # ★ Say where it is ACTUALLY reachable from, not what the gate implies.
+    #
+    # This line used to read "DISABLED (open on the LAN)" whenever no user was
+    # configured — regardless of the bind. Once console_web_bind moved to
+    # loopback in v0.94.0 it flatly contradicted the bashio NOTICE printed three
+    # lines above it, which had correctly said "not reachable from the LAN
+    # directly". Two log lines from one service disagreeing about a security
+    # property is worse than either alone: whichever the reader believes, they
+    # have no way to tell which one is stale.
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+    if AUTH_REQUIRED:
+        gate = f"login gate ENABLED ({len(_USERS)} user(s))"
+    elif loopback:
+        gate = "no login gate, but bound to loopback — not reachable from the LAN"
+    else:
+        gate = "NO LOGIN GATE — reachable from the LAN"
     log(f"console web terminal listening on {host}:{port} "
-        f"(bridging to {CONSOLE_HOST}:{CONSOLE_PORT}) — login gate "
-        f"{'ENABLED (' + str(len(_USERS)) + ' user(s))' if AUTH_REQUIRED else 'DISABLED (open on the LAN)'}")
+        f"(bridging to {CONSOLE_HOST}:{CONSOLE_PORT}) — {gate}")
     try:
         srv.serve_forever()
     finally:
