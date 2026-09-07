@@ -1280,11 +1280,13 @@ machine) is straightforward.
    `https://github.com/tesseractAZ/Switchboard`.
 3. Install **Switchboard**. The add-on builds from source in the repo (Asterisk,
    whisper.cpp, espeak-ng, everything) — no external image to host.
-4. To pin an exact prior version, check out that release's tag first: every
-   version is tagged (`v0.1.0` … the current release) and published as a **GitHub
-   Release** with its changelog, and each release carries a generated `.docx` +
-   `.pdf` of this manual. `git checkout vX.Y.Z` gives you the precise source that
-   built any release.
+4. To pin an exact prior version, check out that release's tag first: versions
+   are tagged (`v0.1.0` … the current release) and published as a **GitHub
+   Release** with the changelog, and each release since v0.81.0 carries a
+   generated `.docx` + `.pdf` of this manual. `git checkout vX.Y.Z` gives you the
+   precise source that built that release. One exception: **v0.42.1** has a
+   changelog entry but no tag and no release — tagging was a manual step until
+   v0.46.1, and that version was missed. Its source is merge commit `8fcb453`.
 
 ### Restore your configuration (the one thing not in the repo)
 

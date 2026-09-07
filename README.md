@@ -201,8 +201,9 @@ WP826 WiFi cordless ──────WiFi────────────�
   without one — the build waited on an event a bot-created release does not
   emit. Repaired in v0.81.0; every release since carries both files.)
 
-Every version is tagged and released, so `git checkout vX.Y.Z` reproduces the exact
-source that built any release — see
+Every version from v0.43.0 on is tagged and released, so `git checkout vX.Y.Z`
+reproduces the exact source that built it. One older version, **v0.42.1**, was
+never tagged: tagging was manual until v0.46.1 and that one was missed. See
 [DOCS §16, *Reproducing on new hardware*](switchboard/DOCS.md#16-reproducing-on-new-hardware).
 
 ## Security in one paragraph
