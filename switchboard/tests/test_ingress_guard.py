@@ -143,3 +143,35 @@ def test_the_websocket_route_is_not_exempted_anywhere():
     assert "/console" not in body, (
         "_scope_allowed special-cases /console; the console must not be able to "
         "opt itself out of the guard that protects it")
+
+
+def test_the_console_asset_route_never_builds_a_path_from_the_request():
+    """★ CodeQL flagged the first version of this route as py/path-injection.
+
+    It was safe by reasoning — the name had to be a key in a two-entry dict
+    before it was used — but it still did `FileResponse(f"{DIR}/{name}")`, so
+    the safety rested on a membership test and an interpolation staying in sync,
+    and no analyser can see a dict lookup as a sanitizer. The table now stores
+    the resolved path, so the request parameter never reaches a file operation.
+    """
+    import re
+    src = (WEBUI / "app.py").read_text()
+    body = src[src.index("def console_asset"):]
+    body = body[:body.index("\n@app.")]
+    assert "FileResponse(path," in body, "the served path must come from the table"
+    assert not re.search(r"FileResponse\(f?\"", body), (
+        "console_asset builds a path literal inline — if that interpolates the "
+        "route parameter it is py/path-injection again")
+    assert "{name}" not in body.replace('@app.get("/console/static/{name}")', ""), (
+        "the route parameter is interpolated somewhere in the handler")
+    # ...and the allowlist is still exactly the two vendored assets.
+    import ast
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "_CONSOLE_ASSETS" for t in node.targets):
+            keys = [k.value for k in node.value.keys]
+            assert keys == ["xterm.js", "xterm.css"], keys
+            break
+    else:
+        raise AssertionError("_CONSOLE_ASSETS not found")

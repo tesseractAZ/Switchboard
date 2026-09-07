@@ -1226,9 +1226,19 @@ CONSOLE_STATIC = "/usr/share/switchboard/console-web/static"
 # parameter. index.html is deliberately ABSENT: the standalone server removed
 # exactly that door in v0.44.0, and reinstating it here would serve the page at
 # a second URL whose relative asset hrefs resolve one level wrong.
+# name -> (ABSOLUTE PATH, content type). The path is a literal in this table,
+# never built from the request. An allowlist that still interpolates the
+# parameter — `FileResponse(f"{DIR}/{name}")` after a dict membership test — is
+# safe by reasoning and flagged as py/path-injection by CodeQL, correctly: the
+# dict lookup is not a sanitizer any analyser can see, and the safety then rests
+# on the next person keeping the lookup and the interpolation in sync. Storing
+# the resolved path removes the request parameter from the file operation
+# entirely, so there is nothing left to keep in sync.
 _CONSOLE_ASSETS = {
-    "xterm.js": "application/javascript; charset=utf-8",
-    "xterm.css": "text/css; charset=utf-8",
+    "xterm.js": (f"{CONSOLE_STATIC}/xterm.js",
+                 "application/javascript; charset=utf-8"),
+    "xterm.css": (f"{CONSOLE_STATIC}/xterm.css",
+                  "text/css; charset=utf-8"),
 }
 
 
@@ -1266,10 +1276,11 @@ def console_page():
 
 @app.get("/console/static/{name}")
 def console_asset(name: str):
-    ctype = _CONSOLE_ASSETS.get(name)
-    if ctype is None:
+    entry = _CONSOLE_ASSETS.get(name)
+    if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(f"{CONSOLE_STATIC}/{name}", media_type=ctype)
+    path, ctype = entry                  # both literals from the table above
+    return FileResponse(path, media_type=ctype)
 
 
 @app.websocket("/console/ws")
