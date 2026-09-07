@@ -1,0 +1,10 @@
+# The image is built from this checkout, and `COPY rootfs /` would otherwise bake
+# in whatever the developer's machine left lying around. A stale .pyc is not
+# inert: Python will import a bytecode file whose .py source has been renamed or
+# deleted if it lands in a directory on sys.path, so a rename that looks complete
+# in git can be silently undone inside the container.
+**/__pycache__/
+**/*.py[cod]
+.git/
+.github/
+**/.DS_Store

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.92.0
+
+Groundwork for moving the browser terminal behind Home Assistant's own login.
+Nothing changes about how the system behaves today; this removes a hazard that
+sat in the path of that work.
+
+**A file was named after a package we were about to install.** The console web
+terminal's protocol helpers lived in `wsproto.py` — which is also the name of one
+of the two WebSocket libraries a Python web server can be told to use. Nothing
+was broken, because that library was not installed. It would have broken the
+moment it was, and it would have broken *invisibly*: inside the add-on the local
+file wins, so the web server would have crash-looped and taken the sidebar panel
+and every call-control endpoint with it, while on a developer's machine the real
+library wins and every test passes. A collision like that is invisible to exactly
+the tests that would have to catch it. The file is now `consoleproto.py`, and a
+new test compares the names we ship against the packages the image installs, in
+both directions, so the next one is caught before it ships.
+
+**Stale compiled Python could have undone the rename.** The image is built from a
+checkout, and the build copied in whatever compiled files a developer's machine
+had left behind — including one for the old name. Python will happily import
+compiled bytecode whose source has been renamed away. A build-exclusion file now
+keeps them out.
+
+**A test helper was leaking global state into every test that ran after it.** It
+put a directory on the import path and never took it off, and left modules cached
+under bare names, so a later test importing one of those names could silently get
+this helper's copy. It now restores both. While there, a deprecated import call
+that Python 3.15 removes was replaced.
+
 ## 0.91.0
 
 **The reference tables are now sorted so you can find things in them.** Eleven

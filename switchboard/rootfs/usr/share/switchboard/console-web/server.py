@@ -18,10 +18,10 @@ A small stdlib-only HTTP + WebSocket server (no pip deps; the add-on is musl):
 This server is reachable on the LAN (host_network). It fronts what the operator
 console already exposes unauthenticated on :2300 — but on a *browser* transport,
 which the raw telnet port is not. To avoid handing a drive-by web page that
-call-control reach, the WS upgrade is same-origin-gated (see wsproto.origin_allowed),
+call-control reach, the WS upgrade is same-origin-gated (see consoleproto.origin_allowed),
 the bind is configurable (CONSOLE_WEB_BIND, default follows console_bind), sessions
 are capped (MAX_SESSIONS) and browser-idle-timed-out. The pure framing/telnet
-helpers live in wsproto.py and are unit-tested; this file is only socket plumbing.
+helpers live in consoleproto.py and are unit-tested; this file is only socket plumbing.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import webauth  # noqa: E402
-import wsproto  # noqa: E402
+import consoleproto  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
@@ -245,8 +245,8 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     except OSError as exc:
         log(f"console connect failed: {exc}")
         try:
-            sock.sendall(wsproto.encode_frame(
-                b"\r\n  Operator console unavailable (is it enabled?).\r\n", wsproto.OP_TEXT))
+            sock.sendall(consoleproto.encode_frame(
+                b"\r\n  Operator console unavailable (is it enabled?).\r\n", consoleproto.OP_TEXT))
         except OSError:
             pass
         return
@@ -258,10 +258,10 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     # then removes everything the console sends so the browser sees clean ANSI.
     try:
         console.sendall(bytes([
-            wsproto.IAC, wsproto.DO, wsproto.OPT_ECHO,
-            wsproto.IAC, wsproto.DO, wsproto.OPT_SGA,
-            wsproto.IAC, wsproto.WILL, wsproto.OPT_SGA,
-            wsproto.IAC, wsproto.WILL, wsproto.OPT_NAWS,
+            consoleproto.IAC, consoleproto.DO, consoleproto.OPT_ECHO,
+            consoleproto.IAC, consoleproto.DO, consoleproto.OPT_SGA,
+            consoleproto.IAC, consoleproto.WILL, consoleproto.OPT_SGA,
+            consoleproto.IAC, consoleproto.WILL, consoleproto.OPT_NAWS,
         ]))
     except OSError:
         console.close()
@@ -278,9 +278,9 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     tn_in = b""       # console bytes pending telnet strip
     open_ = True
 
-    def send_ws(payload: bytes, opcode: int = wsproto.OP_BIN) -> bool:
+    def send_ws(payload: bytes, opcode: int = consoleproto.OP_BIN) -> bool:
         try:
-            sock.sendall(wsproto.encode_frame(payload, opcode))
+            sock.sendall(consoleproto.encode_frame(payload, opcode))
             return True
         except OSError:
             return False
@@ -288,15 +288,15 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     # Process any frames that arrived glued to the handshake before we block.
     def drain_ws_frames() -> bool:
         nonlocal ws_in
-        frames, ws_in = wsproto.decode_frames(ws_in)
+        frames, ws_in = consoleproto.decode_frames(ws_in)
         for opcode, data in frames:
-            if opcode == "error" or opcode == wsproto.OP_CLOSE:
+            if opcode == "error" or opcode == consoleproto.OP_CLOSE:
                 return False
-            if opcode == wsproto.OP_PING:
-                if not send_ws(data, wsproto.OP_PONG):
+            if opcode == consoleproto.OP_PING:
+                if not send_ws(data, consoleproto.OP_PONG):
                     return False
                 continue
-            if opcode == wsproto.OP_PONG:
+            if opcode == consoleproto.OP_PONG:
                 continue
             if not _handle_client_payload(console, data):
                 return False
@@ -331,7 +331,7 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
                 if not chunk:
                     break
                 tn_in += chunk
-                clean, tn_in = wsproto.strip_telnet(tn_in)
+                clean, tn_in = consoleproto.strip_telnet(tn_in)
                 if clean and not send_ws(clean):
                     break
             if sock in readable:
@@ -353,7 +353,7 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
         except OSError:
             pass
         try:
-            sock.sendall(wsproto.encode_frame(b"", wsproto.OP_CLOSE))
+            sock.sendall(consoleproto.encode_frame(b"", consoleproto.OP_CLOSE))
         except OSError:
             pass
 
@@ -371,7 +371,7 @@ def _handle_client_payload(console: socket.socket, data: bytes) -> bool:
             cols = msg.get("cols", 80)
             rows = msg.get("rows", 24)
             try:
-                console.sendall(wsproto.naws_subnegotiation(cols, rows))
+                console.sendall(consoleproto.naws_subnegotiation(cols, rows))
                 return True
             except OSError:
                 return False
@@ -433,13 +433,13 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
     head, rest = _read_http_head(sock)
     if not head:
         return
-    method, path, headers = wsproto.parse_http_headers(head)
+    method, path, headers = consoleproto.parse_http_headers(head)
     if method is None:
         _send_simple(sock, 400, "Bad Request")
         return
     path = path.split("?", 1)[0]
     if method == "GET" and path in ("/ws", "/ws/"):
-        if not wsproto.is_websocket_upgrade(headers):
+        if not consoleproto.is_websocket_upgrade(headers):
             _send_simple(sock, 426, "Upgrade Required", "Expected a WebSocket upgrade.")
             return
         if headers.get("sec-websocket-version", "").strip() != "13":
@@ -451,7 +451,7 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
             return
         # Drive-by / cross-site-WebSocket-hijack guard: this fronts a
         # call-control console, so reject a cross-origin upgrade.
-        if not wsproto.origin_allowed(headers, _ALLOWED_ORIGINS):
+        if not consoleproto.origin_allowed(headers, _ALLOWED_ORIGINS):
             _send_simple(sock, 403, "Forbidden", "Cross-origin WebSocket rejected.")
             return
         # Login gate: the WS carries the actual console session, so it MUST be
@@ -467,7 +467,7 @@ def _handle_connection_gated(sock: socket.socket, slots: threading.BoundedSemaph
         try:
             key = headers.get("sec-websocket-key", "")
             try:
-                sock.sendall(wsproto.handshake_response(key))
+                sock.sendall(consoleproto.handshake_response(key))
             except OSError:
                 return
             # Bound blocking writes so a peer that stops reading can't park the
@@ -525,7 +525,7 @@ def _handle_login(sock, headers, leftover: bytes) -> None:
     # Same-origin gate, mirroring the WS upgrade. A cross-origin form POST can
     # never read the response, but WITHOUT this any web page a household browser
     # visits could burn this IP's login attempts and lock the console out.
-    if not wsproto.origin_allowed(headers, _ALLOWED_ORIGINS):
+    if not consoleproto.origin_allowed(headers, _ALLOWED_ORIGINS):
         _send_simple(sock, 403, "Forbidden", "Cross-origin login rejected.")
         return
     # Charge the throttle BEFORE verifying: a denied or failed attempt must
