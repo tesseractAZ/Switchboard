@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.91.0
+
+**The reference tables are now sorted so you can find things in them.** Eleven
+tables across the manual and the performance notes were in the order someone
+happened to write them down — which is fine to read once and useless when you
+already know the name of the thing you are looking for. They are alphabetical
+now, sorted within their existing sections so the grouping from everyday
+settings down to advanced ones is unchanged. The P-code table for the gateway
+was a variation on the same problem: it looked ordered and was not, so it is now
+in numeric order.
+
+**Twenty tables were deliberately left alone, because their order carries
+meaning.** A call-quality distribution is sorted by how often each verdict
+occurred, and that frequency is the whole point of the table; alphabetising it
+would also have scattered its summary row into the middle. The voice-assistant
+latency table follows the pipeline in the order the stages actually run. The
+gateway port-configuration table follows the order the fields appear on the
+gateway's own web page, so you can work down the screen. And the dial-code
+tables are already in the order you would look a code up in.
+
+One passage in the performance notes refers to "that last row", so any future
+reordering needs to check the surrounding prose as well as the table.
+
 ## 0.90.0
 
 A sweep of every document, test, workflow and note against the code as it now

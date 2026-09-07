@@ -91,20 +91,20 @@ its default is fine.
 | Option | Default | Notes |
 |--------|---------|-------|
 | `call_quality_alerts` | `true` | Notify when a **conversation's** audio is poor (low MOS, high loss, one-way). Every leg is measured and written to the ledger regardless; machine-initiated legs (wake-up delivery, paging, announcements) are recorded but do not alert — except an *undelivered* wake-up, which does (v0.78.0). See §11. |
-| `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
-| `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
-| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage). |
-| `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
-| `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
-| `device_health_alerts` | `true` | Notify when the cordless or gateway becomes unhealthy (and again on recovery). |
-| `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
-| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
-| `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
-| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
-| `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
+| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
+| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
+| `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
+| `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
 | `cordless_wifi_min_signal` | `2` | Lowest acceptable WiFi bars (0–5) before flagging a weak link. |
+| `device_health_alerts` | `true` | Notify when the cordless or gateway becomes unhealthy (and again on recovery). |
+| `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
+| `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
+| `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
+| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage). |
+| `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
+| `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 
 ### Announcements
 
@@ -119,44 +119,44 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
+| `console_bind` | `0.0.0.0` | Interface it listens on. `127.0.0.1` restricts it to the host. |
 | `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **Unauthenticated on the LAN** — keep it trusted or bind to loopback, or disable. |
 | `console_port` | `2300` | TCP port for the telnet console. |
-| `console_bind` | `0.0.0.0` | Interface it listens on. `127.0.0.1` restricts it to the host. |
+| `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
+| `console_web_bind` | `""` | Blank = follow `console_bind` (→ all interfaces); `127.0.0.1` restricts it to the host. |
 | `console_web_enabled` | `true` | Browser version of the console (xterm.js). Unauthenticated on the LAN **only while `console_users` is empty** — configure a user and both the page and the terminal socket require a sign-in (see below). Idles if `console_enabled` is off. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
-| `console_web_bind` | `""` | Blank = follow `console_bind` (→ all interfaces); `127.0.0.1` restricts it to the host. |
-| `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
 
 ### Time, clock & wake-up
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
 | `clock_enabled` / `clock_ext` | `true` / `41` | The talking clock and its dial code (2–6 digits). |
+| `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
+| `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
 | `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. |
-| `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
-| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
 | `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
+| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
+| `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
 | `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
 | `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
 | `wakeup_weather` | `true` | Speak a short local weather summary during the wake-up call. |
-| `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
 
 ### Extra feature codes
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
-| `page_enabled` / `page_ext` | `true` / `44` | All-call paging / intercom and its dial code. |
-| `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
-| `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
-| `status_power_grid` | `""` | Entity whose on/off state says whether utility power is present, spoken by the **power** branch of dial-`45`. Accepts `input_boolean`, `binary_sensor`, `sensor` or `switch`. |
-| `status_power_battery` | `""` | `sensor` giving battery charge as a **percentage** — the menu says "the home battery is at N percent", so a sensor reporting kWh will be read out as if it were a percent. |
-| `status_power_runway` | `""` | `sensor` giving hours of runway remaining. |
-| `status_power_solar` | `""` | `sensor` giving the solar share of current load as a **percentage** — spoken as "solar is covering N percent of the load". |
-| `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
 | `assistant_transcripts` | `true` | Keep what was said to the assistant, and its replies, in the add-on's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder). Turn it off to keep every timing and failure reason without the words. |
+| `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
+| `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
+| `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
+| `page_enabled` / `page_ext` | `true` / `44` | All-call paging / intercom and its dial code. |
+| `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
+| `status_power_battery` | `""` | `sensor` giving battery charge as a **percentage** — the menu says "the home battery is at N percent", so a sensor reporting kWh will be read out as if it were a percent. |
+| `status_power_grid` | `""` | Entity whose on/off state says whether utility power is present, spoken by the **power** branch of dial-`45`. Accepts `input_boolean`, `binary_sensor`, `sensor` or `switch`. |
+| `status_power_runway` | `""` | `sensor` giving hours of runway remaining. |
+| `status_power_solar` | `""` | `sensor` giving the solar share of current load as a **percentage** — spoken as "solar is covering N percent of the load". |
 
 ### Outside line (SIP trunk)
 
@@ -165,18 +165,18 @@ system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
 
 | Sub-field | Default | Notes |
 |-----------|---------|-------|
-| `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
-| `provider_host` | `""` | Your SIP provider's host, e.g. `losangeles.voip.ms`. |
-| `port` | `5060` | Provider SIP port. |
-| `username` | `""` | Trunk auth username / sub-account. |
-| `secret` | `""` | Trunk auth password. Must not contain `;` or leading/trailing whitespace (Asterisk would truncate it). |
-| `from_user` | `""` | Outbound `From` user (defaults to `username`). |
-| `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
-| `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
-| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings. Blank rings the default group. **Fails open on a typo:** an extension that is not a configured room is ignored (logged at start) and the call rings the whole house instead — check the start-up log after changing it. |
 | `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
 | `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes (2–3 digits) still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps feature codes (41–46) and extension 20 dialing instantly on analog phones — without it, they look like the start of a phone number. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
+| `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
+| `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
+| `from_user` | `""` | Outbound `From` user (defaults to `username`). |
+| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings. Blank rings the default group. **Fails open on a typo:** an extension that is not a configured room is ignored (logged at start) and the call rings the whole house instead — check the start-up log after changing it. |
+| `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
+| `port` | `5060` | Provider SIP port. |
+| `provider_host` | `""` | Your SIP provider's host, e.g. `losangeles.voip.ms`. |
 | `registns` | `true` | Register to the provider (most trunks need this). |
+| `secret` | `""` | Trunk auth password. Must not contain `;` or leading/trailing whitespace (Asterisk would truncate it). |
+| `username` | `""` | Trunk auth username / sub-account. |
 
 ---
 
@@ -448,14 +448,14 @@ A turn that worked looks like this (wrapped for print):
 | `outcome` | What happened |
 | --- | --- |
 | `answered` | A command was heard, sent to Home Assistant, and the reply spoken. |
-| `no-speech` | The turn produced no text. `reason` says which: `silence` (nothing was said, and the recogniser is healthy), `timeout`, `spawn-error` or `error`. |
-| `goodbye` | The caller ended it themselves. |
-| `ended-unheard` | Two turns in a row produced nothing, so it gave up. |
-| `ended-max-turns` | Five recordings were used without a goodbye. |
-| `ha-unavailable` | Home Assistant could not be reached at all; the call was apologised out. |
 | `bias-failed` | The recogniser's hint list could not be built. The call continued with a smaller one. |
-| `tts-failed` | The voice failed twice on one call, so it apologised and hung up rather than continuing in silence. `tts_fails` carries the count. One failure is tolerated: a long answer can outrun the synthesiser's time limit while it is perfectly healthy, so one is a slow sentence and two is a broken voice. |
+| `ended-max-turns` | Five recordings were used without a goodbye. |
+| `ended-unheard` | Two turns in a row produced nothing, so it gave up. |
 | `fatal` | The assistant crashed. `detail` carries the exception. |
+| `goodbye` | The caller ended it themselves. |
+| `ha-unavailable` | Home Assistant could not be reached at all; the call was apologised out. |
+| `no-speech` | The turn produced no text. `reason` says which: `silence` (nothing was said, and the recogniser is healthy), `timeout`, `spawn-error` or `error`. |
+| `tts-failed` | The voice failed twice on one call, so it apologised and hung up rather than continuing in silence. `tts_fails` carries the count. One failure is tolerated: a long answer can outrun the synthesiser's time limit while it is perfectly healthy, so one is a slow sentence and two is a broken voice. |
 
 `rec_end` says how the recording finished — `timeout` (the caller stopped
 talking), `hangup` (they put the phone down mid-sentence) or `dtmf` (they
@@ -499,12 +499,12 @@ language model, so the wording matters:
 
 | Goal | Say |
 |---|---|
-| Control a light | "turn on the kitchen lights" |
-| Check something | "is the master bath fan on" |
-| Read a sensor | "what is the camera health" |
 | A binary sensor | "is the front door motion on" (not "is there motion at the front door") |
-| Temperature | "what is the temperature in the hallway" |
+| Check something | "is the master bath fan on" |
+| Control a light | "turn on the kitchen lights" |
+| Read a sensor | "what is the camera health" |
 | Survey | "what lights are on" |
+| Temperature | "what is the temperature in the hallway" |
 
 **Temperature needs a room.** A bare "what is the temperature" fails when more
 than one thermostat is exposed. A smart speaker resolves this from the room it
@@ -759,12 +759,12 @@ Useful P-codes (Profile 1 is shared by all eight FXS ports):
 
 | P-code | Setting | Reference value |
 |--------|---------|-----------------|
-| `P4200`–`P4203` | **Dial Plan** (per profile; the FXS ports use Profile 1 = `P4200`) | see below |
-| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see §7.4 |
+| `P32` | Register Expiration (minutes) | `2` (fast re-register after a restart) |
 | `P37` | **Voice Frames per TX** (G.711 ptime = value × 10 ms) | `2` (20 ms) |
 | `P57` | Codec preference | µ-law first |
-| `P32` | Register Expiration (minutes) | `2` (fast re-register after a restart) |
 | `P72` | Use `#` as dial key | `1` (enabled) |
+| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see §7.4 |
+| `P4200`–`P4203` | **Dial Plan** (per profile; the FXS ports use Profile 1 = `P4200`) | see below |
 
 ### 7.4 Dial plan & the send delay
 
@@ -1133,13 +1133,13 @@ recovery notice when they return to normal — again under that device's shared
 
 | Sensor | What it tells you |
 |--------|-------------------|
+| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
+| `sensor.switchboard_gateway_health` | GXW gateway port health |
+| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered and played nothing, or stopped before the end of its script: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever any phone is missing — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
-| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
-| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered and played nothing, or stopped before the end of its script: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
-| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
-| `sensor.switchboard_gateway_health` | GXW gateway port health |
+| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant
 > restart until the next push — that's expected.
@@ -1222,16 +1222,16 @@ stay: they are the editable source, and a build check fails if a prompt and its
 
 | Symptom | Check |
 |--------|-------|
-| Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
+| "No common codec" / call fails instantly | A device is offering only a non-µ-law codec. Make sure G.711 µ-law (PCMU) is enabled on it ([§13](#13-codecs--g711-µ-law-only-on-purpose)). |
+| Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
 | Investigating something that happened **before** a restart/reboot | Notices, warnings, errors **and endpoint reachability** (`Endpoint <n> is now Unreachable`, added in v0.84.0 — before that the durable log held none of it, and the one whole-house outage could not be investigated from it) | Notices, warnings, and errors are also written durably to `/data/state/asterisk.log` on the persistent data volume — it survives restarts and reboots, unlike the Log tab, whose buffer rotates within hours. Registration flaps, trunk timeouts, and RTP errors from before a crash live there. |
+| LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
+| Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
-| Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
-| "No common codec" / call fails instantly | A device is offering only a non-µ-law codec. Make sure G.711 µ-law (PCMU) is enabled on it ([§13](#13-codecs--g711-µ-law-only-on-purpose)). |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. |
-| LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
 
