@@ -18,6 +18,14 @@ message-waiting and wake-up were all affected. Setting a wake-up now also says
 **Set ✓** — a success you cannot see is indistinguishable from a dead button,
 which is why this was hard to tell apart in the first place.
 
+**The wake-up time box was also too narrow to show a time.** It read "12:3" with
+the AM/PM indicator cut off, which looks like a truncated value and is actually
+a truncated box: the Set button beside it was claiming the full width of the row
+and squeezing the field past its own contents. A time field does not scroll or
+shorten when it runs out of room — it simply clips, and the first thing lost is
+the AM/PM. The field now keeps the width it needs and the button takes what is
+left.
+
 If the panel is already open in a tab, reload it: the page is served fresh each
 time, but an open tab keeps the version it loaded with.
 

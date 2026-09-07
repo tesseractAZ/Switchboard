@@ -1335,9 +1335,21 @@ INDEX_HTML = """<!doctype html>
   .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
   .wakerow { display: flex; gap: .35rem; margin-top: .45rem; align-items: center; }
   .wakerow .wklab { font-size: .9rem; flex: 0 0 auto; opacity: .8; }
-  .wakerow input[type=time] { flex: 1 1 auto; min-width: 0; font: inherit; font-size: .75rem;
-             padding: .3rem .4rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
+  /* ★ The time field must not be shrunk below the width of a time.
+     It had `flex: 1 1 auto; min-width: 0` while the Set button beside it
+     inherited `.ringbtn { width: 100% }` with no override — so the button
+     claimed the whole row and flexbox was free to squeeze the input past its
+     own content. The native control does not scroll or ellipsise; it simply
+     clips, rendering "12:3" with the AM/PM indicator cut off entirely, which
+     looks like a truncated VALUE rather than a too-small BOX.
+     So: the input takes its natural size and never shrinks, and the button
+     takes whatever is left. min-width fits "12:30 PM" plus the stepper Safari
+     draws inside the field. */
+  .wakerow input[type=time] { flex: 0 0 auto; min-width: 7rem; font: inherit;
+             font-size: .8rem; padding: .3rem .4rem; border-radius: 8px;
+             border: 1px solid var(--bd, #d4d7dd);
              background: var(--card, #fff); color: inherit; }
+  .wakerow .ringbtn { flex: 1 1 auto; width: auto; margin-top: 0; min-width: 3rem; }
   /* Wake-up list: one clean "Room — time · when [Cancel]" row per pending call. */
   .wakelist { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
   .wakeitem { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;

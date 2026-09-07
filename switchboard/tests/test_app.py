@@ -901,3 +901,30 @@ def test_no_grid_action_depends_on_the_rebuild_to_re_enable_its_button() -> None
     assert "done('Set ✓')" in handler, (
         "the wake-up Set button gives no success feedback — a silent success is "
         "indistinguishable from a dead button, which is how this shipped")
+
+
+def test_the_wakeup_time_field_cannot_be_squeezed_below_a_time() -> None:
+    """★ Reported from live use: the time read "12:3" with no AM/PM.
+
+    It looked like a truncated value; it was a too-small box. The field had
+    `flex: 1 1 auto; min-width: 0` while the Set button beside it inherited
+    `.ringbtn { width: 100% }` with no `.wakerow` override — so the button
+    claimed the whole row and flexbox squeezed the input past its own content
+    width. A native `<input type="time">` does not scroll or ellipsise when it
+    is too narrow; it clips, and the first thing lost is the meridiem.
+    """
+    css = app.INDEX_HTML
+    rule = css[css.index(".wakerow input[type=time]"):]
+    rule = rule[:rule.index("}") + 1]
+    assert "min-width: 0" not in rule, (
+        "the wake-up time field can be shrunk below its content again — it will "
+        "clip the AM/PM indicator with no visual sign that it did")
+    assert "flex: 0 0 auto" in rule, "the field is allowed to shrink"
+    import re
+    m = re.search(r"min-width:\s*([\d.]+)rem", rule)
+    assert m and float(m.group(1)) >= 6.0, (
+        f"min-width is {m.group(1) if m else 'unset'}rem — too narrow for "
+        f"'12:30 PM' plus the stepper the browser draws inside the field")
+    assert ".wakerow .ringbtn" in css, (
+        "the Set button has no .wakerow override, so it inherits width:100% and "
+        "squeezes the field again")
