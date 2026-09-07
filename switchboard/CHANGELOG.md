@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.94.2
+
+**Set on a wake-up did nothing, and that was caused by the previous release.**
+Holding the room cards still while you type — the fix for the time box being
+overwritten — also stopped the thing that put the buttons back. Every action on
+a card switched its button off while it worked and relied on the card being
+rebuilt a few seconds later to switch it on again. With the card deliberately
+held still, that never happened, and a switched-off button silently ignores
+every click that follows. Setting a wake-up is the worst possible place for it:
+on a Mac, Safari and Firefox leave the cursor in the time box when you click a
+button beside it, which is exactly the condition that holds the card.
+
+Every button on a card now restores itself when its work finishes, rather than
+waiting for the card to be redrawn. Ring, connect, hang up, transfer,
+message-waiting and wake-up were all affected. Setting a wake-up now also says
+**Set ✓** — a success you cannot see is indistinguishable from a dead button,
+which is why this was hard to tell apart in the first place.
+
+**The wake-up time box was also too narrow to show a time.** It read "12:3" with
+the AM/PM indicator cut off, which looks like a truncated value and is actually
+a truncated box: the Set button beside it was claiming the full width of the row
+and squeezing the field past its own contents. A time field does not scroll or
+shorten when it runs out of room — it simply clips, and the first thing lost is
+the AM/PM. The field now keeps the width it needs and the button takes what is
+left.
+
+If the panel is already open in a tab, reload it: the page is served fresh each
+time, but an open tab keeps the version it loaded with.
+
 ## 0.94.1
 
 **Two log lines were disagreeing about whether the console was reachable from
