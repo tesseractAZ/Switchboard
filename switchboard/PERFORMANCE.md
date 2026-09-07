@@ -286,14 +286,14 @@ quiet because the system is healthy or because they cannot fire.
 
 | Detector | Fired | Why |
 | --- | --- | --- |
-| Poor-call alert | 11 legs | Working. |
-| Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
-| Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
-| Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
-| Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
-| Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
-| Wake-up undelivered | 0 | Unexercised (§3) — and since 0.84.0 the re-ring it depends on is itself gated, so the path has two untested links, not one. |
 | Assistant health | — | No ledger before 0.80.0 (§4). |
+| Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
+| Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
+| Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
+| Poor-call alert | 11 legs | Working. |
+| Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
+| Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
+| Wake-up undelivered | 0 | Unexercised (§3) — and since 0.84.0 the re-ring it depends on is itself gated, so the path has two untested links, not one. |
 
 **Five of eight have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
