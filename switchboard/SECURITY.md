@@ -50,10 +50,29 @@ Defense is layered. Each subsystem below states what is defended and how.
 
 The dashboard runs behind Home Assistant Ingress, but because the add-on uses host
 networking, its port (`8099`) is *also* directly reachable on the LAN — which would
-bypass Ingress authentication. To close that, an ASGI middleware rejects any
-request whose source IP is not the Home Assistant Supervisor (`172.30.32.2`) or
-loopback, returning **HTTP 403**. This preserves Ingress auth without changing the
-bind.
+bypass Ingress authentication. To close that, a pure-ASGI middleware rejects any
+connection whose source IP is not the Home Assistant Supervisor (`172.30.32.2`),
+returning **HTTP 403**. This preserves Ingress auth without changing the bind.
+
+**It covers `http` *and* `websocket` scopes, and that is load-bearing.** Until
+v0.93.0 this was a Starlette `@app.middleware("http")`, which returns early for
+any scope that is not HTTP. That was correct while every route was HTTP and
+became a hole the moment the operator console arrived on this port: a WebSocket
+route would have inherited no guard at all, putting an unauthenticated terminal
+onto the LAN — on the one port that cannot be switched off, because it is the
+panel. Any new middleware here must dispatch on the scope type, and the LAN
+exemptions below must stay gated behind `scope["type"] == "http"`; a WebSocket
+scope carries no `method` key, and reaching for a default would exempt upgrades
+outright.
+
+**The allowlist is exactly one address, and must never become a subnet.** The
+loopback entries were removed in v0.93.0: under `host_network` that loopback is
+the *host's*, shared with every host-network add-on and every process on the box.
+It is a location, not an identity. A CIDR would be worse still — the sibling
+Z-Wave add-on shipped a check matching the whole `172.30.32.0/23` hassio bridge,
+which is where every sibling add-on container lives, so its address term was
+always true and the test collapsed to "did the client send a header it chose to
+send".
 
 Two narrow, read-only GET paths are exempt so "dumb" LAN devices can reach them: a
 name-validated announcement WAV (`/announce/<name>.wav`) and the cordless's remote
@@ -228,11 +247,24 @@ password) and both its page and its WebSocket require a signed-in session, with
 per-address throttling of failed attempts. With an empty `console_users` the web
 terminal is as open as the telnet console.
 
-**Mitigations you control:** configure `console_users` for the web terminal;
-set `console_bind: 127.0.0.1` (the web terminal
-follows it) to make them host-local, or disable them with
-`console_enabled: false` / `console_web_enabled: false`. The Home Assistant Ingress
-dashboard remains the authenticated management surface.
+**Prefer the Ingress console.** Since v0.93.0 the same terminal is served at
+`/console/` on the Ingress port, where Home Assistant's own session authenticates
+it and the guard in §1 pins the caller to the Supervisor. It needs no
+`console_users` entry because there is no second front door to protect — which
+also means no login to leave disabled. The standalone `:8100` terminal remains
+for now and is scheduled for removal.
+
+**The cost of that move, stated plainly:** the terminal now runs inside the Home
+Assistant frontend's *origin*. A cross-site-scripting bug in the console page is
+no longer confined to a terminal on its own port — it is an XSS against the HA
+session. Only `xterm.js` and `xterm.css` are served to that page, from an
+exact-match allowlist of two filenames (no directory serving, no path joining on
+the parameter), which is the surface that keeps that trade acceptable.
+
+**Mitigations you control:** configure `console_users` for the `:8100` terminal;
+set `console_bind: 127.0.0.1` (the web terminal follows it) to make both
+host-local, or disable them with `console_enabled: false` /
+`console_web_enabled: false`. Neither affects the Ingress console.
 
 ### The AppArmor profile is coarse
 

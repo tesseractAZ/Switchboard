@@ -40,11 +40,18 @@ sys.path.insert(0, "/usr/share/switchboard/wakeup")
 # routes are wired up at the bottom of this module; when it's absent, importing
 # this file still succeeds and ``app`` is None.
 try:
-    from fastapi import FastAPI, Request  # noqa: E402
+    from fastapi import FastAPI, Request, WebSocket  # noqa: E402
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response  # noqa: E402
+    from starlette.websockets import WebSocketDisconnect  # noqa: E402
     _HAVE_FASTAPI = True
 except ImportError:  # pragma: no cover - exercised only on the test box
     FastAPI = Request = FileResponse = HTMLResponse = JSONResponse = Response = None  # type: ignore
+    WebSocket = None  # type: ignore
+    # A REAL class, not None. `except None:` is a TypeError at runtime, so a
+    # None here would turn every disconnect into a crash on the one box where
+    # nobody would see it until deploy.
+    class WebSocketDisconnect(Exception):  # type: ignore
+        pass
     _HAVE_FASTAPI = False
 
 # 8 kHz Playback audio for the announce-to-handset endpoint; absent on the dev box.
@@ -52,6 +59,11 @@ try:
     import announce_asterisk  # noqa: E402
 except ImportError:  # pragma: no cover
     announce_asterisk = None  # type: ignore
+
+# The browser<->operator-console bridge. Framework-free by design (see its
+# docstring): everything that can be got wrong lives there and is unit-tested,
+# and this module contributes only the route wiring.
+import console_bridge  # noqa: E402
 
 from ami import (  # noqa: E402
     AMIError,
@@ -182,7 +194,22 @@ _EXT_RE = re.compile(r"^[0-9]{2,6}$")
 # client that isn't the Supervisor (loopback kept for local health checks). This
 # closes the bypass without changing the bind, so Ingress keeps working.
 INGRESS_CLIENT = "172.30.32.2"
-_ALLOWED_CLIENTS = frozenset({INGRESS_CLIENT, "127.0.0.1", "::1"})
+# ★ EXACTLY ONE ADDRESS. Not a subnet, and no loopback.
+#
+# 127.0.0.1 and ::1 used to be here "for local health checks". Under
+# host_network that loopback is the HOST's, shared with every other
+# host-network add-on and every process on the Pi — including the SSH add-on's
+# root shell. It is a location, not an identity, and this port now carries a
+# terminal onto the operator console. Verified before removal that nothing
+# dials 127.0.0.1:8099 (`ss -tnp`, and the only in-repo references to 8099 are
+# the listener itself and the ingress declaration).
+#
+# It must also never become a CIDR. The sibling Z-Wave add-on shipped exactly
+# that: its ingress check matched the whole 172.30.32.0/23 hassio bridge, which
+# is where every sibling add-on container lives — so the address term was
+# always true and the expression collapsed to "did the client send a header it
+# chose to send". test_ingress_guard.py pins this.
+_ALLOWED_CLIENTS = frozenset({INGRESS_CLIENT})
 
 
 def _client_allowed(host: str) -> bool:
@@ -202,7 +229,16 @@ class _NoApp:
             return fn
         return wrap
 
-    get = post = middleware = _decorator
+    def add_middleware(self, *_a, **_k):
+        """No-op. Registration is a framework act; the DECISION is
+        ``_scope_allowed`` below, which is pure and tested off-box."""
+
+    # NOTE: every name used as `@app.<name>` anywhere in this file must appear
+    # here, or importing this module on a box without FastAPI raises
+    # AttributeError — which aborts pytest COLLECTION for every test file that
+    # imports app.py, i.e. the whole suite, not one test.
+    # test_noapp_surface.py derives the required list from the source.
+    get = post = middleware = websocket = _decorator
 
 
 app = FastAPI(title="Switchboard", docs_url=None, redoc_url=None) if _HAVE_FASTAPI else _NoApp()
@@ -382,30 +418,95 @@ def safe_announce_path(name: str) -> str:
     return path
 
 
-@app.middleware("http")
-async def restrict_to_ingress(request: Request, call_next):
-    path = request.url.path or ""
-    # Two read-only GETs are fetched over the LAN by dumb devices (not the
-    # Supervisor ingress client), so exempt just those from the client-IP guard:
-    #   * /announce/<name>.wav — a media player fetching an ephemeral, name-validated
-    #     announcement WAV (see serve_announcement).
-    #   * /phonebook.xml — the WP826 cordless fetching its Remote Phonebook (it can't
-    #     ride Ingress); read-only, low-sensitivity (internal ext directory).
-    if request.method == "GET" and (path.startswith("/announce/") or path == "/phonebook.xml"):
-        return await call_next(request)
-    # The HA media_player custom-component triggers announcements over the LAN from
-    # the Core container — allow POST /api/announce ONLY when it carries the shared
-    # announce token (read per-request, so only this path pays for the options read).
-    # Disabled unless a token is configured; the endpoint itself can still only play
-    # a local clip to a known ext (never an outside call).
-    if request.method == "POST" and path.startswith("/api/announce/"):
-        tok = _announce_token()
-        if tok and request.headers.get("x-announce-token") == tok:
-            return await call_next(request)
-    client = request.client.host if request.client else ""
-    if not _client_allowed(client):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return await call_next(request)
+def _scope_allowed(scope) -> bool:
+    """★ May this connection reach the app? Pure, so it is testable off-box.
+
+    THE DEFECT THIS SHAPE EXISTS FOR. Until 0.93.0 this logic was
+    ``@app.middleware("http")``, i.e. Starlette's BaseHTTPMiddleware — which
+    returns early for any scope whose type is not ``"http"``. That was correct
+    while every route was HTTP. The moment a WebSocket route is added it stops
+    being correct in the worst possible way: the new route inherits NO guard,
+    and because this add-on runs host_network with ``--host 0.0.0.0``, the
+    terminal would have been reachable, unauthenticated, from the LAN — on the
+    one port that cannot be switched off, because it is the Ingress panel.
+
+    So the guard is now structural: it sits at the ASGI layer, dispatches on the
+    scope type, and a future WebSocket route cannot forget to call it.
+    """
+    stype = scope.get("type")
+    if stype not in ("http", "websocket"):
+        return True                       # lifespan MUST pass through
+
+    client = scope.get("client")
+    host = client[0] if client else ""    # None (a test client, or a UNIX
+    if host.startswith("::ffff:"):        # socket) -> "" -> denied
+        host = host[7:]
+
+    # The exemptions are HTTP-only, and that ordering is load-bearing: a
+    # websocket scope carries no "method" key, so a `.get("method", "GET")`
+    # workaround plus the /announce/ prefix test would exempt WebSockets
+    # outright — reintroducing the hole this function exists to close.
+    if stype == "http":
+        path = scope.get("path") or ""
+        method = scope.get("method", "")
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers") or []}
+        # Two read-only GETs are fetched over the LAN by dumb devices (not the
+        # Supervisor ingress client):
+        #   * /announce/<name>.wav — a media player fetching an ephemeral,
+        #     name-validated announcement WAV (see serve_announcement).
+        #   * /phonebook.xml — the WP826 cordless fetching its Remote Phonebook
+        #     (it can't ride Ingress); read-only, low-sensitivity.
+        if method == "GET" and (path.startswith("/announce/") or path == "/phonebook.xml"):
+            return True
+        # The HA media_player custom-component triggers announcements over the
+        # LAN from the Core container — allow POST /api/announce ONLY when it
+        # carries the shared announce token. Disabled unless a token is
+        # configured; the endpoint can still only play a local clip to a known
+        # ext (never an outside call).
+        if method == "POST" and path.startswith("/api/announce/"):
+            tok = _announce_token()
+            if tok and headers.get("x-announce-token") == tok:
+                return True
+
+    return _client_allowed(host)
+
+
+class RestrictToIngress:
+    """Pure-ASGI guard covering http AND websocket scopes.
+
+    Rejecting a WebSocket means closing it BEFORE any accept: uvicorn renders a
+    pre-handshake close as a 403 on the handshake itself. Accept-then-close
+    would complete the upgrade first, which is a working socket for however long
+    it takes to close it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if _scope_allowed(scope):
+            await self.app(scope, receive, send)
+            return
+        if scope.get("type") == "websocket":
+            await receive()               # drain the initial websocket.connect
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"error":"forbidden"}'})
+
+
+app.add_middleware(RestrictToIngress)
+
+if _HAVE_FASTAPI:
+    # Starlette's automatic slash-redirect builds an ABSOLUTE url from the
+    # scheme plus the forwarded Host, so its Location drops the Ingress prefix
+    # entirely (and over Nabu Casa is also an https->http downgrade the browser
+    # blocks). Already latent today on `GET /api/status/`. Every fetch the page
+    # makes is relative, and /phonebook.xml + /announce/{name} are exact paths,
+    # so nothing depends on the synthesiser.
+    app.router.redirect_slashes = False
 
 
 @app.get("/announce/{name}")
@@ -1105,6 +1206,94 @@ def index() -> str:
     return INDEX_HTML
 
 
+# --------------------------------------------------------------------------- #
+# The operator console, in the browser, through Ingress.
+#
+# WHY IT LIVES ON THIS PORT. The standalone server on :8100 had to invent its
+# own login gate because it answered directly on the LAN. Here Home Assistant
+# has already authenticated the caller before anything reaches us, and
+# RestrictToIngress pins the socket peer to the Supervisor, so there is no
+# second password to invent, forget, or leave disabled.
+#
+# THE COST, STATED PLAINLY: the terminal now runs inside the Home Assistant
+# frontend's ORIGIN. A cross-site-scripting bug in the console page is no longer
+# confined to a terminal on port 8100 — it is an XSS against the HA session.
+# That is a real trade, not a footnote (see DOCS §Ingress operator console).
+# --------------------------------------------------------------------------- #
+CONSOLE_STATIC = "/usr/share/switchboard/console-web/static"
+
+# An exact-match map, never a directory served and never os.path.join on a path
+# parameter. index.html is deliberately ABSENT: the standalone server removed
+# exactly that door in v0.44.0, and reinstating it here would serve the page at
+# a second URL whose relative asset hrefs resolve one level wrong.
+# name -> (ABSOLUTE PATH, content type). The path is a literal in this table,
+# never built from the request. An allowlist that still interpolates the
+# parameter — `FileResponse(f"{DIR}/{name}")` after a dict membership test — is
+# safe by reasoning and flagged as py/path-injection by CodeQL, correctly: the
+# dict lookup is not a sanitizer any analyser can see, and the safety then rests
+# on the next person keeping the lookup and the interpolation in sync. Storing
+# the resolved path removes the request parameter from the file operation
+# entirely, so there is nothing left to keep in sync.
+_CONSOLE_ASSETS = {
+    "xterm.js": (f"{CONSOLE_STATIC}/xterm.js",
+                 "application/javascript; charset=utf-8"),
+    "xterm.css": (f"{CONSOLE_STATIC}/xterm.css",
+                  "text/css; charset=utf-8"),
+}
+
+
+def _ingress_user(headers) -> str:
+    """Who Home Assistant says this is, for the log line only.
+
+    Supervisor injects X-Remote-User-Id / -Name and strips client-supplied
+    copies, so these cannot be forged THROUGH ingress — but they are only
+    populated when the ingress session carries user data, which this deployment
+    has not yet been observed to do. Recorded for attribution; deliberately NOT
+    an authorization gate, because failing closed on an unverified Supervisor
+    header would trade a working console for no security benefit on an install
+    whose peer pin already bounds the caller to the Supervisor.
+    """
+    return (headers.get("x-remote-user-name")
+            or headers.get("x-remote-user-id") or "unknown")
+
+
+@app.get("/console")
+def console_redirect():
+    """RELATIVE redirect. An absolute Location drops the Ingress prefix.
+
+    The canonical URL is /console/ WITH the slash, because the vendored page
+    references ./static/xterm.css. At /console those resolve one directory up,
+    404, and the page renders as a permanent spinner with no error — strictly
+    worse than a clean failure.
+    """
+    return Response(status_code=307, headers={"Location": "console/"})
+
+
+@app.get("/console/")
+def console_page():
+    return FileResponse(f"{CONSOLE_STATIC}/index.html", media_type="text/html")
+
+
+@app.get("/console/static/{name}")
+def console_asset(name: str):
+    entry = _CONSOLE_ASSETS.get(name)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path, ctype = entry                  # both literals from the table above
+    return FileResponse(path, media_type=ctype)
+
+
+@app.websocket("/console/ws")
+async def console_ws(websocket: WebSocket) -> None:
+    """One browser terminal. All of the hard parts live in console_bridge."""
+    who = _ingress_user({k.lower(): v for k, v in websocket.headers.items()})
+    print(f"[switchboard-webui] console session opened by {who}", flush=True)
+    try:
+        await console_bridge.run_bridge(websocket)
+    finally:
+        print(f"[switchboard-webui] console session closed for {who}", flush=True)
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -1201,6 +1390,7 @@ INDEX_HTML = """<!doctype html>
   <div id="banner"></div>
 
   <div class="toolbar">
+    <a class="ringbtn" href="console/" style="text-decoration:none">🖥️ Console</a>
     <button class="ringbtn" id="pageall">📢 Page all</button>
     <span class="muted" id="connecthint"></span>
   </div>

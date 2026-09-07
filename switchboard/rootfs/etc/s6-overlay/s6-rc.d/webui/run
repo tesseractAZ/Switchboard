@@ -14,4 +14,18 @@ cd /usr/share/switchboard/webui || exit 1
 # falls back to /data/options.json when absent. Keeps every consumer on ONE
 # effective view of the config.
 export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
-exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log
+# --ws websockets: deterministic, rather than letting `auto` pick whatever
+#   happens to be importable. If the package is ever missing this FAILS LOUDLY
+#   at startup instead of degrading to a 404 on /console/ws — a silently dead
+#   terminal invites re-enabling the unauthenticated :8100, which is the thing
+#   this whole change exists to retire. The Dockerfile asserts the import at
+#   build time and test_run_gates pins the flag against the pip list.
+# --ws-max-size 65536: the 64 KiB inbound cap the standalone console server has
+#   always enforced. The wsproto backend ignores this option entirely.
+# --no-proxy-headers: keeps scope["client"] as the real socket peer. The Ingress
+#   guard pins that to 172.30.32.2, and HA's proxy chain does append
+#   X-Forwarded-For. NEVER "fix" this with --forwarded-allow-ips: the client
+#   would then resolve to the BROWSER's LAN address and every legitimate
+#   Ingress request would 403.
+exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log \
+     --ws websockets --ws-max-size 65536 --no-proxy-headers
