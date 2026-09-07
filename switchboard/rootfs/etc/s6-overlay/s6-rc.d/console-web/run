@@ -61,7 +61,12 @@ if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     BIND="$(switchboard-opt console_bind)"
 fi
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    BIND="0.0.0.0"
+    # v0.94.0 — fail CLOSED. This fires only when BOTH option reads come back
+    # empty, i.e. a transient blank read during a config reload. The old
+    # fallback was 0.0.0.0, so a momentary glitch put a terminal that drives
+    # call control onto the LAN until the next restart. A terminal that is
+    # briefly reachable only from the host is the cheaper failure by far.
+    BIND="127.0.0.1"
 fi
 export CONSOLE_WEB_BIND="${BIND}"
 
