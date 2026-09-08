@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.94.5
+
+**The documentation had drifted, and two of its security statements were wrong in
+the direction that matters — they claimed more protection than exists.**
+
+The readme still said the telephone console was unauthenticated on your network
+and told you to lock it down yourself. That stopped being true five releases ago,
+when both standalone consoles moved to your Home Assistant machine only. It also
+never mentioned that the console now lives in the Home Assistant sidebar, which
+is the change most worth knowing about.
+
+The security note claimed dependency scanning that this project does not have —
+every dependency is installed inside the container image, which the scanner
+cannot read, so it has never raised anything here. It also had the two console
+address settings the wrong way round, said two accepted code-scanning findings
+were dismissed when they deliberately remain visible, and stated that turning
+either console off leaves the sidebar one alone. Turning off the telephone
+console in fact stops the sidebar one working, because that is what it connects
+to. And it described an empty sign-in list as the only way the login is off —
+a list that fails to parse, or whose entries are missing a name or a password,
+switches the login off just as completely.
+
+**A first pass at these corrections introduced three new errors of its own,
+caught before release.** It said nothing is published on your network, which is
+false — the management port does listen on every interface, and what protects it
+is a check on who is connecting, not the absence of a listener. Saying otherwise
+removes your reason to care about it. It also generalised the previous release's
+scrolling fix to "any list", when only the lights list scrolls and the main board
+still cuts off at the bottom — documenting a bug as fixed. And it implied the
+sidebar console lacks the session limits the standalone one has, when it has
+those and a twelve-hour ceiling besides.
+
+Also corrected: the performance notes claimed version 0.89.0 and 486 tests
+(now 0.94.4 and 538), the manual's console section pointed at an address that no
+longer answers from another machine, and several places said "the two front-ends"
+when there are three.
+
 ## 0.94.4
 
 **The lights list now scrolls.** With thirty-four lights across a dozen areas the

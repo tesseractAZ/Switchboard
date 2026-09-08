@@ -23,7 +23,10 @@ fixes for older versions — update to the current release.
 ## Automated scanning
 
 Every push and pull request is analysed by **CodeQL** (`security-extended`) for
-both Python and JavaScript, and by **Dependabot** for dependency advisories.
+both Python and JavaScript. There is **no** dependency-manifest scanning: every
+runtime dependency is installed by `apk add` / `pip install` inside
+`switchboard/Dockerfile`, which GitHub's dependency graph does not parse, so
+Dependabot raises no advisories for this repository.
 Findings surface in the repository's Security tab, and CI additionally **fails**
 on any error-level or high-severity (>= 7.0) result that is not listed in
 `.github/codeql-baseline.json` — a small, explicit exemption file (currently 5
@@ -202,8 +205,11 @@ against path traversal.
 The SIP trunk is where the internet meets your phone bill. When a trunk is enabled,
 these defenses are generated automatically:
 
-- **Blocked prefixes.** International (`011`) and premium (`900`, `1-900`) numbers
-  are matched *before* the general outbound rule and routed to congestion.
+- **Blocked prefixes.** International (`011`) and premium `1-900` numbers are
+  matched *before* the general outbound rule and routed to congestion, in both
+  dial modes. Prefix-dial mode additionally blocks a bare `900`; direct-dial mode
+  does not need to, because its outbound pattern (`_1NXXNXXXXXX`) requires the
+  leading 1 and never matches a bare 10-digit number.
 - **Dial-flag hygiene.** Inbound calls use `r`-only Dial flags — an outside caller
   is never given the in-call `##`/`*2` DTMF transfer/feature codes. Outbound calls
   use `rT` — your internal caller may transfer, but the far PSTN party may not
@@ -228,12 +234,18 @@ these defenses are generated automatically:
 ## Accepted LAN-local risks
 
 These are deliberate design choices, documented here so you can decide whether they
-fit your network. Where the add-on can flag one at start-up it does — the console
-bind logs a notice, and a blank `cordless_cert_sha256` prints a NOTE — but the
+fit your network. Where the add-on can flag one at start-up it does — each console
+logs its bind, escalating from INFO to a NOTICE only when it is actually reachable
+from the LAN without a login, and a blank `cordless_cert_sha256` prints a NOTE — but the
 AppArmor and developer-tool items are structural and emit no start-up line, so
 this list is the record of them.
 
 ### The telnet operator console (`:2300`) and web terminal (`:8100`)
+
+Since v0.94.0 both listeners default to loopback (`console_bind` and
+`console_web_bind` are both `127.0.0.1`), so on a **fresh** install neither is
+reachable from the LAN. An upgrade keeps whatever binds are already stored in its
+options. This section describes what you take on if either is on the network.
 
 Both can ring, connect, hang up,
 transfer, page, set message-waiting, and control lights. The blast radius is
@@ -241,11 +253,16 @@ bounded — at most 5 concurrent sessions, a 15-minute idle reclaim, and (for th
 terminal) a same-origin WebSocket gate that blocks cross-site drive-by hijacking —
 but anyone who can reach the port from a same-origin context can drive the board.
 
-The telnet console is **unauthenticated on the LAN by design**; the **web
-terminal supports a login** — configure `console_users` (username + masked
+If either is on the LAN: the telnet console is **unauthenticated by design**; the
+**web terminal supports a login** — configure `console_users` (username + masked
 password) and both its page and its WebSocket require a signed-in session, with
 per-address throttling of failed attempts. With an empty `console_users` the web
-terminal is as open as the telnet console.
+terminal is as open as the telnet console — **and so it is with a `console_users`
+value that fails to parse, or whose rows are missing a username or a password**:
+those rows are dropped, and a list left with no valid rows disables the gate
+entirely. The start-up log line reports which mode is actually live
+(`login gate ACTIVE (n user(s))` vs `no login gate`); trust that line over the
+options page.
 
 **Prefer the Ingress console.** Since v0.93.0 the same terminal is served at
 `/console/` on the Ingress port, where Home Assistant's own session authenticates
@@ -261,10 +278,18 @@ session. Only `xterm.js` and `xterm.css` are served to that page, from an
 exact-match allowlist of two filenames (no directory serving, no path joining on
 the parameter), which is the surface that keeps that trade acceptable.
 
-**Mitigations you control:** configure `console_users` for the `:8100` terminal;
-set `console_bind: 127.0.0.1` (the web terminal follows it) to make both
-host-local, or disable them with `console_enabled: false` /
-`console_web_enabled: false`. Neither affects the Ingress console.
+**Mitigations you control:** both listeners already default to loopback
+(`console_bind: 127.0.0.1`, `console_web_bind: 127.0.0.1`), so neither is on the
+LAN unless you change it. **`console_web_bind` is the web terminal's own setting
+and takes precedence**; `console_bind` is consulted only when `console_web_bind`
+is left empty — so set the one you mean. If you do put the `:8100` terminal on the
+LAN, configure `console_users` to gate it.
+
+`console_web_enabled: false` turns off the standalone terminal and does **not**
+affect the Ingress console. `console_enabled: false` **does**: the Ingress
+terminal bridges to the operator console on `127.0.0.1:2300`, so disabling that
+console — or binding it to anything other than loopback — leaves `/console/`
+showing "unavailable".
 
 ### The AppArmor profile is coarse
 
@@ -291,7 +316,9 @@ a self-signed certificate with no validatable chain, so the tool sets
 `rejectUnauthorized: false` and reads its admin password from a local file. This is
 an accepted LAN-local risk for a personal device-admin tool and is not part of the
 add-on's request path. (Two CodeQL alerts flag this `rejectUnauthorized: false`;
-they are dismissed with that justification.)
+the rule `js/disabling-certificate-validation` is listed for `tools/wp826.mjs` in
+`.github/codeql-baseline.json` with that justification, so it does not fail CI.
+The alerts are **not** dismissed — they stay visible in the Security tab.)
 
 ---
 
@@ -300,8 +327,11 @@ they are dismissed with that justification.)
 1. **Change the default room secrets** (`change-me-101`, `change-me-102`, …) before
    your phones register. Use a strong, unique `secret` per room; the validator
    rejects `;`, whitespace, and control characters.
-2. **If your LAN is not fully trusted**, bind the consoles to loopback
-   (`console_bind: 127.0.0.1`) or disable them.
+2. **Nothing, for the consoles, on a fresh install** — `console_bind` and
+   `console_web_bind` both default to `127.0.0.1`. If you are upgrading from
+   before 0.94.0 your stored binds are unchanged, so check them; and if you
+   deliberately put either on the LAN, configure `console_users` for the web
+   terminal (the telnet one cannot be authenticated at all).
 3. **To allow LAN-triggered announcements**, set a non-empty `announce_token`;
    otherwise `/api/announce` is Supervisor-only.
 4. **Use a strong trunk secret** if you enable the outside line, and set

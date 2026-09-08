@@ -120,11 +120,11 @@ its default is fine.
 | Option | Default | Notes |
 |--------|---------|-------|
 | `console_bind` | `127.0.0.1` | Interface it listens on. `127.0.0.1` restricts it to the host. |
-| `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **Unauthenticated on the LAN** — keep it trusted or bind to loopback, or disable. |
+| `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **No authentication of any kind** — harmless on the default loopback bind; do not move it onto an untrusted LAN. |
 | `console_port` | `2300` | TCP port for the telnet console. |
 | `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
 | `console_web_bind` | `127.0.0.1` | Blank = follow `console_bind`. Both default to loopback since 0.94.0: the browser console is served through the Home Assistant sidebar instead (§10), so neither listener needs to be on your network. |
-| `console_web_enabled` | `true` | Browser version of the console (xterm.js). Unauthenticated on the LAN **only while `console_users` is empty** — configure a user and both the page and the terminal socket require a sign-in (see below). Idles if `console_enabled` is off. |
+| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. Idles if `console_enabled` is off. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 
 ### Time, clock & wake-up
@@ -990,8 +990,9 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   **Switchboard** panel and press **🖥️ Console**, or go straight to `/console/`
   under the panel's URL. This is the same board, served from the Ingress port, so
   **Home Assistant's own login is the only login** — there is no separate
-  password to configure, forget, or leave switched off, and nothing is exposed on
-  your network. It works in the HA mobile app.
+  password to configure, forget, or leave switched off. The port does listen on
+  your LAN — host networking gives it no choice — but every connection whose peer
+  is not the Supervisor is refused. It works in the HA mobile app.
 
   Two things worth knowing about it. The URL must end in a **slash**: the page
   loads its assets relatively, so `/console` alone resolves them one directory up
@@ -1010,33 +1011,54 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 - **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
-  **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. Toggle with
-  `console_enabled`; restrict to the host with `console_bind: 127.0.0.1`.
-- **Browser web terminal** — the same TUI rendered with xterm.js at
-  `http://<ha-host>:8100/`. A tiny stdlib HTTP + WebSocket server bridges the
-  browser to the telnet console on the host, so no telnet client is needed. Toggle
-  with `console_web_enabled` / `console_web_port`. It idles if `console_enabled` is
-  off (nothing to bridge to).
+  **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. The **lights**
+  list scrolls with **↑↓** — it says how many lights are hidden above and below,
+  and repeats the area heading when the view starts inside one (0.94.4). The main
+  board does **not** scroll: a roster taller than the window is cut at the bottom.
+  Toggle with `console_enabled`. **Since 0.94.0 this binds to `127.0.0.1` by
+  default** — on a *fresh* install; an upgrade keeps the `console_bind` you
+  already had, and the start-up line names the address it is actually listening
+  on, so read that rather than assuming the new default applied. Set
+  `console_bind: 0.0.0.0` to put it back on your LAN, and read the security note
+  below before you do.
+- **Browser web terminal (the standalone one)** — the same TUI rendered with
+  xterm.js by a small stdlib HTTP + WebSocket server that bridges to the telnet
+  console. **Since 0.94.0 it binds to `127.0.0.1` by default**, so
+  `http://<ha-host>:8100/` no longer answers from another machine; it is kept as a
+  fallback reachable from the Home Assistant host itself. The sidebar console
+  above supersedes it and needs no `console_users` entry. Toggle with
+  `console_web_enabled` / `console_web_port`; it idles if `console_enabled` is off
+  (nothing to bridge to).
 
-> **Security:** the two front-ends are *not* equally exposed, and both can
-> ring/connect/hang up phones.
+> **Security:** all three front-ends can ring, connect and hang up phones, and
+> they are *not* equally exposed.
 >
-> - **Telnet (2300) is unauthenticated on the LAN, by design.** There is no login
->   and no `console_users` equivalent; anyone who can reach the port drives the
->   board. Bind it to `127.0.0.1` or disable it if your LAN isn't trusted.
-> - **The web terminal (8100) takes a sign-in** as soon as `console_users` has an
->   entry: the page redirects to a login form, the `/ws` upgrade re-checks the
->   session cookie (so a saved socket URL is no way around it), sessions are
->   256-bit tokens with a 12-hour lifetime and are dropped on restart, and failed
->   attempts are throttled per source address. With `console_users` **empty** the
->   gate is off and the terminal is exactly as open as telnet — that is the
->   historical default, and the start-up log says which mode is live.
+> - **The sidebar console is the one to use.** It is served on the Ingress port,
+>   so Home Assistant has already authenticated the caller before anything reaches
+>   the add-on, and a guard pins the connection to the Supervisor — for HTTP *and*
+>   for the terminal's WebSocket. The port does listen on your LAN — host
+>   networking gives it no choice — but every connection whose peer is not the
+>   Supervisor is refused, and there is no second password to configure or leave
+>   switched off.
+> - **Telnet (2300) has no authentication and never has** — no login, no
+>   `console_users` equivalent; anyone who can reach the port drives the board.
+>   **Since 0.94.0 it binds to `127.0.0.1` by default**, so as shipped nobody can
+>   reach it but the Home Assistant host. Moving that bind puts an unauthenticated
+>   switchboard on your LAN.
+> - **The standalone web terminal (8100)** also binds to `127.0.0.1` by default
+>   since 0.94.0. It still supports a sign-in when `console_users` has an entry:
+>   the page redirects to a login form, the `/ws` upgrade re-checks the session
+>   cookie (so a saved socket URL is no way around it), sessions are 256-bit
+>   tokens with a 12-hour lifetime dropped on restart, and failed attempts are
+>   throttled per source address. With `console_users` **empty** the gate is off,
+>   which is why the bind matters; the start-up log states which mode is live and
+>   whether the bind actually exposes it.
 >
-> Independently of the login, the WebSocket upgrade is same-origin-gated (a
-> cross-origin drive-by page is rejected), sessions are capped (5) and
-> idle-timed-out (15 min), and the bind follows `console_bind`. Home Assistant's
-> own Ingress dashboard (sidebar **Switchboard**) remains the authenticated
-> management surface. See [SECURITY.md](SECURITY.md).
+> Independently of any login, **both** browser front-ends cap concurrent sessions
+> at 5 and reclaim one after 15 minutes of browser idle; the sidebar console also
+> has a 12-hour absolute ceiling per session. The standalone terminal additionally
+> same-origin-gates its WebSocket upgrade, and its bind follows `console_bind`
+> unless `console_web_bind` overrides it. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -1264,8 +1286,8 @@ asterisk -rx "pjsip show registrations"   # trunk registration
 
 ## 15. Security
 
-The security model, the toll-fraud threat model, the **LAN-exposed** console
-services and their mitigations, secret handling, and the short list of things
+The security model, the toll-fraud threat model, the console services and their
+exposure, secret handling, and the short list of things
 **you** must configure are documented in **[SECURITY.md](SECURITY.md)**. The
 essentials:
 
@@ -1275,10 +1297,11 @@ essentials:
 - The trunk blocks international/premium prefixes and confines transfers to
   internal destinations.
 - **Change the default room secrets** before your phones register.
-- The telnet console is **unauthenticated on your LAN by design**. The web
-  terminal takes a sign-in once `console_users` is configured, and is exactly as
-  open as telnet until then. Bind them to `127.0.0.1` or disable them if the LAN
-  isn't trusted.
+- Both standalone consoles bind to `127.0.0.1` by default since 0.94.0, so
+  neither is on your LAN as shipped. The telnet console has no authentication at
+  all, and the web terminal's sign-in is off until `console_users` has an entry —
+  so if you move either bind, put it on a trusted network first. The sidebar
+  console (§10) needs neither.
 - `GET /phonebook.xml` on port 8099 is deliberately reachable from the LAN
   without authentication so the cordless can fetch its remote phonebook; it
   exposes room names and internal extensions only ([§8](#8-the-wp826-wifi-cordless-optional)).
