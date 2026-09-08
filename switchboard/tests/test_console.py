@@ -740,3 +740,100 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------- #
+# The lights list scrolls.
+# --------------------------------------------------------------------------- #
+def _many_lights(n=34):
+    areas = ["Bathroom", "Dining Room", "Family Room", "Garage", "Guest Bedroom",
+             "Guest Hallway", "Gym", "Hallway", "Kitchen", "Living Room",
+             "Master Bedroom", "Office"]
+    out = []
+    for a in areas:
+        for i in range(1, 4):
+            if len(out) < n:
+                out.append({"name": f"{a} Light {i}", "area": a, "state": "off"})
+    return out
+
+
+def _plain(lines):
+    import re
+    return [re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines]
+
+
+def test_every_light_is_reachable_however_many_there_are():
+    """★ Reported from live use: "no way to scroll and truncates at bottom".
+
+    Before v0.94.4 `_lights_lines` rendered every light from the first one, and
+    `center()` then clamped the frame to the terminal height. With 34 lights
+    across twelve areas — 46 rows of content — everything past the terminal's
+    last row was cut off at ANY size. `lsel` kept incrementing past the fold, so
+    the rows below were not merely off-screen, they were unreachable: the cursor
+    moved somewhere you could not see and no key brought it back.
+
+    The invariant is the one that matters to a person using it: whatever is
+    selected must be on screen, and the frame must fit.
+    """
+    lights = _many_lights(34)
+    for height in (12, 24, 30, 60):
+        sess = {"lights": lights, "lsel": 0, "mode": "lights", "w": 100, "h": height}
+        for sel in range(len(lights)):
+            sess["lsel"] = sel
+            out = console._lights_lines(sess, 100, height)
+            txt = _plain(out)
+            assert len(out) <= height, (
+                f"h={height} lsel={sel}: frame is {len(out)} rows, taller than the "
+                f"terminal — center() will clip it and the bottom is lost")
+            assert any("▸" in ln for ln in txt), (
+                f"h={height} lsel={sel}: the selected light is not on screen; the "
+                f"cursor moved somewhere the operator cannot see")
+
+
+def test_the_scroll_position_persists_between_redraws():
+    """The console redraws on a timer. Recomputing the window from scratch each
+    frame would make a long list twitch under the cursor."""
+    lights = _many_lights(34)
+    sess = {"lights": lights, "lsel": 20, "mode": "lights", "w": 100, "h": 24}
+    console._lights_lines(sess, 100, 24)
+    first = sess.get("ltop")
+    assert first is not None and first > 0, "no scroll offset was recorded"
+    console._lights_lines(sess, 100, 24)
+    assert sess["ltop"] == first, "the window moved without the selection moving"
+
+
+def test_a_scrolled_list_says_what_is_hidden_and_which_area_it_is_in():
+    """A list that scrolls with no indication looks exactly like one that is
+    truncated — which is the bug this replaced. And a name with no area heading
+    tells you a light is on but not where."""
+    lights = _many_lights(34)
+    sess = {"lights": lights, "lsel": 33, "mode": "lights", "w": 100, "h": 24}
+    txt = _plain(console._lights_lines(sess, 100, 24))
+    joined = "\n".join(txt)
+    assert "more above" in joined, "nothing tells the operator there is more above"
+    # The top visible light must be attributable to an area: either the window
+    # happens to open ON that area's heading, or the heading is repeated. Only
+    # asserting "(cont.)" would fail whenever the window lands on a boundary,
+    # which is a property of the fixture rather than of the code.
+    body = [ln for ln in txt if "○ off" in ln or "● on" in ln]
+    first_light_at = txt.index(body[0])
+    assert any(("(cont.)" in ln) or (ln.strip() and "○" not in ln and "●" not in ln
+                                     and "LIGHTS" not in ln and "─" not in ln)
+               for ln in txt[:first_light_at]), (
+        "the first visible light has no area heading above it — the operator can "
+        "see that a light is on but not where it is")
+
+    top = _plain(console._lights_lines({"lights": lights, "lsel": 0, "mode": "lights",
+                                        "w": 100, "h": 24}, 100, 24))
+    assert "below" in "\n".join(top), "nothing indicates there is more below"
+
+
+def test_a_short_list_is_not_windowed_at_all():
+    """Six lights on a 24-row terminal must render plainly — no scroll note, no
+    continuation heading, nothing to explain."""
+    sess = {"lights": _many_lights(6), "lsel": 0, "mode": "lights", "w": 100, "h": 24}
+    txt = _plain(console._lights_lines(sess, 100, 24))
+    joined = "\n".join(txt)
+    assert "above" not in joined and "below" not in joined
+    assert "(cont.)" not in joined
+    assert sum(1 for ln in txt if "○ off" in ln) == 6, "not every light rendered"
