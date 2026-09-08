@@ -26,8 +26,9 @@ wake-up:
 
 ![The Switchboard dashboard in the Home Assistant sidebar](switchboard/docs/img/dashboard.png)
 
-**The operator console** — the same board, full-screen, driven by keystroke over
-telnet or in the browser:
+**The operator console** — the same board, full-screen, driven by keystroke. It
+opens from the Switchboard panel in the Home Assistant sidebar, and also answers
+over telnet on the Home Assistant machine itself:
 
 ![The full-screen operator console](switchboard/docs/img/console.png)
 
@@ -72,7 +73,8 @@ telnet or in the browser:
   transfer, page, message-waiting, and wake-up controls, and a **Lights panel**
   with per-area on/off toggles for every Home Assistant light.
 - **A full-screen operator console** — a switchboard board you drive by keystroke,
-  over telnet and in the browser, mirroring the same live signals.
+  in the Home Assistant sidebar, over telnet, or through a standalone browser
+  terminal, mirroring the same live signals.
 - **Proactive health monitoring** — the add-on watches every phone's registration
   and round-trip latency, scores each call's audio quality, tracks the WiFi
   cordless's battery and signal, and watches the trunk registration — publishing it
@@ -211,10 +213,15 @@ never tagged: tagging was manual until v0.46.1 and that one was missed. See
 The Ingress dashboard is reachable only from the Home Assistant Supervisor; the
 Asterisk Manager socket is loopback-only with a fresh random secret each boot and no
 shell-command privilege; the SIP trunk blocks international/premium prefixes and
-confines every transfer to internal destinations. The telnet operator console is
-**unauthenticated on your LAN by design**; its browser terminal takes a sign-in
-(`console_users`) and is only as open as telnet when no users are configured —
-keep both on a trusted network or bind them to `127.0.0.1`. Change the default room secrets before
+confines every transfer to internal destinations. **The operator console runs in
+the Home Assistant sidebar**, where your Home Assistant login is the only login and
+the port it is served on refuses every connection whose peer is not the Supervisor
+— WebSocket upgrades included. Host networking means that port *does* listen on
+your LAN; the guard, not the bind, is what closes it. The two standalone consoles — telnet on
+`2300` and the browser terminal on `8100` — both default to `127.0.0.1`, so neither
+is reachable from your LAN as shipped. Neither has authentication of its own that
+is on by default, so if you move either bind, put it on a trusted network or
+configure `console_users` for the browser one. Change the default room secrets before
 your phones register. Full details in [SECURITY.md](switchboard/SECURITY.md).
 
 ## License

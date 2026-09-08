@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Software version 0.89.0.** Quantiles are nearest-rank.
+**Software version 0.94.4.** Quantiles are nearest-rank.
 
 There is deliberately no single "data as of" line. There was one, and it was the
 document's own second rule being broken at file scope: §1's ledger figures were
@@ -318,7 +318,7 @@ detector that cannot fire and a healthy system produce identical silence.
 
 | | | Source |
 | --- | --- | --- |
-| Tests | **486**, 6.6 s | `pytest`, below |
+| Tests | **538**, 8.1 s | `pytest`, below |
 | Mutants applied, 0.77.0–0.80.0 | 64 | release commits |
 | Killed | 64 | release commits |
 | Survived their first run | 10 | release commits |
