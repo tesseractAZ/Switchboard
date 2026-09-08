@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.94.3
+
+**The terminal never told the console how big it was, so long screens were cut
+off.** The lights list stopped part-way down with empty space beneath it, and
+the same would have been true of any screen taller than twenty-four lines.
+
+The page measures itself when it loads, remembers the answer, and then skips the
+work if a later measurement matches. That is sensible for redrawing, and wrong
+for the one call that happens when the connection opens — because "the size has
+not changed since I last measured" is not the same as "the console has been
+told". It never was told, so it used its built-in twenty-four lines and drew
+nothing below them.
+
+It now always announces the size on a new connection. It also watches the
+terminal element itself for size changes, not just the browser window: embedded
+in a dashboard, this page lives in a frame whose height the dashboard sets after
+the page has already measured, and that growth does not look like a window
+resize from the inside.
+
 ## 0.94.2
 
 **Set on a wake-up did nothing, and that was caused by the previous release.**

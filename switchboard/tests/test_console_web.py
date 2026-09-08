@@ -12,6 +12,7 @@ out of the console->browser stream. The socket plumbing in server.py is not
 exercised here (same split as console.py's pure parser vs. its socket server).
 """
 import os
+import sys
 import struct
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
@@ -241,6 +242,15 @@ def test_env_int_tolerates_empty_port() -> None:
     saved = {k: os.environ.get(k)
              for k in ("CONSOLE_WEB_TARGET_PORT", "CONSOLE_WEB_PORT",
                        "T_BLANK", "T_VAL", "T_PAD")}
+    # server.py:39 does its own sys.path.insert and imports its siblings by BARE
+    # name, so loading it here leaks both into the session. Snapshot the WHOLE
+    # list (one .remove() is not enough) and the bare names. Caught by the
+    # autouse tripwire in conftest.py — and note it only ERRORED when this file
+    # ran ALONE: in the full suite an earlier test had already put that path
+    # there, so it was inside the "before" snapshot and invisible. That masking
+    # is exactly what makes a leak like this survive.
+    saved_path = list(sys.path)
+    saved_mods = {n: sys.modules.get(n) for n in ("consoleproto", "webauth")}
     try:
         os.environ["CONSOLE_WEB_TARGET_PORT"] = ""   # the exact crashy case
         os.environ["CONSOLE_WEB_PORT"] = ""
@@ -264,6 +274,13 @@ def test_env_int_tolerates_empty_port() -> None:
             os.environ["T_PAD"] = "  9000  "
             check("_env_int: surrounding whitespace tolerated", srv._env_int("T_PAD", 8100) == 9000)
     finally:
+        sys.path[:] = saved_path
+        for n, m in saved_mods.items():
+            if m is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = m
+        sys.modules.pop("switchboard_console_web_server", None)
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -327,3 +344,43 @@ def test_the_startup_line_reports_reachability_not_just_the_gate():
         "the reachability check does not recognise both loopback forms")
     assert "AUTH_REQUIRED" in block, "the gate state is no longer consulted"
     assert "not reachable from the LAN" in src and "reachable from the LAN" in src
+
+
+def test_the_terminal_always_announces_its_size_on_a_new_socket():
+    """★ Why the LIGHTS screen stopped part-way down the list.
+
+    The page measured itself at startup with `applySize(false)`, which filled
+    `lastCols`/`lastRows` BEFORE any socket existed. `applySize` then returned
+    early whenever a later measurement matched that cache — including the call
+    from `ws.onopen`, the only one that actually transmits. So on a fresh
+    connection the console was never told the window size and stayed at its
+    built-in 80x24 for the life of the page, with everything below row 24 simply
+    absent. Verified live before the fix: a raw socket that sends no resize gets
+    a 79-column board; one that sends `{"type":"resize","cols":180}` gets 179.
+
+    "Unchanged locally" is not "the server knows". The cache is a guard against
+    redundant term.resize() work and must never gate the handshake.
+
+    Source-structure assertion — the page's JS has no DOM in this suite — but it
+    pins the two things that would regress rather than a phrase.
+    """
+    html = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+            / "switchboard" / "console-web" / "static" / "index.html").read_text()
+
+    assert "function applySize(send, force)" in html, (
+        "applySize lost its force parameter; onopen can no longer guarantee a send")
+    assert "(changed || force)" in html, (
+        "the send is gated on the size having CHANGED again — a fresh socket "
+        "with an unchanged measurement will never be told the size")
+    assert "applySize(true, true)" in html, (
+        "ws.onopen does not force the size announcement")
+    assert "if (s.cols === lastCols && s.rows === lastRows) return;" not in html, (
+        "the unconditional early return is back")
+
+    # The parent sizes this iframe after the card lays out, which grows the
+    # element without the iframe's own window firing a resize event.
+    assert "ResizeObserver" in html, (
+        "nothing observes the terminal element; embedded in a dashboard the "
+        "iframe is resized by its parent with no window resize event")
+    assert 'observe(document.getElementById("term"))' in html, (
+        "the ResizeObserver is constructed but never attached to anything")
