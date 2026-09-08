@@ -106,13 +106,28 @@
     var ws = null;
     var lastCols = 0, lastRows = 0;
 
-    function applySize(send) {
+    // ★ `force` exists because "unchanged locally" is NOT "the server knows".
+    //
+    // The old shape returned early whenever the measurement matched the cached
+    // one — and the cache was filled by the applySize(false) call that runs at
+    // startup, BEFORE the socket exists. So on a fresh connection the one call
+    // that would actually transmit the size (from ws.onopen) matched the cache
+    // and returned without sending. The console never learned the window size
+    // and stayed at its built-in 80x24 for the life of the page, with the rest
+    // of the terminal left blank — most visible on a long screen like LIGHTS,
+    // which simply stopped part-way down the list.
+    //
+    // The cache is a guard against redundant term.resize() work. It must not
+    // gate the handshake.
+    function applySize(send, force) {
       var s = computeSize();
-      if (s.cols === lastCols && s.rows === lastRows) return;
-      lastCols = s.cols;
-      lastRows = s.rows;
-      term.resize(s.cols, s.rows);
-      if (send && ws && ws.readyState === WebSocket.OPEN) {
+      var changed = (s.cols !== lastCols || s.rows !== lastRows);
+      if (changed) {
+        lastCols = s.cols;
+        lastRows = s.rows;
+        term.resize(s.cols, s.rows);
+      }
+      if (send && ws && ws.readyState === WebSocket.OPEN && (changed || force)) {
         // Tell the server the new dimensions; it maps them to a telnet NAWS
         // subnegotiation for the operator console.
         ws.send(JSON.stringify({ type: "resize", cols: s.cols, rows: s.rows }));
@@ -131,7 +146,7 @@
       ws.onopen = function () {
         backoff = 2000;   // a real connection resets the ladder
         setStatus("");
-        applySize(true);
+        applySize(true, true);   // always announce the size on a new socket
       };
       ws.onmessage = function (ev) {
         var data = ev.data;
@@ -173,10 +188,20 @@
     });
 
     var resizeTimer = null;
-    window.addEventListener("resize", function () {
+    function scheduleResize() {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(function () { applySize(true); }, 120);
-    });
+    }
+    window.addEventListener("resize", scheduleResize);
+
+    // ★ window.resize is not sufficient here. This page is embedded in a Home
+    // Assistant dashboard as an iframe whose height the PARENT sets once the
+    // card has laid out — after this script has already measured. That grows
+    // the element without the iframe's own window ever firing a resize event,
+    // so the terminal would keep whatever size it guessed at startup.
+    if (window.ResizeObserver) {
+      new ResizeObserver(scheduleResize).observe(document.getElementById("term"));
+    }
 
     applySize(false);
     connect();
