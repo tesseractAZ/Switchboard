@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.94.4
+
+**The lights list now scrolls.** With thirty-four lights across a dozen areas the
+list was always longer than the screen, and everything past the last visible row
+was simply cut off — at any window size, with no way to reach it. The cursor
+kept moving down past the edge, so the lights below were not merely out of sight
+but unreachable: nothing you could press brought them back.
+
+The list now follows the cursor, tells you how many lights are hidden above and
+below, and repeats the area heading when the view starts in the middle of one —
+a light's name without its room tells you something is on but not where. A list
+short enough to fit is shown plainly, with none of that.
+
+This also fixes it for anyone using the console over telnet, where the same
+truncation applied.
+
 ## 0.94.3
 
 **The terminal never told the console how big it was, so long screens were cut

@@ -540,38 +540,112 @@ def _help_lines(width: int) -> list[str]:
     ]
 
 
-def _lights_lines(sess: dict, width: int) -> list[str]:
+def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
     """The `L` lights view — an area-grouped list of HA lights with a cursor.
+
+    ★ THIS LIST SCROLLS, and before v0.94.4 it did not.
+
+    Every light was rendered from the first one, and ``center()`` then clamped
+    the frame to the terminal height — so with 34 lights across a dozen areas
+    the tail was simply cut off, at ANY terminal size, and nothing could bring it
+    back. The cursor moved past the fold (``lsel`` kept incrementing) but the
+    viewport never followed, so the rows below were unreachable rather than
+    merely off-screen. Reported from live use: "no way to scroll and truncates at
+    bottom".
+
+    The window is kept in ``sess['ltop']`` so it stays put between redraws
+    instead of recentring on every frame, and it is nudged only far enough to
+    keep the selection visible. When the window starts mid-area the area heading
+    is repeated at the top, because a scrolled list whose group heading has
+    scrolled away tells you what is on but not where it is.
+
     Pure: reads the list already fetched into sess['lights'] (render never does
-    I/O), so it works the same in tests as it does live."""
+    I/O), so it works the same in tests as it does live.
+    """
     lights = sess.get("lights", []) or []
     lsel = max(0, min(sess.get("lsel", 0), max(0, len(lights) - 1)))
     rule = color(GREY, "─" * min(width, 72))
     on_n = sum(1 for li in lights if str(li.get("state", "")).lower() == "on")
     head_right = color(GREY, f"{on_n}/{len(lights)} on ")
-    lines = [
-        f" {BOLD}💡 LIGHTS{RESET}   {head_right}",
-        rule,
-    ]
+    head = [f" {BOLD}💡 LIGHTS{RESET}   {head_right}", rule]
+    foot = [rule,
+            "  " + color(GREY, "[↑↓] select   ") + color(BOLD, "Enter") + color(GREY, " toggle   ")
+            + color(BOLD, "r") + color(GREY, " refresh   ")
+            + color(BOLD, "Esc") + color(GREY, " back   ") + color(BOLD, "Q") + color(GREY, " quit")]
+
     if not lights:
-        lines.append("  " + color(GREY, "— no lights —"))
+        return head + ["  " + color(GREY, "— no lights —")] + foot
+
+    # Build the body once, remembering which row is which light and which area
+    # heading is in force at each row (for the repeat-heading-when-scrolled rule).
+    rows: list[tuple[str, int | None, str]] = []
+    last_area = object()
+    cur_area = ""
+    for idx, li in enumerate(lights):
+        area = li.get("area") or ""
+        if area != last_area:
+            last_area = area
+            cur_area = area or "Unassigned"
+            rows.append(("  " + color(BOLD, cur_area), None, cur_area))
+        cursor = color(CYAN, "▸") if idx == lsel else " "
+        is_on = str(li.get("state", "")).lower() == "on"
+        badge = color(GREEN, "● on") if is_on else color(GREY, "○ off")
+        name = (li.get("name") or li.get("entity_id") or "")[:28].ljust(28)
+        rows.append((f"    {cursor} {name}  {badge}", idx, cur_area))
+
+    # Room for the body: the chrome above and below, plus one line reserved for
+    # the "more" indicator. Never less than one row, so a tiny terminal still
+    # shows the selection rather than nothing.
+    avail = max(1, height - len(head) - len(foot) - 1)
+    if len(rows) <= avail:
+        return head + [r[0] for r in rows] + foot
+
+    sel_row = next((i for i, r in enumerate(rows) if r[1] == lsel), 0)
+
+    def _window(size: int) -> int:
+        """Smallest nudge to `ltop` that keeps the selection inside `size` rows."""
+        t = max(0, min(int(sess.get("ltop", 0)), max(0, len(rows) - size)))
+        if sel_row < t:
+            t = sel_row
+        elif sel_row >= t + size:
+            t = sel_row - size + 1
+        return max(0, min(t, max(0, len(rows) - size)))
+
+    # Two passes, because the continuation heading costs a row and whether it is
+    # needed depends on where the window lands. A first version prepended the
+    # heading and then truncated the body back to `avail` — which drops the
+    # BOTTOM row, and after scrolling down the bottom row is the selection. The
+    # cursor vanished at exactly the moment scrolling started to matter.
+    top = _window(avail)
+    need_head = top > 0 and rows[top][1] is not None
+    if need_head:
+        top = _window(avail - 1)
+        need_head = top > 0 and rows[top][1] is not None
+    body_n = avail - 1 if need_head else avail
+    sess["ltop"] = top
+
+    body = [r[0] for r in rows[top:top + body_n]]
+    # If the window opens inside an area, say which area — its heading has
+    # scrolled off, and a name with no room is half the information.
+    if need_head:
+        body[0:0] = ["  " + color(BOLD, rows[top][2]) + color(GREY, " (cont.)")]
+
+    # Count LIGHTS, not rows. The rows include area headings, so a row count
+    # tells the operator a number that matches nothing they can see. And clamp:
+    # an earlier version subtracted a window that had already been clamped
+    # against a different size and cheerfully printed "↓ -1 below".
+    end = min(len(rows), top + body_n)
+    hidden_above = sum(1 for r in rows[:top] if r[1] is not None)
+    hidden_below = sum(1 for r in rows[end:] if r[1] is not None)
+    if hidden_above and hidden_below:
+        note = f"↑ {hidden_above} more above · ↓ {hidden_below} more below"
+    elif hidden_above:
+        note = f"↑ {hidden_above} more above"
+    elif hidden_below:
+        note = f"↓ {hidden_below} more below"
     else:
-        last_area = object()  # sentinel so a real "" area still prints once
-        for idx, li in enumerate(lights):
-            area = li.get("area") or ""
-            if area != last_area:
-                last_area = area
-                lines.append("  " + color(BOLD, area or "Unassigned"))
-            cursor = color(CYAN, "▸") if idx == lsel else " "
-            is_on = str(li.get("state", "")).lower() == "on"
-            badge = color(GREEN, "● on") if is_on else color(GREY, "○ off")
-            name = (li.get("name") or li.get("entity_id") or "")[:28].ljust(28)
-            lines.append(f"    {cursor} {name}  {badge}")
-    lines.append(rule)
-    lines.append("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "Enter") + color(GREY, " toggle   ")
-                 + color(BOLD, "r") + color(GREY, " refresh   ")
-                 + color(BOLD, "Esc") + color(GREY, " back   ") + color(BOLD, "Q") + color(GREY, " quit"))
-    return lines
+        note = ""
+    return head + body + ([("  " + color(GREY, note))] if note else []) + foot
 
 
 def render(board: dict, sess: dict, now: float) -> list[str]:
@@ -582,7 +656,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     if sess.get("mode") == "help":
         return center(_help_lines(width), width, height)
     if sess.get("mode") == "lights":
-        lines = _lights_lines(sess, width)
+        lines = _lights_lines(sess, width, height)
         msg = sess.get("msg", "")
         lines.append("  " + color(CYAN, "› " + msg) if (msg and sess.get("msg_until", 0) > now) else "")
         return center(lines, width, height)
@@ -769,7 +843,7 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
         ln = len(lights)
         if key == "esc":
             sess["mode"] = "normal"
-            for k in ("lights", "lsel"):
+            for k in ("lights", "lsel", "ltop"):
                 sess.pop(k, None)
             return
         if ln == 0:
