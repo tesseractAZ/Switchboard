@@ -1862,11 +1862,17 @@ def test_asterisk_log_has_a_readable_twin_on_share() -> None:
     post-incident forensics was unreachable at exactly the moment it was wanted;
     an audit called this the single highest-value unlock available.
 
-    The /share twin also carries `verbose`, which the /data one omits on purpose.
-    NOTICE/WARNING/ERROR already reach the container log with timestamps, but
-    ast_verbose output -- the `-- Executing [...]` dialplan trace, i.e. what a
-    call actually did -- does not: 0 of 3438 container-log lines in one audit
-    window carried a timestamp at all. A file channel stamps every line."""
+    ★ v0.94.7 — THE TWIN NO LONGER CARRIES `verbose`, AND THAT IS THE POINT.
+    The dialplan trace quotes dialled and calling numbers verbatim; a live audit
+    found 3 complete telephone numbers on 55 lines of the /share copy. Both the
+    trace and the endpoint-reachability lines are the same VERBOSE class, and
+    Asterisk's per-channel level specifier does not separate them -- /data ran
+    `verbose(2)` from v0.84.0 and still logged 208 `pbx.c: Executing` lines on
+    2026-09-09. So the trace lives only in the private /data copy now, and
+    rtpmon.endpoint_transitions() reads it from there.
+
+    The twin still exists, and still matters: /data CANNOT BE READ from outside,
+    so severities on /share remain the only externally reachable record."""
     conf = sbc.render_logger({"log_level": "info"})
     check("logger: channels live under [logfiles], not [general]",
           "[logfiles]" in conf and conf.index("[logfiles]") < conf.index("console =>"))
@@ -1875,10 +1881,13 @@ def test_asterisk_log_has_a_readable_twin_on_share() -> None:
     check("logger: a readable twin exists under /share",
           "/share/switchboard/asterisk.log =>" in conf)
     share_line = [l for l in conf.splitlines() if l.startswith("/share/")][0]
-    check("logger: the /share copy carries verbose (the dialplan trace)",
-          "verbose" in share_line)
-    check("logger: and still carries the error severities",
+    check("logger: the /share copy carries NO verbose (it quotes phone numbers)",
+          "verbose" not in share_line)
+    check("logger: but still carries the error severities",
           all(sev in share_line for sev in ("notice", "warning", "error")))
+    data_line = [l for l in conf.splitlines() if l.startswith("/data/")][0]
+    check("logger: the private /data copy keeps verbose, so the trace survives",
+          "verbose" in data_line)
 
 
 def test_scripted_contexts_record_how_far_they_got() -> None:

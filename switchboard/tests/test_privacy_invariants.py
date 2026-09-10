@@ -182,29 +182,55 @@ def test_no_agi_routes_speech_through_asterisks_logger():
         + "\n  ".join(offenders))
 
 
-def test_the_verbose_channel_arrangement_is_deliberate():
-    """Verbose goes to the world-readable /share log ON PURPOSE, and moving it is
-    not a typo fix.
+def test_the_world_readable_log_carries_no_dialplan_trace():
+    """★★★ THE LEAK, and why the obvious fix does not work.
 
-    It looks inverted — the private log gets less than the public one — and the
-    reason it stays is a dependency: `Endpoint <n> is now Unreachable` is itself a
-    VERBOSE-class line, /data/state/asterisk.log carries none of them, and
-    rtpmon.endpoint_transitions() reads the /share file to reconstruct fleet
-    outages that fall entirely between two health samples. Flipping the routing
-    silently disables that detector. The protection is the tripwire above, not
-    the channel.
+    `/share` is host-mounted, readable by anything on the box, and captured in
+    Supervisor backups. Its Asterisk log carried `verbose`, which admits the
+    dialplan trace: `pbx.c: Executing [...]`, `Called PJSIP/<number>@trunk`,
+    `Spawn extension (rooms, <number>, ...)`. Measured live 2026-09-09: **55
+    lines, 74 occurrences, 3 distinct complete telephone numbers** -- the house's
+    own DID and two third parties who had merely called it.
+
+    ★ A LEVEL CAP DOES NOT WORK, and v0.94.6 shipped believing it did. The
+    reasoning was that the wanted lines (`Endpoint <n> is now (Un)Reachable`) are
+    level 2 and the leaking ones level 3, so `verbose(2)` would separate them. It
+    does not. `/data` carried `verbose(2)` from v0.84.0 and still logged 208
+    `pbx.c: Executing` lines on 2026-09-09 -- while receiving ZERO on Sep 4-5,
+    when it had no `verbose` keyword at all. The KEYWORD admits the trace; the
+    number is decoration.
+
+    So the only lever is where the reader looks. `endpoint_transitions()` now
+    reads the private `/data` copy, and this world-readable one carries
+    severities only. Both halves are asserted here, because either alone is a
+    silent regression: leaving `verbose` on `/share` republishes the numbers,
+    and pointing the reader back at `/share` makes the fleet-outage detector
+    depend on a channel that must not carry what it needs.
     """
+    import re
     src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
-    share = re.search(r"/share/switchboard/asterisk\.log\s*=>\s*([a-z,]+)", src)
-    data = re.search(r"/data/state/asterisk\.log\s*=>\s*([a-z,]+)", src)
-    assert share and data, "logger.conf routing not found"
-    assert "verbose" in share.group(1), (
-        "verbose left the /share log — endpoint_transitions() reads VERBOSE lines "
-        "from it and is now blind. If this is intentional, move the reader too.")
+
+    share = re.search(r"/share/switchboard/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
+    assert share, "the /share logger channel is gone"
+    assert "verbose" not in share.group(1), (
+        f"the world-readable log carries {share.group(1)!r}. `verbose` admits the "
+        f"dialplan trace, which quotes dialled and calling numbers in the clear. "
+        f"A level cap does NOT filter it -- that was tried in v0.94.6 and was inert.")
+    for sev in ("notice", "warning", "error"):
+        assert sev in share.group(1), f"the /share copy lost {sev}"
+
+    data = re.search(r"/data/state/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
+    assert data and "verbose" in data.group(1), (
+        f"the private /data copy lost verbose ({data.group(1) if data else 'missing'!r}); "
+        f"the dialplan trace and the endpoint transitions now exist nowhere.")
+
     poller = (ADDON / "rootfs/usr/share/switchboard/rtpmon/poller.py").read_text()
-    assert "/share/switchboard/asterisk.log" in poller, (
-        "the transition reader no longer reads the /share log — re-check whether "
-        "verbose still needs to be there")
+    m = re.search(r'ENDPOINT_LOG_PATH\s*=\s*os\.environ\.get\([^,]+,\s*\n?\s*"([^"]+)"', poller)
+    assert m, "could not find the transition reader's log path"
+    assert m.group(1).startswith("/data/"), (
+        f"endpoint_transitions() reads {m.group(1)} -- but /share no longer "
+        f"carries the VERBOSE lines it parses, so the fleet-outage detector is "
+        f"blind. It must read the private copy.")
 
 
 @pytest.mark.parametrize("claim", [
@@ -227,60 +253,3 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
             if claim in t and p.resolve() != me]
     assert not hits, (f"{claim!r} is false — AGI stderr is inherited fd 2 and "
                       f"never reaches Asterisk's logger. Found in: {hits}")
-
-
-def test_the_world_readable_log_caps_verbose_to_level_2():
-    """★★★ THE LEAK THIS CLOSES, measured on the live system 2026-09-09.
-
-    `/share` is host-mounted, readable by anything on the box, and captured in
-    Supervisor backups. Its Asterisk log carried a BARE `verbose`, which inherits
-    the console level (Asterisk runs `-vvv`) and therefore took level-3 lines:
-
-        pbx.c: Executing [...]              <- every dialplan app, with arguments
-        Called PJSIP/<number>@trunk
-        Spawn extension (rooms, <number>, ...)
-
-    Those quote the dialled and calling numbers verbatim. The live file held
-    **55 lines, 74 occurrences, 3 distinct telephone numbers** — including the
-    house's own DID and two third parties who had merely called it.
-
-    ★ IT ALSO DEFEATED THE MASKING ONE LINE ABOVE. The rtpqos summary masks the
-    caller ID to `****<last4>` (14 lines in that file), and the `TrySystem` on
-    the very next dialplan priority passes the FULL number as an argument — which
-    the uncapped trace then logged in full (7 lines). Masking a field is
-    worthless while the trace that quotes it is uncapped. That is why the fix is
-    the channel level and not the argument.
-
-    ★ AND THE CAP WAS ON THE WRONG CHANNEL. v0.84.0 reasoned correctly that a
-    bare `verbose` "dumps the whole dialplan trace onto the persistent volume"
-    and capped it — on `/data`, the PRIVATE log — while leaving the
-    world-readable one bare. The private log was the one that did not need it.
-
-    WHY 2 AND NOT LESS. `rtpmon.endpoint_transitions()` reads
-    `Endpoint <n> is now (Un)Reachable` from this file to reconstruct fleet
-    outages between health samples; those are level 2. Verified on the same
-    file: 550 such lines, 0 carrying a number, and 0 NOTICE/WARNING/ERROR lines
-    carrying one — so the cap removes every leaking line and nothing else.
-    """
-    import re
-    src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
-
-    m = re.search(r"/share/switchboard/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
-    assert m, "the /share logger channel is gone"
-    spec = m.group(1)
-
-    lvl = re.search(r"verbose\((\d+)\)", spec)
-    assert lvl, (
-        f"the world-readable log takes a BARE `verbose` ({spec!r}). It inherits "
-        f"Asterisk's -vvv console level and will log the dialplan trace, which "
-        f"quotes dialled and calling numbers in the clear.")
-    assert int(lvl.group(1)) == 2, (
-        f"verbose({lvl.group(1)}) on the world-readable log. Level 3 is the "
-        f"dialplan trace (numbers in the clear); below 2 loses the "
-        f"`Endpoint <n> is now Unreachable` lines that endpoint_transitions() "
-        f"is the entire reason verbose is on this channel.")
-
-    # ...and the private twin stays capped too, for byte rate rather than privacy.
-    d = re.search(r"/data/state/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
-    assert d and "verbose(2)" in d.group(1), (
-        f"the /data channel lost its level cap: {d.group(1) if d else 'missing'!r}")

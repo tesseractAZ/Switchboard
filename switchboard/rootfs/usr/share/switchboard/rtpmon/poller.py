@@ -619,8 +619,18 @@ def _now_iso() -> str:
 # The forensic Asterisk log carries every endpoint reachability TRANSITION at
 # VERBOSE level, e.g.
 #   [Sep  1 01:00:49] VERBOSE[308] res_pjsip/pjsip_configuration.c: Endpoint 16 is now Unreachable
+#
+# ★ v0.94.7 — READS THE PRIVATE LOG, NOT THE SHARED ONE. These transitions are
+# VERBOSE-class, and so is the full dialplan trace, which quotes dialled and
+# calling numbers verbatim. Asterisk's per-channel level specifier does NOT
+# separate them: /data carried `verbose(2)` from v0.84.0 and still logged 208
+# `pbx.c: Executing` lines on 2026-09-09, so a cap cannot be the answer. The
+# only way to keep telephone numbers out of the world-readable /share copy is to
+# stop sending `verbose` there at all — which means this reader has to come here
+# instead. It runs as root inside the container, where /data is readable; /data
+# is add-on-private (container shell blocked, backups encrypted, add-on API 403).
 ENDPOINT_LOG_PATH = os.environ.get("SWITCHBOARD_ASTERISK_LOG",
-                                   "/share/switchboard/asterisk.log")
+                                   "/data/state/asterisk.log")
 _TRANSITION_RE = re.compile(r"Endpoint (\S+) is now (Unreachable|Reachable)")
 # Bound a single read so a huge backlog cannot balloon the poller's memory.
 _TRANSITION_MAX_READ = 512 * 1024
