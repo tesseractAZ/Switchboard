@@ -227,3 +227,60 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
             if claim in t and p.resolve() != me]
     assert not hits, (f"{claim!r} is false — AGI stderr is inherited fd 2 and "
                       f"never reaches Asterisk's logger. Found in: {hits}")
+
+
+def test_the_world_readable_log_caps_verbose_to_level_2():
+    """★★★ THE LEAK THIS CLOSES, measured on the live system 2026-09-09.
+
+    `/share` is host-mounted, readable by anything on the box, and captured in
+    Supervisor backups. Its Asterisk log carried a BARE `verbose`, which inherits
+    the console level (Asterisk runs `-vvv`) and therefore took level-3 lines:
+
+        pbx.c: Executing [...]              <- every dialplan app, with arguments
+        Called PJSIP/<number>@trunk
+        Spawn extension (rooms, <number>, ...)
+
+    Those quote the dialled and calling numbers verbatim. The live file held
+    **55 lines, 74 occurrences, 3 distinct telephone numbers** — including the
+    house's own DID and two third parties who had merely called it.
+
+    ★ IT ALSO DEFEATED THE MASKING ONE LINE ABOVE. The rtpqos summary masks the
+    caller ID to `****<last4>` (14 lines in that file), and the `TrySystem` on
+    the very next dialplan priority passes the FULL number as an argument — which
+    the uncapped trace then logged in full (7 lines). Masking a field is
+    worthless while the trace that quotes it is uncapped. That is why the fix is
+    the channel level and not the argument.
+
+    ★ AND THE CAP WAS ON THE WRONG CHANNEL. v0.84.0 reasoned correctly that a
+    bare `verbose` "dumps the whole dialplan trace onto the persistent volume"
+    and capped it — on `/data`, the PRIVATE log — while leaving the
+    world-readable one bare. The private log was the one that did not need it.
+
+    WHY 2 AND NOT LESS. `rtpmon.endpoint_transitions()` reads
+    `Endpoint <n> is now (Un)Reachable` from this file to reconstruct fleet
+    outages between health samples; those are level 2. Verified on the same
+    file: 550 such lines, 0 carrying a number, and 0 NOTICE/WARNING/ERROR lines
+    carrying one — so the cap removes every leaking line and nothing else.
+    """
+    import re
+    src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
+
+    m = re.search(r"/share/switchboard/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
+    assert m, "the /share logger channel is gone"
+    spec = m.group(1)
+
+    lvl = re.search(r"verbose\((\d+)\)", spec)
+    assert lvl, (
+        f"the world-readable log takes a BARE `verbose` ({spec!r}). It inherits "
+        f"Asterisk's -vvv console level and will log the dialplan trace, which "
+        f"quotes dialled and calling numbers in the clear.")
+    assert int(lvl.group(1)) == 2, (
+        f"verbose({lvl.group(1)}) on the world-readable log. Level 3 is the "
+        f"dialplan trace (numbers in the clear); below 2 loses the "
+        f"`Endpoint <n> is now Unreachable` lines that endpoint_transitions() "
+        f"is the entire reason verbose is on this channel.")
+
+    # ...and the private twin stays capped too, for byte rate rather than privacy.
+    d = re.search(r"/data/state/asterisk\.log\s*=>\s*([a-z,()0-9]+)", src)
+    assert d and "verbose(2)" in d.group(1), (
+        f"the /data channel lost its level cap: {d.group(1) if d else 'missing'!r}")

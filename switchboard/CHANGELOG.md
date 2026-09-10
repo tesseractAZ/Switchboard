@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.94.6
+
+**Telephone numbers were being written to a log anyone on the machine can read.**
+
+The readable copy of the Asterisk log, the one kept in the shared folder so it can
+be read from outside the add-on, was recording the full dialplan trace — every
+step of every call, including the number dialled and the number calling. On the
+live system that was fifty-five lines holding three complete telephone numbers:
+this house's own, and two belonging to people who had merely called it. The
+shared folder is readable by anything else on the machine and is copied into
+every backup.
+
+It also quietly defeated a protection already in place. The call-quality summary
+deliberately masks the caller's number to its last four digits — and the very
+next step of the same call passed the whole number as an argument, which the
+trace then wrote out in full. Masking one line while the line beneath it quotes
+the same number achieves nothing.
+
+The cause was a limit applied to the wrong file. A previous release recognised
+the problem exactly and set a level limit — on the *private* log, which nobody
+outside the add-on can read, leaving the shared one unlimited. That is now
+corrected, and the shared log keeps only what the fleet-outage detector reads
+from it. Verified against the same file: every leaking line is removed, and every
+line the detector needs is kept.
+
+The existing file has been cleaned in place. Anyone who took a backup before now
+should be aware it contains those numbers.
+
 ## 0.94.5
 
 **The documentation had drifted, and two of its security statements were wrong in
