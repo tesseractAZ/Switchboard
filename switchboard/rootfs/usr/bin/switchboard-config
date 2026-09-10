@@ -2066,13 +2066,23 @@ def render_logger(opts: dict) -> str:
         # then logs verbatim (7 lines). Masking a field is worthless while the
         # trace that quotes it is uncapped.
         #
-        # verbose(2) keeps precisely what the reader needs and nothing that
-        # identifies anyone. Verified against the same file: 550 `Endpoint <n> is
-        # now (Un)Reachable` lines (level 2 -- rtpmon.endpoint_transitions()
-        # parses these and is the whole reason verbose is on this channel at
-        # all), 0 of which carry a number; and 0 NOTICE/WARNING/ERROR lines carry
-        # one, so nothing survives the cap that should not.
-        "/share/switchboard/asterisk.log => notice,warning,error,verbose(2)\n"
+        # ★★★ v0.94.7 — NO `verbose` HERE AT ALL, and the level cap was a dead end.
+        #
+        # v0.94.6 tried `verbose(2)`, reasoning that the wanted lines are level 2
+        # and the leaking ones level 3. THAT FIX WAS INERT. Asterisk's
+        # per-channel level specifier does not filter these: /data has carried
+        # `verbose(2)` since v0.84.0 and still logged 208 `pbx.c: Executing`
+        # lines on 2026-09-09 -- and /data received ZERO of them on Sep 4-5, when
+        # it had no `verbose` keyword at all. The keyword is what admits them;
+        # the number does nothing.
+        #
+        # Both the wanted line (`Endpoint <n> is now (Un)Reachable`, 480 in the
+        # sampled window) and the leaking line (`pbx.c: Executing`, 2203) are the
+        # same VERBOSE class, so no severity list can separate them. The only
+        # lever left is WHERE the reader looks: rtpmon.endpoint_transitions() now
+        # reads /data/state/asterisk.log, which is add-on-private, and this
+        # world-readable copy carries severities only.
+        "/share/switchboard/asterisk.log => notice,warning,error\n"
     )
 
 

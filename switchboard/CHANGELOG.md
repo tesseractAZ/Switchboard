@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.94.7
+
+**The previous release did not fix the telephone numbers in the shared log. This
+one does.**
+
+0.94.6 set a level limit on that log, reasoning that the lines worth keeping sit
+at one level and the lines leaking numbers sit at a higher one. That reasoning
+was wrong, and it was checkable before shipping. The private log has carried the
+same limit since 0.84.0 and is still recording the full call trace today — while
+carrying none of it on the two days before that limit was added, when it had no
+verbose setting at all. It is the setting itself that admits the trace; the
+number attached to it does nothing.
+
+Both the lines worth keeping and the lines that leak are the same class, so no
+setting on that file can separate them. What separates them is which file the
+reader looks at. The fleet-outage detector now reads the private log, which
+cannot be read from outside the add-on, and the shared copy keeps only warnings
+and errors — no call trace, and so no numbers.
+
+The shared log has been cleaned again in place. As before: a backup taken before
+today contains those numbers.
+
 ## 0.94.6
 
 **Telephone numbers were being written to a log anyone on the machine can read.**
