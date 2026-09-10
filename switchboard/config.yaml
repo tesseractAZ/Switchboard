@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.94.5"
+version: "0.94.6"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX that turns analog house phones into a smart intercom,

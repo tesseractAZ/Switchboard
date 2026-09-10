@@ -2044,11 +2044,35 @@ def render_logger(opts: dict) -> str:
         # trace onto the persistent volume; `verbose(1)` captures nothing,
         # because these lines are level 2. Only `verbose(2)` selects them.
         "/data/state/asterisk.log => notice,warning,error,verbose(2)\n"
-        # The readable twin. Same severities PLUS verbose, because the container
-        # log stamps NOTICE/WARNING/ERROR but NOT ast_verbose -- the dialplan
-        # trace that shows what a call actually did. A file channel stamps every
-        # line, and /share can be read from the host side, unlike /data.
-        "/share/switchboard/asterisk.log => notice,warning,error,verbose\n"
+        # The readable twin, and the one that needed the cap MOST.
+        #
+        # ★ v0.94.6 — THE LEVEL CAP WAS ON THE WRONG CHANNEL. v0.84.0 correctly
+        # reasoned that a bare `verbose` "dumps the whole dialplan trace onto the
+        # persistent volume" and capped it -- but applied that to /data, the
+        # PRIVATE log, and left /share, the WORLD-READABLE one, uncapped. Exactly
+        # backwards: /share is host-mounted, readable by anything on the box, and
+        # captured in Supervisor backups.
+        #
+        # A bare `verbose` inherits the console level (Asterisk runs -vvv), so
+        # this channel took level-3 lines: `pbx.c: Executing [...]`, `Called
+        # PJSIP/<number>@trunk`, `Spawn extension (rooms, <number>, ...)`. Those
+        # carry the DIALLED AND CALLING NUMBERS as plain text. Measured on the
+        # live file 2026-09-09: 55 lines, 74 occurrences, 3 distinct numbers --
+        # and every single one was a level-3 line.
+        #
+        # It also defeated the masking one priority above it: the rtpqos Verbose
+        # summary masks cid to ****<last4> (14 lines), and the TrySystem on the
+        # NEXT priority passes the full number as an argument, which the trace
+        # then logs verbatim (7 lines). Masking a field is worthless while the
+        # trace that quotes it is uncapped.
+        #
+        # verbose(2) keeps precisely what the reader needs and nothing that
+        # identifies anyone. Verified against the same file: 550 `Endpoint <n> is
+        # now (Un)Reachable` lines (level 2 -- rtpmon.endpoint_transitions()
+        # parses these and is the whole reason verbose is on this channel at
+        # all), 0 of which carry a number; and 0 NOTICE/WARNING/ERROR lines carry
+        # one, so nothing survives the cap that should not.
+        "/share/switchboard/asterisk.log => notice,warning,error,verbose(2)\n"
     )
 
 
