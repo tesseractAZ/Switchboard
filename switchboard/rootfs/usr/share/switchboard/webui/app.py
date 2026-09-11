@@ -522,10 +522,26 @@ def serve_announcement(name: str):
     return FileResponse(path, media_type="audio/wav")
 
 
+# Delivery-attempt records live in the shared `delivery` module so the wake-up
+# scheduler writes to the same file with the same shape -- the announce path and
+# the alarm clock fail in the same ways and should be readable together.
+try:
+    import delivery as _delivery
+except Exception:  # noqa: BLE001 - the webui must import without it
+    _delivery = None
+
+
 # 8 kHz mono 16-bit PCM = 16000 bytes/s. 90 s is generous for a spoken alert and
 # still well under the 72 s that was observed repeating on the cordless.
 ANNOUNCE_BYTES_PER_SECOND = 16000
-ANNOUNCE_MAX_SECONDS = float(os.environ.get("ANNOUNCE_MAX_SECONDS", "90") or 90)
+# ★ THE CAP IS READ FROM `delivery`, NOT DEFINED HERE. v0.98.0 gave the announce
+# path a reconciler, and that reconciler's horizon — how long it waits before
+# calling an announcement undelivered — is derived from this number. Two copies
+# would let this one grow while the horizon stayed put, and the result would be
+# a "never arrived" record filed against an announcement still playing: a false
+# alarm aimed squarely at the LONGEST announcements, the ones most worth getting
+# right. The literal below is the dev-box fallback for when the module is absent.
+ANNOUNCE_MAX_SECONDS = float(getattr(_delivery, "ANNOUNCE_MAX_SECONDS", 90.0))
 ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
 # ext -> (digest, monotonic seconds). Process-local by design: a restart should
 # not inherit a suppression decision made before it.
@@ -629,15 +645,6 @@ def _cleanup_announce_dir(max_age: int = 300) -> None:
                 pass
     except OSError:
         pass
-
-
-# Delivery-attempt records live in the shared `delivery` module so the wake-up
-# scheduler writes to the same file with the same shape -- the announce path and
-# the alarm clock fail in the same ways and should be readable together.
-try:
-    import delivery as _delivery
-except Exception:  # noqa: BLE001 - the webui must import without it
-    _delivery = None
 
 
 def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:

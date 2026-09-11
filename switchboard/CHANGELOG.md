@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.98.0
+
+**An announcement that rang a phone nobody answered left no record anywhere, so
+it was indistinguishable from one that was never sent.**
+
+The announce path recorded that Asterisk had *accepted* the request, and six
+different ways for it to be refused, and nothing at all about what happened
+after that. When a handset rings and nobody picks up, no dialplan runs, so
+there is no hangup handler, no call-quality record, and no ledger entry — the
+announcement simply is not there. That happened on 2026-09-01 at 19:05:15: the
+cordless rang, was never answered, and the alert vanished without a trace.
+Absence in a delivery log reads as "we never tried", which was the one thing
+that was not true.
+
+Announcements now end with a verdict. The hangup handler records that the clip
+reached the handset, and a reconciler files an "announcement never arrived"
+record for anything still unaccounted for once enough time has passed.
+
+Two details that decide whether this works.
+
+**It waits long enough.** An announcement can ring for thirty seconds and then
+play for up to ninety, so the obvious two-minute deadline would have reported a
+failure for announcements that were still speaking — and only for the longest
+ones, which are the alerts most worth getting right. The deadline is computed
+from the actual limits rather than picked, and it does not look further back
+than an hour: a service that was stopped overnight should not wake up and file
+a night's worth of retroactive failures about a window nobody can act on any
+more.
+
+**It matches the right announcement.** Each announcement is now named on the
+call itself, so the request and the result identify each other exactly. Pairing
+them by "closest in time to the same phone" would have matched every
+announcement in the current log correctly — but only because the closest two
+happen to be eight minutes apart. Three alerts in eight minutes is what a real
+incident looks like, and that is precisely when the log has to be right.
+
+An announcement cut off partway through still counts as having arrived, with
+how far it got recorded alongside. It did not meet its contract, and the
+call-quality log says so as it always has; filing it next to an announcement
+that rang out unanswered would erase the one distinction this is for.
+
+Unlike a missed wake-up call, a missed announcement is recorded and not pushed.
+An alarm clock has a deadline; an announcement does not.
+
 ## 0.97.0
 
 **Four wake-up calls that woke somebody rang the phone a second time and then
