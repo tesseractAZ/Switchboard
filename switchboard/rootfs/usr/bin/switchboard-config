@@ -1239,6 +1239,11 @@ def render_rtpqos_context() -> list:
         # How far a scripted leg got before hangup. Empty for contexts that set
         # no stage (a normal room call has no stages to reach).
         ' --stage "${FILTER(a-z,${SW_STAGE})}"'
+        # The announcement this leg was playing, by name. Empty everywhere else.
+        # It is what lets the announce reconciler pair this hangup with the
+        # `originate-queued` record app.py wrote, WITHOUT guessing from
+        # timestamps. FILTERed because it reaches a shell argument.
+        ' --sound "${FILTER(A-Za-z0-9_.-,${SW_ANN_NAME})}"'
         f' --rxploss {q("rxploss")} --txploss {q("txploss")}'
         f' --rxjitter {q("rxjitter")} --txjitter {q("txjitter")} --rtt {q("rtt")}'
         f' --rxmes {q("rxmes")} --txmes {q("txmes")}'
@@ -1272,7 +1277,8 @@ def render_rtpqos_context() -> list:
         ' --nomedia --tag "${ARG1}" --chan "${CHANNEL(name)}"'
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         ' --billsec "${CDR(billsec)}" --hcause "${HANGUPCAUSE}"'
-        ' --stage "${FILTER(a-z,${SW_STAGE})}" &)'
+        ' --stage "${FILTER(a-z,${SW_STAGE})}"'
+        ' --sound "${FILTER(A-Za-z0-9_.-,${SW_ANN_NAME})}" &)'
     )
     return [
         "",

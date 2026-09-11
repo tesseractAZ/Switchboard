@@ -256,6 +256,54 @@ def _reconcile_rings(now: float) -> None:
                 log(f"could not post the undelivered-wake-up card: {exc}")
 
 
+def _reconcile_announcements(now: float) -> None:
+    """File a terminal outcome for announcements that never arrived.
+
+    ★ THE ANNOUNCE PATH HAD NO ENDING. app.py records `originate-queued` the
+    instant AMI accepts the Originate — all it can know then — and records six
+    distinct REFUSALS. It has never had a way to record that an accepted
+    announcement was answered, or that it was not. So an announcement that rings
+    a handset nobody picks up runs no dialplan at all: no `h` extension, no QoS
+    record, no ledger row of any kind. Live on 2026-09-01 at 19:05:15 — `Called
+    19`, `is ringing`, AMI hung it up four seconds later, and the announcement is
+    absent from BOTH ledgers. Absence in a delivery ledger reads as "we never
+    tried", which is the one thing that was not true.
+
+    This lives in the wake-up scheduler because it is the only loop in the add-on
+    whose job is already "decide what happened to a delivery we dispatched". The
+    webui is request-driven and has no timer; giving it one to watch its own past
+    requests would be a second such loop for no gain.
+
+    Deliberately does NOT notify. An alarm clock is the one playback path with a
+    deadline (see PLAYBACK_TAGS in switchboard-callqos); an announcement that did
+    not arrive is worth a durable record, not a push at whatever hour it was.
+    """
+    if _delivery is None:
+        return
+    # ★ SAME FAIL-SAFE AS THE RING RECONCILER, and it matters MORE here. The join
+    # asks "was a delivery record written?". If the ledger cannot be written at
+    # all, the answer is no for every announcement — including every one that
+    # played perfectly — so an unwritable ledger would turn this into a machine
+    # for manufacturing failure records about a system that is fine. That exact
+    # permission fault was live for two releases.
+    try:
+        if not _delivery.is_writable():
+            return
+        stale = _delivery.unresolved_announcements(now)
+    except Exception as exc:  # noqa: BLE001  (telemetry must never kill the loop)
+        log(f"could not reconcile announcements: {exc}")
+        return
+    for rec in stale:
+        ext, sound = rec.get("ext") or "?", rec.get("sound") or "?"
+        log(f"announcement {sound} to ext {ext} was queued "
+            f"{int(now - rec['_ts'])}s ago and never reached the handset")
+        try:
+            _delivery.record(ext, "announce", _delivery.ANNOUNCE_UNDELIVERED,
+                             sound=sound, queued=rec.get("ts"))
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not record the undelivered announcement {sound}: {exc}")
+
+
 def tick() -> None:
     now = time.time()
     _reconcile_rings(now)
@@ -344,6 +392,13 @@ def main() -> None:
             tick()
         except Exception as exc:  # never let the loop die
             log(f"tick error: {exc}")
+        # Separate try: an announcement reconciler that raised must not be able
+        # to stop wake-up calls from ringing. The alarm clock is the load-bearing
+        # half of this service.
+        try:
+            _reconcile_announcements(time.time())
+        except Exception as exc:  # noqa: BLE001
+            log(f"announce reconcile error: {exc}")
         for _ in range(POLL):  # short sleeps so SIGTERM is responsive
             if _stop:
                 break

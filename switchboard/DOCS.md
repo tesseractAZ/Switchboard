@@ -698,6 +698,32 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   `duplicate-suppressed`, `skipped-busy`, `unreachable`, `originate-error` or
   `originate-refused` when it was not. An announcement that never became a call
   has no call-quality record, so this ledger is the only place it appears.
+- **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
+  accepted the request. The handset's hangup now records `audio-delivered` once at
+  least a second of the clip has actually played, and anything still unaccounted
+  for after the deadline below is recorded `announce-undelivered`. Before this, an
+  announcement that rang a phone nobody answered ran no dialplan at all and so
+  left **no record anywhere** — it looked exactly like one that was never sent.
+  Live on 2026-09-01 at 19:05:15.
+
+  The two halves are matched **by the name of the clip**, which the call now
+  carries, not by which records happen to sit near each other in time — three
+  alerts inside a few minutes is what an incident looks like, and that is when
+  this has to be right.
+
+  The deadline is **ring + clip cap + a minute, and never under 180 s**: an
+  announcement may ring for 30 s and then speak for up to `90 s`, so a flat
+  two-minute deadline would report a failure for announcements still playing.
+  Nothing older than an hour is judged at all, so a scheduler that was stopped
+  overnight cannot file a night of retroactive failures.
+
+  An announcement **cut off partway through still counts as arrived**, with the
+  stage and packet count on the record. It did not meet its contract — §11 scores
+  it `undelivered` as it always has — but it did reach the phone, and filing it
+  beside one that rang out unanswered would erase the distinction this exists for.
+
+  Unlike a missed wake-up, this is **recorded and not pushed**. An alarm clock has
+  a deadline; an announcement does not.
 
 ---
 

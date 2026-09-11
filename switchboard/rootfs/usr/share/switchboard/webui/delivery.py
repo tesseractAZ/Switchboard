@@ -20,6 +20,7 @@ import datetime
 import json
 import os
 import stat
+import time
 
 OUTCOME_PATH = os.environ.get("SWITCHBOARD_DELIVERY_OUTCOME",
                               "/share/switchboard/delivery-outcomes.jsonl")
@@ -38,6 +39,38 @@ MAX_BYTES = 2 * 1024 * 1024
 # These are also a DURABLE ON-DISK FORMAT. Renaming one orphans every historical
 # record, so the value is pinned by test rather than treated as internal.
 AUDIO_DELIVERED = "audio-delivered"
+# What app.py writes when AMI ACCEPTS an announce Originate — which is all it can
+# know at that moment — and what the reconciler below files when nothing ever
+# answered it.
+ANNOUNCE_QUEUED = "originate-queued"
+ANNOUNCE_UNDELIVERED = "announce-undelivered"
+
+# The longest an announcement may be. Read here rather than in app.py because the
+# reconciler MUST NOT judge an announcement undelivered while it is still
+# playing, and its horizon is derived from this number; a second copy of it over
+# there would let the two drift into exactly that false alarm.
+ANNOUNCE_MAX_SECONDS = float(os.environ.get("ANNOUNCE_MAX_SECONDS", "90") or 90)
+# ami.announce_to_ext's Originate `Timeout` — how long the handset may ring
+# before Asterisk gives up. An announcement can therefore legitimately take the
+# ring plus the whole clip before its hangup record appears.
+ANNOUNCE_RING_SECONDS = 30.0
+
+# ...and the horizon: how long after the Originate was queued an announcement
+# with no terminal record is judged undelivered.
+#
+# ★ DERIVED, not guessed. An earlier plan used a flat ~120 s, which is LESS than
+# ring + the 90 s clip cap — so it would have cried wolf on precisely the longest
+# announcements, the ones most worth getting right. Observed lag from originate
+# to the hangup record tracks playback duration closely (23 s at a 22 s clip,
+# 45 s at 44 s), so the clip cap is the term that matters and the margin covers
+# TTS rendering, a slow answer and the detached sink's own scheduling.
+ANNOUNCE_HORIZON = max(180.0, ANNOUNCE_MAX_SECONDS + ANNOUNCE_RING_SECONDS + 60.0)
+
+# ...and how far back to look at all. Without this, a scheduler that was stopped
+# for a day would wake up and file every announcement it had missed as a fresh
+# failure — a burst of alarming records about a period nobody can act on any
+# more. Beyond this the answer is "unknown", which is not the same as "failed".
+ANNOUNCE_LOOKBACK = 3600.0
 
 
 def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
@@ -151,6 +184,79 @@ def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
         if rec.get("ext") == ext and rec.get("kind") == kind and rec.get("outcome") == outcome:
             return True
     return False
+
+
+def _read_records(since_ts: float) -> list:
+    """Every parseable record at or after `since_ts`, oldest first.
+
+    Scans from the END backwards and stops at the first record older than the
+    cut, like outcomes_since: the file is append-only and every caller asks about
+    a bounded recent window, so this touches a handful of lines rather than the
+    2 MB cap. A malformed line is skipped, never fatal.
+    """
+    try:
+        with open(OUTCOME_PATH, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    out = []
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+            rec["_ts"] = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
+        except (ValueError, KeyError, TypeError):
+            continue
+        if rec["_ts"] < since_ts:
+            break
+        out.append(rec)
+    out.reverse()
+    return out
+
+
+def unresolved_announcements(now: float | None = None, horizon: float | None = None,
+                             lookback: float | None = None) -> list:
+    """Announcements queued long enough ago to be judged, with nothing to show.
+
+    ★ THE HOLE THIS CLOSES. app.py records `originate-queued` the moment AMI
+    ACCEPTS the Originate — which is all it can know then — and records six ways
+    for it to be REFUSED. It has never had a way to record success or silence.
+    So when an announcement rings a handset that is never answered, the dialplan
+    never runs, there is no `h` extension, no QoS record, and no ledger entry of
+    any kind. Live on 2026-09-01 at 19:05:15: `Called 19` -> `is ringing` -> AMI
+    hung it up four seconds later, and the announcement is absent from BOTH
+    ledgers. Absence in a delivery ledger reads as "we never tried".
+
+    ★ THE JOIN IS ON THE SOUND FILENAME, NOT ON TIME PROXIMITY. Every queued
+    record carries `sound` (`ann-<ext>-<32 hex>`), and switchboard-callqos stamps
+    the same name onto the record it writes from the hangup extension, so the two
+    halves of one announcement identify each other exactly. Pairing them by
+    "closest in time on the same extension" would work today only by luck — the
+    minimum observed spacing between announcements is about eight minutes — and
+    would mis-pair the moment two alerts land together, which is exactly when
+    something is going wrong and the ledger matters most.
+
+    Returns the queued records, oldest first. Already-judged ones are excluded by
+    the same join, so calling this on a timer does not re-file anything.
+    """
+    now = time.time() if now is None else now
+    horizon = ANNOUNCE_HORIZON if horizon is None else horizon
+    lookback = ANNOUNCE_LOOKBACK if lookback is None else lookback
+    recs = _read_records(now - lookback)
+    # Sounds that already have an answer, either way.
+    resolved = {r.get("sound") for r in recs
+                if r.get("kind") == "announce"
+                and r.get("outcome") in (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED)
+                and r.get("sound")}
+    out = []
+    for r in recs:
+        if (r.get("kind") == "announce" and r.get("outcome") == ANNOUNCE_QUEUED
+                and r.get("sound") and r["sound"] not in resolved
+                and now - r["_ts"] >= horizon):
+            out.append(r)
+    return out
 
 
 def is_writable() -> bool:

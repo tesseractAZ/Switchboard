@@ -227,13 +227,22 @@ def test_the_quality_ledger_and_the_delivery_ledger_agree_on_every_live_leg(
             assert wrote[0]["stage"] == stage and wrote[0]["txcount"] == txc
 
 
-def test_only_the_alarm_clock_reports_its_own_delivery(tmp_path, monkeypatch):
-    """A page or an announcement has no reconciler waiting on this ledger, and
-    an extra `wakeup` row for a leg that was not a wake-up would be a lie about
-    which extension was woken."""
-    for tag in ("announce", "page", "rooms"):
-        rec = _leg("complete", 900, tag=tag)
-        assert _written(tmp_path / tag, rec, monkeypatch) == []
+def test_only_legs_with_a_reader_report_their_own_delivery(tmp_path, monkeypatch):
+    """v0.98.0 repointed this. It used to assert that ONLY the alarm clock
+    reports itself, which was true while the wake-up reconciler was the only
+    reader. The announce reconciler is now a second one, so `announce` reports
+    too — and files under its own `kind`, because a `wakeup` row for a leg that
+    was not a wake-up would be a lie about which extension was woken.
+
+    `page` and an ordinary room call still write nothing: nothing is waiting on
+    them, and a row nobody reads is noise in a ledger read during incidents.
+    """
+    for tag in ("page", "rooms"):
+        assert _written(tmp_path / tag, _leg("complete", 900, tag=tag),
+                        monkeypatch) == []
+    ann = _written(tmp_path / "announce",
+                   _leg("complete", 900, tag="announce"), monkeypatch)
+    assert [r["kind"] for r in ann] == ["announce"], ann
 
 
 def test_a_redacted_extension_is_never_reported_as_a_wake_up(tmp_path, monkeypatch):

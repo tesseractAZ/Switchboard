@@ -86,6 +86,15 @@ WAKEUP_STAGES = ("answering", "scene", "greeting", "time", "extras", "repeat",
 # handset. Everything after it is more of the same script.
 WAKEUP_DELIVERED_FROM = "greeting"
 
+# The same two facts for [switchboard-announce-play], which is a two-stage
+# script: `playing` is set immediately before Playback(${SW_ANN_FILE}).
+ANNOUNCE_STAGES = ("playing", "complete")
+ANNOUNCE_DELIVERED_FROM = "playing"
+
+# tag -> (every stage in order, the stage from which audio has played)
+SCRIPTED_STAGES = {"wakeup-deliver": (WAKEUP_STAGES, WAKEUP_DELIVERED_FROM),
+                   "announce": (ANNOUNCE_STAGES, ANNOUNCE_DELIVERED_FROM)}
+
 # Transmitted RTP packets that count as audio somebody actually heard: 50
 # packets is one second of ulaw at 20 ms per packet, the same rate `rtp_secs`
 # below divides by.
@@ -115,6 +124,12 @@ DELIVERED_MIN_TXCOUNT = 50
 #
 # So the set is DERIVED from the ladder rather than enumerated by hand, which is
 # what let a real stage go missing and a fictional one take its place.
+#
+# ★ THE TWO CONTEXTS DRAW THIS LINE IN DIFFERENT PLACES, DELIBERATELY. An alarm
+# clock's contract is "did it wake you", so anything from the greeting onward has
+# met it. An announcement's contract is "did the message get across", so only a
+# clip that played to the end has. The DELIVERY ledger asks a third question —
+# "did this reach the handset at all" — and that one is `audio_reached` below.
 SCRIPTED_TERMINAL = {
     "wakeup-deliver": frozenset(
         WAKEUP_STAGES[WAKEUP_STAGES.index(WAKEUP_DELIVERED_FROM):]),
@@ -126,6 +141,14 @@ SCRIPTED_TERMINAL = {
 # that was cut short is not worth an alert. So this is the only playback tag
 # permitted to break the PLAYBACK_TAGS silence.
 ALARM_TAG = "wakeup-deliver"
+
+# Scripted contexts that report their own delivery into the shared ledger, and
+# the `kind` each files under there. Both have a reader waiting: the wake-up
+# reconciler in wakeup/scheduler.py joins on the wake-up rows to decide whether
+# to ring again, and the announce reconciler beside it joins on the announce rows
+# to decide whether an announcement ever arrived. `page` is absent on purpose —
+# nothing is waiting on a page, and a row nobody reads is just noise.
+DELIVERY_KIND = {"wakeup-deliver": "wakeup", "announce": "announce"}
 # Asterisk-readable runtime staged by switchboard-config (root-only options.json is
 # not readable by the asterisk user the dialplan runs us as).
 FEATURES = os.environ.get("SWITCHBOARD_FEATURES", "/run/switchboard/features.json")
@@ -332,6 +355,30 @@ def delivery_failures(tag: str, stage: str, txcount: int) -> list:
     if stage not in terminal:
         out.append(f"delivery stopped at stage {stage!r}")
     return out
+
+
+def audio_reached(tag: str, stage: str, txcount: int) -> bool:
+    """Did this scripted leg get real audio out to the handset?
+
+    A WEAKER question than delivery_failures, and a different one. That asks
+    whether the script met its contract; this asks whether the phone answered and
+    sound came out of it — which is what the delivery ledger is for, and the only
+    thing the announce reconciler needs to know.
+
+    They differ on a truncated announcement: a 10-second clip cut off at 8
+    seconds did not meet its contract, but it plainly reached the handset, and
+    filing it as "never delivered" beside an announcement that rang out
+    unanswered would flatten the one distinction the reconciler exists to draw.
+    The record carries `stage` and `txcount`, so the truncation stays visible.
+    """
+    stages_from = SCRIPTED_STAGES.get(tag or "")
+    if not stages_from or not stage:
+        return False
+    stages, first_audio = stages_from
+    if stage not in stages:
+        return False              # a stage this build has never heard of
+    return (stages.index(stage) >= stages.index(first_audio)
+            and txcount >= DELIVERED_MIN_TXCOUNT)
 
 
 def build_record(a) -> dict:
@@ -555,6 +602,7 @@ def build_record(a) -> dict:
         "tag": a.tag or "",
         "chan": a.chan or "",
         "ext": ext,
+        "sound": (a.sound or "").strip(),
         # ★ The NEGOTIATED wire format. Through v0.76.0 this field carried
         # CHANNEL(audioreadformat) — Asterisk's internal read format, a
         # different quantity — and so named codecs the configuration forbids:
@@ -877,6 +925,11 @@ def _parse_args(argv):
     # How far a scripted leg (wake-up delivery, announce) got before hangup.
     # Empty for contexts that define no stages.
     p.add_argument("--stage", default="")
+    # The announcement this leg was playing, by name (`ann-<ext>-<32 hex>`).
+    # Empty for every other context. It is the join key between the
+    # `originate-queued` record app.py writes when AMI accepts the Originate and
+    # the record written from this hangup — see delivery.unresolved_announcements.
+    p.add_argument("--sound", default="")
     # Asterisk's running MEAN and floor for RTT. --rtt is the LAST round only:
     # one live call reported rtt=0.007675 against maxrtt=0.146652, a 19x spread,
     # so publishing --rtt as "the call's RTT" was publishing one arbitrary draw.
@@ -927,7 +980,11 @@ def record_delivery(rec: dict) -> None:
     Best-effort throughout. A telemetry write must never be the reason a hangup
     handler raises.
     """
-    if rec.get("tag") != ALARM_TAG or rec.get("quality") == "undelivered":
+    kind = DELIVERY_KIND.get(rec.get("tag") or "")
+    if not kind:
+        return
+    if not audio_reached(rec.get("tag") or "", rec.get("stage") or "",
+                         rec.get("txcount") or 0):
         return
     ext = str(rec.get("ext") or "")
     if not ext or rec.get("ext_redacted"):
@@ -939,10 +996,13 @@ def record_delivery(rec: dict) -> None:
     try:
         # The outcome name comes from `delivery`, the module the reconciler also
         # imports. A literal here and a literal there is a silent rename away
-        # from a wake-up that reports its delivery to nobody.
-        delivery.record(ext, "wakeup", delivery.AUDIO_DELIVERED,
+        # from a delivery that reports itself to nobody.
+        delivery.record(ext, kind, delivery.AUDIO_DELIVERED,
                         stage=rec.get("stage") or None,
-                        txcount=rec.get("txcount"))
+                        txcount=rec.get("txcount"),
+                        # ...and the join key for the announce reconciler. Absent
+                        # on a wake-up, which has no clip to name.
+                        sound=rec.get("sound") or None)
     except Exception:                         # noqa: BLE001
         pass
 

@@ -666,6 +666,14 @@ def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: i
                 "Exten: s",
                 "Priority: 1",
                 f"Variable: SW_ANN_FILE={sound}",
+                # ...and the BARE NAME of the clip, which is what identifies this
+                # announcement in the delivery ledger. app.py records
+                # `originate-queued` with `sound=<basename>`; the hangup extension
+                # stamps this onto the record it writes, and the reconciler joins
+                # the two on it. Derived here from the same string the Originate
+                # plays, so the two halves of one announcement cannot be named
+                # differently. Charset already guaranteed by _ANNOUNCE_SOUND_RE.
+                f"Variable: SW_ANN_NAME={os.path.basename(sound)}",
                 f"CallerID: Switchboard Announce <{cnum}>",
                 # Auto-answer onto the SPEAKER via the standard SIP intercom header, so
                 # an alert plays HANDS-FREE instead of ringing (the WP826 has "Allow
