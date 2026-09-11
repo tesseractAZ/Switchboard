@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.95.1
+
+**The previous release got its first boot wrong.** Remembering which phones have
+ever registered only helps once something has been remembered, and on the first
+start after the upgrade that record did not exist yet. An empty record was read
+as "no phone has ever registered", so the house was described as having no
+phones expected at all — while one was already back and answering. A count of
+expected phones lower than the count actually reachable is worse than the
+problem it replaced.
+
+A phone that is registered right now has self-evidently registered, whatever the
+remembered list says. That is now taken into account, the remembered list fills
+in over the first few minutes, and every later start has the full benefit.
+
 ## 0.95.0
 
 **The fleet-health record could not report an outage, and two real ones passed

@@ -256,7 +256,20 @@ def summarize(phones: list, wired_exts: list | None = None,
         never_registered = {p["ext"] for p in phones
                             if not p.get("registered") and p["ext"] not in seen_before}
     else:
-        never_registered = configured - set(ever_registered)
+        # ★ THE UNION IS LOAD-BEARING, AND v0.95.0 SHIPPED WITHOUT IT.
+        #
+        # On the first boot after that release the durable file did not exist,
+        # so the set loaded EMPTY, `configured - set()` declared the whole roster
+        # never-registered, and the record read `reachable: 1, expected: 0` — a
+        # denominator below its own numerator, which is worse than the defect it
+        # replaced. Observed live at 2026-09-11T00:30:03Z.
+        #
+        # An endpoint registered RIGHT NOW has self-evidently registered,
+        # whatever the durable set has caught up with. That alone restores the
+        # invariant `expected >= reachable` on a cold start, and the set fills in
+        # over the first cycles so every later boot gets the full fix.
+        ever = set(ever_registered) | {p["ext"] for p in phones if p.get("registered")}
+        never_registered = configured - ever
         expected_exts = configured - never_registered
     return {
         "wired_median_rtt_ms": _median(wired_rtts),
