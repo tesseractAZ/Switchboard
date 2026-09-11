@@ -552,10 +552,15 @@ handset answered and the far end dropped a second later, before the greeting,
 with zero audio packets transmitted. Somebody reached for a ringing phone at six
 in the morning, heard nothing, and every ledger read healthy.
 
-The delivery leg now records a `spoken` milestone written immediately **after
-the greeting has played** — Asterisk abandons the script the moment the channel
-drops, so reaching that point proves audio reached a live line. The scheduler
-joins on that, not on the pickup:
+The delivery leg records a `spoken` milestone written immediately **after the
+greeting has played** — Asterisk abandons the script the moment the channel
+drops, so reaching that point proves audio reached a live line. Since v0.97.0
+the hangup handler also records `audio-delivered` when it measures at least a
+second of audio actually transmitted at or after the greeting. Both are read and
+either is enough: `spoken` cannot be written by a sleeper who is woken **by** the
+greeting and hangs up during it, because the line that writes it never runs, and
+that was a real source of six-in-the-morning false alarms. The scheduler joins on
+those two, not on the pickup:
 
 1. The phone rings for `wakeup_ring_seconds` (default 60).
 2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
@@ -582,8 +587,9 @@ would be judged unanswered.
 
 Every step above is recorded in `/share/switchboard/delivery-outcomes.jsonl`:
 `ring-queued`, `deferred` (the room was busy or offline at the appointed time),
-`answered` and `spoken`, `no-answer` or `answered-silent`, `ring-requeued` or
-`re-ring-skipped`, and finally `undelivered`. One more is worth knowing:
+`answered`, `spoken` and `audio-delivered`, `no-answer` or `answered-silent`,
+`ring-requeued` or `re-ring-skipped`, and finally `undelivered`. One more is
+worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
 instrument. Reading that file end to end tells you what happened to a wake-up
@@ -1119,10 +1125,17 @@ something *at* a phone — wake-up delivery, paging, announcements — are score
 stored honestly but never move `sensor.switchboard_last_call`, and never raise an
 ordinary poor-quality alert.
 
-**One exception, added in v0.78.0.** A wake-up delivery that was answered and then
-transmitted no audio, or that stopped before the end of its script, is recorded
-`undelivered` and *does* alert. A page cut short is not worth waking anyone over;
-an alarm clock that did not go off is the one thing on this list with a deadline. Nobody is on the line to act on an alert about
+**One exception, added in v0.78.0.** A wake-up delivery that was answered and
+then failed to deliver is recorded `undelivered` and *does* alert. A page cut
+short is not worth waking anyone over; an alarm clock that did not go off is the
+one thing on this list with a deadline.
+
+Where that line falls was corrected in v0.97.0. A wake-up counts as delivered
+once the script has reached the **greeting** *and* at least a second of audio has
+left the box — so somebody woken by the greeting who hangs up on it is a success,
+not an alarm. It is `undelivered` when the call stopped before the greeting, or
+when it was answered and carried no audio at all. That second case is the one
+this whole mechanism exists for: an alarm clock picked up in silence. Nobody is on the line to act on an alert about
 a chime, and those legs are one-directional by design, so the one-way-audio
 detector (which exists to catch a broken conversation) would fire on their
 perfectly normal shape. Conversations and the interactive menus alert exactly
@@ -1175,7 +1188,7 @@ recovery notice when they return to normal — again under that device's shared
 |--------|-------------------|
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
-| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered and played nothing, or stopped before the end of its script: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
+| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever any phone is missing — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |

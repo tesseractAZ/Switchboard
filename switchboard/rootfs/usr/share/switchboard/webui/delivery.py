@@ -25,6 +25,20 @@ OUTCOME_PATH = os.environ.get("SWITCHBOARD_DELIVERY_OUTCOME",
                               "/share/switchboard/delivery-outcomes.jsonl")
 MAX_BYTES = 2 * 1024 * 1024
 
+# ★ THE OUTCOME NAMES LIVE HERE BECAUSE TWO PROGRAMS MUST SPELL THEM THE SAME.
+#
+# switchboard-callqos writes AUDIO_DELIVERED from the hangup extension and
+# wakeup/scheduler.py joins on it to decide whether to ring a phone again and
+# push a critical alert. They are separate programs in separate directories, and
+# a literal in each is a silent single-character failure: the reconciler simply
+# stops seeing the record, every test stays green, and the symptom is a
+# DND-bypassing push at six in the morning to somebody who is already awake.
+# Both import this module already.
+#
+# These are also a DURABLE ON-DISK FORMAT. Renaming one orphans every historical
+# record, so the value is pinned by test rather than treated as internal.
+AUDIO_DELIVERED = "audio-delivered"
+
 
 def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     """Trim an append-only ledger to its newest records. Best-effort.

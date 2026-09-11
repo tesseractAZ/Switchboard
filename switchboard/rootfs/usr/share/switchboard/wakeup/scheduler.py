@@ -132,6 +132,28 @@ def _reconcile_rings(now: float) -> None:
         if _delivery is not None:
             try:
                 spoken = _delivery.outcomes_since(ext, "wakeup", "spoken", r["started"])
+                # ★ v0.97.0 — ...OR the hangup extension measured the audio.
+                #
+                # `spoken` is written by the delivery AGI from the line AFTER
+                # Playback(sw-wakeup-greeting), so it is unreachable for the
+                # sleeper this alarm clock works best on: woken BY the greeting,
+                # hangs up during it. Asterisk abandons the extension the moment
+                # the channel drops, the AGI never runs, and ninety seconds later
+                # this function rang the phone again and then pushed a critical
+                # DND-bypassing "it did not go through" at a person who was
+                # already up. Live 2026-09-08 06:12:22 — and the h-extension
+                # could see 59 transmitted packets of greeting on that very leg.
+                #
+                # switchboard-callqos writes AUDIO_DELIVERED from that
+                # measurement, using the same verdict it scores the quality
+                # ledger with, so the two ledgers cannot disagree about one call.
+                #
+                # OR, not replace: `spoken` proves the greeting played to the
+                # END, which this does not, and it is written in-band by the AGI
+                # rather than by a detached process. Two instruments, and the
+                # wake-up is delivered if EITHER of them says so.
+                spoken = spoken or _delivery.outcomes_since(
+                    ext, "wakeup", _delivery.AUDIO_DELIVERED, r["started"])
                 answered = spoken or _delivery.outcomes_since(
                     ext, "wakeup", "answered", r["started"])
             except Exception as exc:  # noqa: BLE001  (never let telemetry break the alarm)
