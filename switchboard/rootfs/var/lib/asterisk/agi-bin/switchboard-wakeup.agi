@@ -57,11 +57,29 @@ def set_var(name: str, value: str) -> None:
 
 
 def channel_ext(channel: str) -> str:
-    """PJSIP/11-0000000a -> 11."""
+    """PJSIP/11-0000000a -> 11. Empty for anything that is not a room.
+
+    ★ v0.99.0 — THE DIGIT TEST IS THE POINT. This was a byte-for-byte copy of
+    the DISPLAY helper in webui/ami.py, whose own docstring says it yields
+    "trunk" for PJSIP/trunk-... . That is right for a listing and wrong here:
+    "trunk" is truthy, so the caller's `if not ext` bail was skipped and an
+    OUTSIDE caller — transferred to the operator by the handset that answered,
+    then asking for a wake-up — could store one under the key `trunk` and be
+    told aloud, by SayUnixTime, that it was set. It can never ring
+    (ami.originate_wakeup digit-guards the channel it dials), so the spoken
+    confirmation was simply false; and until the fix beside it in
+    scheduler.tick(), the undeliverable entry re-fired every twenty seconds
+    for as long as the add-on ran.
+
+    Every other consumer of agi_channel in this tree already requires digits —
+    operator/agi_speech.py tests `.isdigit()`, and both the assistant AGI and
+    switchboard-callqos match `PJSIP/(<digits>)-`. This was the one that did not.
+    """
     if "/" not in channel:
         return ""
     tail = channel.split("/", 1)[1].split(";", 1)[0]
-    return tail.rsplit("-", 1)[0] if "-" in tail else tail
+    ext = tail.rsplit("-", 1)[0] if "-" in tail else tail
+    return ext if ext.isdigit() else ""
 
 
 def recognize(attempt: int) -> str:
