@@ -25,7 +25,7 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Software version 0.94.4.** Quantiles are nearest-rank.
+**Software version 0.100.3.** Quantiles are nearest-rank.
 
 There is deliberately no single "data as of" line. There was one, and it was the
 document's own second rule being broken at file scope: §1's ledger figures were
@@ -192,19 +192,44 @@ sudo docker exec app_<slug> sh -c 'tail -n 5 /share/switchboard/heartbeat.jsonl'
 
 ## 3. Delivery
 
-7 records in `/share/switchboard/delivery-outcomes.jsonl`, spanning 2026-09-01 →
-2026-09-06. A completeness check, not a rate.
+95 records in `/share/switchboard/delivery-outcomes.jsonl`, spanning 2026-09-01 →
+2026-09-11. A completeness check, not a rate. Counts are alphabetical within each
+kind; several outcomes did not exist for most of the window, and each says when
+it began.
 
 | Outcome | n | |
 | --- | ---: | --- |
-| `originate-queued` (announce) | 3 | new in 0.78.0 — the announce path recorded only failures before it |
-| `ring-queued` (wake-up) | 2 | |
-| `unreachable` (announce) | 1 | the pre-flight device check refused to ring a dead endpoint |
+| `announce-undelivered` | 3 | new in 0.98.0. **2 of the 3 are known false positives** from defects fixed the same night — one judged across an upgrade boundary (0.98.1), one whose join key Asterisk had mangled (0.98.2). The third is genuine and was caused by an add-on restart. |
+| `announce-unsettled` | 1 | new in 0.100.2, and **verified by induced failure** on 2026-09-11: an announcement queued 10 s after a restart, its dialog refused with `invalid URI`, recorded not-judged rather than failed. |
+| `audio-delivered` (announce) | 7 | new in 0.98.0 |
+| `audio-delivered` (wake-up) | 2 | new in 0.97.0 |
+| `originate-queued` (announce) | 36 | new in 0.78.0 — the announce path recorded only failures before it |
+| `originate-refused` (announce) | 1 | AMI reachable and refusing, during a restart |
+| `unreachable` (announce) | 4 | the pre-flight device check refused to ring a dead endpoint |
+| `answered` (wake-up) | 10 | |
+| `answered-silent` (wake-up) | 2 | picked up, nothing played |
+| `no-answer` (wake-up) | 2 | |
+| `ring-queued` (wake-up) | 12 | |
+| `ring-requeued` (wake-up) | 4 | the second ring |
+| `spoken` (wake-up) | 8 | |
+| `undelivered` (wake-up) | 2 | |
 | `permcheck` (self-test) | 1 | the writability probe added in 0.74.0 |
 
-No `answered`, `spoken`, `no-answer` or `undelivered` rows: no wake-up has run
-since 0.78.0 introduced the `spoken` milestone. **The reconciler is unexercised
-in production.** Its behaviour is covered by tests, which is a different claim.
+**The reconciler is no longer unexercised.** The 0.94.4 edition of this document
+recorded it as covered by tests only; it has since judged real wake-ups and real
+announcements, and both of its verdicts appear above.
+
+*Population caveat.* An operator fired 9 announcements at ext 18/19/20 on
+2026-09-11 while verifying 0.98.2–0.100.2, two of them into a deliberately
+induced post-restart failure. They are real rows produced by the real path, but
+the announce counts in this table are not a week of household traffic. The
+wake-up rows are unprompted.
+
+**Still unexercised in production**, accruing from the dates given: the four
+`no-media` verdicts split out in 0.96.0 (`abandoned`, `no-media`, `not-answered`,
+`unreachable`) — 10 legs have been recorded since that release and none was a
+no-media leg; and the `announce-menu` QoS tag split out in 0.99.0, which needs
+somebody to dial the announce code.
 
 ---
 
@@ -301,9 +326,12 @@ quiet because the system is healthy or because they cannot fire.
 | Poor-call alert | 11 legs | Working. |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
 | Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
-| Wake-up undelivered | 0 | Unexercised (§3) — and since 0.84.0 the re-ring it depends on is itself gated, so the path has two untested links, not one. |
+| Wake-up undelivered | 5 legs | **Fired, and was wrong all five times.** Every notifying row in the QoS ledger falls on 2026-09-08/09 and each was a delivered wake-up scored `undelivered` because the scorer's terminal-stage list had drifted from the dialplan. Fixed in 0.97.0; **zero notifying rows since**, against 2 wake-ups delivered on 2026-09-11 that both scored `excellent`. A detector's first firing being a false positive is the argument for this table. |
+| Announce undelivered | 3 | New in 0.98.0. 2 of 3 were false positives from defects fixed the same night; the third was genuine (a restart). See §3. |
+| Announce settling window | 1 | New in 0.100.2. **Verified by induced failure** rather than by waiting: an announcement queued 10 s after a deliberate restart, dialog refused, recorded `announce-unsettled`. The only detector here whose first firing was arranged on purpose. |
+| No-media split (4 verdicts) | 0 | Shipped 0.96.0. 10 legs recorded since and none was a no-media leg, so all four verdicts are unexercised — accruing, not proven. |
 
-**Five of eight have never fired.** One is genuinely quiet, two have not been
+**Five of eleven have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
 incapable of firing and is now fixed. Two more were verified by hand across
 three calls on 2026-09-06 — the emergency notice and the unanswered-leg gate —
@@ -326,10 +354,13 @@ detector that cannot fire and a healthy system produce identical silence.
 
 | | | Source |
 | --- | --- | --- |
-| Tests | **538**, 8.1 s | `pytest`, below |
+| Tests | **643**, ~7 s | `pytest`, below |
 | Mutants applied, 0.77.0–0.80.0 | 64 | release commits |
 | Killed | 64 | release commits |
 | Survived their first run | 10 | release commits |
+| Mutants applied, 0.96.0–0.100.3 | 66 | release commits |
+| Killed | 66 | release commits |
+| Survived their first run | 7 | release commits |
 
 The mutation figures are the one place this document breaks its own first rule:
 they come from the release commit messages, not from a ledger on disk, and
@@ -347,6 +378,17 @@ not — the same mistake as the bug being fixed. Deleting the assistant's silenc
 classification survived because every test stubbed the function that produces
 it. Neither is a coverage gap in the usual sense; both are tests that asserted
 their own scaffolding.
+
+The 0.96.0–0.100.3 survivors cluster differently, and the pattern is worth
+naming: **a test whose threshold or fixture comes from the constant it is
+testing passes for every value of that constant.** Three of the seven were
+that — a window checked against its own width, a floor compared to itself, and a
+process-start stamp that every test set by hand, so zeroing it (which would make
+the feature inert in production) left the suite green. Two more were names that
+had to agree across two programs and were spelled independently in each. The
+remedy in both shapes is the same: pin the value literally in one place and make
+the code read it, rather than letting the test and the code agree with each
+other about nothing.
 
 ```
 python3 -m pytest switchboard/tests/ -q

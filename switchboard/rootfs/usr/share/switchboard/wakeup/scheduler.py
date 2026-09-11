@@ -361,9 +361,14 @@ def _reconcile_announcements(now: float) -> None:
         # all is indistinguishable from one the reconciler forgot. This says
         # plainly that it was not judged, and why.
         if rec["_ts"] < settle_until:
+            # Report the distance from the START of the window, not from its end.
+            # The first live firing of this branch logged "queued 117s inside the
+            # settling window" for an announcement queued 3 s after start — the
+            # number was the remaining window, which reads as its opposite.
             log(f"announcement {sound} to ext {ext} was queued "
-                f"{int(settle_until - rec['_ts'])}s inside the post-restart "
-                f"settling window — not judged")
+                f"{int(rec['_ts'] - _STARTED)}s after start, inside the "
+                f"{int(_delivery.ANNOUNCE_SETTLE_SECONDS)}s post-restart settling "
+                f"window — not judged")
             try:
                 _delivery.record(ext, "announce", _delivery.ANNOUNCE_UNSETTLED,
                                  sound=sound, queued=rec.get("ts"),

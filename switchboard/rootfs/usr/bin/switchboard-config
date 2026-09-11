@@ -2157,9 +2157,10 @@ def render_features() -> str:
 
 SHARE_DIR = Path("/share/switchboard")
 SHARE_LOG = SHARE_DIR / "asterisk.log"
-# Verbose is affordable here only because v0.56.0 turned off displayconnects: the
-# AMI logon/logoff pairs were 89.4% of the log. Cap anyway -- Asterisk never
-# rotates a logfiles channel, and an unbounded forensic log is its own outage.
+# Cap it: Asterisk never rotates a logfiles channel, and an unbounded forensic log
+# is its own outage. (Until v0.94.7 this channel also carried `verbose`, which is
+# why the cap was set as high as it is; it now takes notice/warning/error only and
+# grows far more slowly.)
 SHARE_LOG_MAX_BYTES = 32 * 1024 * 1024
 
 
@@ -2221,11 +2222,35 @@ def ensure_share_log_dir() -> None:
                 f"the AGI may be unable to append to the ledgers")
         try:
             if SHARE_LOG.exists() and SHARE_LOG.stat().st_size > SHARE_LOG_MAX_BYTES:
-                # Truncate rather than delete: keep the inode so a running Asterisk
-                # (on a config reload rather than a cold start) keeps writing.
-                with open(SHARE_LOG, "w", encoding="utf-8"):
-                    pass
-                log(f"trimmed {SHARE_LOG} (was over {SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
+                # ★ v0.100.3 — KEEP THE NEWEST HALF, do not empty the file.
+                #
+                # This was `open(SHARE_LOG, "w")` followed by `pass`, which
+                # truncates to ZERO BYTES. The comment beside it justified
+                # truncating rather than deleting — keeping the inode so a
+                # reloaded Asterisk keeps writing — and that reasoning is sound;
+                # it just says nothing about throwing away every line.
+                #
+                # This is the same defect `delivery._rotate_tail` had and fixed in
+                # v0.77.0, whose note reads: "At the cap the entire forensic
+                # history disappeared, and silently: an empty ledger and a quiet
+                # system look identical." That is doubly true of a log nobody
+                # reads until something has already gone wrong. One ledger learned
+                # the lesson; this file did not, and it had a 32 MB fuse on it.
+                #
+                # Rewritten in place (not renamed) so the inode survives, and cut
+                # at a line boundary so the first surviving line is not half a
+                # record.
+                keep = max(1, SHARE_LOG_MAX_BYTES // 2)
+                with open(SHARE_LOG, "rb") as _fh:
+                    _fh.seek(-keep, os.SEEK_END)
+                    _tail = _fh.read()
+                _nl = _tail.find(b"\n")
+                _tail = _tail[_nl + 1:] if _nl != -1 else b""
+                with open(SHARE_LOG, "wb") as _fh:
+                    _fh.write(_tail)
+                log(f"trimmed {SHARE_LOG} to its newest "
+                    f"{keep // (1024*1024)} MB (was over "
+                    f"{SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
         except OSError as exc:
             log(f"WARN could not trim {SHARE_LOG}: {exc}")
         import shutil as _sh

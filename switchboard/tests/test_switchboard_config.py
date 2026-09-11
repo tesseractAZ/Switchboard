@@ -7,6 +7,7 @@ Run with plain Python (no pytest needed):
 Exercises the input-validation / config-injection defenses so a regression that
 re-opens an injection or drops a guard fails loudly.
 """
+import inspect
 import json
 import re
 from importlib.machinery import SourceFileLoader
@@ -2365,3 +2366,55 @@ def test_the_durable_log_is_bounded_and_keeps_its_tail() -> None:
         sbc.STATE_DIR = real
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_share_log_trim_keeps_history_instead_of_emptying_the_file() -> None:
+    """★ A cap that truncates to ZERO is not a cap, it is a delete on a timer.
+
+    `ensure_share_log_dir()` trims /share/switchboard/asterisk.log past
+    SHARE_LOG_MAX_BYTES. Until v0.100.3 it did `open(path, "w")` + `pass`, which
+    empties the file. The comment beside it justified truncating rather than
+    DELETING — keep the inode so a reloaded Asterisk keeps writing — and that
+    part is right; it just said nothing about discarding every line.
+
+    `delivery._rotate_tail` had the identical defect and fixed it in v0.77.0:
+    "At the cap the entire forensic history disappeared, and silently: an empty
+    ledger and a quiet system look identical." That applies with more force to a
+    log nobody opens until something has already gone wrong.
+
+    Driven against a real file rather than by reading the source, because the
+    thing under test is what ends up on disk.
+    """
+    import os
+    import tempfile
+    from pathlib import Path as _P
+
+    src = (_P(sbc.__file__) if hasattr(sbc, "__file__") else None)
+    body = inspect.getsource(sbc.ensure_share_log_dir)
+    check("share-log trim: no longer empties the file",
+          'open(SHARE_LOG, "w", encoding="utf-8")' not in body)
+    check("share-log trim: keeps a tail", "SHARE_LOG_MAX_BYTES // 2" in body)
+    check("share-log trim: cuts at a line boundary", 'find(b"\\n")' in body)
+
+    # ...and the tail arithmetic itself, exercised on a real file.
+    d = tempfile.mkdtemp()
+    f = _P(d) / "asterisk.log"
+    lines = [f"[Sep 11] line {i} " + "x" * 80 + "\n" for i in range(4000)]
+    f.write_text("".join(lines))
+    cap = f.stat().st_size // 2
+    keep = max(1, cap // 2)
+    with open(f, "rb") as fh:
+        fh.seek(-keep, os.SEEK_END)
+        tail = fh.read()
+    nl = tail.find(b"\n")
+    tail = tail[nl + 1:] if nl != -1 else b""
+    with open(f, "wb") as fh:
+        fh.write(tail)
+    out = f.read_text()
+    check("share-log trim: the file is NOT empty afterwards", len(out) > 0)
+    check("share-log trim: the newest line survives", "line 3999" in out)
+    check("share-log trim: the oldest line is gone", "line 0 " not in out)
+    check("share-log trim: the first surviving line is whole",
+          out.splitlines()[0].startswith("[Sep 11] line"))
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
