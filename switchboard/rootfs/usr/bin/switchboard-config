@@ -922,7 +922,20 @@ def render_announce_play_context() -> list[str]:
 
 def render_announce_context() -> list[str]:
     """The [announce] context: record a short message and play it out to the
-    configured Home Assistant media players (via the announce AGI)."""
+    configured Home Assistant media players (via the announce AGI).
+
+    ★ ITS QOS TAG IS `announce-menu`, NOT `announce`. This is a HUMAN on a
+    handset, speaking into it for as long as they like — an ordinary two-way
+    call. `[switchboard-announce-play]` is the opposite: the PBX ringing a
+    handset to play a clip at it, one-directional by design. They had the same
+    tag, and `announce` is in callqos's PLAYBACK_TAGS, so this context inherited
+    the playback exemptions: the one-way-audio detector was forced off, the
+    poor-call notification was suppressed, and the leg never reached
+    sensor.switchboard_last_call. A resident recording a twelve-second
+    announcement on a handset whose transmit path was dead — rxcount high,
+    txcount zero, exactly the shape that detector exists for — was filed
+    `notify: false` and reported to nobody.
+    """
     return [
         ";; ----- Phone -> HA speaker announce -----",
         "[announce]",
@@ -932,7 +945,7 @@ def render_announce_context() -> list[str]:
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-announce.agi)",
         " same = n,Hangup()",
-    ] + rtpqos_h("announce") + [
+    ] + rtpqos_h("announce-menu") + [
         "",
     ]
 

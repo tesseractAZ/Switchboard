@@ -1237,7 +1237,10 @@ recovery notice when they return to normal — again under that device's shared
 `/data/state/callqos.jsonl`, inside the add-on and not readable from outside.
 Three mirrors are written to the host-mounted `/share/switchboard/` so an audit
 can reach them without a shell: `callqos-outcomes.jsonl` (the same records, with
-any telephone number truncated to its last four digits), `delivery-outcomes.jsonl`
+any value longer than an extension truncated to its last four digits — v0.99.0
+widened that from *any all-digit value*, which let a number arriving as
+`+1602…` through unmasked, so the mask depended on the caller's own
+formatting), `delivery-outcomes.jsonl`
 (every wake-up and announcement outcome), and `heartbeat.jsonl` (one row per
 health cycle). The assistant's own ledger is deliberately **not** mirrored — see
 [§4](#4-the-voice-operator--directory-assistance).

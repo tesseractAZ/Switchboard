@@ -537,13 +537,20 @@ def test_every_call_carrying_context_feeds_the_quality_ledger() -> None:
             if mm:
                 tagged[cur] = mm.group(1)
 
-    # ctx -> the tag its legs carry. Every one but internal-xfer tags itself;
-    # a transfer is a call kind, not a context name, and reads better in the
-    # ledger as what it is.
+    # ctx -> the tag its legs carry. Most tag themselves; the exceptions each
+    # say something the context name does not.
     expected = {c: c for c in ("rooms", "operator", "directory", "from-trunk",
                                "wakeup", "wakeup-deliver", "page", "automation",
-                               "status", "announce")}
+                               "status")}
+    # A transfer is a call kind, not a context name, and reads better in the
+    # ledger as what it is.
     expected["internal-xfer"] = "transfer"
+    # v0.99.0 — [announce] is a HUMAN speaking into a handset; the PBX playing a
+    # clip AT a handset is [switchboard-announce-play]. They shared the tag
+    # `announce`, which callqos lists in PLAYBACK_TAGS, so this two-way call
+    # inherited the playback exemptions and a dead-transmit leg here could never
+    # raise a one-way-audio alert. Separate tags, separate treatment.
+    expected["announce"] = "announce-menu"
     for ctx, tag in sorted(expected.items()):
         check(f"ledger: [{ctx}] has a hangup extension", tagged.get(ctx) is not None)
         check(f"ledger: [{ctx}] tags its legs as {tag!r}", tagged.get(ctx) == tag)

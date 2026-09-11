@@ -355,10 +355,18 @@ def tick() -> None:
             _record(ext, "deferred", hhmm=entry.get("hhmm"),
                     device_state=state or "unknown")
             continue
+        # ★ THREE OUTCOMES, NOT TWO. `ok` alone cannot tell "AMI answered and
+        # refused" from "AMI was unreachable", and the difference decides both
+        # what is recorded and whether the wake-up stays due. Before v0.99.0 an
+        # AMI hiccup recorded `originate-error` AND then fell into `elif not ok`
+        # and recorded `originate-refused` for the same attempt — two rows
+        # claiming different causes for one event.
         ok = False
+        errored = False
         try:
             ok = ami.originate_wakeup(ext, RING)
         except Exception as exc:  # AMI hiccup — leave it for the next tick
+            errored = True
             log(f"originate wake-up for ext {ext} failed: {exc}")
             _record(ext, "originate-error", hhmm=entry.get("hhmm"),
                     detail=str(exc)[:120])
@@ -382,9 +390,23 @@ def tick() -> None:
             _ringing[ext] = {"target_epoch": entry.get("target_epoch"),
                              "hhmm": entry.get("hhmm"), "started": now,
                              "retried": False}
-        elif not ok:
+        elif not errored:
             _record(ext, "originate-refused", hhmm=entry.get("hhmm"))
-        if ok:
+        # ★ v0.99.0 — A REFUSED WAKE-UP IS ALSO CONSUMED. The comment above says
+        # the store entry is consumed "so the next 20 s tick cannot re-fire it
+        # into a ring storm", and the consumption sat inside `if ok:` — so on the
+        # one path where the ring demonstrably did NOT go out, it did exactly
+        # what it says it prevents. A wake-up AMI refuses stays due forever and
+        # every tick writes another `originate-refused` row: ~4,320 a day against
+        # a 2 MB ledger that trims its OLDEST records at the cap. That does not
+        # merely add noise, it deletes the wake-up and announcement history the
+        # ledger exists to keep.
+        #
+        # An AMI hiccup is the exception, and keeps the old behaviour: the ring
+        # may genuinely never have been attempted, so the entry stays due and the
+        # next tick tries again. That is why `errored` is tracked separately —
+        # `not ok` alone cannot tell the two apart.
+        if not errored:
             try:
                 store.cancel_if(ext, entry.get("target_epoch"))  # one-shot; don't clobber a re-set one
             except Exception as exc:

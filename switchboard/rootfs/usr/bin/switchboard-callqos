@@ -775,8 +775,27 @@ def append_outcome(rec: dict) -> None:
     # The last four digits are kept so a reader can still correlate two legs of
     # the same call; the ledger in /data, which cannot be read from outside,
     # keeps the number in full.
+    # ★ v0.99.0 — LENGTH ALONE, NOT `.isdigit()`.
+    #
+    # The dialplan filters the caller-ID through `FILTER(0-9+*#,...)`, so `+`,
+    # `*` and `#` all reach this field — the charset exists to pass them. A
+    # number that arrives E.164-formatted is `"+16025551234"`, and
+    # `"+16025551234".isdigit()` is FALSE, so the mask was skipped and the whole
+    # number was written verbatim to the host-mounted, backup-captured mirror
+    # this code exists to keep numbers out of. Proven by running both through
+    # build_record + append_outcome: the bare form masked to `*******1234`, the
+    # `+` form did not mask at all.
+    #
+    # The inbound caller-ID is also ATTACKER-CONTROLLED — the dialplan says so
+    # in as many words where it filters it — so this was not merely waiting on
+    # an upstream format change; a caller could choose the form that leaks.
+    #
+    # The sibling rule that masks the same value in the Asterisk log already
+    # gates on length alone. Two halves of one privacy rule disagreed, and the
+    # half that leaked was the durable one. Anything longer than an extension is
+    # not an extension, whatever characters it is made of.
     _ext = str(out.get("ext") or "")
-    if len(_ext) > MAX_EXT_DIGITS and _ext.isdigit():
+    if len(_ext) > MAX_EXT_DIGITS:
         out["ext"] = "*" * (len(_ext) - 4) + _ext[-4:]
         out["ext_redacted"] = True
     try:

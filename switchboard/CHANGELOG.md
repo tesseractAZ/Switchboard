@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.99.0
+
+**Four defects of the same shape, found by auditing everything that crosses
+between the phone system and the programs that watch it.**
+
+The previous release fixed a name that was quietly reshaped on its way through
+Asterisk and then compared for equality on the other side. That turned out not
+to be a one-off, so every value that makes that crossing was checked. Four
+things came back.
+
+**A caller's telephone number could reach the shared folder unmasked.** Numbers
+are masked down to their last four digits before being written to the folder
+that is visible outside the phone system and captured in backups — because most
+of those numbers belong to people who never chose to be in this system. The
+mask only applied if the number was all digits, and a number can arrive with a
+leading `+`. The same number therefore leaked or was masked depending on how
+the caller's carrier happened to format it, and the caller can choose that. The
+mask now applies to anything longer than an extension, which is what the
+matching rule in the call log has always done.
+
+**An outside caller could set a wake-up call that could never ring.** Someone
+on an outside line, handed to the operator by whoever answered, can ask for a
+wake-up. The system identified the room by pulling it out of the phone line's
+name — and for an outside line that produced the word "trunk", which it then
+accepted as if it were a room. It told the caller aloud that the wake-up was
+set. It never could have rung.
+
+**A wake-up the phone system refuses to place used to retry forever.** Every
+twenty seconds, for as long as the add-on ran, each attempt writing another
+line to the delivery log. That log keeps its newest records and discards its
+oldest at a size limit, so this would not merely have added noise — it would
+have deleted the wake-up and announcement history the last several releases
+exist to create. Refused attempts are now recorded once and closed. A genuine
+network outage still retries, as before; those two were previously
+indistinguishable and were even being written down twice, under two different
+causes, for the same attempt.
+
+**Announcements you record yourself were exempt from audio checks.** Speaking
+an announcement into a handset and having the system play one at a handset were
+filed under the same name, and the second is deliberately one-directional, so
+both were excused from the check that catches a call where your voice is not
+getting through. A twelve-second announcement into a dead microphone was
+recorded as fine and reported to nobody. They are now told apart.
+
 ## 0.98.2
 
 **A test announcement played in full, and three minutes later the system
