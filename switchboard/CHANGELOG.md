@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.95.0
+
+**The fleet-health record could not report an outage, and two real ones passed
+through it unnoticed.**
+
+Every health sample compares how many phones are reachable against how many are
+expected. Those two numbers were never once able to disagree: across 1,316
+recorded samples they matched every single time, and the list of phones that are
+down was empty in every one. On 19 August and again on 7 September every
+extension in the house and the outside line went unreachable together for about
+a minute, and the record for those minutes reads nine phones reachable, trunk
+registered, nothing down.
+
+The cause was what "never registered" meant. It meant "has not registered since
+this program started" — and the program starts fresh on every update. So after
+an update, any phone that had not yet come back was treated as a phone that had
+never existed: removed from the list of things that are down, and subtracted
+from the number expected. The target shrank to meet the score.
+
+It now means what it says. A phone that has ever registered is remembered
+across restarts, so one that has not come back yet is reported as down. The
+softphone, which genuinely has never registered, stays excluded — a healthy
+house still reads nine of nine rather than nine of ten.
+
+**The field naming which phones are missing was absent from almost every
+record.** It was written only when it had something to say, so a reader could
+not tell "nothing is down" from "nobody looked". It is now always present, and
+an empty list is an answer.
+
 ## 0.94.7
 
 **The previous release did not fix the telephone numbers in the shared log. This
