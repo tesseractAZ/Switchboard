@@ -715,7 +715,12 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   announcement may ring for 30 s and then speak for up to `90 s`, so a flat
   two-minute deadline would report a failure for announcements still playing.
   Nothing older than an hour is judged at all, so a scheduler that was stopped
-  overnight cannot file a night of retroactive failures.
+  overnight cannot file a night of retroactive failures — and, since v0.98.1,
+  **nothing sent before the current run started** is judged either. A window the
+  reconciler was not running for is unknown rather than failed: the confirming
+  record comes from a short-lived helper that an add-on restart kills, and across
+  an upgrade it may have been a build that never wrote one. Skipping that window
+  is why an add-on restart does not produce a burst of false failures.
 
   An announcement **cut off partway through still counts as arrived**, with the
   stage and packet count on the record. It did not meet its contract — §11 scores

@@ -60,6 +60,14 @@ _ringing: dict = {}
 
 _stop = False
 
+# When THIS process started. The announce reconciler refuses to judge anything
+# queued before it: the record that would resolve an announcement is written by a
+# detached switchboard-callqos that an add-on restart kills, and before an
+# upgrade it may have been a build that never wrote one. v0.98.0 shipped without
+# this and filed a failure against an announcement that had played perfectly,
+# within ten minutes, on the upgrade boundary itself.
+_STARTED = time.time()
+
 
 def log(msg: str) -> None:
     print(f"[switchboard-wakeup] {msg}", flush=True)
@@ -289,7 +297,7 @@ def _reconcile_announcements(now: float) -> None:
     try:
         if not _delivery.is_writable():
             return
-        stale = _delivery.unresolved_announcements(now)
+        stale = _delivery.unresolved_announcements(now, not_before=_STARTED)
     except Exception as exc:  # noqa: BLE001  (telemetry must never kill the loop)
         log(f"could not reconcile announcements: {exc}")
         return

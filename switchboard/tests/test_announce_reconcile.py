@@ -336,6 +336,9 @@ def test_the_scheduler_files_the_verdict(tmp_path):
     logged = []
     sched._delivery = mod
     sched.log = lambda m: logged.append(m)
+    # The process has been up for an hour as far as this test is concerned; the
+    # boundary rule is exercised on its own in §6.
+    sched._STARTED = NOW - 3600
     _queue(mod, "19", "ann-19-aaaa", ago=400)
     sched._reconcile_announcements(NOW)
     recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
@@ -363,6 +366,7 @@ def test_an_unwritable_ledger_files_nothing(tmp_path):
     sched = _load_scheduler(mod)
     sched._delivery = mod
     sched.log = lambda m: None
+    sched._STARTED = NOW - 3600
     _queue(mod, "19", "ann-19-aaaa", ago=400)
     before = Path(mod.OUTCOME_PATH).read_text()
     mod.is_writable = lambda: False
@@ -386,6 +390,7 @@ def test_the_reconciler_never_pushes(tmp_path):
     sched._delivery = mod
     sched.ha_client = _HA
     sched.log = lambda m: None
+    sched._STARTED = NOW - 3600
     _queue(mod, "19", "ann-19-aaaa", ago=400)
     sched._reconcile_announcements(NOW)
     assert pushed == [], pushed
@@ -403,3 +408,84 @@ def test_a_raising_reconciler_cannot_stop_wake_up_calls():
         "would skip the other")
     assert loop.index("tick()") < loop.index("_reconcile_announcements("), (
         "the wake-up ring must be dispatched before anything else in the loop")
+
+
+# --------------------------------------------------------------------------- #
+# 6. ★ The upgrade boundary. v0.98.0 shipped without this and was wrong in ten
+#    minutes, on a live box, about a real announcement.
+# --------------------------------------------------------------------------- #
+def test_nothing_queued_before_this_process_started_is_judged(tmp_path):
+    """★ THE REGRESSION, from the live incident that produced it.
+
+    2026-09-11T01:36:24Z: an announcement was queued to ext 19 under v0.97.0,
+    whose hangup extension did not name the clip and whose sink wrote no delivery
+    record. It PLAYED — the call-quality ledger scored that leg `excellent`.
+    v0.98.0 was deployed at 01:45, its reconciler looked back an hour, found a
+    queued record with no resolving half, and filed `announce-undelivered`
+    against an announcement that had worked.
+
+    A longer horizon does not fix that; nothing would have appeared however long
+    it waited. The rule is that a window this process was not running for is
+    UNKNOWABLE, not failed — the resolving record comes from a detached
+    switchboard-callqos that an add-on restart kills outright, quite apart from
+    an upgrade changing what it writes.
+    """
+    mod = _delivery(tmp_path)
+    started = NOW - 600                       # this process came up 10 min ago
+    _queue(mod, "19", "ann-19-before-upgrade", ago=1140)   # 19 min ago: older
+    _queue(mod, "19", "ann-19-after-upgrade", ago=400)     # 6.7 min ago: newer
+    got = _sounds(mod.unresolved_announcements(now=NOW, not_before=started))
+    assert got == ["ann-19-after-upgrade"], got
+
+
+def test_the_boundary_is_not_merely_the_lookback_in_disguise(tmp_path):
+    """Both records below sit comfortably inside the one-hour lookback, so the
+    lookback cannot be what separates them. Only the process start can."""
+    mod = _delivery(tmp_path)
+    assert mod.ANNOUNCE_LOOKBACK >= 3600
+    _queue(mod, "19", "ann-19-old", ago=1200)
+    _queue(mod, "19", "ann-19-new", ago=400)
+    assert len(mod.unresolved_announcements(now=NOW)) == 2, (
+        "fixture premise: with no boundary both are judged")
+    assert _sounds(mod.unresolved_announcements(
+        now=NOW, not_before=NOW - 600)) == ["ann-19-new"]
+
+
+def test_the_scheduler_passes_its_own_start_time(tmp_path):
+    """The parameter is useless if the one caller does not use it — and the one
+    caller is the only thing standing between a restart and a burst of false
+    failure records."""
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600
+    _queue(mod, "19", "ann-19-before", ago=1200)
+    sched._reconcile_announcements(NOW)
+    recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+            if l.strip()]
+    assert [r["outcome"] for r in recs] == [mod.ANNOUNCE_QUEUED], (
+        f"an announcement from before the process started was judged: {recs}")
+    # ...and one from after it still is.
+    _queue(mod, "19", "ann-19-after", ago=400)
+    sched._reconcile_announcements(NOW)
+    recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+            if l.strip()]
+    assert recs[-1]["outcome"] == mod.ANNOUNCE_UNDELIVERED
+    assert recs[-1]["sound"] == "ann-19-after"
+
+
+def test_the_process_start_is_actually_stamped():
+    """★ P4. Every test above sets `_STARTED` by hand to control its fixture, so
+    none of them can tell whether the module stamps it at all. Setting it to 0.0
+    — or forgetting it — makes the boundary inert in production while the whole
+    suite stays green, and the first upgrade files a false failure for every
+    announcement in the preceding hour. Which is what happened."""
+    import time as _time
+    mod = SourceFileLoader("delivery_start", str(WEBUI / "delivery.py")).load_module()
+    before = _time.time()
+    sched = _load_scheduler(mod)
+    after = _time.time()
+    assert before - 60 <= sched._STARTED <= after + 1, (
+        f"_STARTED is {sched._STARTED}, not this process's start time — the "
+        f"restart/upgrade boundary is inert")
