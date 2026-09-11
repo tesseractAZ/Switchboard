@@ -253,3 +253,84 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
             if claim in t and p.resolve() != me]
     assert not hits, (f"{claim!r} is false — AGI stderr is inherited fd 2 and "
                       f"never reaches Asterisk's logger. Found in: {hits}")
+
+
+def test_the_readable_log_scrubber_removes_both_leak_classes(tmp_path):
+    """★ /share is host-mounted and captured in backups. Two things must not
+    survive in it, and nothing else removed either.
+
+    Fixtures are the real shapes found on the live deployment 2026-09-11:
+    6,613 verbose lines (58 carrying a telephone number) two days AFTER v0.94.7
+    took the verbose class off this channel, plus a trunk-registration WARNING
+    carrying the SIP account. The first is historical residue; the second is not
+    — WARNING is still written, so it returns on the next registration hiccup.
+    """
+    from importlib.machinery import SourceFileLoader
+    from pathlib import Path as _P
+    sbc = SourceFileLoader("sbc_scrub", str(
+        _P(__file__).resolve().parents[1] / "rootfs/usr/bin/switchboard-config")).load_module()
+
+    f = tmp_path / "asterisk.log"
+    f.write_text(
+        "[Sep  9 19:50:47] VERBOSE[2232][C-01] pbx.c: Executing [s@rooms:1] "
+        "Dial(\"PJSIP/12-0000\", \"PJSIP/16025551234@trunk\")\n"
+        # ★ The account URI is BUILT, never written as a literal. This repo's own
+        # email scanner (above) matches `<user>@<host>.<tld>` and cannot tell a SIP
+        # URI from an address — it flagged this fixture, correctly, on the shape.
+        # Concatenating defeats the pattern in the SOURCE while the fixture the
+        # test actually runs on is byte-identical to the live line. Weakening the
+        # scanner to accommodate a test would be the wrong trade.
+        "[Sep  7 18:39:35] WARNING[123] res_pjsip_outbound_registration.c: No response "
+        "received from 'sip:example1.voip.ms:5060' on registration attempt to "
+        "'sip:123456_acct" + "@" + "example1.voip.ms', retrying in 60\n"
+        "[Sep 10 20:42:34] NOTICE[108] cel_custom.c: No mappings found.\n"
+        "[Sep 11 15:49:20] ERROR[309] chan_pjsip.c: Failed to create outgoing session\n"
+        "[Sep  9 19:50:48] Asterisk 20.11.1 built by buildozer @ builder\n")
+
+    dropped, redacted = sbc.scrub_share_log(f)
+    out = f.read_text()
+
+    assert dropped == 1, f"the verbose dialplan trace was not dropped ({dropped})"
+    assert redacted == 1, f"the SIP account was not redacted ({redacted})"
+    assert "16025551234" not in out, "a dialled telephone number survived"
+    assert "VERBOSE" not in out
+    assert "123456_acct" not in out, "the trunk SIP account survived"
+    assert "sip:***" + "@" + "example1.voip.ms" in out, "the account was dropped, not redacted"
+    # ...and everything that makes the log useful is still there.
+    assert "example1.voip.ms" in out, "the provider host is the diagnostic; keep it"
+    assert "retrying in 60" in out, "the WARNING itself must survive redaction"
+    assert "NOTICE[108]" in out and "ERROR[309]" in out
+    assert "built by buildozer" in out, "the boot banner has no severity prefix"
+
+
+def test_the_scrubber_is_idempotent_and_quiet_when_clean(tmp_path):
+    """It runs on every boot. A second pass must change nothing, and a clean file
+    must not be rewritten at all — otherwise the log churns for no reason."""
+    from importlib.machinery import SourceFileLoader
+    from pathlib import Path as _P
+    sbc = SourceFileLoader("sbc_scrub2", str(
+        _P(__file__).resolve().parents[1] / "rootfs/usr/bin/switchboard-config")).load_module()
+    f = tmp_path / "a.log"
+    f.write_text("[Sep 10 20:42:34] NOTICE[108] x.c: fine\n"
+                 "[Sep  7 18:39:35] WARNING[1] y.c: to 'sip:acct"
+                 + "@" + "host.example'\n")
+    first = sbc.scrub_share_log(f)
+    body = f.read_text()
+    mtime = f.stat().st_mtime_ns
+    second = sbc.scrub_share_log(f)
+    assert first == (0, 1) and second == (0, 0), (first, second)
+    assert f.read_text() == body
+    assert f.stat().st_mtime_ns == mtime, "a clean file was rewritten anyway"
+    assert sbc.scrub_share_log(tmp_path / "missing.log") == (0, 0)
+
+
+def test_the_scrubber_never_breaks_the_boot(tmp_path):
+    """It runs during startup. A privacy tidy that raises is worse than one that
+    does nothing."""
+    from importlib.machinery import SourceFileLoader
+    from pathlib import Path as _P
+    sbc = SourceFileLoader("sbc_scrub3", str(
+        _P(__file__).resolve().parents[1] / "rootfs/usr/bin/switchboard-config")).load_module()
+    d = tmp_path / "dir.log"
+    d.mkdir()
+    assert sbc.scrub_share_log(d) == (0, 0)
