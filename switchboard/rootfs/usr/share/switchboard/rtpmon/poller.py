@@ -188,7 +188,8 @@ def _sample_is_partial(reachable: list, phones: list,
 
 
 def summarize(phones: list, wired_exts: list | None = None,
-              measured_before: set | None = None) -> dict:
+              measured_before: set | None = None,
+              ever_registered: set | None = None) -> dict:
     """Rollup for the summary sensor: reachable/unreachable/offline split + worst RTT.
     'offline' (configured but de-registered) is called out separately from merely
     'unreachable' (registered but its qualify is failing) — a dropped cordless is
@@ -221,13 +222,42 @@ def summarize(phones: list, wired_exts: list | None = None,
                   if p["rtt_ms"] is not None and str(p["ext"]) in wired_set]
     other_rtts = [(str(p["ext"]), p["rtt_ms"]) for p in reachable
                   if p["rtt_ms"] is not None and str(p["ext"]) not in wired_set]
-    # Registered now, or measured at some point by this process. See the
-    # `expected` comment below for why both terms are load-bearing.
-    seen_before = measured_before or set()
-    expected_exts = {p["ext"] for p in phones if p.get("registered")} | {
-        p["ext"] for p in phones if p["ext"] in seen_before}
-    never_registered = {p["ext"] for p in phones
-                        if not p.get("registered") and p["ext"] not in seen_before}
+    # ★★★ v0.95.0 — `never_registered` IS A DURABLE FACT, NOT A PER-PROCESS ONE.
+    #
+    # THE DEFECT THIS REPLACES. `seen_before` was `measured_before`, which is
+    # in-memory and starts empty on every restart. So after a restart any
+    # endpoint that had not yet re-registered was "not registered AND not seen
+    # before" -> never_registered -> filtered out of `down` (see the writer) AND
+    # subtracted from `expected`. The denominator shrank to match the numerator.
+    #
+    # Measured over the field: `reachable == expected` in 1316 of 1316 rows
+    # carrying the field, and `down == []` in all 1316. The two numbers a reader
+    # would compare to spot an outage COULD NOT DISAGREE. Two whole-fleet
+    # blackouts (2026-08-19 22:53 and 2026-09-07 18:39, every extension AND the
+    # trunk unreachable) were recorded as "9 reachable, down: []".
+    #
+    # `ever_registered` is persisted, so "never registered" means what it says:
+    # no registration has EVER been seen for this AOR. On this plant that is ext
+    # 20, the softphone, and only ext 20. Everything else stays in the
+    # denominator across a restart, which is the whole point -- a phone that is
+    # not back yet is DOWN, not absent.
+    #
+    # NOTE this is deliberately NOT `measured_before` persisted. That set is
+    # about RTT measurement and starts empty on purpose (poller.run's comment:
+    # a restart should not trust stale history); it also feeds
+    # `worst_rtt_is_partial`, which is left exactly as it was.
+    configured = {p["ext"] for p in phones}
+    if ever_registered is None:
+        # Unknown (a direct caller that did not supply it): preserve the old
+        # reading rather than silently inventing a stronger claim.
+        seen_before = measured_before or set()
+        expected_exts = {p["ext"] for p in phones if p.get("registered")} | {
+            p["ext"] for p in phones if p["ext"] in seen_before}
+        never_registered = {p["ext"] for p in phones
+                            if not p.get("registered") and p["ext"] not in seen_before}
+    else:
+        never_registered = configured - set(ever_registered)
+        expected_exts = configured - never_registered
     return {
         "wired_median_rtt_ms": _median(wired_rtts),
         "wired_max_rtt_ms": max(wired_rtts) if wired_rtts else None,
@@ -631,6 +661,40 @@ def _now_iso() -> str:
 # is add-on-private (container shell blocked, backups encrypted, add-on API 403).
 ENDPOINT_LOG_PATH = os.environ.get("SWITCHBOARD_ASTERISK_LOG",
                                    "/data/state/asterisk.log")
+
+# Extensions that have EVER been seen registered. Durable, because "has this AOR
+# ever registered?" is a fact about the plant, not about this process -- see the
+# long note in summarize(). Grows only; an extension removed from the `rooms`
+# option simply stops appearing in `phones` and drops out of every set derived
+# from it, so a decommissioned phone does not linger.
+EVER_REGISTERED_PATH = os.environ.get("SWITCHBOARD_EVER_REGISTERED",
+                                      "/data/state/ever-registered.json")
+
+
+def load_ever_registered(path: str = None) -> set:
+    """The durable set, or an empty one. Never raises: a missing or corrupt file
+    must degrade to the old per-process reading, not stop the poller."""
+    try:
+        with open(path or EVER_REGISTERED_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {str(e) for e in data.get("exts", [])} if isinstance(data, dict) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_ever_registered(exts: set, path: str = None) -> bool:
+    """Write the set. Returns True only if it reached the disk — a silent
+    failure here would quietly restore the defect this file exists to fix."""
+    target = path or EVER_REGISTERED_PATH
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"exts": sorted(exts)}, fh)
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        return False
 _TRANSITION_RE = re.compile(r"Endpoint (\S+) is now (Unreachable|Reachable)")
 # Bound a single read so a huge backlog cannot balloon the poller's memory.
 _TRANSITION_MAX_READ = 512 * 1024
@@ -815,8 +879,14 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         # so a reader can tell "no data" from "zero phones up".
         rec["reachable"] = None
         rec["ami"] = "unreachable"
-    if wired_down:
-        rec["wired_down"] = list(wired_down)
+    # ★ v0.95.0 — ALWAYS emitted, even empty.
+    #
+    # This was `if wired_down:`, so the one field that names which gateway ports
+    # are missing was ABSENT from 2653 of 2765 live rows. A consumer could not
+    # key on it unconditionally; it had to infer meaning from a missing key, and
+    # "absent" read identically to "not measured". An empty list is a positive
+    # statement — nothing is down — and is worth the eighteen bytes.
+    rec["wired_down"] = list(wired_down or [])
     # Everything Asterisk saw while this poller was asleep. An empty list means
     # "nothing changed", which is a far stronger statement than a point-sample
     # that merely found everything up at one instant.
@@ -933,7 +1003,8 @@ def wired_exts(opts: dict) -> list:
 
 
 def poll_once(names: dict, wired: list | None = None,
-              measured_before: set | None = None) -> tuple:
+              measured_before: set | None = None,
+              ever_registered: set | None = None) -> tuple:
     """One measurement cycle. Returns (phones, summary) or (None, None) if AMI is
     down this cycle (caller just skips — no publish, no crash)."""
     import ami
@@ -944,7 +1015,7 @@ def poll_once(names: dict, wired: list | None = None,
     if not endpoints:
         return None, None  # AMI up but no roster -> skip (don't blank the sensors)
     phones = build_phone_health(endpoints, contacts, names)
-    return phones, summarize(phones, wired, measured_before)
+    return phones, summarize(phones, wired, measured_before, ever_registered)
 
 
 def wired_down_count(summ: dict, wired: list | None) -> int:
@@ -1000,14 +1071,23 @@ def run() -> int:
     # not raise worst_rtt_is_partial — see _sample_is_partial. Grows only; a
     # restart deliberately starts empty rather than trusting stale history.
     measured_before: set = set()
+    # ...and the DURABLE counterpart, which survives the restart that
+    # measured_before deliberately does not. See summarize().
+    ever_registered: set = load_ever_registered()
     while True:
         opts = _load_options()
         names = room_names(opts)
         wired = wired_exts(opts)
-        phones, summ = poll_once(names, wired, measured_before)
+        phones, summ = poll_once(names, wired, measured_before, ever_registered)
         if phones:
             measured_before |= {p["ext"] for p in phones
                                 if p["reachable"] and p["rtt_ms"] is not None}
+            # Registration, not reachability: an endpoint with a contact has
+            # registered, even if its qualify is currently failing.
+            newly = {p["ext"] for p in phones if p.get("registered")} - ever_registered
+            if newly:
+                ever_registered |= newly
+                save_ever_registered(ever_registered)
         reachable = summ.get("reachable", 0) if summ else 0
         if phones is not None:
             _append_history(phones)

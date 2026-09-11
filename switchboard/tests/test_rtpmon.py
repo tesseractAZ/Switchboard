@@ -891,7 +891,7 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         pm._load_options = lambda: {"link_health_alerts": False}
         pm.room_names = lambda o: {"11": "A", "13": "B"}
         pm.wired_exts = lambda o: ["11", "13"]
-        pm.poll_once = lambda n, w, m: (phones, summ)
+        pm.poll_once = lambda n, w, m, _ever=None: (phones, summ)
         pm._append_history = lambda p: None
         pm._publish = lambda p, s: None
         pm.trunk_enabled = lambda o: True
@@ -1260,7 +1260,7 @@ def test_the_detector_actually_reaches_a_notification() -> None:
             pm.room_names = lambda o: {}
             pm.wired_exts = lambda o: ["11", "12", "13", "14", "15",
                                        "16", "17", "18"]
-            pm.poll_once = lambda a, b, c: (phones, summ)
+            pm.poll_once = lambda a, b, c, _ever=None: (phones, summ)
             pm._append_history = lambda p: None
             pm._publish = lambda p, s: None
             pm._heartbeat = lambda *a, **k: None
@@ -1367,3 +1367,117 @@ def test_the_heartbeat_uses_the_transitions_it_was_handed() -> None:
         pm.endpoint_transitions = real
         pm.HEARTBEAT_PATH = real_path
         shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# ★★★ The fleet-health record must be able to say "down".
+# --------------------------------------------------------------------------- #
+def _fleet(up_exts, all_exts=("11", "12", "13", "14", "15", "16", "17", "18", "19", "20")):
+    """A plant where `up_exts` are registered+reachable and the rest are neither
+    — which is exactly the state of a freshly restarted Asterisk."""
+    return [_ph(e, 2.5 if e in up_exts else None,
+                reachable=e in up_exts, registered=e in up_exts)
+            for e in all_exts]
+
+
+def test_a_restarted_fleet_reports_down_instead_of_shrinking_the_denominator() -> None:
+    """★★★ THE DEFECT. Measured live: `reachable == expected` in 1316 of 1316
+    heartbeat rows carrying the field, and `down == []` in all 1316.
+
+    `never_registered` was "not registered AND not in measured_before", and
+    `measured_before` is in-memory and starts empty on every restart. So after a
+    restart every endpoint that had not yet re-registered was classed
+    never-registered, filtered out of `down`, and SUBTRACTED FROM `expected`.
+    The denominator shrank to match the numerator, so the two fields a reader
+    compares to spot an outage could not disagree.
+
+    Two whole-fleet blackouts (2026-08-19 and 2026-09-07 — every extension and
+    the trunk unreachable) were recorded as "9 reachable, down: []".
+
+    `ever_registered` is durable, so a phone that is not back yet is DOWN.
+    """
+    phones = _fleet(up_exts=())                       # nothing re-registered yet
+    ever = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}   # ext 20 never has
+
+    summ = pm.summarize(phones, ["11", "12", "13", "14", "15", "16", "17", "18"],
+                        measured_before=set(), ever_registered=ever)
+
+    assert summ["expected"] == 9, (
+        f"expected={summ['expected']} — the denominator shrank to match the "
+        f"numerator; an outage cannot be distinguished from health")
+    assert summ["reachable"] == 0
+    assert summ["reachable"] != summ["expected"], (
+        "reachable == expected on a totally dead fleet — this is the defect")
+    assert sorted(summ["never_registered_exts"]) == ["20"], (
+        f"never_registered={summ['never_registered_exts']} — it must mean 'no "
+        f"registration has EVER been seen', not 'not up yet in this boot'")
+
+
+def test_the_partially_recovered_fleet_names_the_missing_phones() -> None:
+    """The warmup case that produced the live 1316 rows: some back, some not."""
+    phones = _fleet(up_exts=("11", "12", "19"))
+    ever = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+    summ = pm.summarize(phones, ["11", "12", "13", "14", "15", "16", "17", "18"],
+                        measured_before=set(), ever_registered=ever)
+    assert summ["expected"] == 9 and summ["reachable"] == 3
+    assert set(summ["unreachable_exts"]) >= {"13", "14", "15", "16", "17", "18"}
+    assert "20" not in summ["unreachable_exts"] or "20" in summ["never_registered_exts"]
+
+
+def test_a_healthy_fleet_still_reads_nine_of_nine() -> None:
+    """The v0.72.0 property that must survive: ext 20 has never registered, so a
+    healthy plant reads 9 of 9 — not 9 of 10, which trained readers to ignore
+    the field."""
+    phones = _fleet(up_exts=("11", "12", "13", "14", "15", "16", "17", "18", "19"))
+    ever = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+    summ = pm.summarize(phones, ["11", "12", "13", "14", "15", "16", "17", "18"],
+                        measured_before=set(), ever_registered=ever)
+    assert summ["reachable"] == 9 and summ["expected"] == 9
+    assert summ["total"] == 10
+    assert summ["never_registered_exts"] == ["20"]
+
+
+def test_the_durable_set_round_trips_and_degrades_safely(tmp_path) -> None:
+    """It must never stop the poller. A missing or corrupt file degrades to the
+    old per-process reading rather than raising in the supervision loop."""
+    p = str(tmp_path / "ever.json")
+    assert pm.load_ever_registered(p) == set(), "a missing file must read empty"
+    assert pm.save_ever_registered({"11", "19"}, p) is True
+    assert pm.load_ever_registered(p) == {"11", "19"}
+    open(p, "w").write("{not json")
+    assert pm.load_ever_registered(p) == set(), "a corrupt file must not raise"
+    assert pm.save_ever_registered({"11"}, "/proc/nope/ever.json") is False, (
+        "a failed write must be reported, not swallowed — a silent failure here "
+        "restores the very defect this file exists to fix")
+
+
+def test_the_run_loop_persists_a_newly_registered_extension() -> None:
+    """★ Wiring, not data. The durable set is worthless if nothing writes to it,
+    and `summarize` cannot tell the difference."""
+    import inspect
+    src = inspect.getsource(pm.run)
+    assert "load_ever_registered()" in src, "the run loop never loads the durable set"
+    assert "save_ever_registered(" in src, "the run loop never persists it"
+    assert 'p.get("registered")' in src, (
+        "the set must grow on REGISTRATION, not reachability — an endpoint with "
+        "a contact has registered even while its qualify is failing")
+    assert "ever_registered)" in src, "the set is never passed to poll_once"
+
+
+def test_wired_down_is_always_present_even_when_empty() -> None:
+    """It was `if wired_down:`, so the one field naming which gateway ports are
+    missing was ABSENT from 2653 of 2765 live rows. A consumer had to infer
+    meaning from a missing key, and 'absent' read identically to 'not
+    measured'."""
+    import inspect
+    src = inspect.getsource(pm._heartbeat)
+    assert 'rec["wired_down"] = list(wired_down or [])' in src, (
+        "wired_down is conditional again — an empty list is a positive "
+        "statement and must be emitted")
+    # Scan CODE, not comments: the function's own comment quotes the removed
+    # `if wired_down:` to explain why it went, so a whole-source substring test
+    # matches its own explanation. Fourth self-match of this shape in this repo
+    # — forbid the construct, never the characters.
+    code = "\n".join(l for l in src.split("\n") if not l.lstrip().startswith("#"))
+    assert "if wired_down:" not in code, (
+        "the conditional emit is back; wired_down will vanish from healthy rows")
