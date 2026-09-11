@@ -806,15 +806,33 @@ def test_the_escalation_does_not_claim_a_ring_that_never_happened(tmp_path):
     check("re-ring: and the skip records the device state that caused it",
           any(r.get("device_state") == "Unavailable" for r in recs))
 
-    # Now let the ring be judged again: it should escalate, honestly.
-    sched._ringing["19"] = {"target_epoch": t0, "hhmm": "06:15",
-                            "started": t0, "retried": True, "rang_again": False}
-    sched._reconcile_rings(t0 + 2 * sched.RETRY_AFTER + 2)
-    check("re-ring: the failure still escalates", len(pushes) == 1)
+    # ★ v0.100.0 — THE SKIP ESCALATES ON THE SPOT, and this half of the test used
+    # to fabricate the state that made it look as though it did.
+    #
+    # It set `{"retried": True, "rang_again": False}` by hand and judged again.
+    # The code cannot produce that pair: `retried` is set True only in the branch
+    # that also sets `rang_again` True. So the assertions below were reading a
+    # message arm that was DEAD — the careful "second attempt was not made"
+    # wording, written and fixed once in v0.84.0, could never be reached from the
+    # path it was written for, because that path escalated to nobody at all. The
+    # skip recorded a row and stopped.
+    #
+    # Note this is the very mistake the comment forty lines down warns about,
+    # committed in the same test. Driving it end to end is what exposed it.
+    check("re-ring: a skipped second attempt escalates immediately",
+          len(pushes) == 1)
     check("re-ring: and does NOT claim the phone rang twice",
           "rung twice" not in pushes[0])
     check("re-ring: it says the second attempt was not made",
           "second attempt was not made" in pushes[0])
+    check("re-ring: and names why, rather than leaving it unexplained",
+          "handset was not available" in pushes[0])
+    check("re-ring: the verdict is recorded alongside the push",
+          any(r["outcome"] == "undelivered" and r.get("reason") == "re-ring-skipped"
+              for r in [_j.loads(l) for l in
+                        open(delivery.OUTCOME_PATH).read().splitlines() if l.strip()]))
+    check("re-ring: and the ring is no longer tracked",
+          "19" not in sched._ringing)
 
     # ★ ...and when the second ring DID go out, it must say so — driven END TO
     # END, never by hand-setting the flag in the fixture.

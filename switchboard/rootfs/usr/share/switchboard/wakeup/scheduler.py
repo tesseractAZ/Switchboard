@@ -78,6 +78,47 @@ def _sig(*_):
     _stop = True
 
 
+def _escalate(ext: str, hhmm: str, detail: str, reason: str, attempt: int) -> None:
+    """Record an undelivered wake-up AND tell somebody about it.
+
+    ★ v0.100.0 — EVERY WAY A WAKE-UP CAN FAIL NOW ARRIVES HERE. Until this
+    release exactly one of four did. The other three wrote a ledger row and
+    stopped: a re-ring the handset was not available for, a re-ring the PBX
+    refused, and an originate refused before the phone ever rang. All three are
+    a missed alarm clock, and all three were silent — the row is in a file
+    nobody reads at 6am.
+
+    The give-away was in the code itself. The wording below for "the second
+    attempt was not made" was UNREACHABLE: `retried` is set True only in the
+    branch that also sets `rang_again` True, so the ternary that chose it could
+    never take that arm. Careful phrasing had been written, reviewed and fixed
+    once (v0.84.0) for a case that never got as far as being said out loud.
+
+    Split out so the record and the notification cannot drift apart: a caller
+    that records an undelivered wake-up without telling anyone is the defect,
+    and now there is no way to write one.
+    """
+    log(f"wake-up for ext {ext} ({hhmm}) UNDELIVERED — {reason}")
+    _record(ext, "undelivered", hhmm=hhmm, attempt=attempt, reason=reason)
+    msg = f"The {hhmm} wake-up call for extension {ext} was not delivered. {detail}"
+    pushed = False
+    if ha_client is not None and PUSH_TARGET:
+        try:
+            # critical=True so it sounds through Do Not Disturb. An alarm clock
+            # that failed is exactly the case DND should not swallow.
+            pushed = ha_client.push(msg, title="Switchboard: wake-up not delivered",
+                                    target=PUSH_TARGET, critical=True)
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not push the undelivered wake-up: {exc}")
+    if not pushed and ha_client is not None:
+        # Fall back to the drawer card rather than losing the signal entirely.
+        try:
+            ha_client.notify(msg, title="Switchboard: wake-up not delivered",
+                             notification_id=f"switchboard_undelivered_wakeup_{ext}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not post the undelivered-wake-up card: {exc}")
+
+
 def _reconcile_rings(now: float) -> None:
     """Decide what happened to every ring we dispatched but never confirmed.
 
@@ -214,7 +255,17 @@ def _reconcile_rings(now: float) -> None:
                 log(f"re-ring for ext {ext} SKIPPED — room '{state or 'unknown'}'")
                 _record(ext, "re-ring-skipped", hhmm=r["hhmm"], attempt=2,
                         device_state=state or "unknown")
+                # ★ ...AND SAY SO. This path recorded the skip and stopped. The
+                # alarm did not go off, the second attempt was never made, and
+                # the owner was told nothing — the exact sentence below had been
+                # written for this case and was unreachable from it.
+                _escalate(ext, r["hhmm"],
+                          "The phone was rung once and nobody picked up; the "
+                          "second attempt was not made because the handset was "
+                          "not available.",
+                          reason="re-ring-skipped", attempt=2)
             else:
+                refused = ""
                 try:
                     if ami.originate_wakeup(ext, RING):
                         r["retried"] = True
@@ -222,46 +273,34 @@ def _reconcile_rings(now: float) -> None:
                         r["rang_again"] = True
                         _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
                         continue
+                    refused = "the phone system refused it"
                 except Exception as exc:  # noqa: BLE001
                     log(f"re-ring for ext {ext} failed: {exc}")
+                    refused = "the phone system could not be reached"
+                # The handset WAS available and the second ring still did not go
+                # out. Same verdict, different cause, and neither was reported.
+                _record(ext, "re-ring-failed", hhmm=r["hhmm"], attempt=2,
+                        detail=refused)
+                _escalate(ext, r["hhmm"],
+                          f"The phone was rung once and nobody picked up; the "
+                          f"second attempt was not made because {refused}.",
+                          reason="re-ring-failed", attempt=2)
             _ringing.pop(ext, None)
             continue
         # Second ring also failed — this is a genuinely undelivered alarm.
-        log(f"wake-up for ext {ext} ({r['hhmm']}) UNDELIVERED after two rings")
-        _record(ext, "undelivered", hhmm=r["hhmm"], attempt=2,
-                reason="answered-silent" if answered else "no-answer")
+        _escalate(ext, r["hhmm"],
+                  # ★ SAY ONLY WHAT IS KNOWN. This used to assert "The phone rang
+                  # twice and nobody picked up" on every undelivered wake-up — a
+                  # claim the scheduler cannot support. An Async Originate returns
+                  # success the moment AMI accepts it; if Asterisk then fails to
+                  # create the dialog (five such ERRORs are in the durable log) the
+                  # phone never rang at all, and the person woken by this push at
+                  # 6am was being told something false about their own house.
+                  "The phone was picked up but played no audio." if answered
+                  else "The phone was rung twice and nobody picked up.",
+                  reason="answered-silent" if answered else "no-answer",
+                  attempt=2)
         _ringing.pop(ext, None)
-        # ★ SAY ONLY WHAT IS KNOWN. This used to assert "The phone rang twice and
-        # nobody picked up" on every undelivered wake-up — a claim the scheduler
-        # cannot support. An Async Originate returns success the moment AMI
-        # accepts it; if Asterisk then fails to create the dialog (five such
-        # ERRORs are in the durable log) the phone never rang at all, and the
-        # person woken by this push at 6am was being told something false about
-        # their own house.
-        detail = ("The phone was picked up but played no audio."
-                  if answered else
-                  "The phone was rung twice and nobody picked up."
-                  if r.get("rang_again") else
-                  "The phone was rung once and nobody picked up; the second "
-                  "attempt was not made because the handset was not available.")
-        msg = (f"The {r['hhmm']} wake-up call for extension {ext} was not "
-               f"delivered. {detail}")
-        pushed = False
-        if ha_client is not None and PUSH_TARGET:
-            try:
-                # critical=True so it sounds through Do Not Disturb. An alarm
-                # clock that failed is exactly the case DND should not swallow.
-                pushed = ha_client.push(msg, title="Switchboard: wake-up not delivered",
-                                        target=PUSH_TARGET, critical=True)
-            except Exception as exc:  # noqa: BLE001
-                log(f"could not push the undelivered wake-up: {exc}")
-        if not pushed and ha_client is not None:
-            # Fall back to the drawer card rather than losing the signal entirely.
-            try:
-                ha_client.notify(msg, title="Switchboard: wake-up not delivered",
-                                 notification_id=f"switchboard_undelivered_wakeup_{ext}")
-            except Exception as exc:  # noqa: BLE001
-                log(f"could not post the undelivered-wake-up card: {exc}")
 
 
 def _reconcile_announcements(now: float) -> None:
@@ -392,6 +431,15 @@ def tick() -> None:
                              "retried": False}
         elif not errored:
             _record(ext, "originate-refused", hhmm=entry.get("hhmm"))
+            # ★ The phone never rang at all, and until v0.100.0 this was the
+            # quietest failure of the four: one ledger row and nothing else.
+            # Safe to escalate only because the entry is now consumed below —
+            # before that fix this path re-fired every 20 s, and a push on each
+            # would have been a notification storm rather than an alarm.
+            _escalate(ext, entry.get("hhmm") or "?",
+                      "The phone system refused to place the call, so the "
+                      "phone never rang.",
+                      reason="originate-refused", attempt=1)
         # ★ v0.99.0 — A REFUSED WAKE-UP IS ALSO CONSUMED. The comment above says
         # the store entry is consumed "so the next 20 s tick cannot re-fire it
         # into a ring storm", and the consumption sat inside `if ok:` — so on the

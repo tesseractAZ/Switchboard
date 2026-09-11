@@ -1053,8 +1053,12 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
   **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. The **lights**
   list scrolls with **↑↓** — it says how many lights are hidden above and below,
-  and repeats the area heading when the view starts inside one (0.94.4). The main
-  board does **not** scroll: a roster taller than the window is cut at the bottom.
+  and repeats the area heading when the view starts inside one (0.94.4). Since
+  0.100.0 **the board itself scrolls the same way**: the roster follows the
+  selection and says how many rooms are out of view. When the window is shorter
+  still, the active-call and wake-up lists collapse to a count of what they are
+  hiding — but the key bar at the bottom is never given up, which is what used to
+  happen first, because the page was simply cut off at the terminal's last row.
   Toggle with `console_enabled`. **Since 0.94.0 this binds to `127.0.0.1` by
   default** — on a *fresh* install; an upgrade keeps the `console_bind` you
   already had, and the start-up line names the address it is actually listening
