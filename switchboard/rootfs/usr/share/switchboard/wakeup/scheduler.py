@@ -340,8 +340,37 @@ def _reconcile_announcements(now: float) -> None:
     except Exception as exc:  # noqa: BLE001  (telemetry must never kill the loop)
         log(f"could not reconcile announcements: {exc}")
         return
+    settle_until = _STARTED + _delivery.ANNOUNCE_SETTLE_SECONDS
     for rec in stale:
         ext, sound = rec.get("ext") or "?", rec.get("sound") or "?"
+        # ★ THE RESTART WINDOW IS NOT A FAILURE, AND IT IS NOT A SUCCESS EITHER.
+        #
+        # Asterisk restarts with the add-on and its endpoints take up to two
+        # minutes to re-register. An announcement originated into that gap really
+        # does not arrive — so `announce-undelivered` is TRUE, and useless: the
+        # cause is a restart the operator already performed, and nothing about it
+        # is actionable. Live 2026-09-11, an announcement queued 18 s after a
+        # restart failed with `Could not create dialog to invalid URI '19'` while
+        # the same handset was unreachable in 2 of 1,714 steady-state polls.
+        #
+        # `not_before=_STARTED` does not cover this: that guard asks whether THIS
+        # PROCESS was running, and it was — it is Asterisk that had not finished
+        # coming back. A second condition, not a longer horizon.
+        #
+        # Recorded rather than skipped, because a queued row with no verdict at
+        # all is indistinguishable from one the reconciler forgot. This says
+        # plainly that it was not judged, and why.
+        if rec["_ts"] < settle_until:
+            log(f"announcement {sound} to ext {ext} was queued "
+                f"{int(settle_until - rec['_ts'])}s inside the post-restart "
+                f"settling window — not judged")
+            try:
+                _delivery.record(ext, "announce", _delivery.ANNOUNCE_UNSETTLED,
+                                 sound=sound, queued=rec.get("ts"),
+                                 reason="pbx-restarting")
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not record the unsettled announcement {sound}: {exc}")
+            continue
         log(f"announcement {sound} to ext {ext} was queued "
             f"{int(now - rec['_ts'])}s ago and never reached the handset")
         try:

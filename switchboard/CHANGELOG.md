@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.100.2
+
+**An announcement sent while the phone system was still starting up was
+reported as never arriving. True, and useless.**
+
+The add-on restarts Asterisk with it, and the handsets take up to two minutes to
+register again. An announcement sent into that gap really does not arrive — but
+saying so tells you nothing you did not already know, because the cause is the
+restart you just performed. It happened on 2026-09-11: an announcement sent
+eighteen seconds after a restart failed because the cordless had not come back
+yet, and three minutes later it was filed as undelivered.
+
+Anything sent within two minutes of the add-on starting is now recorded as *not
+judged*, with the reason, instead of as a failure. It is recorded rather than
+quietly skipped: a request with nothing after it cannot be told apart from one
+the system forgot about.
+
+Two minutes is not a new guess — it is the same settling time the health
+monitor already waits before it considers the phones finished re-registering.
+Two parts of the system answering "has it come back yet?" should not answer it
+differently.
+
+Genuine misses during ordinary running are unaffected, which is the point of
+the feature and is tested from both sides of the boundary.
+
+**Also: the documentation check added yesterday had a blind spot, and this
+release walked straight into it.** It read outcome names written directly at the
+point of use, but the announcement outcomes are written through shared constants
+so that two programs spell them identically — so the new one was invisible to it
+and went undocumented. The check now reads both.
+
 ## 0.100.1
 
 **A log audit found one thing the manual had already fallen behind on, and the

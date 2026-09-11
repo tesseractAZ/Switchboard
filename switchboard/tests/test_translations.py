@@ -215,7 +215,23 @@ def test_every_outcome_name_the_code_writes_is_in_the_manual() -> None:
         written |= set(re.findall(r'_record\(\s*ext\s*,\s*"([a-z][a-z-]+)"', code))
         written |= set(re.findall(
             r'_record_delivery\([^,]+,\s*"[a-z]+"\s*,\s*"([a-z][a-z-]+)"', code))
+    # ★ ...AND THE NAMES THAT ARE NOT LITERALS AT THE CALL SITE.
+    #
+    # This test shipped in v0.100.1 scanning only call sites, and the very next
+    # change slipped past it: the announce path writes its outcomes through
+    # CONSTANTS (`_delivery.record(ext, "announce", _delivery.ANNOUNCE_UNSETTLED)`)
+    # because two programs have to spell them identically, so there is no literal
+    # at the call site to match. A scanner that only knows one of the two ways
+    # this codebase names an outcome is a scanner with a blind spot.
+    #
+    # String-valued UPPERCASE constants only, which is exactly the outcome
+    # vocabulary — the timing constants beside them are numbers and drop out.
+    vocab = (root / "rootfs" / "usr" / "share" / "switchboard" / "webui"
+             / "delivery.py").read_text()
+    written |= set(re.findall(r'^[A-Z_]+ = "([a-z][a-z-]+)"', vocab, re.M))
     check(f"outcomes: the code-side scan finds some ({len(written)})", len(written) >= 10)
+    check("outcomes: the scan sees constant-named outcomes, not just literals",
+          "audio-delivered" in written and "announce-undelivered" in written)
     missing = sorted(n for n in written if f"`{n}`" not in docs)
     check(f"outcomes: every name the code writes is in the manual ({missing})",
           not missing)
