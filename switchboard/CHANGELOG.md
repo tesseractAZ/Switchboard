@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.97.0
+
+**Four wake-up calls that woke somebody rang the phone a second time and then
+pushed a critical alert saying they had not.**
+
+They are all in the ledger. Two stopped at the greeting, having transmitted 1.2
+and 3.2 seconds of audio; two stopped during the spoken extras, having
+transmitted 14 and 12 seconds. Every one of them reached a sleeper who picked up
+the phone, heard the wake-up, and hung up — and every one was scored
+`undelivered`, re-rang the handset ninety seconds later, and sent a
+Do-Not-Disturb-bypassing push at six in the morning to a person who was already
+awake.
+
+Two separate causes, both fixed here.
+
+The delivery milestone was written from the dialplan line *after* the greeting
+finishes playing, so it was unreachable for exactly the sleeper the alarm clock
+works best on: the one woken **by** the greeting, who hangs up during it.
+Asterisk abandons the script the instant the channel drops, so that line never
+ran. The hangup handler could see the audio all along — it counts transmitted
+RTP packets — and now says so, in the same ledger, from the same verdict the
+call-quality score is computed with. Both instruments are read, and either one
+is enough; the milestone still proves the greeting played to the end, which the
+packet count does not.
+
+Separately, the list of script stages that count as a delivered wake-up was
+maintained by hand beside a dialplan that sets them, and had drifted: it named a
+stage the dialplan has never set, and omitted two that it does. The list is now
+derived from the stage order rather than restated, and a test compares it
+against the dialplan directly, so a stage added in one place can no longer go
+missing in the other.
+
+The failure this all exists to catch is untouched and still the loudest thing in
+the ledger: a wake-up answered in silence — picked up, zero audio transmitted —
+is `undelivered`, alerts, and rings again. "Delivered" now requires a full second
+of audio to have actually left the box, not merely a packet or two, so a handset
+dropped inside the codec's own startup cannot be mistaken for one that woke
+someone.
+
 ## 0.96.0
 
 **A call that carried no audio was recorded the same way whether or not anyone

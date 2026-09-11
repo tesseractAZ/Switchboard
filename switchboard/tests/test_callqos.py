@@ -1218,7 +1218,13 @@ def test_a_truncated_delivery_is_named_but_only_the_alarm_clock_alerts() -> None
             billsec="30", stage=stage, rxcount="1500", txcount=txcount,
             rxmes="88", txmes="88", rtt="0.01", maxrtt="0.02", stdevrtt="0.003"))
 
-    cut = leg("wakeup-deliver", "greeting")
+    # v0.97.0 repointed this anchor. It used to use stage="greeting", which is
+    # now the stage at which the script has DEMONSTRABLY PLAYED — with the 1500
+    # transmitted packets this fixture passes, that is a 30-second wake-up call
+    # somebody heard, and the old expectation was the false alarm this release
+    # removes. `scene` is still genuinely cut short: it is set before a word is
+    # spoken. The invariant under test (only the alarm clock alerts) is unchanged.
+    cut = leg("wakeup-deliver", "scene")
     check("F36: a wake-up cut off mid-script is undelivered",
           cut["quality"] == "undelivered")
     check("F36: and it alerts", cut["notify"] is True)

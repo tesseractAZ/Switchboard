@@ -74,23 +74,52 @@ PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
 # (wakeup, automation, status) still alert exactly as before.
 PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 
-# Contexts that narrate a script, and the stage each reaches when it finishes.
+# The stages [wakeup-deliver] sets, IN THE ORDER THE DIALPLAN SETS THEM.
+# switchboard-config's render_wakeup_context() is the definition; this is a copy,
+# and test_wakeup_delivery_verdict keeps the two identical. A stage added there
+# and not here scores as a failed delivery — silently, at six in the morning.
+WAKEUP_STAGES = ("answering", "scene", "greeting", "time", "extras", "repeat",
+                 "complete")
+# ...and the stage from which audio has demonstrably played. The dialplan sets
+# `greeting` immediately before Playback(sw-wakeup-greeting), so reaching it and
+# transmitting audio is the earliest proof that sound left the box towards a live
+# handset. Everything after it is more of the same script.
+WAKEUP_DELIVERED_FROM = "greeting"
+
+# Transmitted RTP packets that count as audio somebody actually heard: 50
+# packets is one second of ulaw at 20 ms per packet, the same rate `rtp_secs`
+# below divides by.
+#
+# Deliberately a duration and not `> 0`. A handset picked up and dropped inside
+# the codec's own startup can emit a stray packet or two, and the one thing this
+# verdict must never do is launder the 2026-09-02 06:15:22 leg — answered,
+# txcount 0, the sleeper heard silence — into a success. One second is also
+# comfortably below both live early-hangups (59 and 161 packets, i.e. 1.2 s and
+# 3.2 s), so it separates "heard the greeting start" from "heard nothing".
+DELIVERED_MIN_TXCOUNT = 50
+
+# Contexts that narrate a script, and the stages that mean the script delivered.
 # The dialplan enters both ONLY after Answer(), so a non-empty `stage` on one of
 # these legs is proof the call was picked up — which makes the pair (stage,
 # txcount) a complete delivery verdict: somebody answered, and this much audio
 # actually left the box.
-# ★ v0.96.0 — SETS, not single strings, and membership rather than `!=`.
 #
-# A wake-up whose greeting played and whose caller then hung up HAS been
-# delivered; the reconciler draws its line at the greeting, the scorer drew it at
-# the final stage, and the two disagreed on the same leg. Over 48 h the scorer
-# alarmed on 5 legs, one of which had played the entire script, while the
-# worst-sounding leg in the whole ledger alarmed on nothing.
+# ★ v0.96.0 made this a SET, because `_stage != "complete"` makes any new
+# terminal stage inert on arrival. v0.97.0 fixes what the set CONTAINED: it
+# listed {complete, delivered, repeat}, where "delivered" is not a stage the
+# dialplan has ever set and `time`/`extras` are. Live consequence, in the ledger
+# right now: four wake-ups scored `undelivered` with `notify: true` — two that
+# stopped at `extras` having transmitted 704 and 623 packets (14 and 12 seconds
+# of the script), and two that stopped at `greeting` with 59 and 161. All four
+# woke somebody; all four earned a DND-bypassing push at 6am saying they had not.
 #
-# This must be a set before any new latch string is introduced, or the latch is
-# inert: any value other than "complete" is still `!= "complete"`.
-SCRIPTED_TERMINAL = {"wakeup-deliver": {"complete", "delivered", "repeat"},
-                     "announce": {"complete"}}
+# So the set is DERIVED from the ladder rather than enumerated by hand, which is
+# what let a real stage go missing and a fictional one take its place.
+SCRIPTED_TERMINAL = {
+    "wakeup-deliver": frozenset(
+        WAKEUP_STAGES[WAKEUP_STAGES.index(WAKEUP_DELIVERED_FROM):]),
+    "announce": frozenset({"complete"}),
+}
 
 # ...and the one scripted context with a hard deadline. A wake-up call that did
 # not wake anyone is a failure with a real-world cost; a page or an announcement
@@ -270,6 +299,41 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
 # --------------------------------------------------------------------------- #
 # Derive the full metric set from the raw args.
 # --------------------------------------------------------------------------- #
+def delivery_failures(tag: str, stage: str, txcount: int) -> list:
+    """Why this scripted playback leg did NOT deliver. Empty list means it did.
+
+    ★ THE ONE PLACE THE RULE LIVES. This program scores the quality ledger from
+    it AND writes the delivery ledger the wake-up reconciler reads (see
+    record_delivery), so the two cannot disagree about the same leg. They already
+    did — on 2026-09-08 06:12:22 the reconciler called a leg undelivered and
+    re-rang the phone while the quality ledger, looking at the same numbers,
+    could see 59 packets of greeting had reached it.
+
+    Two independent facts, both required:
+
+      stage    — the dialplan enters these contexts only after Answer(), so any
+                 stage at all proves a pickup, and the LAST stage reached says
+                 how far the script got. `greeting` onwards means a Playback ran.
+      txcount  — how much audio actually left the box. A stage is set BEFORE the
+                 Playback it labels, so reaching `greeting` on its own proves
+                 only that Asterisk tried.
+
+    A leg with no stage is not a scripted delivery at all (an ordinary room call
+    sets none) and is returned as no failures — never dragged into this rule.
+    """
+    terminal = SCRIPTED_TERMINAL.get(tag or "")
+    if not terminal or not stage:
+        return []
+    out = []
+    if txcount == 0:
+        out.append("answered but transmitted no audio")
+    elif txcount < DELIVERED_MIN_TXCOUNT:
+        out.append(f"only {txcount / 50.0:.1f}s of audio reached the handset")
+    if stage not in terminal:
+        out.append(f"delivery stopped at stage {stage!r}")
+    return out
+
+
 def build_record(a) -> dict:
     rxcount, txcount = _int(a.rxcount), _int(a.txcount)
     rxploss, txploss = _int(a.rxploss), _int(a.txploss)
@@ -426,13 +490,7 @@ def build_record(a) -> dict:
     # Both halves of the verdict are already in the record. A stage means the leg
     # was answered; txcount says whether anything reached them.
     _stage = (a.stage or "").strip()
-    _terminal = SCRIPTED_TERMINAL.get(a.tag or "")
-    undelivered = []
-    if _terminal and _stage:
-        if txc == 0:
-            undelivered.append("answered but transmitted no audio")
-        if _stage not in _terminal:
-            undelivered.append(f"delivery stopped at stage {_stage!r}")
+    undelivered = delivery_failures(a.tag or "", _stage, txc)
 
     if undelivered:
         _quality = "undelivered"
@@ -840,6 +898,55 @@ def _parse_args(argv):
     return args
 
 
+def record_delivery(rec: dict) -> None:
+    """Tell the wake-up reconciler that audio reached the handset.
+
+    ★ THE OTHER HALF OF THE 6AM PUSH, and the reason this lives here rather than
+    in a second script.
+
+    scheduler._reconcile_rings() joins on a `spoken` record, written by the
+    delivery AGI from the line AFTER Playback(sw-wakeup-greeting). That is the
+    right milestone for a greeting that finishes — and it is unreachable for the
+    sleeper this alarm clock works best on: woken BY the greeting, hangs up
+    during it. Asterisk abandons the extension the instant the channel drops, so
+    the AGI never runs, no `spoken` lands, and ninety seconds later the
+    reconciler rings the phone a second time and then pushes a critical,
+    DND-bypassing "your wake-up call did not go through" to a person who is
+    already awake because it did. Live on 2026-09-08 at 06:12:22.
+
+    The h-extension already knows the answer: 59 transmitted packets at stage
+    `greeting`. So the leg reports its own delivery, from the same verdict the
+    quality ledger is scored with — one decision, two ledgers, no way for them to
+    contradict each other on the same call.
+
+    Written for EVERY delivered wake-up leg, not only the early hangups. It costs
+    one line and makes this an independent second witness to `spoken`: the AGI
+    write has failed silently before (EACCES for two releases, /share root-owned),
+    and on the alarm path two instruments beat one.
+
+    Best-effort throughout. A telemetry write must never be the reason a hangup
+    handler raises.
+    """
+    if rec.get("tag") != ALARM_TAG or rec.get("quality") == "undelivered":
+        return
+    ext = str(rec.get("ext") or "")
+    if not ext or rec.get("ext_redacted"):
+        return
+    try:
+        import delivery                       # /usr/share/switchboard/webui
+    except Exception:                         # noqa: BLE001
+        return
+    try:
+        # The outcome name comes from `delivery`, the module the reconciler also
+        # imports. A literal here and a literal there is a silent rename away
+        # from a wake-up that reports its delivery to nobody.
+        delivery.record(ext, "wakeup", delivery.AUDIO_DELIVERED,
+                        stage=rec.get("stage") or None,
+                        txcount=rec.get("txcount"))
+    except Exception:                         # noqa: BLE001
+        pass
+
+
 def _detach() -> None:
     """Fork into a new session so channel teardown on hangup can't kill us mid-push.
 
@@ -881,6 +988,7 @@ def main(argv=None) -> int:
         # Readable proof this program ran and what it decided -- the dialplan's
         # trailing '&' means launch is all it can ever prove.
         append_outcome(rec)
+        record_delivery(rec)
         push_ha(rec)
     except (Exception, SystemExit):
         # A hangup handler must never fail loudly. Swallow and move on.

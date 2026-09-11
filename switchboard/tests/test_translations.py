@@ -207,6 +207,11 @@ def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
     code = "".join((root / p).read_text() for p in (
         "rootfs/usr/share/switchboard/wakeup/scheduler.py",
         "rootfs/usr/share/switchboard/webui/app.py",
+        # v0.97.0 — delivery.py now DEFINES outcome names rather than only
+        # storing them, because two programs in different directories have to
+        # spell `audio-delivered` identically. Omitting it here would make a
+        # documented outcome read as undocumented.
+        "rootfs/usr/share/switchboard/webui/delivery.py",
         "rootfs/var/lib/asterisk/agi-bin/switchboard-wakeup-deliver.agi",
         "rootfs/var/lib/asterisk/agi-bin/switchboard-assistant.agi",
     ))
