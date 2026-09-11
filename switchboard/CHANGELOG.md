@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.96.0
+
+**A call that carried no audio was recorded the same way whether or not anyone
+answered it — so the one case worth telling you about never did.**
+
+Nine such calls sit in the ledger, all filed identically and all silent. But a
+call nobody picked up carried no audio by definition and is not a fault, while a
+call somebody *did* pick up and heard nothing on is a real one. Mixing them made
+the category too noisy to alert on, which meant the genuine failure could not
+raise an alert either.
+
+They are now told apart by whether the call was answered and by how it ended: a
+call that rang out, one abandoned while it was still ringing, and one that could
+never be connected each say so. Only the answered-but-silent case raises an
+alert, and it now does.
+
+**A wake-up could be delivered and still be reported as a failure.** The alarm
+scored a wake-up as undelivered unless it reached the very last step of the
+script, while the part of the system that decides whether you were actually woken
+draws its line at the greeting. Over two days that disagreement produced five
+alerts, one of them on a wake-up that had played the whole script — and the
+worst-sounding call in the entire ledger raised nothing at all. More than one
+stopping point now counts as delivered, which is also a precondition for the
+remaining half of that fix.
+
 ## 0.95.1
 
 **The previous release got its first boot wrong.** Remembering which phones have

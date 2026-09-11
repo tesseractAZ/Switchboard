@@ -79,7 +79,18 @@ PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 # these legs is proof the call was picked up — which makes the pair (stage,
 # txcount) a complete delivery verdict: somebody answered, and this much audio
 # actually left the box.
-SCRIPTED_TERMINAL = {"wakeup-deliver": "complete", "announce": "complete"}
+# ★ v0.96.0 — SETS, not single strings, and membership rather than `!=`.
+#
+# A wake-up whose greeting played and whose caller then hung up HAS been
+# delivered; the reconciler draws its line at the greeting, the scorer drew it at
+# the final stage, and the two disagreed on the same leg. Over 48 h the scorer
+# alarmed on 5 legs, one of which had played the entire script, while the
+# worst-sounding leg in the whole ledger alarmed on nothing.
+#
+# This must be a set before any new latch string is introduced, or the latch is
+# inert: any value other than "complete" is still `!= "complete"`.
+SCRIPTED_TERMINAL = {"wakeup-deliver": {"complete", "delivered", "repeat"},
+                     "announce": {"complete"}}
 
 # ...and the one scripted context with a hard deadline. A wake-up call that did
 # not wake anyone is a failure with a real-world cost; a page or an announcement
@@ -420,7 +431,7 @@ def build_record(a) -> dict:
     if _terminal and _stage:
         if txc == 0:
             undelivered.append("answered but transmitted no audio")
-        if _stage != _terminal:
+        if _stage not in _terminal:
             undelivered.append(f"delivery stopped at stage {_stage!r}")
 
     if undelivered:
@@ -430,7 +441,42 @@ def build_record(a) -> dict:
         # else scripted stays silent — a truncated page is not an emergency.
         _notify = (a.tag or "") == ALARM_TAG
     elif a.nomedia:
-        _quality, _reasons, _notify = "no-media", ["leg carried no RTP media"], False
+        # ★ v0.96.0 — "no RTP" was FOUR different outcomes wearing one label, and
+        # the only one worth paging on was the one that never paged.
+        #
+        # All 9 no-media legs in the live ledger read `quality: "no-media",
+        # notify: false`. But an ANSWERED call that carried no audio is a real
+        # fault — someone picked up and heard silence — while a call nobody
+        # answered carried no audio by definition and is not a fault at all.
+        # Filing both as "no-media" meant the bucket was mostly noise, so the
+        # notify had to stay off, so the genuine case could never page.
+        #
+        # billsec and hcause both already reach here and both are already in the
+        # record, so the split costs nothing and is auditable afterwards.
+        _hc = _int(a.hcause)
+        _bs = billsec or 0
+        if _bs > 0:
+            # Answered, and still no RTP. THE case worth catching.
+            _quality, _reasons, _notify = (
+                "no-media", ["answered but carried no RTP media"], True)
+        elif _hc == 127:
+            _quality, _reasons, _notify = (
+                "abandoned", ["caller hung up during ringback"], False)
+        elif _hc in (3, 34):
+            # Channel could never be created / invalid extension. Deliberately
+            # NOT a page: 2 of the 9 live cases are dials to ext 20, whose
+            # non-registration is intentional, and 1 is a misdial that
+            # Congestion() correctly rejected. A bucket of its own keeps a
+            # genuine routing defect visible without paging on known-benign
+            # behaviour.
+            _quality, _reasons, _notify = (
+                "unreachable", ["channel could not be created"], False)
+        elif _hc == 16:
+            _quality, _reasons, _notify = (
+                "not-answered", ["rang out; nobody answered"], False)
+        else:
+            _quality, _reasons, _notify = (
+                "no-media", ["leg carried no RTP media"], False)
     else:
         _quality, _reasons = label, reasons
         _notify = notify and (a.tag or "") not in PLAYBACK_TAGS

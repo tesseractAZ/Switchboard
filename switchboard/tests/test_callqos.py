@@ -1116,14 +1116,36 @@ def test_a_call_that_carried_no_media_still_reaches_the_ledger() -> None:
               cid="19", billsec="0", hcause="16", nomedia=True)
     rec = cq.build_record(a)
     check("F31: the abandoned call IS a record", isinstance(rec, dict))
-    check("F31: labelled for what it is, not as a measurement failure",
-          rec["quality"] == "no-media")
+    # ★ v0.96.0 — this used to read "no-media", which conflated FOUR outcomes.
+    # billsec 0 + hcause 16 is a call that rang out. It carried no audio by
+    # definition and is not a fault; calling it no-media put it in the same
+    # bucket as an answered call that played silence, and the bucket was then
+    # too noisy to ever notify on.
+    check("F31: a call that rang out is labelled as such",
+          rec["quality"] == "not-answered")
     check("F31: which is distinct from 'we measured and could not tell'",
           rec["quality"] != "unknown")
     check("F31: it says who", rec["ext"] == "19")
     check("F31: and which leg", rec["tag"] == "rooms")
-    check("F31: it explains itself", rec["reasons"] == ["leg carried no RTP media"])
+    check("F31: it explains itself", rec["reasons"] == ["rang out; nobody answered"])
     check("F31: and it never wakes anyone", rec["notify"] is False)
+    # The other three shapes the old single label swallowed.
+    _ab = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000d",
+                                cid="19", billsec="0", hcause="127", nomedia=True))
+    check("F31: abandoned during ringback is its own bucket",
+          _ab["quality"] == "abandoned" and _ab["notify"] is False)
+    _un = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000e",
+                                cid="19", billsec="0", hcause="3", nomedia=True))
+    check("F31: an uncreatable channel is its own bucket, and stays silent",
+          _un["quality"] == "unreachable" and _un["notify"] is False)
+    # ★ ...and THE case worth catching, which the old label could never page on:
+    # someone picked up and heard nothing.
+    _silent = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000f",
+                                    cid="19", billsec="12", hcause="16", nomedia=True))
+    check("F31: an ANSWERED leg with no RTP is the real fault",
+          _silent["quality"] == "no-media")
+    check("F31: ...and it is the only no-media shape that pages",
+          _silent["notify"] is True)
     check("F31: no metrics are invented from a leg that measured nothing",
           rec["mes_worst"] is None and rec["rtt_ms"] is None)
     # The notify guard has to hold even when the scoring path WOULD have fired.
@@ -1133,8 +1155,12 @@ def test_a_call_that_carried_no_media_still_reaches_the_ledger() -> None:
     # mutation harness confirmed: deleting the guard changed no result). Feed it
     # the shape that trips one-way detection, so the guard is what keeps an
     # abandoned call from paging the house if the invocation ever grows counts.
+    # The original shape used billsec=10, which v0.96.0 now (correctly) treats as
+    # an answered silent call and DOES page on. The guard being tested here is
+    # "an abandoned call never pages, whatever else is in the record", so the
+    # exemplar moves to the abandoned shape it was always about.
     loud = _Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000b",
-                 cid="19", billsec="10", hcause="16", nomedia=True,
+                 cid="19", billsec="0", hcause="16", nomedia=True,
                  rxcount="1000", txcount="0", rxmes="88", txmes="0")
     check("F31: precondition — this shape DOES alert without the no-media flag",
           cq.build_record(_Args(source="dialplan", tag="rooms",
@@ -1266,3 +1292,40 @@ def test_a_telephone_number_is_not_mirrored_to_the_readable_folder() -> None:
               line3["ext"] == "123456")
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_more_than_one_stage_counts_as_delivered() -> None:
+    """★ The scorer and the reconciler drew the delivery line in different places.
+
+    `SCRIPTED_TERMINAL` mapped wakeup-deliver to the single string "complete" and
+    the test was `_stage != _terminal`. The reconciler draws its line at the
+    GREETING — a wake-up whose greeting played and whose caller then hung up has
+    demonstrably woken someone. Over 48 h the scorer alarmed on 5 legs, one of
+    which had played the entire script, while the worst-sounding leg in the whole
+    ledger alarmed on nothing.
+
+    It has to be a SET before any new latch string is introduced, or the latch is
+    inert: every value other than "complete" is still `!= "complete"`.
+    """
+    assert isinstance(cq.SCRIPTED_TERMINAL["wakeup-deliver"], (set, frozenset)), (
+        "a single string means any new terminal stage is still 'not complete', "
+        "and any latch added upstream is dead on arrival")
+    assert "complete" in cq.SCRIPTED_TERMINAL["wakeup-deliver"]
+
+    for stage in sorted(cq.SCRIPTED_TERMINAL["wakeup-deliver"]):
+        rec = cq.build_record(_Args(
+            source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000a1",
+            cid="19", billsec="26", hcause="16", stage=stage,
+            rxcount="1200", txcount="1200", rxmes="88", txmes="88"))
+        assert rec["quality"] != "undelivered", (
+            f"stage {stage!r} is listed terminal but still scored undelivered")
+
+    # ...and a genuinely truncated one still is.
+    cut = cq.build_record(_Args(
+        source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000a2",
+        cid="19", billsec="1", hcause="16", stage="scene",
+        rxcount="10", txcount="0", rxmes="88", txmes="0"))
+    assert cut["quality"] == "undelivered", (
+        "a wake-up that stopped at 'scene' having transmitted nothing is the "
+        "failure this alarm exists for")
+    assert cut["notify"] is True, "an alarm clock that did not go off must say so"
