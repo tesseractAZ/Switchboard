@@ -2164,6 +2164,65 @@ SHARE_LOG = SHARE_DIR / "asterisk.log"
 SHARE_LOG_MAX_BYTES = 32 * 1024 * 1024
 
 
+# A SIP account identifier in a URI: `sip:<user>@<host>`. Asterisk writes the
+# full outbound-registration URI into WARNING lines when a trunk registration
+# retries — e.g. res_pjsip_outbound_registration.c's "No response received from
+# ... on registration attempt to 'sip:<account>@<provider>'" — and WARNING is a
+# class the readable copy carries. The host is left alone: it names the provider,
+# which is what makes the line diagnostic, and identifies nobody.
+_SIP_ACCT_RE = re.compile(r"sip:[A-Za-z0-9_.+-]+@")
+_SEVERITY_RE = re.compile(r"^\[[^\]]+\] ([A-Z]+)\[")
+
+
+def scrub_share_log(path: Path) -> tuple:
+    """Take the credentials and the call detail out of the READABLE log copy.
+
+    ★ THE COPY IN /share IS HOST-MOUNTED AND CAPTURED IN BACKUPS. Two classes of
+    content do not belong in it, and neither is removed by anything else:
+
+    `VERBOSE` lines. v0.94.7 took the verbose class off this channel because it
+    carries the dialplan trace — who called whom, and every telephone number
+    dialled. That stopped NEW leakage and removed nothing already written. On the
+    deployment this was found on, the readable copy still held 6,613 verbose
+    lines, 58 of them carrying a 10-11 digit number, two days after the fix.
+    Closing a tap does not drain the bucket.
+
+    The SIP ACCOUNT in a registration URI. This one is not historical: a trunk
+    registration retry writes it at WARNING, which this channel still carries, so
+    it comes back on the next hiccup. Redacted rather than dropped — the line is
+    how you find out your trunk is flapping, and it stays readable as
+    `sip:***@<provider>`.
+
+    The private copy in /data keeps both in full; it is not readable from outside
+    the container, which is the whole reason the two copies differ.
+
+    Rewrites in place so the inode survives an Asterisk holding the file open for
+    append. Returns (dropped, redacted); (0, 0) means it had nothing to do, which
+    is the steady state.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return (0, 0)
+        dropped = redacted = 0
+        out = []
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = _SEVERITY_RE.match(line)
+                if m and m.group(1) == "VERBOSE":
+                    dropped += 1
+                    continue
+                new = _SIP_ACCT_RE.sub("sip:***@", line)
+                if new != line:
+                    redacted += 1
+                out.append(new)
+        if dropped or redacted:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.writelines(out)
+        return (dropped, redacted)
+    except OSError:
+        return (0, 0)          # a privacy tidy must never break the boot
+
+
 def ensure_share_log_dir() -> None:
     """Create /share/switchboard, asterisk-writable, for the READABLE copy of the
     Asterisk log -- and trim it if it has grown past the cap.
@@ -2253,6 +2312,15 @@ def ensure_share_log_dir() -> None:
                     f"{SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
         except OSError as exc:
             log(f"WARN could not trim {SHARE_LOG}: {exc}")
+        # ...and take the call detail and the trunk account out of it. Runs after
+        # the trim so it works on the smaller file.
+        try:
+            _dropped, _redacted = scrub_share_log(SHARE_LOG)
+            if _dropped or _redacted:
+                log(f"scrubbed {SHARE_LOG}: dropped {_dropped} verbose line(s), "
+                    f"redacted {_redacted} SIP account(s)")
+        except Exception as exc:  # noqa: BLE001
+            log(f"WARN could not scrub {SHARE_LOG}: {exc}")
         import shutil as _sh
         try:
             _sh.chown(str(SHARE_DIR), user="asterisk", group="asterisk")

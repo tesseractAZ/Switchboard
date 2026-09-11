@@ -174,13 +174,23 @@ control.
   container, and to take verbose off the readable copy entirely. The detector
   kept working and the dialplan trace stopped being published.
 
-  ⚠ **Historical residue.** Nothing removes what was written before that change.
-  On this deployment the readable copy still holds pre-v0.94.7 lines — the newest
-  dialplan trace in it is dated 2026-09-09, two days before v0.94.7 shipped — and
-  a scan of it counts 58 lines carrying a 10–11 digit number and 998 carrying a
-  `sip:<number>@` URI. Stopping the leak did not drain what had already leaked.
-  If that matters for your deployment, truncate the file; the authoritative copy
-  is `/data/state/asterisk.log`, which is not readable from outside.
+  **The readable copy is scrubbed at every boot** (v0.100.4). Two things are taken
+  out of it, and nothing else removed either:
+
+  - **Any `VERBOSE` line.** v0.94.7 stopped writing them here, and removed
+    nothing already written. On the deployment this was found on, the readable
+    copy still held 6,613 verbose lines — 58 carrying a telephone number — two
+    days after the fix. Closing a tap does not drain the bucket.
+  - **The SIP account in a registration URI**, rewritten to `sip:***@<provider>`.
+    This one is not historical: a trunk registration retry writes the full URI at
+    **WARNING**, a class this channel still carries, so it returns on the next
+    hiccup. Redacted rather than dropped — that line is how you learn your trunk
+    is flapping — and the provider host is deliberately kept, because it is what
+    makes the line diagnostic and it identifies nobody.
+
+  The private copy in `/data/state/asterisk.log` keeps both in full. That is the
+  whole reason the two copies differ, and it is not readable from outside the
+  container.
 
   What this means in practice: **since v0.94.7 the dialplan trace is no longer
   published to the shared folder, and the recognised speech never was.**

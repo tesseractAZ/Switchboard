@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.100.4
+
+**The readable copy of the phone log is now scrubbed every time the add-on
+starts.**
+
+Two different things did not belong in it, and nothing was removing either.
+
+**Call detail from before it was switched off.** An earlier release stopped
+writing the dialplan trace — who called whom, and every number dialled — to the
+copy that lives in the shared folder, because that folder is visible outside the
+add-on and is captured in backups. It stopped new entries and removed nothing
+already written; this deployment still held 6,613 of them, 58 carrying a
+telephone number, two days later. Those have now been removed here, and will be
+removed automatically anywhere else upgrading past that release.
+
+**Your SIP account name, which was still being written.** When the outside line
+fails to register, the phone system logs the full registration address —
+including the account — as a warning, and warnings still go to the readable copy.
+So this was not historical: it would have come back the next time the trunk
+hiccuped. The account is now replaced with `***`. The line itself is kept, and so
+is the provider's name, because that is what tells you the trunk is flapping.
+
+The private copy keeps everything in full. It is not readable from outside the
+add-on, which is the reason the two copies differ at all.
+
+A clean file is left untouched rather than rewritten, and a failure to scrub
+cannot stop the add-on starting.
+
 ## 0.100.3
 
 **The security document described a leak that had already been fixed, and the
