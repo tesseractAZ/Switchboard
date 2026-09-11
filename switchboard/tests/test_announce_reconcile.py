@@ -214,10 +214,18 @@ def test_the_dialplan_passes_the_clip_name_to_the_sink():
     --sound, and callqos puts it in the record. A break anywhere makes every
     announcement look undelivered — and the reconciler would then file a failure
     for every announcement that ever played."""
-    cfg = CONFIG.read_text()
-    assert cfg.count('--sound "${FILTER(A-Za-z0-9_.-,${SW_ANN_NAME})}"') == 2, (
+    # ★ v0.98.2 repointed this to the RENDERED dialplan. It used to match the
+    # Python SOURCE literal — and the source literal looked perfectly correct
+    # while the bytes Asterisk received silently dropped both hyphens from the
+    # clip name. Asserting the source was asserting the wrong artifact, which is
+    # the whole lesson of that incident.
+    cfg = SourceFileLoader("swcfg_sound", str(ROOT / "rootfs" / "usr" / "bin"
+                                              / "switchboard-config")).load_module()
+    rendered = "\n".join(cfg.render_rtpqos_context())
+    assert rendered.count('--sound "${FILTER(') == 2, (
         "both callqos invocations — the normal one and the no-media one — must "
         "pass the clip name; an unanswered announcement takes the no-media path")
+    assert rendered.count("${SW_ANN_NAME}") == 2
     ami = (WEBUI / "ami.py").read_text()
     assert "SW_ANN_NAME={os.path.basename(sound)}" in ami, (
         "the Originate does not put the clip name on the channel")
@@ -489,3 +497,149 @@ def test_the_process_start_is_actually_stamped():
     assert before - 60 <= sched._STARTED <= after + 1, (
         f"_STARTED is {sched._STARTED}, not this process's start time — the "
         f"restart/upgrade boundary is inert")
+
+
+# --------------------------------------------------------------------------- #
+# 7. ★ The join key crossed the dialplan boundary and came back different.
+#    Found by a live test fire, 2026-09-11. Every fixture here is that incident.
+# --------------------------------------------------------------------------- #
+LIVE_QUEUED = "ann-19-1b411fcd0c42455d9816c29ae1f581e4"     # what app.py wrote
+LIVE_ARRIVED = "ann191b411fcd0c42455d9816c29ae1f581e4"      # what the dialplan delivered
+
+
+def test_the_live_mangled_pair_still_joins(tmp_path):
+    """★ THE INCIDENT.
+
+    02:00:27  originate-queued      sound=ann-19-1b411fcd...
+    02:00:36  audio-delivered       sound=ann191b411fcd...     stage=complete, 389 packets
+    02:03:44  announce-undelivered  sound=ann-19-1b411fcd...
+
+    The announcement played in full and was reported as never delivered 197
+    seconds later, because `FILTER(A-Za-z0-9_.-,...)` reads a hyphen as a range
+    separator and — after the single character `.` — consumed it instead of
+    admitting it. Every announcement would have gone the same way, forever.
+
+    The charset is fixed. This test pins the OTHER half: the join no longer
+    depends on that fix being right, because the live ledger shows `a-z-`
+    PRESERVING hyphens while `A-Za-z0-9_.-` dropped them — the behaviour turns on
+    parse order, and an alarm path should not rest on that.
+    """
+    mod = _delivery(tmp_path)
+    _queue(mod, "19", LIVE_QUEUED, ago=400)
+    _played(mod, "19", LIVE_ARRIVED, ago=390)
+    assert mod.unresolved_announcements(now=NOW) == [], (
+        "the delivered announcement did not resolve its own queued record")
+
+
+def test_the_canonical_key_is_collision_safe():
+    """Canonicalising throws away characters, so it must not throw away
+    IDENTITY. app.py mints `ann-<ext>-<uuid4 hex>`, so 128 bits survive."""
+    mod = SourceFileLoader("delivery_key", str(WEBUI / "delivery.py")).load_module()
+    assert mod.clip_key(LIVE_QUEUED) == mod.clip_key(LIVE_ARRIVED)
+    assert mod.clip_key("ann-19-" + "a" * 32) != mod.clip_key("ann-19-" + "b" * 32)
+    assert mod.clip_key("ann-19-" + "a" * 32) != mod.clip_key("ann-20-" + "a" * 32)
+    assert mod.clip_key("") == "" and mod.clip_key(None) == ""
+
+
+def test_a_mangled_name_does_not_resolve_a_different_clip(tmp_path):
+    """Canonicalising must not turn the join into a wildcard."""
+    mod = _delivery(tmp_path)
+    _queue(mod, "19", "ann-19-" + "a" * 32, ago=400)
+    _played(mod, "19", "ann19" + "b" * 32, ago=390)
+    assert _sounds(mod.unresolved_announcements(now=NOW)) == ["ann-19-" + "a" * 32]
+
+
+def test_the_sink_resolves_a_name_the_dialplan_mangled(tmp_path, monkeypatch):
+    """End to end with the bytes the live dialplan actually produced."""
+    mod = _delivery(tmp_path)
+    monkeypatch.setitem(sys.modules, "delivery", mod)
+    monkeypatch.setattr(cq, "append_record", lambda rec: None)
+    monkeypatch.setattr(cq, "append_outcome", lambda rec: None)
+    monkeypatch.setattr(cq, "push_ha", lambda rec: None)
+    _queue(mod, "19", LIVE_QUEUED, ago=400)
+    cq.main(["--source", "dialplan", "--tag", "announce",
+             "--chan", "PJSIP/19-00000000", "--cid", "19", "--billsec", "7",
+             "--hcause", "16", "--stage", "complete", "--sound", LIVE_ARRIVED,
+             "--rxcount", "385", "--txcount", "389", "--rxmes", "70", "--txmes", "88"])
+    assert mod.unresolved_announcements(now=NOW) == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. ...and the class-level guard, over the RENDERED dialplan.
+# --------------------------------------------------------------------------- #
+def _filter_charsets():
+    """Every FILTER() charset in the dialplan Asterisk actually loads.
+
+    Read from the RENDERED text, not the Python source: the source spells the
+    escape through two layers of string literal, and what matters is the byte
+    sequence that reaches Asterisk.
+    """
+    cfg = SourceFileLoader("swcfg_render", str(ROOT / "rootfs" / "usr" / "bin"
+                                               / "switchboard-config")).load_module()
+    text = "\n".join(cfg.render_rtpqos_context() + cfg.rtpqos_h("rooms")
+                     + cfg.render_wakeup_context() + cfg.render_announce_play_context())
+    return set(re.findall(r"FILTER\(([^,]*),", text))
+
+
+def test_no_filter_charset_contains_an_ambiguous_hyphen():
+    """★ THE CLASS, not the instance.
+
+    A hyphen in a FILTER charset is a RANGE SEPARATOR. To be admitted as a
+    literal it must be written `\\-`; the FILTER documentation says so outright.
+    Two charsets in this dialplan wrote it bare, and they did NOT behave the
+    same way — `a-z-` preserved the hyphens in `room-to-room` (9 rows in the live
+    ledger) while `A-Za-z0-9_.-` silently dropped both hyphens from an
+    announcement's clip name and broke the reconciler that joins on it.
+
+    The difference is only where the hyphen sat relative to a completed range.
+    Nothing in the charset tells a reader which they are getting, and the failure
+    is silent — so a bare hyphen is banned outright rather than reasoned about
+    case by case.
+    """
+    bad = []
+    for cs in sorted(_filter_charsets()):
+        i, n = 0, len(cs)
+        while i < n:
+            if cs[i] == "\\":
+                i += 2                       # an escape; whatever it is, it is explicit
+                continue
+            # A hyphen is fine ONLY strictly between two literal characters.
+            if cs[i] == "-":
+                lo, hi = cs[i - 1] if i else "", cs[i + 1] if i + 1 < n else ""
+                if not lo or not hi or hi == "-" or ord(lo) >= ord(hi):
+                    bad.append(f"{cs!r}: bare '-' at index {i} is not a valid range")
+            i += 1
+    assert not bad, (
+        "a bare hyphen in a FILTER charset is a range separator, not a literal — "
+        "write it as \\\\- :\n  " + "\n  ".join(bad))
+
+
+def test_the_guard_actually_rejects_the_two_real_defects():
+    """A scanner that silently matches nothing agrees with everything. These are
+    the exact two charsets this release fixed."""
+    def flags(cs):
+        i, n, bad = 0, len(cs), []
+        while i < n:
+            if cs[i] == "\\":
+                i += 2
+                continue
+            if cs[i] == "-":
+                lo, hi = cs[i - 1] if i else "", cs[i + 1] if i + 1 < n else ""
+                if not lo or not hi or hi == "-" or ord(lo) >= ord(hi):
+                    bad.append(i)
+            i += 1
+        return bad
+    assert flags("A-Za-z0-9_.-"), "the charset that broke the announce join is not flagged"
+    assert flags("a-z-"), "the SW_TAG charset is not flagged"
+    assert not flags("A-Za-z0-9_.\\-"), "the fixed charset is flagged"
+    assert not flags("a-z\\-"), "the fixed SW_TAG charset is flagged"
+    assert not flags("0-9+*#") and not flags("a-z")
+
+
+def test_the_announce_charset_reaches_asterisk_escaped():
+    """The escape crosses two layers of Python string literal on its way into
+    extensions.conf. Assert the RENDERED bytes, not the source."""
+    charsets = _filter_charsets()
+    assert "A-Za-z0-9_.\\-" in charsets, sorted(charsets)
+    assert "a-z\\-" in charsets, sorted(charsets)
+    assert "A-Za-z0-9_.-" not in charsets and "a-z-" not in charsets

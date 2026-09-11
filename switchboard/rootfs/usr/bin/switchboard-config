@@ -1198,9 +1198,18 @@ def rtpqos_h(tag: str) -> list:
     proceeds; the context name remains the fallback, so a context that stamps
     nothing behaves exactly as before. FILTER keeps the value to plain letters
     and a dash: it reaches a shell argument."""
+    # ★ THE HYPHEN IS ESCAPED. Written `a-z-` this happened to work — the live
+    # ledger holds 9 `room-to-room` rows with both hyphens intact — but only
+    # because a trailing hyphen that follows a COMPLETED range has nothing left
+    # to start a range from. Spelled `A-Za-z0-9_.-`, where the hyphen follows the
+    # single character `.`, the same construct silently DROPPED both hyphens from
+    # an announcement's clip name and broke the reconciler that joins on it
+    # (live 2026-09-11 02:00:36). Position decided the outcome, not any rule a
+    # reader could infer from the charset, so both sites now use the spelling the
+    # FILTER documentation actually gives for a literal hyphen.
     return [f"exten = h,1,NoOp(rtpqos {tag})",
             f' same = n,Set(SW_KIND=${{IF($["${{SW_TAG}}" != ""]?'
-            f'${{FILTER(a-z-,${{SW_TAG}})}}:{tag})}})',
+            f'${{FILTER(a-z\\-,${{SW_TAG}})}}:{tag})}})',
             " same = n,Gosub(switchboard-rtpqos,s,1(${SW_KIND}))"]
 
 
@@ -1243,7 +1252,21 @@ def render_rtpqos_context() -> list:
         # It is what lets the announce reconciler pair this hangup with the
         # `originate-queued` record app.py wrote, WITHOUT guessing from
         # timestamps. FILTERed because it reaches a shell argument.
-        ' --sound "${FILTER(A-Za-z0-9_.-,${SW_ANN_NAME})}"'
+        #
+        # ★ THE HYPHEN IS ESCAPED, AND IT HAS TO BE. Written `A-Za-z0-9_.-`, this
+        # silently DROPPED both hyphens from `ann-19-<uuid>`: FILTER reads a
+        # hyphen as a range separator, and after the single character `.` it was
+        # taken as the start of a range rather than admitted. Live 2026-09-11
+        # 02:00:36 — an announcement that played in full was recorded under a
+        # name its own queued record could not match, and reported as never
+        # delivered three minutes later.
+        #
+        # Note that `FILTER(a-z-,${SW_TAG})` below does NOT drop its hyphen —
+        # `room-to-room` survives it, 9 rows in the live ledger — because there
+        # the trailing hyphen follows a COMPLETED range. So position decides, not
+        # any rule a reader could infer, which is why this one is escaped and why
+        # delivery.clip_key() no longer trusts the result either way.
+        ' --sound "${FILTER(A-Za-z0-9_.\\-,${SW_ANN_NAME})}"'
         f' --rxploss {q("rxploss")} --txploss {q("txploss")}'
         f' --rxjitter {q("rxjitter")} --txjitter {q("txjitter")} --rtt {q("rtt")}'
         f' --rxmes {q("rxmes")} --txmes {q("txmes")}'
@@ -1278,7 +1301,7 @@ def render_rtpqos_context() -> list:
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         ' --billsec "${CDR(billsec)}" --hcause "${HANGUPCAUSE}"'
         ' --stage "${FILTER(a-z,${SW_STAGE})}"'
-        ' --sound "${FILTER(A-Za-z0-9_.-,${SW_ANN_NAME})}" &)'
+        ' --sound "${FILTER(A-Za-z0-9_.\\-,${SW_ANN_NAME})}" &)'
     )
     return [
         "",

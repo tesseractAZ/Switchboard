@@ -186,6 +186,35 @@ def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
     return False
 
 
+def clip_key(sound) -> str:
+    """The canonical form of an announcement clip name, for joining across the
+    dialplan boundary.
+
+    ★ v0.98.2 — WHY THIS IS NOT JUST `sound`. The name is written here by app.py
+    as `ann-19-1b411fcd...` and travels to the other half of the join through an
+    Asterisk channel variable and a `FILTER()` charset. On 2026-09-11 at 02:00:36
+    it arrived as `ann191b411fcd...` — BOTH HYPHENS GONE — because FILTER reads a
+    hyphen as a range separator and the charset spelled it in a position where it
+    was consumed rather than admitted. The reconciler compares for equality, so
+    the announcement that had just played in full (stage `complete`, 389 packets)
+    was reported as never delivered 197 seconds later. Every announcement would
+    have been, forever.
+
+    The charset is fixed too. This exists because that fix is a claim about how a
+    particular Asterisk build parses a particular escape, and the correctness of
+    an alarm path should not rest on one: the live ledger shows `a-z-` PRESERVING
+    the hyphens in `room-to-room` while `A-Za-z0-9_.-` dropped them, so the
+    behaviour turns on parse order, not on a rule anyone could read off the
+    charset. Comparing canonical forms is immune to all of it.
+
+    Case-folded and reduced to letters and digits — the only characters a charset
+    like this can be relied on to pass. Collision-safe for the names actually
+    minted: app.py builds `ann-<ext>-<uuid4 hex>`, so 128 bits of the key survive
+    canonicalisation.
+    """
+    return "".join(c for c in str(sound or "").lower() if c.isalnum())
+
+
 def _read_records(since_ts: float) -> list:
     """Every parseable record at or after `since_ts`, oldest first.
 
@@ -272,14 +301,14 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
     # which makes it a line that invites a reader to believe it is load-bearing.
     recs = _read_records(floor)
     # Sounds that already have an answer, either way.
-    resolved = {r.get("sound") for r in recs
+    resolved = {clip_key(r.get("sound")) for r in recs
                 if r.get("kind") == "announce"
                 and r.get("outcome") in (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED)
                 and r.get("sound")}
     out = []
     for r in recs:
         if (r.get("kind") == "announce" and r.get("outcome") == ANNOUNCE_QUEUED
-                and r.get("sound") and r["sound"] not in resolved
+                and r.get("sound") and clip_key(r["sound"]) not in resolved
                 and now - r["_ts"] >= horizon):
             out.append(r)
     return out

@@ -709,7 +709,10 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   The two halves are matched **by the name of the clip**, which the call now
   carries, not by which records happen to sit near each other in time — three
   alerts inside a few minutes is what an incident looks like, and that is when
-  this has to be right.
+  this has to be right. Since v0.98.2 the comparison uses the name's letters and
+  digits only: the name crosses the dialplan, which was silently stripping the
+  hyphens out of it, and an alert's delivery verdict should not depend on which
+  punctuation survives that trip.
 
   The deadline is **ring + clip cap + a minute, and never under 180 s**: an
   announcement may ring for 30 s and then speak for up to `90 s`, so a flat
