@@ -51,6 +51,14 @@ no media at all.
 | `no-media` | 2 | 0.8% — new in 0.77.0 |
 | **Alerted** | **11** | 4.4% of legs (all of them `poor`) |
 
+**`no-media` was four outcomes in one label, and was split in 0.96.0.** A leg that
+carried no RTP might have been answered and played silence, or might simply have
+rung out — and only the first is a fault. Filing both together made the bucket
+too noisy to alert on, so the one case worth paging on never did. Rows written
+from 0.96.0 use `no-media` only for an ANSWERED leg with no audio (which now
+notifies), and `not-answered`, `abandoned` and `unreachable` for the rest. The
+two rows counted above predate that split.
+
 This distribution is not evidence that the scoring works. For most of this window
 the round-trip detector could not fire at all (§5), so a run of `excellent` is
 partly a property of the instrument rather than of the calls.
