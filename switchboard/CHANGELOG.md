@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.100.3
+
+**The security document described a leak that had already been fixed, and the
+readable log had a delete on a timer.**
+
+A documentation and GitHub sweep, prompted by the log audit.
+
+**The security notes were wrong about what is published.** They stated that the
+copy of the Asterisk log in the shared folder carries the verbose class — the
+dialplan trace — and that this was deliberate, because a health monitor needed
+it. That was true until v0.94.7, which moved the monitor to the private copy and
+took the verbose class off the readable one. The document was never updated, so
+it told you your call detail was public within your home network when it had
+stopped being so two days earlier. Corrected, with the reason the original
+decision was reversed.
+
+**What leaked before that fix is still there.** Stopping a leak does not remove
+what already leaked, and nothing in the add-on was going to. On this deployment
+the readable copy still holds pre-fix lines — the newest dialplan trace in it
+predates the fix — including some carrying telephone numbers. The security notes
+now say so and say what to do about it; the authoritative copy is the private
+one, so truncating the readable copy loses nothing that matters.
+
+**The cap on that file emptied it.** Past 32 MB it was rewritten to zero bytes
+rather than trimmed, so the first time it filled, the entire readable history
+would have vanished — the exact defect the delivery ledger had and fixed in
+v0.77.0, whose note reads "an empty ledger and a quiet system look identical".
+It now keeps its newest half, cut at a line boundary.
+
+**A log line said the opposite of what it meant.** The first real firing of the
+post-restart settling window reported an announcement "queued 117s inside the
+settling window" when it had been queued 3 seconds in; the number was the time
+remaining, not the time elapsed.
+
+**Measured behaviour is re-derived** against the current ledgers. The delivery
+reconciler is no longer listed as unexercised — it has judged real wake-ups and
+real announcements — and the detector table now records that the undelivered
+wake-up alarm fired five times and was wrong all five, before the release that
+fixed it, with none since.
+
 ## 0.100.2
 
 **An announcement sent while the phone system was still starting up was

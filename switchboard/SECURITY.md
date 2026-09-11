@@ -145,7 +145,7 @@ control.
   | --- | --- | --- |
   | console → journald | notice, warning, error, verbose | via the Supervisor |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose(2)** | **no** |
-  | `/share/switchboard/asterisk.log` | notice, warning, error, **verbose** | **yes** |
+  | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose** | **yes** |
 
   The `/data` copy takes exactly one level of verbose output, and the level is
   the point. Endpoint reachability — `Endpoint <n> is now Unreachable` and its
@@ -156,17 +156,35 @@ control.
   selects those lines and stops short of the verb-3 dialplan trace, which is
   where the call detail — and any spoken content a future change might route
   through the logger — would be. The file is trimmed at boot to its newest half
-  whenever it passes 8 MB.
+  whenever it passes 8 MB. The `/share` copy is capped the same way at 32 MB —
+  and until v0.100.3 that cap **emptied the file** rather than keeping its newest
+  half, which would have discarded the whole readable history the first time it
+  fired.
 
   With `res_security_log` not loaded there is no per-REGISTER flood, so still no
   secrets and negligible growth. The `/share` copy is the one to reason about: `/share` is host-mounted, readable by
-  anything with access to the shared folder, and captured in add-on backups. It
-  carries the verbose class deliberately — the link-health poller reconstructs
-  endpoint outages from `Endpoint <n> is now Unreachable`, which is a verbose
-  line, and moving the class to `/data` would silently blind that detector.
+  anything with access to the shared folder, and captured in add-on backups.
 
-  What this means in practice: **the dialplan trace is public within your home
-  network, and the recognised speech is not.** Speech-recognition output is
+  **Since v0.94.7 it carries no verbose class at all.** It used to, on the
+  reasoning that the link-health poller reconstructs endpoint outages from
+  `Endpoint <n> is now Unreachable` — a verbose line — so moving the class to
+  `/data` would blind that detector. That reasoning was sound and the conclusion
+  was wrong: the fix was to repoint the poller at `/data/state/asterisk.log`
+  (`ENDPOINT_LOG_PATH`), which it can read because it runs as root inside the
+  container, and to take verbose off the readable copy entirely. The detector
+  kept working and the dialplan trace stopped being published.
+
+  ⚠ **Historical residue.** Nothing removes what was written before that change.
+  On this deployment the readable copy still holds pre-v0.94.7 lines — the newest
+  dialplan trace in it is dated 2026-09-09, two days before v0.94.7 shipped — and
+  a scan of it counts 58 lines carrying a 10–11 digit number and 998 carrying a
+  `sip:<number>@` URI. Stopping the leak did not drain what had already leaked.
+  If that matters for your deployment, truncate the file; the authoritative copy
+  is `/data/state/asterisk.log`, which is not readable from outside.
+
+  What this means in practice: **since v0.94.7 the dialplan trace is no longer
+  published to the shared folder, and the recognised speech never was.**
+  Speech-recognition output is
   written by the AGIs to their own stderr, which never passes through Asterisk's
   logger — verified on a running system, both `asterisk.log` copies contain zero
   transcript lines. The voice assistant's transcripts go to
