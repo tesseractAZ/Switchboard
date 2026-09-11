@@ -749,6 +749,17 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
 
   Unlike a missed wake-up, this is **recorded and not pushed**. An alarm clock has
   a deadline; an announcement does not.
+- **...and one it declines to judge** (v0.100.2). Asterisk restarts with the
+  add-on, and its handsets take up to two minutes to re-register. An announcement
+  sent into that gap genuinely does not arrive — but `announce-undelivered` would
+  be a true and useless record, because the cause is a restart you just performed.
+  Anything queued within **120 seconds** of the add-on starting is recorded
+  `announce-unsettled` instead, which says plainly that it was not judged and why.
+  It is recorded rather than skipped: a request with no verdict at all cannot be
+  told apart from one the system forgot about.
+
+  120 s is the same settling cap the fleet monitor uses to decide the phones have
+  finished re-registering, rather than a second number for the same question.
 
 ---
 

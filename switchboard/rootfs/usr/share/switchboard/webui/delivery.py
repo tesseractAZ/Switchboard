@@ -44,6 +44,9 @@ AUDIO_DELIVERED = "audio-delivered"
 # answered it.
 ANNOUNCE_QUEUED = "originate-queued"
 ANNOUNCE_UNDELIVERED = "announce-undelivered"
+# ...and the verdict for an announcement nobody can fairly judge: one queued
+# while the PBX was still coming back up. See ANNOUNCE_SETTLE_SECONDS.
+ANNOUNCE_UNSETTLED = "announce-unsettled"
 
 # The longest an announcement may be. Read here rather than in app.py because the
 # reconciler MUST NOT judge an announcement undelivered while it is still
@@ -65,6 +68,27 @@ ANNOUNCE_RING_SECONDS = 30.0
 # 45 s at 44 s), so the clip cap is the term that matters and the margin covers
 # TTS rendering, a slow answer and the detached sink's own scheduling.
 ANNOUNCE_HORIZON = max(180.0, ANNOUNCE_MAX_SECONDS + ANNOUNCE_RING_SECONDS + 60.0)
+
+# How long after this process started the PBX is still considered to be coming
+# back up, during which an announcement is recorded as UNJUDGED rather than as
+# failed.
+#
+# ★ MEASURED, and the number is borrowed rather than invented. Asterisk restarts
+# with the add-on; its endpoints do not come back instantly, and an announcement
+# originated into that gap genuinely does not arrive — the record would be true
+# and useless, because the cause is a restart the operator already knows about.
+# Live on 2026-09-11: an announcement queued 18 s after a restart failed with
+# `Could not create dialog to invalid URI '19'`, and another was refused
+# pre-flight 24 s after the next one. Over the same ledger the cordless was
+# unreachable in 2 of 1,714 STEADY-state polls (0.12 %) — so the failures belong
+# to the restart, not to the handset.
+#
+# 120 s is rtpmon's own settling cap for exactly this condition
+# (WARMUP_MAX_POLLS * WARMUP_DELAY = 8 * 15), the point at which the fleet
+# monitor stops waiting for ports to re-register and calls the fleet steady.
+# Two subsystems answering "has the PBX come back yet?" should not answer it with
+# two different numbers.
+ANNOUNCE_SETTLE_SECONDS = 120.0
 
 # ...and how far back to look at all. Without this, a scheduler that was stopped
 # for a day would wake up and file every announcement it had missed as a fresh
@@ -301,9 +325,13 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
     # which makes it a line that invites a reader to believe it is load-bearing.
     recs = _read_records(floor)
     # Sounds that already have an answer, either way.
+    # Any terminal verdict resolves a clip — including "not judged". Leaving
+    # ANNOUNCE_UNSETTLED out would re-file it on every 20 s tick forever, which
+    # is the failure this exclusion set exists to prevent.
     resolved = {clip_key(r.get("sound")) for r in recs
                 if r.get("kind") == "announce"
-                and r.get("outcome") in (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED)
+                and r.get("outcome") in (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED,
+                                         ANNOUNCE_UNSETTLED)
                 and r.get("sound")}
     out = []
     for r in recs:

@@ -37,7 +37,11 @@ NOW = 1789050000.0
 
 def _delivery(tmp_path):
     mod = SourceFileLoader("delivery_announce", str(WEBUI / "delivery.py")).load_module()
-    mod.OUTCOME_PATH = str(tmp_path / "delivery-outcomes.jsonl")
+    # mkdir: callers pass a per-case SUBDIRECTORY to keep ledgers isolated, and
+    # the helpers here append with open() rather than through record(), which is
+    # the only thing that makes the directory itself.
+    Path(tmp_path).mkdir(parents=True, exist_ok=True)
+    mod.OUTCOME_PATH = str(Path(tmp_path) / "delivery-outcomes.jsonl")
     return mod
 
 
@@ -643,3 +647,117 @@ def test_the_announce_charset_reaches_asterisk_escaped():
     assert "A-Za-z0-9_.\\-" in charsets, sorted(charsets)
     assert "a-z\\-" in charsets, sorted(charsets)
     assert "A-Za-z0-9_.-" not in charsets and "a-z-" not in charsets
+
+
+# --------------------------------------------------------------------------- #
+# 9. ★ The post-restart settling window. Asterisk comes back slower than we do.
+# --------------------------------------------------------------------------- #
+def test_an_announcement_queued_while_the_pbx_restarts_is_not_called_a_failure(tmp_path):
+    """★ THE INCIDENT, 2026-09-11.
+
+    Asterisk booted at 02:14:38Z. An announcement was queued at 02:14:56Z — 18
+    seconds later — and failed with `Could not create dialog to invalid URI '19'`
+    because the handset had not re-registered yet. At 02:17:57Z the reconciler
+    filed `announce-undelivered`.
+
+    That record is TRUE and useless: the cause is a restart the operator just
+    performed. Over the same ledger the handset was unreachable in 2 of 1,714
+    steady-state polls (0.12 %), so the failure belongs to the restart, not to
+    the phone.
+
+    `not_before=_STARTED` does not cover it — that guard asks whether THIS
+    PROCESS was running, and it was. It is Asterisk that had not finished coming
+    back, which is a second condition rather than a longer horizon.
+    """
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600                       # this process is 10 min old
+    # queued 18 s after start, exactly like the live one
+    _queue(mod, "19", "ann-19-restartwindow", ago=600 - 18)
+    sched._reconcile_announcements(NOW)
+    recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines() if l.strip()]
+    assert recs[-1]["outcome"] == mod.ANNOUNCE_UNSETTLED, recs
+    assert recs[-1]["sound"] == "ann-19-restartwindow"
+    assert not any(r["outcome"] == mod.ANNOUNCE_UNDELIVERED for r in recs)
+
+
+def test_it_is_recorded_not_silently_skipped(tmp_path):
+    """★ Absence is not a verdict. A queued row with nothing after it cannot be
+    told apart from one the reconciler forgot, so the skip has to say so."""
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600
+    _queue(mod, "19", "ann-19-quiet", ago=590)
+    before = len(Path(mod.OUTCOME_PATH).read_text().splitlines())
+    sched._reconcile_announcements(NOW)
+    after = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines() if l.strip()]
+    assert len(after) == before + 1, "the skip left no trace"
+    assert after[-1].get("reason") == "pbx-restarting"
+
+
+def test_the_unsettled_verdict_is_not_re_filed_every_tick(tmp_path):
+    """It resolves the clip like any other verdict. Leaving it out of the
+    exclusion set would append one row per 20 s tick, forever."""
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600
+    _queue(mod, "19", "ann-19-once", ago=590)
+    sched._reconcile_announcements(NOW)
+    n = len(Path(mod.OUTCOME_PATH).read_text().splitlines())
+    for _ in range(4):
+        sched._reconcile_announcements(NOW)
+    assert len(Path(mod.OUTCOME_PATH).read_text().splitlines()) == n
+
+
+def test_an_announcement_after_the_window_is_still_judged(tmp_path):
+    """★ The control that matters most. The window must not become a blanket
+    excuse — a genuine miss during ordinary running is what this whole feature
+    exists to catch."""
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600
+    _queue(mod, "19", "ann-19-genuine", ago=400)     # 200 s after start, past 120
+    sched._reconcile_announcements(NOW)
+    recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines() if l.strip()]
+    assert recs[-1]["outcome"] == mod.ANNOUNCE_UNDELIVERED, recs
+
+
+def test_the_boundary_is_where_it_says_it_is(tmp_path):
+    """Either side of ANNOUNCE_SETTLE_SECONDS, driven through the scheduler."""
+    for ago, expect in ((600 - 119, "unsettled"), (600 - 121, "undelivered")):
+        mod = _delivery(tmp_path / f"b{ago}")
+        sched = _load_scheduler(mod)
+        sched._delivery = mod
+        sched.log = lambda m: None
+        sched._STARTED = NOW - 600
+        _queue(mod, "19", f"ann-19-edge{ago}", ago=ago)
+        sched._reconcile_announcements(NOW)
+        got = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+               if l.strip()][-1]["outcome"]
+        want = mod.ANNOUNCE_UNSETTLED if expect == "unsettled" else mod.ANNOUNCE_UNDELIVERED
+        assert got == want, f"queued {600-ago}s after start → {got}, wanted {want}"
+
+
+def test_the_settling_window_matches_the_fleet_monitors_own_cap():
+    """★ Two subsystems answering "has the PBX come back yet?" must not answer it
+    with two different numbers. rtpmon waits WARMUP_MAX_POLLS * WARMUP_DELAY for
+    every port to re-register before it calls the fleet steady; this is the same
+    question, so it takes the same answer rather than a second guess."""
+    mod = SourceFileLoader("delivery_settle", str(WEBUI / "delivery.py")).load_module()
+    poller_src = (ROOT / "rootfs" / "usr" / "share" / "switchboard" / "rtpmon"
+                  / "poller.py").read_text()
+    delay = int(re.search(r"^WARMUP_DELAY\s*=\s*(\d+)", poller_src, re.M).group(1))
+    polls = int(re.search(r"^WARMUP_MAX_POLLS\s*=\s*(\d+)", poller_src, re.M).group(1))
+    assert mod.ANNOUNCE_SETTLE_SECONDS == delay * polls, (
+        f"the announce settling window is {mod.ANNOUNCE_SETTLE_SECONDS}s but the "
+        f"fleet monitor settles after {delay * polls}s ({polls} x {delay}s)")
+    # ...and it must fit inside the horizon, or nothing would ever be judged at all.
+    assert mod.ANNOUNCE_SETTLE_SECONDS < mod.ANNOUNCE_LOOKBACK
