@@ -540,6 +540,26 @@ def _help_lines(width: int) -> list[str]:
     ]
 
 
+def _scroll_top(n: int, sel: int, top, size: int) -> int:
+    """Smallest nudge to `top` that keeps row `sel` inside a `size`-row window.
+
+    Shared by the lights list and the room roster. It was written for the lights
+    list, where getting it right took three attempts; the roster has exactly the
+    same problem and no reason to solve it a second time.
+
+    Clamped at both ends, so a window computed against one size and then reused
+    against a smaller one cannot return a negative or past-the-end offset — an
+    earlier version did, and printed "↓ -1 below".
+    """
+    size = max(1, size)
+    t = max(0, min(int(top or 0), max(0, n - size)))
+    if sel < t:
+        t = sel
+    elif sel >= t + size:
+        t = sel - size + 1
+    return max(0, min(t, max(0, n - size)))
+
+
 def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
     """The `L` lights view — an area-grouped list of HA lights with a cursor.
 
@@ -604,12 +624,7 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
 
     def _window(size: int) -> int:
         """Smallest nudge to `ltop` that keeps the selection inside `size` rows."""
-        t = max(0, min(int(sess.get("ltop", 0)), max(0, len(rows) - size)))
-        if sel_row < t:
-            t = sel_row
-        elif sel_row >= t + size:
-            t = sel_row - size + 1
-        return max(0, min(t, max(0, len(rows) - size)))
+        return _scroll_top(len(rows), sel_row, sess.get("ltop", 0), size)
 
     # Two passes, because the continuation heading costs a row and whether it is
     # needed depends on where the window lands. A first version prepended the
@@ -646,6 +661,27 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
     else:
         note = ""
     return head + body + ([("  " + color(GREY, note))] if note else []) + foot
+
+
+# The roster never shrinks below this. Fewer rows than this and the operator is
+# scrolling a porthole: the selection is visible but nothing around it, so there
+# is no way to see where in the house you are. The calls and wake-up lists give
+# up their rows first.
+ROSTER_MIN_ROWS = 3
+
+
+def _capped(rows: list, cap: int, noun: str) -> list:
+    """At most `cap` rows, and say what is missing rather than just stopping.
+
+    A list that silently ends at the terminal's edge reads as a complete list.
+    That is the whole defect this release is about, one level down.
+    """
+    cap = max(0, int(cap))
+    if len(rows) <= cap:
+        return list(rows)
+    hidden = len(rows) - cap
+    plural = noun if hidden == 1 else noun + "s"
+    return list(rows[:cap]) + ["    " + color(GREY, f"… {hidden} more {plural}")]
 
 
 def render(board: dict, sess: dict, now: float) -> list[str]:
@@ -691,14 +727,15 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     if stt and stt != "disabled":
         bits.append(color(GREY, "STT ") + color(GREEN if stt == "up" else YELLOW,
                                                 "● " + ("resident" if stt == "up" else "CLI fallback")))
-    if bits:
-        lines.append("  " + color(GREY, "     ").join(bits))
-        lines.append(rule)
+    # Droppable: informative, but the last chrome to keep when the terminal is
+    # too short to hold the roster, the calls and the keys at once.
+    signal_lines = (["  " + color(GREY, "     ").join(bits), rule] if bits else [])
 
     if not board.get("ami_ok", False):
         lines.append("  " + color(RED, "Asterisk Manager unreachable — the PBX may still be starting."))
         lines.append(rule)
 
+    room_rows: list[str] = []
     for idx, r in enumerate(rooms):
         cursor = color(CYAN, "▸") if idx == sel else " "
         glyph, col, txt, suffix = _room_status(r)
@@ -724,12 +761,13 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
                 parts.append(cs)
             detail = color(GREY, "  ·  ".join(parts)) if parts else ""
         row = _fill_row(left, detail, bw)
-        lines.append(row)
+        room_rows.append(row)
 
-    lines.append(rule)
-    lines.append("  " + color(BOLD, "ACTIVE CALLS"))
+    # ── Everything below the roster, built separately so the roster can be
+    # given whatever height is left over rather than running off the bottom.
+    call_rows: list[str] = []
     if not calls:
-        lines.append("    " + color(GREY, "— none —"))
+        call_rows.append("    " + color(GREY, "— none —"))
     else:
         glyphs = {"outside": "📞", "operator": "🎧", "internal": "🏠"}
         for c in calls:
@@ -740,16 +778,37 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             cname = _codec_label(c.get("codec", ""))
             meta = c.get("state", "") + (f"  {dur}" if dur else "") + (f"  {cname}" if cname else "")
             tail = color(GREY, meta)
-            lines.append(f"    {g}  {c.get('detail','')}   {tail}")
+            call_rows.append(f"    {g}  {c.get('detail','')}   {tail}")
 
-    wakeups = board.get("wakeups", [])
-    if wakeups:
-        lines.append(rule)
-        lines.append("  " + color(BOLD, "WAKE-UPS"))
-        for w in wakeups:
-            lines.append(f"    ⏰  {w.get('label','')}   " + color(GREY, fmt12(w.get("hhmm", ""))))
+    wake_rows: list[str] = []
+    for w in board.get("wakeups", []) or []:
+        wake_rows.append(f"    ⏰  {w.get('label','')}   " + color(GREY, fmt12(w.get("hhmm", ""))))
 
-    lines.append(rule)
+    def _section(rows: list, cap: int, title: str, noun: str, glyph: str) -> list[str]:
+        """A titled list, a capped list, or — at cap 0 — a single-line count.
+
+        A heading plus a rule plus "… 2 more" is three rows spent saying nothing
+        actionable. At that point the honest thing is one row that says the
+        section exists and how big it is, and to give the rows to the roster.
+        """
+        if not rows:
+            return []
+        if cap <= 0:
+            n = len(rows)
+            return ["  " + color(GREY, f"{glyph} {n} {noun}{'' if n == 1 else 's'}")]
+        return [rule, "  " + color(BOLD, title)] + _capped(rows, cap, noun)
+
+    def _tail(cap_calls: int, cap_wakes: int) -> list[str]:
+        out: list[str] = []
+        if call_rows and calls:
+            out += _section(call_rows, cap_calls, "ACTIVE CALLS", "call", "📞")
+        else:                               # the "— none —" placeholder: 3 rows
+            out += [rule, "  " + color(BOLD, "ACTIVE CALLS")] + call_rows
+        out += _section(wake_rows, cap_wakes, "WAKE-UPS", "wake-up", "⏰")
+        out.append(rule)
+        return out
+
+    footer: list[str] = []
     if sess.get("mode") == "wakeup":
         label = sess.get("wakeup_label", "?")
         buf = sess.get("wakeup_buf", "")
@@ -757,16 +816,16 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         # Live preview: show the (forgiving) parser's reading before committing —
         # the same parse()+fmt12() the commit path uses, so they can't disagree.
         preview = color(GREY, f"   → {fmt12(hhmm)}") if hhmm else ""
-        lines.append("  " + color(YELLOW, f"SET WAKE-UP {label}:  {buf}█") + preview)
-        lines.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · Backspace deletes"))
+        footer.append("  " + color(YELLOW, f"SET WAKE-UP {label}:  {buf}█") + preview)
+        footer.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · Backspace deletes"))
     elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
-        lines.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+        footer.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
     elif sess.get("mode") == "transfer":
         frm = sess.get("transfer_from_label", "?")
-        lines.append("  " + color(YELLOW, f"TRANSFER {frm}'s call → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+        footer.append("  " + color(YELLOW, f"TRANSFER {frm}'s call → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
     elif sess.get("mode") == "pageconfirm":
-        lines.append("  " + color(YELLOW, "PAGE ALL — ring every phone into the intercom?")
+        footer.append("  " + color(YELLOW, "PAGE ALL — ring every phone into the intercom?")
                      + color(GREY, "   ") + color(BOLD, "[Y]") + color(GREY, " yes    ")
                      + color(BOLD, "[N]") + color(GREY, " cancel"))
     else:
@@ -780,14 +839,67 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         bar3 = ("  " + color(BOLD, "L") + color(GREY, " lights   ")
                 + color(BOLD, "?") + color(GREY, " help   ")
                 + color(BOLD, "Q") + color(GREY, " quit"))
-        lines.append(bar1)
-        lines.append(bar2)
-        lines.append(bar3)
+        footer.append(bar1)
+        footer.append(bar2)
+        footer.append(bar3)
     msg = sess.get("msg", "")
     if msg and sess.get("msg_until", 0) > now:
-        lines.append("  " + color(CYAN, "› " + msg))
+        footer.append("  " + color(CYAN, "› " + msg))
     else:
-        lines.append("")
+        footer.append("")
+    # ── Fit the roster to what is left. ────────────────────────────────────────
+    #
+    # ★ THE BOARD DID NOT SCROLL, AND center() TRUNCATES FROM THE BOTTOM.
+    #
+    # Everything here is fixed except three lists that all grow with the
+    # household: the roster, the active calls and the wake-ups. Past the
+    # terminal's height the surplus was simply clipped — and the bottom is where
+    # the key bar lives, so the first thing an operator lost was the list of what
+    # they could press. Ten rooms plus one wake-up already overflows 24 rows.
+    #
+    # What is given up, in order:
+    #   1. the roster scrolls, following the selection — the lights list's rule,
+    #      reused rather than re-derived — and says how many are out of view;
+    #   2. the call and wake-up lists are capped, each saying how many it hides;
+    #   3. the footer is never given up. It is how you operate the thing, and a
+    #      modal prompt ("type a time · Enter sets") is load-bearing text.
+    # Each rung gives up one more thing; the first that leaves the roster a
+    # workable window wins. Recomputed rather than estimated — a section's rule
+    # and heading disappear with its last row, so the arithmetic is not linear.
+    # The footer is absent from this ladder on purpose.
+    head_lines, tail_lines = lines, _tail(len(call_rows), len(wake_rows)) + footer
+    for cap_wakes, cap_calls, signals in (
+            (len(wake_rows), len(call_rows), True),    # everything
+            (1,              len(call_rows), True),    # one wake-up, then a count
+            (0,              len(call_rows), True),
+            (0,              1,              True),    # one call, then a count
+            (0,              0,              True),
+            (0,              0,              False),   # finally, the signals line
+    ):
+        head_lines = lines + (signal_lines if signals else [])
+        tail_lines = _tail(cap_calls, cap_wakes) + footer
+        if height - len(head_lines) - len(tail_lines) >= ROSTER_MIN_ROWS + 1:
+            break
+    lines = head_lines
+
+    avail = height - len(lines) - len(tail_lines)
+    if avail < 1:
+        avail = 1          # a terminal shorter than its own chrome; keep one row
+    if len(room_rows) > avail:
+        avail = max(1, avail - 1)                     # one row for the note
+        top = _scroll_top(len(room_rows), sel, sess.get("rtop", 0), avail)
+        sess["rtop"] = top
+        above, below = top, max(0, len(room_rows) - (top + avail))
+        note = (f"↑ {above} more above · ↓ {below} more below" if above and below
+                else f"↑ {above} more above" if above
+                else f"↓ {below} more below" if below else "")
+        lines += room_rows[top:top + avail]
+        if note:
+            lines.append("  " + color(GREY, note))
+    else:
+        sess["rtop"] = 0
+        lines += room_rows
+    lines += tail_lines
     return center(lines, width, height)
 
 

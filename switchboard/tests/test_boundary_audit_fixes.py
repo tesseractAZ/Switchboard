@@ -254,7 +254,10 @@ def test_a_refused_wakeup_is_consumed_not_retried_forever(tmp_path):
     store, outcomes = _run_tick(tmp_path, lambda ext, ring: False)
     assert store.cancelled == ["19"], "the refused wake-up is still due next tick"
     assert "19" not in store.entries
-    assert outcomes == ["originate-refused"], outcomes
+    # v0.100.0 added the escalation beside the row — safe ONLY because of the
+    # consumption this test pins: before it, the refused entry re-fired every
+    # 20 s, and a push on each would have been a storm rather than an alarm.
+    assert outcomes == ["originate-refused", "undelivered"], outcomes
 
 
 def test_an_ami_outage_still_leaves_the_wakeup_due(tmp_path):

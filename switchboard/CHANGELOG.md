@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.100.0
+
+**Two things that were known to be wrong and had been left that way.**
+
+**A wake-up that failed usually told nobody.** There are four ways one can fail,
+and only one of them raised the alert. The phone system refusing to place the
+call, the second attempt being skipped because the handset had gone offline, and
+the second attempt failing when it was tried — all three wrote a line to a log
+file and stopped. The log is not what wakes you at six in the morning.
+
+The give-away was sitting in the code. A carefully worded sentence for "the
+second attempt was not made" had been written, reviewed and corrected once, for
+a case that could never reach it: the only path that got as far as sending an
+alert was the one where the second attempt *had* been made. The test covering
+that sentence reached it by writing an impossible situation into the test itself
+by hand. All four paths now go through one place, which notifies before it
+returns, so there is no longer a way to record a missed alarm quietly.
+
+Each alert says what actually happened and nothing more — whether the phone rang
+twice, rang once, or never rang at all, and if the second attempt was not made,
+why. A network blip while placing the call is still not treated as a failure: it
+retries, as before, rather than crying wolf.
+
+**The operator board now scrolls.** It never did. A roster taller than the
+window was simply cut off at the terminal's last row — and the bottom row is
+where the list of keys lives, so the first thing you lost was the reminder of
+what you could press. Ten rooms and one wake-up already overflowed a standard
+window.
+
+The roster now follows the selection and says how many rooms are above and
+below, exactly like the lights list has since 0.94.4 — the same rule, shared,
+rather than written a second time. On a shorter window the active-call and
+wake-up lists give up their rows first and collapse to a count of what they are
+hiding, so you are never told there are no wake-ups when there are two. The keys
+are never given up.
+
 ## 0.99.0
 
 **Four defects of the same shape, found by auditing everything that crosses
