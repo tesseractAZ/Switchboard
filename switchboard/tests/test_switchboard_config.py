@@ -1466,8 +1466,16 @@ def test_rtpqos_telemetry() -> None:
         check(f"rtpqos: [{ctx}] falls back to its context name when nothing "
               "stamped a kind",
               f":{ctx})}})" in body)
+        # v0.98.2 — `a-z-` became `a-z\-`. A bare hyphen in a FILTER charset is a
+        # RANGE SEPARATOR; this one happened to survive because a trailing hyphen
+        # after a completed range has nothing to start a range from, but the same
+        # construct spelled `A-Za-z0-9_.-` silently ate both hyphens out of an
+        # announcement's clip name and broke the reconciler that joins on it.
+        # `room-to-room` is the value that depends on it here.
         check(f"rtpqos: [{ctx}] filters the kind before it reaches a shell arg",
-              "FILTER(a-z-,${SW_TAG})" in body)
+              "FILTER(a-z\\-,${SW_TAG})" in body)
+        check(f"rtpqos: [{ctx}] admits the hyphen in a kind like room-to-room",
+              "FILTER(a-z-,${SW_TAG})" not in body)
     # ...and the kind must actually be STAMPED where it differs from the context
     # name. [rooms] hosts room-to-room dialling, outbound PSTN, the operator, the
     # clock and paging, and all five hung up in [rooms] -- an audit found that

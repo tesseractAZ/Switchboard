@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.98.2
+
+**A test announcement played in full, and three minutes later the system
+recorded that it had never arrived.**
+
+The announcement is identified by the name of its audio clip, which is how the
+request and the result find each other. The name travels through Asterisk, and
+Asterisk was quietly deleting the hyphens from it — so `ann-19-1b411fcd…` went
+out and `ann191b411fcd…` came back, the two halves no longer matched, and an
+announcement that had just spoken was filed as undelivered. Every announcement
+would have been, from here on.
+
+The cause is a character list that says which characters are allowed through. A
+hyphen in such a list normally means "everything between these two characters",
+and to allow a hyphen itself it has to be written specially. Two lists in this
+system wrote it plainly. Only one broke — which is the uncomfortable part: the
+other happens to sit in a position where Asterisk reads it the way it was
+meant, so identical-looking code behaved differently and nothing in either one
+told you which you were getting. Both are now written the documented way, and a
+test rejects the plain form outright rather than reasoning about it case by
+case.
+
+The match itself no longer depends on any of that. Names are now compared on
+their letters and digits alone, so whatever punctuation survives the journey,
+the request and the result still recognise each other. That is deliberate
+belt-and-braces: the correctness of the fix above is a claim about how one
+version of Asterisk reads one piece of punctuation, and whether an alert is
+reported as delivered should not rest on it.
+
+Found by firing a test announcement at a real handset immediately after
+release. The record it produced is left in the log, where it is an accurate
+account of what the software did.
+
 ## 0.98.1
 
 **The announcement reconciler shipped in 0.98.0 reported its first failure ten
