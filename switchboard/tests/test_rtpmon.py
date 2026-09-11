@@ -1481,3 +1481,55 @@ def test_wired_down_is_always_present_even_when_empty() -> None:
     code = "\n".join(l for l in src.split("\n") if not l.lstrip().startswith("#"))
     assert "if wired_down:" not in code, (
         "the conditional emit is back; wired_down will vanish from healthy rows")
+
+
+def test_an_empty_durable_set_means_unknown_not_nothing_ever_registered() -> None:
+    """★ THE BOOTSTRAP DEFECT v0.95.0 SHIPPED, observed live.
+
+    On the first boot after that upgrade the durable file does not exist, so the
+    set loads empty. `configured - set()` then declared the WHOLE ROSTER never
+    registered and `expected` collapsed to 0 — while one phone was already back:
+
+        reachable: 1, expected: 0, never_registered: [11..20]   (00:30:03Z)
+
+    A denominator below its own numerator is worse than the defect it replaced.
+
+    The fix is the union with the currently-registered set: a phone that is
+    registered right now has self-evidently registered. Mutation-checked — I
+    first also changed the branch test from `is None` to a falsy check, and
+    reverting THAT failed nothing, because both branches behave identically on a
+    cold start. The union is the whole fix; the branch change was dead weight and
+    was removed rather than shipped looking load-bearing.
+    """
+    phones = _fleet(up_exts=("16",))
+    summ = pm.summarize(phones, ["11", "12", "13", "14", "15", "16", "17", "18"],
+                        measured_before=set(), ever_registered=set())
+    assert summ["expected"] >= summ["reachable"], (
+        f"expected={summ['expected']} < reachable={summ['reachable']} — the "
+        f"denominator fell below its own numerator")
+    assert set(summ["never_registered_exts"]) != {p["ext"] for p in phones}, (
+        "an empty durable set declared the entire roster never-registered")
+
+
+def test_expected_is_never_below_reachable_whatever_the_inputs() -> None:
+    """The invariant that makes the record readable at all. Driven across every
+    combination of durable knowledge and live state, because the live defect
+    appeared only where the two disagreed."""
+    wired = ["11", "12", "13", "14", "15", "16", "17", "18"]
+    everything = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+    for up in ((), ("16",), ("11", "19"), tuple(sorted(everything))):
+        for ever in (None, set(), {"16"}, everything, everything | {"20"}):
+            summ = pm.summarize(_fleet(up_exts=up), wired,
+                                measured_before=set(), ever_registered=ever)
+            assert summ["expected"] >= summ["reachable"], (
+                f"up={up} ever={ever}: expected={summ['expected']} < "
+                f"reachable={summ['reachable']}")
+
+
+def test_a_registered_phone_is_never_called_never_registered() -> None:
+    """It has self-evidently registered, whatever the durable set says."""
+    summ = pm.summarize(_fleet(up_exts=("16", "19")),
+                        ["11", "12", "13", "14", "15", "16", "17", "18"],
+                        measured_before=set(), ever_registered={"11"})
+    assert "16" not in summ["never_registered_exts"]
+    assert "19" not in summ["never_registered_exts"]
