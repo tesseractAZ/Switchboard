@@ -217,7 +217,8 @@ def _read_records(since_ts: float) -> list:
 
 
 def unresolved_announcements(now: float | None = None, horizon: float | None = None,
-                             lookback: float | None = None) -> list:
+                             lookback: float | None = None,
+                             not_before: float | None = None) -> list:
     """Announcements queued long enough ago to be judged, with nothing to show.
 
     ★ THE HOLE THIS CLOSES. app.py records `originate-queued` the moment AMI
@@ -238,13 +239,38 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
     would mis-pair the moment two alerts land together, which is exactly when
     something is going wrong and the ledger matters most.
 
+    `not_before` is the caller's own start time, and it is REQUIRED in practice —
+    see the warning below. Records queued before it are left alone.
+
+    ★ v0.98.1 — WHAT THE CALLER COULD NOT HAVE SEEN IS UNKNOWN, NOT FAILED.
+    Caught live within ten minutes of shipping v0.98.0, by this very function:
+    it filed `announce-undelivered` against an announcement that had played
+    perfectly. The announcement was queued at 01:36:24Z under v0.98.0's
+    PREDECESSOR, whose hangup extension did not name the clip and whose sink did
+    not write a delivery record — so the resolving half could not exist, and the
+    upgrade at 01:45 then looked back an hour and judged it.
+
+    The rule that fixes it is not a longer horizon. It is that a window the
+    caller was not running for is unknowable: the resolving record is written by
+    a detached `switchboard-callqos` that an add-on restart kills outright, and
+    before an upgrade it may have been a build that never wrote one at all.
+    Judging across that boundary manufactures failures about announcements that
+    worked, which is precisely the noise a delivery ledger cannot afford.
+
     Returns the queued records, oldest first. Already-judged ones are excluded by
     the same join, so calling this on a timer does not re-file anything.
     """
     now = time.time() if now is None else now
     horizon = ANNOUNCE_HORIZON if horizon is None else horizon
     lookback = ANNOUNCE_LOOKBACK if lookback is None else lookback
-    recs = _read_records(now - lookback)
+    floor = now - lookback
+    if not_before is not None:
+        floor = max(floor, not_before)
+    # One floor, applied once: _read_records stops at it, so every record below
+    # has already passed it. A second `_ts >= floor` test here read as belt and
+    # braces and was provably dead — no mutation of it could change a result —
+    # which makes it a line that invites a reader to believe it is load-bearing.
+    recs = _read_records(floor)
     # Sounds that already have an answer, either way.
     resolved = {r.get("sound") for r in recs
                 if r.get("kind") == "announce"

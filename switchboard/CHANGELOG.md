@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.98.1
+
+**The announcement reconciler shipped in 0.98.0 reported its first failure ten
+minutes later, and it was wrong.**
+
+An announcement went out to the cordless at 6:36 pm and played perfectly — the
+call-quality log scored that call `excellent`. It had been sent by the previous
+version, which did not yet record that an announcement had arrived. When 0.98.0
+was installed nine minutes later, its new reconciler looked back over the
+preceding hour, found a request with no matching delivery, and filed "never
+arrived" against an announcement that had worked.
+
+Waiting longer would not have helped; nothing was ever going to appear. The
+rule that fixes it is that a period the reconciler was not running for is
+**unknown, not failed** — the record that confirms an announcement is written
+by a short-lived helper that a restart kills outright, quite apart from an
+upgrade changing what it writes. Nothing sent before the current run started is
+judged at all.
+
+One incorrect record, timestamped 01:45:14Z on 2026-09-11, is left in the log
+where it landed. It is an accurate account of what the software did, and the
+log is append-only for exactly that reason.
+
 ## 0.98.0
 
 **An announcement that rang a phone nobody answered left no record anywhere, so
