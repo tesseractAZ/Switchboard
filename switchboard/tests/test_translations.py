@@ -182,6 +182,45 @@ def test_backup_hooks_leave_evidence_outside_the_container() -> None:
     assert r.returncode == 0, f"unwritable stamp failed the backup: {r.stderr[:200]}"
 
 
+def test_every_outcome_name_the_code_writes_is_in_the_manual() -> None:
+    """★ THE OTHER DIRECTION, and it is the one that actually rots.
+
+    The test below it checks docs → code: every name the manual cites must be a
+    string the code writes. That catches an invented or renamed outcome. It
+    cannot catch the far more common case — shipping a NEW outcome and forgetting
+    the manual — because a name absent from the document is absent from its input.
+
+    v0.100.0 added `re-ring-failed` and that is exactly what happened: the code
+    wrote it from the moment it shipped, the delivery ledger would have carried
+    it the first time a second ring was refused, and a reader grepping the manual
+    for it would have concluded the event does not exist. Found by auditing the
+    two lists against each other, not by any test.
+
+    Names are taken FROM THE CODE, the same way the sibling test takes them from
+    the document, so a new outcome cannot fall outside the set being checked.
+    """
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / "DOCS.md").read_text()
+    written = set()
+    for rel in ("rootfs/usr/share/switchboard/wakeup/scheduler.py",
+                "rootfs/usr/share/switchboard/webui/app.py",
+                "rootfs/var/lib/asterisk/agi-bin/switchboard-wakeup-deliver.agi"):
+        src = (root / rel).read_text()
+        # Strip docstrings and comments: both explain outcomes by name, and a
+        # scanner that reads its own explanation invents work already done.
+        code = re.sub(r'"""(?:.|\n)*?"""', "",
+                      "\n".join(l.split("#", 1)[0] for l in src.split("\n")))
+        written |= set(re.findall(r'_record\(\s*ext\s*,\s*"([a-z][a-z-]+)"', code))
+        written |= set(re.findall(
+            r'_record_delivery\([^,]+,\s*"[a-z]+"\s*,\s*"([a-z][a-z-]+)"', code))
+    check(f"outcomes: the code-side scan finds some ({len(written)})", len(written) >= 10)
+    missing = sorted(n for n in written if f"`{n}`" not in docs)
+    check(f"outcomes: every name the code writes is in the manual ({missing})",
+          not missing)
+
+
 def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
     """The manual now lists the delivery and assistant outcome names by hand.
 

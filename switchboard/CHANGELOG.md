@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.100.1
+
+**A log audit found one thing the manual had already fallen behind on, and the
+reason it could.**
+
+The previous release added a new delivery outcome — recorded when the second
+attempt at a wake-up call is made and fails — and the manual was never told
+about it. Anyone reading the delivery log, finding that entry and searching the
+documentation for it would have concluded it was not a real event.
+
+The check that was supposed to prevent this only ran one way: it verified that
+every name the manual cites is one the software actually writes, which catches
+an invented or renamed entry but cannot catch a new one that was simply never
+written down — a name missing from the document is missing from what the check
+reads. It now runs in both directions.
+
+The wake-up section also now sets out all four ways a wake-up can fail and what
+the alert says for each, rather than describing only the last of them.
+
+No behaviour changes.
+
 ## 0.100.0
 
 **Two things that were known to be wrong and had been left that way.**

@@ -576,6 +576,22 @@ those two, not on the pickup:
    — picked up but silent, rung twice, or rung once with the second attempt
    skipped — rather than asserting a second ring it cannot confirm.
 
+**Every way it can fail now raises that alert** (v0.100.0). There are four, and
+until then only the last one did; the other three wrote a line to the ledger and
+stopped, which is not what wakes anyone at six in the morning:
+
+| what happened | recorded | the alert says |
+| --- | --- | --- |
+| Asterisk refused to place the call | `originate-refused` | the phone never rang |
+| the handset was gone, so no second ring | `re-ring-skipped` | the second attempt was not made, and why |
+| the second ring was attempted and failed | `re-ring-failed` | whether it was refused or unreachable |
+| rang twice, or was picked up in silence | `no-answer` / `answered-silent` | which of the two |
+
+A network blip while placing the call is deliberately **not** one of these: it is
+recorded `originate-error`, the wake-up stays due, and the next tick tries again.
+Treating an unreachable PBX as a failed alarm would cry wolf and then ring the
+phone anyway.
+
 The second ring comes first on purpose: the phone is the loudest thing in the
 room and it is the device that was supposed to wake you. The push is the fallback
 for when the handset itself is the problem. Set `wakeup_push_target` to empty and
@@ -587,9 +603,10 @@ would be judged unanswered.
 
 Every step above is recorded in `/share/switchboard/delivery-outcomes.jsonl`:
 `ring-queued`, `deferred` (the room was busy or offline at the appointed time),
-`answered`, `spoken` and `audio-delivered`, `no-answer` or `answered-silent`,
-`ring-requeued` or `re-ring-skipped`, and finally `undelivered`. One more is
-worth knowing:
+`originate-refused` or `originate-error` when the call could not be placed at
+all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
+`answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
+finally `undelivered`. One more is worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
 instrument. Reading that file end to end tells you what happened to a wake-up
