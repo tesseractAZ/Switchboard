@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.100.5
+
+**Opening the operator console briefly claimed the phone system was
+unreachable, on a perfectly healthy system.**
+
+The console only talks to the phone system while somebody is actually watching
+it — that is deliberate, so it is not logging in and out around the clock for
+nobody. The consequence is that the first thing drawn on screen is always drawn
+before the first check has come back. That first frame said "Asterisk Manager
+unreachable", with every phone showing as offline, for about a second on every
+connect.
+
+It now says **"Connecting to the PBX…"** until it has actually asked, and keeps
+the unreachable warning for when it has asked and the answer was no. Those are
+different things and were being reported identically — the same confusion
+between *not yet known* and *known to be bad* that this project has now fixed in
+four places.
+
+Caught by a log check: a four-second capture of the board showed the warning and
+0 of 0 phones online, while the health record ninety seconds either side of it
+read nine of nine reachable.
+
 ## 0.100.4
 
 **The readable copy of the phone log is now scrubbed every time the add-on
