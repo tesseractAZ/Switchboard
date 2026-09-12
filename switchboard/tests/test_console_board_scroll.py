@@ -57,7 +57,9 @@ def _board(n_rooms=10, n_calls=1, n_wakes=2):
         "calls": [{"kind": "outside", "detail": f"Call {i}", "state": "Up",
                    "duration": "00:01:12", "codec": "ulaw"} for i in range(n_calls)],
         "wakeups": [{"label": f"Room {i}", "hhmm": "06:15"} for i in range(n_wakes)],
-        "ami_ok": True, "trunk_reg": "Registered", "stt": "up",
+        # A polled board: ts non-zero, or render() shows the connecting notice
+        # instead of the roster (v0.100.5).
+        "ami_ok": True, "ts": 1_789_000_000.0, "trunk_reg": "Registered", "stt": "up",
     }
 
 

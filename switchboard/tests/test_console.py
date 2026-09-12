@@ -35,9 +35,13 @@ def check(name: str, cond: bool) -> None:
     assert cond, name
 
 
-def _board(rooms, calls=None, ami_ok=True):
+# ★ POLLED is the default, so `ts` is non-zero. Board() starts at ts=0.0 meaning
+# "never polled", and since v0.100.5 render() tells that apart from "polled and
+# AMI is down" — a fixture carrying rooms AND ts=0.0 describes a state the real
+# system cannot reach. _unpolled() below is the one that wants the zero.
+def _board(rooms, calls=None, ami_ok=True, ts=1_789_000_000.0):
     b = console.Board()
-    b.set({"ami_ok": ami_ok, "rooms": rooms, "calls": calls or [], "ts": 0.0})
+    b.set({"ami_ok": ami_ok, "rooms": rooms, "calls": calls or [], "ts": ts})
     return b
 
 
@@ -103,9 +107,34 @@ def test_render_connect_mode() -> None:
 
 
 def test_render_ami_down() -> None:
+    """Polled, and the answer was no. This is the real alarm."""
     board = _board(ROOMS, ami_ok=False)
     text = "\n".join(console.render(board.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0))
     check("render: AMI-down banner", "unreachable" in text.lower())
+    check("render: and it is not the connecting notice",
+          "connecting to the pbx" not in text.lower())
+
+
+def test_render_before_the_first_poll_says_connecting_not_unreachable() -> None:
+    """★ NOT ASKED YET IS NOT THE SAME AS ASKED AND THE ANSWER WAS NO.
+
+    poller_loop parks on ClientGate with no AMI traffic while nobody is watching,
+    so every new session renders at least one frame before the first poll
+    returns. That frame reported "Asterisk Manager unreachable" on a healthy
+    system — seen live on 2026-09-11, where a 4-second capture showed 0/0 online
+    and the warning while the heartbeat 90 s either side read 9/9 reachable.
+
+    Board() starts at ts=0.0 and build_board stamps time.time() on every poll,
+    INCLUDING a failed one, so `ts` separates the two cleanly.
+    """
+    b = console.Board()                      # exactly as a fresh session sees it
+    text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 80}, 0.0))
+    check("render: a never-polled board says it is connecting",
+          "connecting to the pbx" in text.lower())
+    check("render: and does NOT claim the PBX is unreachable",
+          "unreachable" not in text.lower())
+    check("render: the key bar is still there while connecting",
+          "Q" in text and "quit" in text)
 
 
 def test_navigation() -> None:
@@ -239,7 +268,7 @@ def test_render_signals() -> None:
 def test_cancel_wakeup_key() -> None:
     console.wakeup_store.set_wakeup("11", "07:00")
     board = console.Board()
-    board.set({"ami_ok": True, "rooms": ROOMS, "calls": [], "wakeups": [], "ts": 0.0})
+    board.set({"ami_ok": True, "rooms": ROOMS, "calls": [], "wakeups": [], "ts": 1_789_000_000.0})
     sess = {"sel": 0, "mode": "normal"}  # sel 0 -> ext 11 (Kitchen)
     console.apply_key(sess, "x", board, lambda m: None)
     check("x: cancels the selected room's wake-up",
@@ -655,7 +684,7 @@ def test_poller_gated_on_clients() -> None:
 
     def fake_build(cfg, opts=None):
         calls["n"] += 1
-        return {"ami_ok": True, "rooms": [], "calls": [], "ts": 0.0}
+        return {"ami_ok": True, "rooms": [], "calls": [], "ts": 1_789_000_000.0}
 
     orig_build, orig_rooms, orig_opts, orig_poll = (
         console.build_board, console.load_rooms_cfg, console.load_options, console.POLL_SECONDS)

@@ -731,7 +731,25 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     # too short to hold the roster, the calls and the keys at once.
     signal_lines = (["  " + color(GREY, "     ").join(bits), rule] if bits else [])
 
-    if not board.get("ami_ok", False):
+    # ★ THREE STATES, NOT TWO. `ami_ok` is False both before the first poll and
+    # when the PBX is genuinely unreachable, and those read very differently to
+    # somebody who has just opened the console.
+    #
+    # The poller is gated on a connected client (poller_loop parks on ClientGate
+    # with no AMI traffic while nobody is watching), so EVERY new session renders
+    # at least one frame before the first poll returns. That frame claimed
+    # "Asterisk Manager unreachable" on a perfectly healthy system — observed on
+    # 2026-09-11, where a 4 s capture showed 0/0 online and the warning while the
+    # heartbeat 90 s earlier and 90 s later both read 9/9 reachable.
+    #
+    # `ts` is the discriminator and already exists: Board starts at 0.0 and
+    # build_board stamps time.time() on every poll, including a failed one. So a
+    # falsy `ts` means "not asked yet", which is not the same as "asked and the
+    # answer was no" — the distinction this codebase keeps having to relearn.
+    if not board.get("ts"):
+        lines.append("  " + color(GREY, "Connecting to the PBX…"))
+        lines.append(rule)
+    elif not board.get("ami_ok", False):
         lines.append("  " + color(RED, "Asterisk Manager unreachable — the PBX may still be starting."))
         lines.append(rule)
 
