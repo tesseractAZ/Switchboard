@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.100.6
+
+**The shared-folder copy of the phone log kept your home network's addresses,
+and between restarts it kept your SIP account too. Separately, the console
+screenshot in the README showed a board that had never connected.**
+
+All three were found in a review of the live system's logs.
+
+**The scrub only ran when the add-on started.** 0.100.4 took the SIP account out
+of the readable copy of the log, but only at startup. The outside line writes
+that account again whenever its registration has to retry, and on this system
+one did nine and a half hours after a restart; it stayed in the shared folder
+until the next restart would have removed it. The link-health monitor now
+repeats the scrub every time it checks the phones (every five minutes by
+default), reading only what has been added since, so anything written is gone
+by the next check. If link health is turned off, that service now runs the
+scrub on its own instead of sitting idle.
+
+**Your home network's addresses were never scrubbed.** When a phone misses a
+health check, the phone system logs an error that includes the phone's address
+on your network. Private addresses — the `10.`, `172.16.` to `172.31.` and
+`192.168.` ranges — are now replaced with `<private-ip>`. The port and the
+extension stay, so the line still tells you which phone.
+
+The scrub cannot lose a line the phone system is writing at the same moment: if
+the file grows while it works, it writes nothing and tries again at the next
+check. A line still being written is left alone until it is finished.
+
+**The README's console screenshot said "Connecting to the PBX…".** 0.100.5
+taught the console to show that until its first check comes back. The example
+board the screenshots are drawn from had no check time, so the release rebuilt
+the picture with that banner above a fully working board, and two rooms pushed
+off the bottom. The example now carries a check time, and a test draws it and
+fails if either warning appears.
+
 ## 0.100.5
 
 **Opening the operator console briefly claimed the phone system was

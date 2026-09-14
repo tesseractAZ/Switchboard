@@ -428,8 +428,8 @@ in full, and the one historical row already in the mirror was remediated.
 
 That was 0.81.0, and it was only half. The same number reached the same directory
 by a second route: the per-call hangup hook also writes a human-readable
-`Verbose` line, and `/share/switchboard/asterisk.log` takes the full verbose
-class. Measured on the live system after the "fix": **14 such lines carrying 2
+`Verbose` line, and `/share/switchboard/asterisk.log` then took the full verbose
+class (it has taken none since 0.94.7). Measured on the live system after the "fix": **14 such lines carrying 2
 distinct telephone numbers.** Redacting one writer and not the other left the
 disclosure intact and the record of it looking closed. 0.86.0 truncates the
 number in that line too, on the same six-digit rule.

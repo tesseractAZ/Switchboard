@@ -1067,6 +1067,54 @@ def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int,
     return reachable > 0 and reachable <= prev_reachable
 
 
+# The READABLE copy of the Asterisk log, host-mounted in /share. This process
+# reads nothing from it; it keeps it clean. webui/logscrub.py says why a pass at
+# boot alone was not enough.
+SHARE_LOG_PATH = os.environ.get("SWITCHBOARD_SHARE_LOG", "/share/switchboard/asterisk.log")
+SCRUB_ONLY_INTERVAL = 300
+
+
+def _scrub_share_log(st: dict) -> None:
+    """One incremental scrub pass over the readable log.
+
+    `st` carries the byte watermark between cycles ("to") and the last problem
+    reported ("problem"): a persistent failure is logged once rather than every
+    cycle, and a recovery re-arms the warning. Nothing here may stop the
+    link-health loop, so a scrub that raises is reported and skipped.
+    """
+    try:
+        import logscrub
+        r = logscrub.scrub(SHARE_LOG_PATH, st.get("to", 0))
+    except Exception as exc:  # noqa: BLE001
+        problem = f"error: {exc}"
+    else:
+        st["to"] = r.clean_to
+        problem = r.deferred
+        if not r.deferred and (r.dropped or r.redacted):
+            sys.stderr.write(
+                f"switchboard-rtpmon: scrubbed {SHARE_LOG_PATH}: dropped "
+                f"{r.dropped} verbose line(s), redacted {r.redacted} line(s)\n")
+    if problem and problem != st.get("problem"):
+        sys.stderr.write(f"switchboard-rtpmon: WARN readable log not scrubbed "
+                         f"({problem}); retrying next cycle\n")
+    st["problem"] = problem
+
+
+def run_scrub_only() -> int:
+    """`link_health_enabled: false` — keep only the readable-log scrub.
+
+    That option used to idle this service outright. The scrub rides this loop,
+    so switching off a health graph would quietly have turned a privacy
+    guarantee back into a boot-only one.
+    """
+    sys.stderr.write(f"switchboard-rtpmon: link health disabled; scrubbing the "
+                     f"readable log only (every {SCRUB_ONLY_INTERVAL}s)\n")
+    st = {"to": 0, "problem": ""}
+    while True:
+        _scrub_share_log(st)
+        time.sleep(SCRUB_ONLY_INTERVAL)
+
+
 def run() -> int:
     try:
         interval = int(os.environ.get("LINK_HEALTH_INTERVAL", "300") or "300")
@@ -1079,6 +1127,7 @@ def run() -> int:
     prev_reachable = -1
     outage_st = {"cycles": 0, "alerted": False}
     trunk_st = {"cycles": 0, "alerted": False}
+    scrub_st = {"to": 0, "problem": ""}
     # Extensions this process has actually seen answer a qualify. A phone that
     # has never answered cannot have "dropped out" of the RTT sample, so it must
     # not raise worst_rtt_is_partial — see _sample_is_partial. Grows only; a
@@ -1132,6 +1181,9 @@ def run() -> int:
         if trunk_enabled(opts):
             trunk_status = _trunk_check(trunk_st, settled,
                                         opts.get("link_health_alerts", True))
+        # The readable log, EVERY cycle and whatever AMI is doing: Asterisk writes
+        # to it whether or not this poller can reach the manager interface.
+        _scrub_share_log(scrub_st)
         # Liveness record, EVERY cycle -- including cycles where AMI was down and
         # nothing else was published. Silence in the heartbeat file is the only
         # signal that separates "the PBX is idle" from "the poller stopped": the
@@ -1151,4 +1203,4 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    sys.exit(run_scrub_only() if "--scrub-only" in sys.argv[1:] else run())

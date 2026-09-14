@@ -1149,6 +1149,11 @@ notifications — the sensors keep publishing either way.
 > trunk sensor and its auto-recovery, and the cordless half of device health** —
 > with no alert to tell you so. Leave it on unless you mean to turn all of that
 > off.
+>
+> One thing it does **not** stop: the same service keeps the readable log copy,
+> `/share/switchboard/asterisk.log`, free of SIP accounts and LAN addresses (see
+> SECURITY.md). With link health off it runs that scrub alone, every 300 s,
+> rather than idling.
 
 ### Link health (`link_health_*`)
 
