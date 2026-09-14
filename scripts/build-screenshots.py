@@ -190,8 +190,16 @@ def build_console_html(repo_root: Path) -> str:
     console = importlib.machinery.SourceFileLoader(
         "console", str(share / "console/console.py")).load_module()
 
+    # ★ `ts` must be a real poll time. v0.100.5 taught render() that ts == 0 means
+    # "never polled" and to say "Connecting to the PBX…" — and this fixture carried
+    # ts=0.0 next to a full roster, a state the live system cannot produce. The
+    # release workflow re-rendered console.png from it, so the README screenshot
+    # showed "Connecting to the PBX…" above a board reading "trunk Registered, 6/7
+    # online, 2 on call", and the banner's two rows pushed the roster down from five
+    # rooms to three. The same impossible fixture was fixed in the test suite in
+    # that release; this was the consumer that got missed.
     board = {"ami_ok": True, "rooms": ROOMS, "calls": CALLS, "wakeups": WAKEUPS,
-             "trunk_reg": TRUNK["registration"], "stt": "up", "ts": 0.0}
+             "trunk_reg": TRUNK["registration"], "stt": "up", "ts": float(NOW)}
     # h is sized to the content so the board isn't vertically centred inside a
     # tall, mostly-empty terminal.
     lines = console.render(board, {"sel": 0, "mode": "normal", "w": 94, "h": 22}, NOW)

@@ -174,8 +174,8 @@ control.
   container, and to take verbose off the readable copy entirely. The detector
   kept working and the dialplan trace stopped being published.
 
-  **The readable copy is scrubbed at every boot** (v0.100.4). Two things are taken
-  out of it, and nothing else removed either:
+  **The readable copy is scrubbed at boot, and then every poll** (v0.100.4,
+  v0.100.6). Three things are taken out of it, and nothing else removed either:
 
   - **Any `VERBOSE` line.** v0.94.7 stopped writing them here, and removed
     nothing already written. On the deployment this was found on, the readable
@@ -187,9 +187,33 @@ control.
     hiccup. Redacted rather than dropped — that line is how you learn your trunk
     is flapping — and the provider host is deliberately kept, because it is what
     makes the line diagnostic and it identifies nobody.
+  - **Private (RFC 1918) IPv4 addresses** — `10.0.0.0/8`, `172.16.0.0/12`,
+    `192.168.0.0/16` — rewritten to `<private-ip>`. A failed qualify is logged at
+    **ERROR** with the phone's contact URI, and that URI carries the phone's LAN
+    address. The port and the AOR survive, so the line still says which phone.
+    Public addresses are left alone: a provider's address is diagnostic and has
+    the same shape as a household's public one, and no public address of the
+    household has been observed in this log. IPv6 is not handled; the phones
+    register over IPv4.
 
-  The private copy in `/data/state/asterisk.log` keeps both in full. That is the
-  whole reason the two copies differ, and it is not readable from outside the
+  **Why every poll, not only at boot.** v0.100.4 scrubbed at boot alone, and a
+  boot-only scrub has a window as long as the uptime: on the deployment it
+  shipped to, a trunk registration retry wrote the account nine and a half hours
+  after the boot that had scrubbed the file, and it stayed. The boot pass now
+  removes what an earlier build or run left behind; the link-health poller
+  repeats the pass on every poll (`link_health_interval`, 300 s by default),
+  reading only what Asterisk has appended since. With `link_health_enabled:
+  false` that service runs the scrub alone, every 300 s, instead of idling. The
+  exposure window is one poll interval, not one uptime.
+
+  The rewrite is in place, because Asterisk holds the file open for append and a
+  rename would strand its handle on an unlinked file. It is refused — and retried
+  on the next poll — if the file grew between the read and the write, since the
+  lines appended in that gap would otherwise be truncated away. A line Asterisk is
+  still writing is left untouched until it is complete.
+
+  The private copy in `/data/state/asterisk.log` keeps all three in full. That is
+  the whole reason the two copies differ, and it is not readable from outside the
   container.
 
   What this means in practice: **since v0.94.7 the dialplan trace is no longer
