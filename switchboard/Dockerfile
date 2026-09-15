@@ -1,4 +1,31 @@
-ARG BUILD_FROM
+# --------------------------------------------------------------------------- #
+# Base image — written HERE and nowhere else.
+#
+# Until v0.100.6 it lived in build.yaml, and this file declared a bare
+# `ARG BUILD_FROM` for the Supervisor to fill in. On the 2026-09-14 update to
+# v0.100.6 the Supervisor logged "uses build.yaml which is deprecated. Move build
+# parameters into the Dockerfile directly." Since Supervisor 2026.04.0
+# (home-assistant/supervisor#6694) BUILD_FROM is passed ONLY while a build.yaml
+# exists, so the release that drops that compatibility path would have blanked
+# both FROM lines and failed every on-device update. The running container
+# survives a failed build, so the symptom would have been an update that never
+# lands.
+#
+# Deliberately NOT named BUILD_FROM. A Supervisor older than 2026.04.0 ALWAYS
+# passes --build-arg BUILD_FROM, and with no build.yaml it falls back to
+# ghcr.io/home-assistant/{arch}-base:latest, which would silently override a
+# default of that name with an unpinned, different Alpine. Nothing passes
+# SWITCHBOARD_BASE_IMAGE, not the Supervisor and not CI or the release workflow,
+# so this line is what builds everywhere.
+#
+# base:3.21 is a multi-platform manifest; BuildKit takes the child matching the
+# --platform the Supervisor passes. Its amd64 and arm64 children are the same
+# digests as the amd64-base:3.21 / aarch64-base:3.21 images build.yaml named
+# (checked 2026-09-14), so the move changes where the base is written, not what
+# is built. Keep it pinned: the package notes below are Alpine 3.21's.
+# tests/test_build_config.py pins all of this.
+# --------------------------------------------------------------------------- #
+ARG SWITCHBOARD_BASE_IMAGE=ghcr.io/home-assistant/base:3.21
 
 # --------------------------------------------------------------------------- #
 # Stage 1 — build whisper.cpp (offline speech-to-text for the voice operator).
@@ -7,7 +34,7 @@ ARG BUILD_FROM
 # builder stage compiles a static whisper-cli and fetches the model; the
 # multi-stage COPY keeps the toolchain + sources out of the shipped image.
 # --------------------------------------------------------------------------- #
-FROM ${BUILD_FROM} AS whisper-builder
+FROM ${SWITCHBOARD_BASE_IMAGE} AS whisper-builder
 ARG WHISPER_REF=v1.7.4
 ARG WHISPER_MODEL=base.en
 RUN apk add --no-cache build-base cmake git wget
@@ -34,7 +61,7 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
 # AEL/Lua) are noloaded by the generated modules.conf. libstdc++ is the only
 # extra runtime dep whisper-cli needs (built static, OpenMP off).
 # --------------------------------------------------------------------------- #
-FROM ${BUILD_FROM}
+FROM ${SWITCHBOARD_BASE_IMAGE}
 
 RUN apk add --no-cache \
         asterisk \
@@ -148,8 +175,15 @@ EXPOSE 5060/udp
 EXPOSE 8099/tcp
 EXPOSE 8100/tcp
 
+# The org.opencontainers.image.* labels used to be build.yaml's `labels:`, which
+# the Supervisor passed as --label. io.hass.version is the hand-bumped copy of
+# config.yaml's version that the version-consistency job and tag-release.yml
+# grep for; it is kept last only so a bump stays a one-line diff.
 LABEL \
     io.hass.name="Switchboard" \
     io.hass.description="Asterisk PBX for analog home phones" \
     io.hass.type="addon" \
-    io.hass.version="0.103.0"
+    org.opencontainers.image.title="Switchboard" \
+    org.opencontainers.image.description="Asterisk PBX for analog home phones" \
+    org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
+    io.hass.version="0.103.1"

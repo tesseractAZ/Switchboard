@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.103.1
+
+**Add-on updates will keep installing after Home Assistant retires an old build file.**
+
+The v0.100.6 update logged a warning from Home Assistant: the add-on still named its base image in `build.yaml`, a file Home Assistant has deprecated. Since Supervisor 2026.04.0 the base image is passed to the build only while that file exists, so the release that stops reading it would have left the build with no base image. Every update would then have failed to build and simply stopped installing, while the old version kept running with nothing obvious to show for it.
+
+The base image is now written in the add-on's Dockerfile, and `build.yaml` is gone. It is the same image as before — Home Assistant's Alpine 3.21 base — so nothing inside the add-on changes. The automatic test builds and the release build now read the same line your device builds from, and a new test fails if a second copy of the base image appears anywhere.
+
 ## 0.103.0
 
 **Correction to 0.100.6.** That entry said the scrub "cannot lose a line the phone system is writing at the same moment". That was not true. The scrub checked once that the file had not grown, then rewrote it and cut it back to length. A line the phone system added after that check, but before the cut, was removed from the shared-folder copy. The private copy always kept it. No lost line was seen on the system where this was found, but the guarantee was wrong.
