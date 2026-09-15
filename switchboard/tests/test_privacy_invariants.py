@@ -7,13 +7,19 @@ say in their own home. Until v0.80.0 there was no test, no hook and no CI job
 enforcing any of that — the discipline was held by maintainer habit alone, which
 by this project's own doctrine means it was inert.
 
-THE SHAPE OF THE HAZARD. Asterisk runs `-vvv`, and logger.conf routes the
-`verbose` class to `/share/switchboard/asterisk.log`. `/share` is host-mounted
+THE SHAPE OF THE HAZARD. Asterisk runs `-vvv`. Until v0.94.7 logger.conf routed
+the `verbose` class to `/share/switchboard/asterisk.log`, which is host-mounted
 and world-readable BY DESIGN — that is the entire purpose of the directory — and
-it is captured in Supervisor backups. So the obvious way to make an AGI
-diagnostic durable, `Verbose()` or a dialplan `NoOp()`, is precisely the action
-that would move spoken words out of an ephemeral RAM-backed container log and
-into a 32 MB durable file readable from outside the add-on.
+captured in Supervisor backups. So the obvious way to make an AGI diagnostic
+durable, `Verbose()` or a dialplan `NoOp()`, was precisely the action that would
+move spoken words into a 32 MB durable file readable from outside the add-on.
+
+★ AND THE JOURNAL IS NOT THE SAFE PLACE THIS DOCSTRING CALLED IT (2026-09-14).
+It described the container log as ephemeral. The Supervisor serves it to anyone
+with log access, for about two days and across a host reboot, and every AGI's
+stderr lands in it. Recognised words went there on every call, whatever
+`assistant_transcripts` said. They now go there only when it is on; section 3
+below pins that.
 
 WHAT IS ACTUALLY TRUE TODAY, verified on the running system rather than reasoned
 about: `/share/switchboard/asterisk.log` and `/data/state/asterisk.log` contain
@@ -257,3 +263,188 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
 
 # The readable-log scrubber (webui/logscrub.py) and both of its callers are
 # tested in test_logscrub.py.
+
+
+# --------------------------------------------------------------------------- #
+# 3. Recognised words reach the add-on journal only when transcripts are on.
+#
+# The journal is where every AGI's stderr goes, and it is not private: the
+# Supervisor serves it to anyone with log access, for about two days and across a
+# host reboot. On 2026-09-14 it held six recognitions in one day, verbatim, from
+# the wake-up flow as well as the assistant. The behaviour is driven end to end in
+# test_switchboard_stt_server.py and test_assistant_agi.py; the scan below is the
+# tripwire for the NEXT log line, the one nobody has written yet.
+# --------------------------------------------------------------------------- #
+import ast  # noqa: E402
+
+VOICE_SCRIPTS = (sorted((ADDON / "rootfs/var/lib/asterisk/agi-bin").glob("*.agi"))
+                 + [ADDON / "rootfs/usr/bin/switchboard-stt",
+                    ADDON / "rootfs/usr/share/switchboard/operator/agi_speech.py"])
+# Calls whose return value IS what the caller said. Not `recognize`: the operator
+# and wake-up AGIs name that for helpers that return a room token or HH:MM.
+RECOGNISERS = {"listen", "_recording_to_text", "transcribe"}
+GATE = "said"
+
+
+def _call_name(call: ast.Call) -> str:
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+def _is_stderr_sink(call: ast.Call) -> bool:
+    f = call.func
+    if _call_name(call) == "log":                                 # log(...), sp.log(...)
+        return True
+    if (isinstance(f, ast.Attribute) and f.attr == "write"
+            and isinstance(f.value, ast.Attribute) and f.value.attr == "stderr"):
+        return True                                               # sys.stderr.write(...)
+    return _call_name(call) == "print" and any(                   # print(..., file=sys.stderr)
+        k.arg == "file" and isinstance(k.value, ast.Attribute) and k.value.attr == "stderr"
+        for k in call.keywords)
+
+
+def _names(expr, tainted, *, gated: bool):
+    """Tainted names in `expr` outside (gated=False) or inside (True) a said() call."""
+    out, stack = [], [(expr, False)]
+    while stack:
+        node, inside = stack.pop()
+        if isinstance(node, ast.Call) and _call_name(node) == GATE:
+            inside = True
+        if isinstance(node, ast.Name) and node.id in tainted and inside is gated:
+            out.append(node.id)
+        stack.extend((c, inside) for c in ast.iter_child_nodes(node))
+    return out
+
+
+def _scope_nodes(scope):
+    """Every node in `scope`. The module scope stops at function bodies; a
+    function keeps the functions nested in it, which can read its names.
+
+    A first draft walked the whole module for the module scope, so the `text`
+    that automation's main() binds from listen() tainted the unrelated `text`
+    parameter of its say(), which speaks light names."""
+    out, stack = [], list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if isinstance(scope, ast.Module) and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def scan_speech_to_stderr(src: str):
+    """(ungated, gated) stderr writes that interpolate recognised text.
+
+    A name is recognised text when a scope binds it from a RECOGNISERS call. The
+    AST is scanned, not the characters, so a comment explaining this rule cannot
+    trip it."""
+    tree = ast.parse(src)
+    scopes = [tree] + [n for n in ast.walk(tree)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    ungated, gated = set(), set()
+    for scope in scopes:
+        nodes = _scope_nodes(scope)
+        tainted = set()
+        for n in nodes:
+            if (isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Call)
+                    and _call_name(n.value) in RECOGNISERS):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                tainted |= {t.id for tgt in targets for t in ast.walk(tgt)
+                            if isinstance(t, ast.Name)}
+        for n in nodes:
+            if isinstance(n, ast.Call) and _is_stderr_sink(n):
+                for arg in list(n.args) + [k.value for k in n.keywords]:
+                    bad = _names(arg, tainted, gated=False)
+                    if bad:
+                        ungated.add((n.lineno, tuple(sorted(set(bad)))))
+                    if _names(arg, tainted, gated=True):
+                        gated.add(n.lineno)
+    return sorted(ungated), sorted(gated)
+
+
+def test_the_speech_scanner_can_see_what_it_forbids():
+    """A scanner that has never flagged anything proves nothing about the tree."""
+    cases = {
+        'def f():\n    text = listen("x", 1)\n    log(f"heard {text!r}")\n': True,
+        'def f():\n    text, meta = listen("x", 1)\n    sys.stderr.write(f"{text}\\n")\n': True,
+        'def f():\n    text = sp.listen("x")\n    sp.log("tag", f"{text[:40]}")\n': True,
+        'def f():\n    text = _recording_to_text(a, b)\n    print(text, file=sys.stderr)\n': True,
+        'def f():\n    text = listen("x", 1)\n    log(f"heard {said(text, w)}")\n': False,
+        'def f():\n    text = listen("x", 1)\n    log(f"heard {len(text)}")\n': True,
+        'def f(text):\n    log(f"tts failed for {text!r}")\n': False,   # not recognised here
+        # Another function's parameter that shares the name is not recognised
+        # text (automation's say(text) speaks light names)...
+        ('def say(text):\n    log(f"tts failed for {text!r}")\n\n'
+         'def main():\n    text = listen("x", 1)\n    log(f"{said(text, w)}")\n'): False,
+        # ...but a closure over the recognised name is.
+        ('def main():\n    text = listen("x", 1)\n'
+         '    def inner():\n        log(f"{text}")\n    inner()\n'): True,
+    }
+    for src, flagged in cases.items():
+        ungated, gated = scan_speech_to_stderr(src)
+        assert bool(ungated) is flagged, (src, ungated)
+        if "said(" in src:
+            assert gated, f"the gated form was not seen as gated:\n{src}"
+
+
+def test_no_voice_script_writes_recognised_words_to_stderr_ungated():
+    assert len(VOICE_SCRIPTS) >= 11, [p.name for p in VOICE_SCRIPTS]
+    offenders, gated = [], {}
+    for p in VOICE_SCRIPTS:
+        bad, ok = scan_speech_to_stderr(p.read_text())
+        offenders += [f"{p.name}:{line}: {names}" for line, names in bad]
+        gated[p.name] = len(ok)
+    assert not offenders, (
+        "recognised speech reaches stderr, which is the add-on journal, without "
+        "said():\n  " + "\n  ".join(offenders))
+    # ...and the scan SEES the sites it is there for: the six heard= lines in
+    # switchboard-stt and the assistant's per-turn line. Fewer means a rename
+    # blinded it, not that the lines went away.
+    assert gated["switchboard-stt"] >= 6, gated
+    assert gated["switchboard-assistant.agi"] >= 1, gated
+
+
+def test_the_tts_helper_does_not_echo_the_text_it_failed_to_speak(tmp_path, capsys):
+    """switchboard-tts's stderr reaches the journal through whichever AGI ran it.
+    Its timeout message rendered the espeak command line, and the text is an
+    argument on it."""
+    import subprocess as _sp
+    import types
+    from importlib.machinery import SourceFileLoader
+    tts = SourceFileLoader("switchboard_tts_privacy",
+                           str(ADDON / "rootfs/usr/bin/switchboard-tts")).load_module()
+    tts._espeak_bin = lambda: "/usr/bin/espeak-ng"
+
+    def _run(cmd, **kw):
+        raise _sp.TimeoutExpired(cmd, 15)
+    tts.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=_sp.TimeoutExpired,
+                                           SubprocessError=_sp.SubprocessError)
+    capsys.readouterr()
+    assert tts.synthesize("the zebra lamp is on", str(tmp_path / "out")) is False
+    err = capsys.readouterr().err
+    assert "timed out" in err and "zebra" not in err, err
+
+
+@pytest.mark.parametrize("claim", [
+    "RAM-backed container log",
+    "evaporates on rotation",
+    "rotates in hours",
+    "wiped by a reboot",
+])
+def test_no_source_calls_the_add_on_journal_ephemeral(claim):
+    """★ The belief that the journal forgets is what let recognised speech go
+    there unexamined. Four comments said it; the live system kept a previous
+    boot's log for 30 h after a host reboot. Matched across line wraps and
+    comment markers. CHANGELOG.md is history and is not rewritten."""
+    me = Path(__file__).resolve()
+    hits = []
+    for p, t in _text_files():
+        if p.resolve() == me or str(p.relative_to(ROOT)) == "switchboard/CHANGELOG.md":
+            continue
+        flat = " ".join(re.sub(r"(?m)^\s*#+", " ", t).split())
+        if claim in flat:
+            hits.append(str(p.relative_to(ROOT)))
+    assert not hits, (f"{claim!r} describes the add-on journal as ephemeral; it "
+                      f"keeps about two days and survives a reboot. Found in: {hits}")

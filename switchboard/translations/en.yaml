@@ -181,13 +181,14 @@ configuration:
   assistant_transcripts:
     name: Record Assistant Transcripts
     description: >-
-      Keep what was said to the assistant, and what it replied, in the add-on's
-      own diagnostic log. Nothing is sent anywhere: the file lives inside the
-      add-on where it cannot be read from outside the container, and it is never
-      copied to the shared folder. It holds the last 400 turns and is the only
-      way to answer "why did it do that?" after the call has ended. Turn this off
-      and the log still records every timing, outcome and failure reason — only
-      the words themselves are withheld.
+      Keep the words people say to the voice features. On, the assistant's own
+      diagnostic log keeps what was said and what it replied (inside the add-on,
+      last 400 turns, never copied to the shared folder), and the add-on's log —
+      which Home Assistant administrators can read, and which is kept for about
+      two days — quotes what was heard at the operator, wake-up, automation,
+      status, directory and assistant prompts. Nothing is sent anywhere. Off,
+      both still record every timing, outcome and failure reason; only the words
+      are replaced by their length.
   wakeup_retry_seconds:
     name: Wake-up Retry Delay
     description: >-

@@ -68,7 +68,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — but only **three** of the seven behave differently. The Asterisk console channel always carries `notice,warning,error`; `info` adds `verbose`; `debug` and `trace` add `verbose` **and** `debug` and are identical to each other. `notice`, `warning`, `error` and `critical` all produce the same bare `notice,warning,error` — this is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose, then set back (it is very noisy). The durable `/data/state/asterisk.log` copy does not follow this setting at all: it is fixed at `notice,warning,error,verbose(2)`. That one verbose level, added in v0.84.0, exists for a single class of line — `Endpoint <n> is now Unreachable` and its `Contact` twin, which Asterisk emits at verbosity 2 — so the durable log records whether the phones were reachable without carrying the whole dialplan trace. It is trimmed at boot, before Asterisk opens it, keeping the newest half whenever it has grown past 8 MB. |
+| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — but only **three** of the seven behave differently. The Asterisk console channel always carries `notice,warning,error`; `info` adds `verbose`; `debug` and `trace` add `verbose` **and** `debug` and are identical to each other. `notice`, `warning`, `error` and `critical` all produce the same bare `notice,warning,error` — this is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose, then set back (it is very noisy). The durable `/data/state/asterisk.log` copy does not follow this setting at all: it is fixed at `notice,warning,error,verbose(2)`. That one verbose level, added in v0.84.0, exists for a single class of line — `Endpoint <n> is now Unreachable` and its `Contact` twin, which Asterisk emits at verbosity 2 — so the durable log records whether the phones were reachable. The level number does not keep the rest of the verbose class out: the file carries the whole dialplan trace too, dialled numbers included (see SECURITY.md). It is private to the add-on, though included in its backups, and trimmed at boot, before Asterisk opens it, keeping the newest half whenever it has grown past 8 MB. The console channel is the add-on's log in the Supervisor, which keeps about two days across a host reboot and is readable by Home Assistant administrators; at `info`, `debug` or `trace` it carries that same trace. |
 | `rtp_start` | `10000` | First UDP port for live call audio (RTP). Must be below `rtp_end`. |
 | `rtp_end` | `10200` | Last RTP port. The default 200-port window is far more than a home needs (~2 ports per call). |
 
@@ -147,7 +147,7 @@ its default is fine.
 | Option | Default | Notes |
 |--------|---------|-------|
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
-| `assistant_transcripts` | `true` | Keep what was said to the assistant, and its replies, in the add-on's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder). Turn it off to keep every timing and failure reason without the words. |
+| `assistant_transcripts` | `true` | Keep the words people say to the voice features. On: the assistant's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder) records what was said and replied, and the add-on's log — shown by the Supervisor to Home Assistant administrators, kept about two days across a host reboot — quotes what the recognizer heard at the operator, wake-up, home-automation, status, directory and assistant prompts. Off: both still record every timing, outcome and failure reason, with each utterance replaced by its length. If the setting cannot be read, the add-on's log leaves the words out. |
 | `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
@@ -416,9 +416,16 @@ precisely *because* that directory is readable from outside — the call-quality
 and delivery ledgers live there for that reason, and this one deliberately does
 not. Nothing spoken is written to either `asterisk.log`.
 
+The add-on's log is a different matter. Each voice feature's recognizer writes a
+line there for everything it hears, and the assistant adds one per turn. That log
+is readable by Home Assistant administrators through the Supervisor, and it is
+kept for about two days, across a restart of the host. With
+`assistant_transcripts` on, those lines quote the words; with it off, they give
+only the outcome and the length.
+
 Set `assistant_transcripts: false` to keep the diagnostics without the words.
-Every timing, outcome and failure reason is still recorded; only what was said
-is withheld, replaced by its length. The switch is meant to cost privacy, not
+Every timing, outcome and failure reason is still recorded, in the file and in
+the add-on's log; only what was said is withheld, replaced by its length. The switch is meant to cost privacy, not
 visibility — a setting that also made the feature undebuggable would just be
 left on.
 

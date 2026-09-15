@@ -4,7 +4,8 @@
 
 Before v0.80.0 the voice assistant recorded nothing that survived the call. Its
 diagnostics went to a bare `sys.stderr.write`, and AGI stderr never reaches
-Asterisk's logger — it lands in the RAM-backed container log and evaporates.
+Asterisk's logger — it lands in the add-on journal, which rotates after about two
+days and is readable through the Supervisor until then.
 Verified on the running system: zero `[assistant]` lines in either durable log.
 The reply was worse off than the transcript: `reply_text(...)` was evaluated
 inline as a call argument and never bound, so the half of "what it heard and

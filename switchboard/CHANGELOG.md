@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.103.0
+
+**Correction to 0.100.6.** That entry said the scrub "cannot lose a line the phone system is writing at the same moment". That was not true. The scrub checked once that the file had not grown, then rewrote it and cut it back to length. A line the phone system added after that check, but before the cut, was removed from the shared-folder copy. The private copy always kept it. No lost line was seen on the system where this was found, but the guarantee was wrong.
+
+**The every-five-minutes scrub now never moves a byte.** While the phone system is running, the scrub covers each SIP account and home network address with a mask exactly as long as the original. It writes only over those characters and never shortens the file, so a line being written at the same moment cannot be lost.
+- An account now reads `sip:` followed by one `*` per character.
+- An address reads `<ip` followed by `*` up to its original length, so `192.168.1.71` becomes `<ip********>`.
+- A stray verbose line keeps its timestamp and is starred out.
+
+The scrub at add-on start runs before the phone system does. It still removes verbose lines, and it turns every mask into the fixed-length `sip:***@` and `<private-ip>`, so the masks' lengths do not outlast a restart.
+
+**Nothing the add-on writes in the shared folder follows a link any more.** Several parts of the add-on write there:
+- the startup permission fix
+- the log scrub
+- the link-health heartbeat
+- the wake-up and announcement ledger (the wake-up scheduler, the web UI and the wake-up calls)
+- the call-quality ledger
+- the backup-window record
+
+Most of them run as root, in a folder the phone system's own user can write, and so can anything with write access to the shared folder. A symbolic link placed there could have sent that access to another file, such as the add-on's options: appending to it, cutting it down, or changing its permissions. Every one of them now refuses links and anything that is not an ordinary file. If the wake-up ledger has been replaced that way, a wake-up is no longer judged unanswered because its answer could not be recorded. The add-on says the ledger cannot be written and sends no alert.
+
+**What the voice features heard was being written to the add-on log, whatever "Record Assistant Transcripts" was set to.** The add-on log recorded the words every time one of these recognised speech:
+- the operator
+- the wake-up menu
+- home automation
+- dial-a-status
+- directory assistance
+- the assistant
+
+That log is readable by Home Assistant administrators and kept for about two days, even across a restart of the host. The setting now covers it. With it on, nothing changes. With it off, the log keeps the outcome (the room, the wake-up time, "cancel") and the number of characters heard, but not the words. If the add-on cannot read the setting, the words are left out of the log. The assistant's replies follow the same rule when its voice fails. The speech engine no longer repeats the text it was speaking when it times out.
+
+**The security documentation now says where everything goes.**
+- The add-on log carries the full call flow, including every number dialled, the trunk account and phones' network addresses. It also carries recognised speech when transcripts are on.
+- The private copy of the phone log carries the full call flow too. The documentation previously said it stopped short of that.
+- Three shared-folder ledgers record wake-up times, emergency calls and phone status. A fourth records only when backups ran.
+- Home Assistant stores each phone's network address, and the cordless's Wi-Fi network name, as sensor attributes.
+- A table lists every part of the add-on that writes in the shared folder, and as which user.
+
 ## 0.102.0
 
 **The alarm cordless no longer reports "degraded" on a single number nothing else agrees with. The health monitor also stops counting the outside line as a phone, and waits for the cordless after a restart.**

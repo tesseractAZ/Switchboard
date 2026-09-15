@@ -35,6 +35,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -788,6 +789,31 @@ HEARTBEAT_PATH = os.environ.get("SWITCHBOARD_HEARTBEAT",
 HEARTBEAT_MAX_BYTES = 4 * 1024 * 1024
 
 
+def _open_no_follow(path: str, flags: int) -> int:
+    """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
+
+    ★ A LEDGER IN A DIRECTORY OTHERS CAN WRITE (2026-09-14). /share/switchboard
+    is owned by `asterisk` and group-writable, and whatever can write the shared
+    folder from the host can add entries to it as well. This poller runs as
+    root, and appends and trims heartbeat.jsonl there every cycle.
+
+    By name, an append, a trim or a chmod follows a symlink planted in place of
+    the ledger and lands on its target. O_NOFOLLOW makes a link fail to open;
+    the fstat refuses a FIFO, a device or a directory; O_NONBLOCK keeps a planted
+    FIFO from hanging the open. Everything after goes through the fd, so a name
+    swapped after the check cannot redirect it. switchboard-config's
+    open_share_file() applies the same rule to the boot pass.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     """Trim an append-only ledger to its newest records. Best-effort.
 
@@ -801,20 +827,32 @@ def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     Keeps the last `keep_frac` of the cap, cut at a line boundary so the first
     surviving record is not half a JSON object. Rewrites in place rather than
     renaming, so a reader holding the path keeps reading the same inode.
+
+    ★ BY FD, NEVER THROUGH A SYMLINK (2026-09-14). This opened the path twice by
+    name, and both opens follow a link: a link planted in place of the ledger
+    turned the trim into a rewrite of whatever it pointed at. See
+    _open_no_follow(). The bytes it leaves are unchanged, and
+    test_ledger_rotation still holds every copy to the same output.
     """
     try:
-        if os.path.getsize(path) <= max_bytes:
-            return
-        keep = max(1, int(max_bytes * keep_frac))
-        with open(path, "rb") as fh:
+        fd = _open_no_follow(path, os.O_RDWR)
+    except OSError:
+        return                            # absent, a link, or not a file: nothing to trim
+    try:
+        with os.fdopen(fd, "r+b") as fh:
+            if os.fstat(fh.fileno()).st_size <= max_bytes:
+                return
+            keep = max(1, int(max_bytes * keep_frac))
             fh.seek(-keep, os.SEEK_END)
             tail = fh.read()
-        # Everything before the first newline is half a record. Drop it: a
-        # reader must never have to guess whether the first line is complete.
-        nl = tail.find(b"\n")
-        tail = tail[nl + 1:] if nl != -1 else b""
-        with open(path, "wb") as fh:
+            # Everything before the first newline is half a record. Drop it: a
+            # reader must never have to guess whether the first line is complete.
+            nl = tail.find(b"\n")
+            tail = tail[nl + 1:] if nl != -1 else b""
+            # Written first and cut after, so the file is never empty.
+            fh.seek(0)
             fh.write(tail)
+            fh.truncate()
     except OSError:
         pass                              # a trim must never break the write
 
@@ -946,7 +984,11 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
         # Cap: this file is append-only and unbounded otherwise. Keep the tail.
         _rotate_tail(HEARTBEAT_PATH, HEARTBEAT_MAX_BYTES)
-        with open(HEARTBEAT_PATH, "a", encoding="utf-8") as fh:
+        # By fd, never through a symlink: root, in a directory `asterisk` can
+        # write. A link fails the append and is logged below.
+        with os.fdopen(_open_no_follow(HEARTBEAT_PATH,
+                                       os.O_WRONLY | os.O_APPEND | os.O_CREAT),
+                       "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
     except OSError as exc:
         sys.stderr.write(f"[switchboard-rtpmon] heartbeat: {exc}\n")
@@ -1132,6 +1174,12 @@ def _scrub_share_log(st: dict) -> None:
     """
     try:
         import logscrub
+        # ★ NO `writer_stopped`. Asterisk is appending to this file while the
+        # poller runs, so the pass must be the in-place, same-length one: it
+        # never truncates and never writes past what it read, so an append
+        # cannot be cut. v0.100.6 ran the byte-shifting rewrite here, and a line
+        # appended between its size re-check and its truncate() was lost from
+        # the readable copy.
         r = logscrub.scrub(SHARE_LOG_PATH, st.get("to", 0))
     except Exception as exc:  # noqa: BLE001
         problem = f"error: {exc}"
@@ -1140,8 +1188,8 @@ def _scrub_share_log(st: dict) -> None:
         problem = r.deferred
         if not r.deferred and (r.dropped or r.redacted):
             sys.stderr.write(
-                f"switchboard-rtpmon: scrubbed {SHARE_LOG_PATH}: dropped "
-                f"{r.dropped} verbose line(s), redacted {r.redacted} line(s)\n")
+                f"switchboard-rtpmon: scrubbed {SHARE_LOG_PATH} in place: blanked "
+                f"{r.dropped} verbose line(s), masked {r.redacted} line(s)\n")
     if problem and problem != st.get("problem"):
         sys.stderr.write(f"switchboard-rtpmon: WARN readable log not scrubbed "
                          f"({problem}); retrying next cycle\n")

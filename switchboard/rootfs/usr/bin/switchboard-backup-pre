@@ -20,6 +20,7 @@ skip malformed lines by design -- and the torn record is at most the newest one.
 Never fails the backup: any error is logged and swallowed. A backup that runs is
 worth far more than one blocked by a hook."""
 import os
+import stat
 import sys
 
 STATE_DIR = os.environ.get("SWITCHBOARD_STATE", "/data/state")
@@ -53,7 +54,16 @@ def _stamp(phase: str, synced: int = -1) -> None:
         rec["synced_files"] = synced
     try:
         os.makedirs(os.path.dirname(STAMP_PATH), exist_ok=True)
-        with open(STAMP_PATH, "a", encoding="utf-8") as fh:
+        # ★ By fd, never through a symlink (2026-09-14). The Supervisor runs this
+        # hook as root inside the container, and /share/switchboard can be
+        # written by `asterisk` and from the host: by name, this append followed
+        # a link planted in place of the stamp file onto whatever it pointed at.
+        # A link or a FIFO now fails the stamp, which is logged; the backup runs.
+        fd = os.open(STAMP_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise OSError(f"{STAMP_PATH}: not a regular file")
             fh.write(json.dumps(rec) + "\n")
             fh.flush()
             os.fsync(fh.fileno())

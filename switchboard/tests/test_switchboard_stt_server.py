@@ -227,6 +227,108 @@ def test_cancel_synonyms_and_prior_are_one_contract() -> None:
           "cancel" in stt._TIME_PROMPT.lower())
 
 
+# --------------------------------------------------------------------------- #
+# Recognised words in the add-on journal (2026-09-14)
+#
+# Every AGI forwards this program's stderr, and that lands in the add-on
+# journal: served by the Supervisor, kept about two days, kept across a host
+# reboot. The live journal held six `heard=` lines in one day, from the wake-up
+# flow as well as the assistant, while `assistant_transcripts` gated only the
+# assistant's private ledger. These drive main() itself, per mode and branch.
+# --------------------------------------------------------------------------- #
+
+# Distinctive, so its absence from stderr means something; not a time of day.
+HEARD = "switch the zebra lamp to blue"
+
+
+def _stt_main(monkeypatch, capsys, mode, *, parse=None, resolved="11"):
+    import types as _t
+    monkeypatch.setattr(stt, "_recording_to_text", lambda infile, prompt: HEARD)
+    monkeypatch.setattr(sys, "argv", ["switchboard-stt", "--in", "rec.wav", "--mode", mode])
+    monkeypatch.setattr(sys, "path", list(sys.path))   # time mode inserts a path
+    monkeypatch.setitem(sys.modules, "timeparse", _t.SimpleNamespace(parse=lambda t: parse))
+    monkeypatch.setattr(stt, "load_operator",
+                        lambda: {"rooms": [{"ext": "11", "name": "Kitchen"}],
+                                 "synonyms": {}, "threshold": 0.6})
+    monkeypatch.setattr(stt, "resolve_rooms_text", lambda *a, **k: resolved)
+    capsys.readouterr()
+    assert stt.main() == 0
+    return capsys.readouterr()
+
+
+# (mode, stubs, what the line must still say, what stdout must still carry)
+_BRANCHES = [
+    ("transcribe", {}, "transcribe heard=", HEARD),
+    ("time", {"parse": "06:30"}, "-> time=06:30", "06:30"),
+    ("time", {"parse": None}, "-> time=None", ""),
+    ("rooms", {"resolved": "automation"}, "-> automation", "automation"),
+    ("rooms", {"resolved": "11"}, "-> ext=11", "11"),
+]
+
+
+def test_the_words_reach_stderr_only_when_the_policy_says_true(tmp_path, monkeypatch, capsys) -> None:
+    feats = tmp_path / "features.json"
+    monkeypatch.setattr(stt, "FEATURES", str(feats))
+    policies = [
+        ('{"assistant": {"transcripts": true}}', True),
+        ('{"assistant": {"transcripts": false}}', False),
+        (None, False),                                   # no file: fails closed
+        ("{not json", False),                            # unreadable: fails closed
+        ('{"assistant": {"transcripts": "yes"}}', False),  # only a real true
+        ('{"wakeup": {}}', False),                       # no policy at all
+        ('{"assistant": {}}', False),                    # a section without the key
+    ]
+    for body, words in policies:
+        if body is None:
+            if feats.exists():
+                feats.unlink()
+        else:
+            feats.write_text(body)
+        for mode, stubs, outcome, stdout in _BRANCHES:
+            got = _stt_main(monkeypatch, capsys, mode, **stubs)
+            label = f"{mode} {outcome!r} with policy {body!r}"
+            check(f"stt journal: the outcome is still logged ({label})", outcome in got.err)
+            check(f"stt journal: stdout is unchanged ({label})", got.out.strip() == stdout)
+            if words:
+                check(f"stt journal: the words are there when allowed ({label})",
+                      repr(HEARD) in got.err)
+            else:
+                check(f"stt journal: no recognised word reaches stderr ({label})",
+                      "zebra" not in got.err)
+                check(f"stt journal: only the length does ({label})",
+                      f"<{len(HEARD)} chars>" in got.err)
+    # The cancel branch needs a cancel word in what was heard.
+    feats.write_text('{"assistant": {"transcripts": false}}')
+    monkeypatch.setattr(stt, "_recording_to_text", lambda i, p: "cancel the zebra one")
+    monkeypatch.setattr(sys, "argv", ["switchboard-stt", "--in", "r.wav", "--mode", "time"])
+    monkeypatch.setitem(sys.modules, "timeparse", types.SimpleNamespace(parse=lambda t: None))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    capsys.readouterr()
+    stt.main()
+    got = capsys.readouterr()
+    check("stt journal: CANCEL is logged without the words",
+          "-> CANCEL" in got.err and "zebra" not in got.err and got.out.strip() == "CANCEL")
+
+
+def test_the_option_reaches_switchboard_stt_through_features_json(tmp_path, monkeypatch, capsys) -> None:
+    """The options -> AGI bridge, end to end: the file switchboard-config stages
+    is the one this program reads, under the key it writes. An AGI option that
+    never arrives is inert however the tests of its reader look."""
+    sbc = SourceFileLoader("sbc_stt_bridge", str(ROOT / "rootfs" / "usr" / "bin"
+                                                   / "switchboard-config")).load_module()
+    check("stt journal: the staged path is the production one",
+          stt.FEATURES == "/run/switchboard/features.json")
+    check("stt journal: and it is where switchboard-config writes",
+          str(sbc.RUN_DIR / "features.json") == stt.FEATURES)
+    monkeypatch.setattr(sbc, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(stt, "FEATURES", str(tmp_path / "features.json"))
+    for option, words in ((False, False), (True, True)):
+        sbc.write_features_runtime({"assistant_transcripts": option})
+        got = _stt_main(monkeypatch, capsys, "transcribe")
+        check(f"stt journal: assistant_transcripts={option} is honoured",
+              (repr(HEARD) in got.err) is words and ("zebra" in got.err) is words)
+
+
 if __name__ == "__main__":
     test_server_ok_no_cli()
     test_connect_refused_falls_back_to_cli()
