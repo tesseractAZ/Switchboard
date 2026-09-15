@@ -4,12 +4,16 @@
 
 Pins classify_cordless (the ok/degraded/critical rules that decide whether the alarm
 cordless is healthy), classify_gateway (deriving GXW health from which ports are down),
-health_transition (the alert state machine), and last_call_mos (newest-call MOS, recency-gated).
+health_transition (the alert state machine), and judge_rtp_records / newest_call (newest
+ledger-matched call MOS, recency-gated and corroborated against the ledger).
 The WP826 HTTP client + the poll loop are I/O and are not exercised here (mirrors how
 test_rtpmon.py leaves the AMI socket untested).
 """
+import json
 import os
+import stat
 import sys
+import time
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -31,6 +35,15 @@ def check(name, cond):
 
 
 TH = {"battery_crit": 15, "battery_warn": 30, "wifi_min": 2, "mos_min": 3.4, "mos_window": 900}
+
+
+def _last_call_mos(rtp, now=None, ledger_ts=None):
+    """The (mos, age) view these long-standing assertions were written against,
+    over the functions probe_cordless actually calls. `ledger_ts` numbers become
+    untagged legs; None keeps the ungated behaviour."""
+    ledger = None if ledger_ts is None else [{"ts": float(t), "tag": ""} for t in ledger_ts]
+    best = dh.newest_call(dh.judge_rtp_records(rtp, ledger), now=now)
+    return (None, None) if best is None else (best["mos"], best["age_s"])
 
 
 def test_classify_cordless():
@@ -77,19 +90,34 @@ def test_classify_cordless():
     # RECENT poor MOS (last call 30s ago) -> DEGRADED.
     lvl, why = dh.classify_cordless(
         {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
-         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 30}, TH)
+         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 30,
+         "last_mos_ledger_tx": "impaired"}, TH)
     check("cordless: recent poor MOS -> degraded", lvl == "degraded" and any("MOS" in r for r in why))
+
+    # ...but ONLY when the ledger's own measurement of that leg agrees. Three
+    # false 'degraded' episodes on 2026-09-14 rested on a handset 2.2 the ledger
+    # measured at 0 % loss and MES 88. A missing judgement is no support either.
+    for tx in ("clean", "unmeasured", None):
+        snap = {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
+                "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 30}
+        if tx is not None:
+            snap["last_mos_ledger_tx"] = tx
+        lvl, why = dh.classify_cordless(snap, TH)
+        check(f"cordless: recent poor MOS the ledger does not support ({tx}) -> ok",
+              lvl == "ok" and why == [])
 
     # STALE poor MOS (last call 2h ago) must NOT flag — an old bad call can't pin it degraded.
     lvl, why = dh.classify_cordless(
         {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
-         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 7200}, TH)
+         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 7200,
+         "last_mos_ledger_tx": "impaired"}, TH)
     check("cordless: stale poor MOS -> ok (not latched)", lvl == "ok")
 
     # Poor MOS with unknown age -> conservatively NOT flagged.
     lvl, why = dh.classify_cordless(
         {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
-         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9}, TH)
+         "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9,
+         "last_mos_ledger_tx": "impaired"}, TH)
     check("cordless: poor MOS unknown age -> ok", lvl == "ok")
 
     # Answers TCP but API auth fails -> DEGRADED (can't read deep health), NOT critical.
@@ -137,11 +165,11 @@ def test_last_call_mos():
     rtp = {"record0": {"moscq": "4.4", "stopTimeSecond": "1000"},
            "record1": {"moscq": "3.1", "stopTimeSecond": "2000"},
            "record2": {"moscq": "bad", "stopTimeSecond": "3000"}}
-    mos, age = dh.last_call_mos(rtp, now=2050)
+    mos, age = _last_call_mos(rtp, now=2050)
     check("mos: picks the NEWEST call's moscq (not min)", mos == 3.1 and age == 50)
-    check("mos: empty -> (None, None)", dh.last_call_mos({}) == (None, None))
+    check("mos: empty -> (None, None)", _last_call_mos({}) == (None, None))
     # An older good call doesn't get shadowed by an even-older bad one.
-    mos2, _ = dh.last_call_mos({"a": {"moscq": "2.0", "stopTimeSecond": "10"},
+    mos2, _ = _last_call_mos({"a": {"moscq": "2.0", "stopTimeSecond": "10"},
                                 "b": {"moscq": "4.5", "stopTimeSecond": "99"}}, now=100)
     check("mos: newest-good over older-bad", mos2 == 4.5)
 
@@ -338,13 +366,13 @@ def test_last_call_mos_survives_a_string_rtpstatus() -> None:
     """The handset sometimes answers with rtpStatus as a plain STRING. That used
     to reach .values() and raise "'str' object has no attribute 'values'",
     aborting the whole cordless poll cycle (observed live 2026-08-03)."""
-    assert dh.last_call_mos({}) == (None, None)
-    assert dh.last_call_mos(None) == (None, None)
+    assert _last_call_mos({}) == (None, None)
+    assert _last_call_mos(None) == (None, None)
     # The regression itself: a non-empty string must not raise.
     for bad in ("none", "no records", "0"):
-        assert dh.last_call_mos(bad) == (None, None), bad
+        assert _last_call_mos(bad) == (None, None), bad
     # A real mapping still works.
-    got = dh.last_call_mos({"a": {"moscq": "4.3", "stopTimeSecond": "100"}}, now=160)
+    got = _last_call_mos({"a": {"moscq": "4.3", "stopTimeSecond": "100"}}, now=160)
     assert got[0] == 4.3 and got[1] == 60
 
 
@@ -383,17 +411,17 @@ def test_api_unreadable_reason_names_the_cert_pin_too() -> None:
 def test_last_call_mos_skips_no_measurement_sentinel() -> None:
     """The WP826 emits moscq 0.0 as a no-measurement sentinel (real MOS floors
     at 1.0); it reached a live alert as "MOS 0.0" on 2026-08-05."""
-    assert dh.last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"}}, now=150) == (None, None)
-    assert dh.last_call_mos({"a": {"moscq": "0.99", "stopTimeSecond": "100"}}, now=150) == (None, None)
+    assert _last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"}}, now=150) == (None, None)
+    assert _last_call_mos({"a": {"moscq": "0.99", "stopTimeSecond": "100"}}, now=150) == (None, None)
     # Exactly 1.0 is the scale floor — a real (terrible) measurement.
-    assert dh.last_call_mos({"a": {"moscq": "1.0", "stopTimeSecond": "100"}}, now=150) == (1.0, 50)
+    assert _last_call_mos({"a": {"moscq": "1.0", "stopTimeSecond": "100"}}, now=150) == (1.0, 50)
     # A sentinel NEWEST record is ignored as a candidate, so an older valid
     # record within the window is picked — it must neither win nor shadow.
-    got = dh.last_call_mos({"old": {"moscq": "4.1", "stopTimeSecond": "100"},
+    got = _last_call_mos({"old": {"moscq": "4.1", "stopTimeSecond": "100"},
                             "new": {"moscq": "0.0", "stopTimeSecond": "200"}}, now=260)
     assert got == (4.1, 160)
     # All records sentinel -> nothing at all.
-    assert dh.last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"},
+    assert _last_call_mos({"a": {"moscq": "0.0", "stopTimeSecond": "100"},
                              "b": {"moscq": "0.0", "stopTimeSecond": "200"}}, now=260) == (None, None)
 
 
@@ -403,25 +431,25 @@ def test_last_call_mos_requires_a_ledger_matched_call() -> None:
     2026-08-05/06. Only a ledger-confirmed record may drive health."""
     rtp = {"a": {"moscq": "2.5", "stopTimeSecond": "1000"}}
     # A leg within the window confirms the record (90 s inclusive).
-    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1080]) == (2.5, 100)
-    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1000 + dh.CALLQOS_MATCH_WINDOW_S]) == (2.5, 100)
+    assert _last_call_mos(rtp, now=1100, ledger_ts=[1080]) == (2.5, 100)
+    assert _last_call_mos(rtp, now=1100, ledger_ts=[1000 + dh.CALLQOS_MATCH_WINDOW_S]) == (2.5, 100)
     # No leg near it (announce playback) -> skipped entirely.
-    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[1091]) == (None, None)
-    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[2000]) == (None, None)
+    assert _last_call_mos(rtp, now=1100, ledger_ts=[1091]) == (None, None)
+    assert _last_call_mos(rtp, now=1100, ledger_ts=[2000]) == (None, None)
     # Ledger readable but empty -> NO record qualifies.
-    assert dh.last_call_mos(rtp, now=1100, ledger_ts=[]) == (None, None)
+    assert _last_call_mos(rtp, now=1100, ledger_ts=[]) == (None, None)
     # ledger_ts=None keeps the legacy ungated behaviour.
-    assert dh.last_call_mos(rtp, now=1100) == (2.5, 100)
+    assert _last_call_mos(rtp, now=1100) == (2.5, 100)
     # An unconfirmed NEWER record (the announce leg) must not shadow the
     # confirmed real call before it.
     rtp2 = {"announce": {"moscq": "2.2", "stopTimeSecond": "2000"},
             "call": {"moscq": "4.0", "stopTimeSecond": "1000"}}
-    assert dh.last_call_mos(rtp2, now=2100, ledger_ts=[1005]) == (4.0, 1100)
+    assert _last_call_mos(rtp2, now=2100, ledger_ts=[1005]) == (4.0, 1100)
 
 
-def test_load_callqos_ts(tmp_path) -> None:
+def test_load_callqos_legs(tmp_path) -> None:
     # Missing / unreadable ledger -> [] (and downstream, no MOS drives health).
-    assert dh.load_callqos_ts(str(tmp_path / "nope.jsonl")) == []
+    assert dh.load_callqos_legs(str(tmp_path / "nope.jsonl")) == []
     p = tmp_path / "callqos.jsonl"
     p.write_text('{"ts": 100, "ext": "19"}\n'
                  'not json at all\n'
@@ -429,13 +457,13 @@ def test_load_callqos_ts(tmp_path) -> None:
                  '[1, 2]\n'
                  '{"ts": "wat"}\n'
                  '{"ts": 200.5}\n')
-    assert dh.load_callqos_ts(str(p)) == [100.0, 200.5]
+    assert [lg["ts"] for lg in dh.load_callqos_legs(str(p))] == [100.0, 200.5]
     # Only the tail is read (the ledger is append-only and unbounded): a leg
     # older than the tail window is not returned, the newest still is.
     big = tmp_path / "big.jsonl"
     filler = "".join('{"pad": "%s"}\n' % ("x" * 120) for _ in range(700))
     big.write_text('{"ts": 1}\n' + filler + '{"ts": 2}\n')
-    got = dh.load_callqos_ts(str(big), max_bytes=65536)
+    got = [lg["ts"] for lg in dh.load_callqos_legs(str(big), max_bytes=65536)]
     assert 2.0 in got and 1.0 not in got
 
 
@@ -544,15 +572,17 @@ def test_every_published_sensor_carries_a_freshness_stamp() -> None:
 def test_playback_legs_never_confirm_a_call_for_last_call_mos(tmp_path) -> None:
     """The ledger gate must exclude PLAYBACK legs by TAG, not by luck.
 
-    last_call_mos() only accepts a phone-side RTP record if some ledger leg lands
-    within CALLQOS_MATCH_WINDOW_S of it. That gate exists for exactly one reason,
-    per its own docstring: HA announce playback leaves phone-side records with
-    moscq 2.2-2.9 that fired three false 'degraded' episodes on 2026-08-05/06.
+    A phone-side RTP record is accepted only if its nearest ledger leg lands
+    within CALLQOS_MATCH_WINDOW_S of it. That gate exists for exactly one reason:
+    HA announce playback leaves phone-side records with moscq 2.2-2.9 that fired
+    three false 'degraded' episodes on 2026-08-05/06.
 
     It originally worked because playback legs were simply ABSENT from the
     ledger. v0.55.0 then added the rtpqos hook to wakeup-deliver, page and
-    announce -- so those legs ARE written now, and began confirming themselves,
-    silently restoring the bug. The gate must therefore filter on tag."""
+    announce -- so those legs ARE written now, and began confirming themselves.
+    v0.57.0 filtered them out of the loaded list, which opened the next hole: a
+    playback leg beside a real call was confirmed BY that call. So the legs are
+    now kept, tagged, and a record whose nearest leg is playback is skipped."""
     import json as _json
 
     led = tmp_path / "callqos.jsonl"
@@ -564,25 +594,25 @@ def test_playback_legs_never_confirm_a_call_for_last_call_mos(tmp_path) -> None:
         _json.dumps({"ts": 5000.0, "tag": ""}) + "\n",
         encoding="utf-8")
 
-    ts = dh.load_callqos_ts(str(led))
-    assert 1000.0 not in ts, "wakeup-deliver leg must not confirm a call"
-    assert 2000.0 not in ts, "page leg must not confirm a call"
-    assert 3000.0 not in ts, "announce leg must not confirm a call"
-    assert 4000.0 in ts, "a real room conversation MUST still confirm"
-    assert 5000.0 in ts, "an untagged legacy record must still confirm"
-    assert sorted(ts) == [4000.0, 5000.0], ts
+    legs = dh.load_callqos_legs(str(led))
+    tags = {lg["ts"]: lg["tag"] for lg in legs}
+    # Kept, with their tags -- dropping them is what let a neighbour vouch for them.
+    assert tags == {1000.0: "wakeup-deliver", 2000.0: "page", 3000.0: "announce",
+                    4000.0: "rooms", 5000.0: ""}, tags
 
-    # End to end: a handset record scoring 2.2 that lines up ONLY with a playback
-    # leg must be skipped entirely -- that is the false-'degraded' shape.
-    rtp = {"0": {"moscq": "2.2", "stopTimeSecond": "3000"}}
-    mos, _age = dh.last_call_mos(rtp, now=3060.0, ledger_ts=ts)
-    assert mos is None, f"playback leg confirmed a 2.2 record: {mos}"
+    for stop, tag in (("1000", "wakeup-deliver"), ("2000", "page"), ("3000", "announce")):
+        judged = dh.judge_rtp_records({"0": {"moscq": "2.2", "stopTimeSecond": stop}}, legs)
+        assert judged[0]["match"] == "playback", (tag, judged)
+        assert dh.newest_call(judged, now=float(stop) + 60) is None, \
+            f"{tag} leg confirmed a 2.2 record"
 
     # ...while a real conversation at the same score is still reported, because
-    # suppressing genuine bad audio would be the opposite failure.
-    rtp_real = {"0": {"moscq": "2.2", "stopTimeSecond": "4000"}}
-    mos2, _ = dh.last_call_mos(rtp_real, now=4060.0, ledger_ts=ts)
-    assert mos2 == 2.2, f"real call should still report poor MOS, got {mos2}"
+    # suppressing genuine bad audio would be the opposite failure. So is an
+    # untagged legacy record.
+    for stop in ("4000", "5000"):
+        best = dh.newest_call(dh.judge_rtp_records(
+            {"0": {"moscq": "2.2", "stopTimeSecond": stop}}, legs), now=float(stop) + 60)
+        assert best is not None and best["mos"] == 2.2 and best["match"] == "call", best
 
 
 def test_a_clear_driven_by_staleness_is_not_reported_as_recovery() -> None:
@@ -691,11 +721,11 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
     # with NO newer measurement.
     snaps = [
         {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
-         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 100},
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_ledger_tx": "impaired", "last_mos_age_s": 100},
         {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
-         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 220},
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_ledger_tx": "impaired", "last_mos_age_s": 220},
         {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
-         "wifi_signal": 4, "last_mos": 2.2, "last_mos_age_s": 1000},
+         "wifi_signal": 4, "last_mos": 2.2, "last_mos_ledger_tx": "impaired", "last_mos_age_s": 1000},
     ]
     calls = {"n": 0}
 
@@ -740,3 +770,269 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
           "stale-clear" in kinds)
     check("run loop: it did NOT claim recovery on no new evidence",
           "recovered" not in kinds)
+
+
+# ── 2026-09-14: a low handset score needs the ledger's agreement, and is kept ─
+#
+# The WP826 scored moscq 2.2 on an assistant leg (02:51:58Z) and two dial-42
+# wake-up legs (12:42:31Z, 13:10:37Z). The ledger measured all three from the
+# handset's own receiver reports at 0 % transmit loss and MES 87.9-88.0, and
+# three 'degraded' episodes followed. The mechanism is unknown. These pin what
+# the monitor does about it: no alert without corroboration, and a capture of
+# every low score so the mechanism can be read off the data.
+
+def test_the_corroboration_lines_are_pinned_and_judged_at_their_edges() -> None:
+    # Literals, not the constants: a test that reads its bound from its subject
+    # passes for any value of it.
+    assert dh.CORROBORATE_LOSS_TX_PCT == 1.0
+    assert dh.CORROBORATE_MES_TX == 78.0
+    j = dh.ledger_tx_judgement
+    # The three live legs behind the false episodes.
+    for mes, jit in ((88.0, 2.38), (87.9, 5.88), (87.9, 6.5)):
+        assert j({"loss_tx_pct": 0.0, "mes_tx": mes, "jitter_tx_last_ms": jit}) == "clean"
+    assert j({"loss_tx_pct": 0.99, "mes_tx": 88.0}) == "clean"
+    assert j({"loss_tx_pct": 1.0, "mes_tx": 88.0}) == "impaired"
+    # The one non-playback leg in the ledger to reach 1 % (2026-08-25).
+    assert j({"loss_tx_pct": 1.339, "mes_tx": 85.8}) == "impaired"
+    assert j({"loss_tx_pct": 0.0, "mes_tx": 78.0}) == "clean"
+    assert j({"loss_tx_pct": 0.0, "mes_tx": 77.9}) == "impaired"
+    # Asterisk writes 0.0 for a direction no RTCP round scored: not a clean leg.
+    assert j({"loss_tx_pct": 0.0, "mes_tx": 0.0}) == "unmeasured"
+    assert j({"loss_tx_pct": None, "mes_tx": None}) == "unmeasured"
+    # Loss is evidence on its own, measured MES or not.
+    assert j({"loss_tx_pct": 2.5, "mes_tx": 0.0}) == "impaired"
+    assert j({"loss_tx_pct": True, "mes_tx": True}) == "unmeasured"
+    assert j({}) == "unmeasured"
+    assert j(None) == "unmeasured"
+
+
+def test_a_playback_leg_beside_a_real_call_cannot_borrow_its_confirmation() -> None:
+    """The live precondition: a wakeup-deliver leg hung up at 13:00:19Z and an
+    operator leg at 13:00:31Z. Dropping playback legs and accepting ANY leg
+    within 90 s let the delivery's handset score ride in on the operator leg."""
+    deliver, operator = 1789390819.0, 1789390831.0
+    ledger = [{"ts": deliver, "tag": "wakeup-deliver", "loss_tx_pct": 0.0, "mes_tx": 88.1},
+              {"ts": operator, "tag": "operator", "loss_tx_pct": 0.0, "mes_tx": 0.0}]
+    assert abs(operator - deliver) <= dh.CALLQOS_MATCH_WINDOW_S   # the old rule's hole
+    judged = dh.judge_rtp_records({"r": {"moscq": "2.2", "stopTimeSecond": str(int(deliver))}}, ledger)
+    assert judged[0]["match"] == "playback" and judged[0]["leg"]["ts"] == deliver, judged
+    assert dh.newest_call(judged, now=operator + 60) is None
+    # A record nearest the operator leg IS the operator call.
+    j2 = dh.judge_rtp_records({"r": {"moscq": "4.4", "stopTimeSecond": str(int(operator) + 2)}}, ledger)
+    assert j2[0]["match"] == "call" and j2[0]["leg"]["tag"] == "operator", j2
+    # An exact tie goes to playback, whichever order the ledger lists them in.
+    pair = [{"ts": 2000.0, "tag": "rooms"}, {"ts": 2010.0, "tag": "announce"}]
+    rec = {"r": {"moscq": "2.2", "stopTimeSecond": "2005"}}
+    assert dh.judge_rtp_records(rec, pair)[0]["match"] == "playback"
+    assert dh.judge_rtp_records(rec, list(reversed(pair)))[0]["match"] == "playback"
+    # No leg near enough -> unmatched, skipped.
+    far = dh.judge_rtp_records({"r": {"moscq": "2.2", "stopTimeSecond": "9000"}}, pair)
+    assert far[0]["match"] == "unmatched" and dh.newest_call(far) is None
+
+
+def _live_leg(ts, **over):
+    """The 2026-09-14 12:42:31Z dial-42 wake-up leg, as the ledger wrote it."""
+    leg = {"v": 3, "ts": ts, "source": "dialplan", "tag": "wakeup", "ext": "19", "dur": 18,
+           "rxcount": 908, "txcount": 458, "loss_rx_pct": 0.0, "loss_tx_pct": 0.0,
+           "jitter_rx_last_ms": 19.0, "jitter_tx_last_ms": 5.88, "mes_rx": 88.0,
+           "mes_tx": 87.9, "rtt_ms": 5.64, "rtt_max_ms": 9.1, "rtt_samples": "multi",
+           "quality": "excellent"}
+    leg.update(over)
+    return leg
+
+
+def _handset(stop, mos):
+    """A WP826 rtpStatus entry. Only moscq/stopTimeSecond are read; the rest is
+    what the capture must keep verbatim."""
+    return {"moscq": mos, "startTimeSecond": str(stop - 18), "stopTimeSecond": str(stop),
+            "packetLost": "0", "jitter": "3", "codec": "PCMU"}
+
+
+def _drive_cordless(tmp_path, legs, records, cycles=3):
+    """Run the REAL poll loop -- probe_cordless, the ledger read, the judgement,
+    classify, publish, capture and the alert state machine -- against a fake
+    handset API. Returns (cordless publishes, notifications, capture rows, path)."""
+    import types
+    led = tmp_path / "callqos.jsonl"
+    led.write_text("".join(json.dumps(lg) + "\n" for lg in legs))
+    cap = tmp_path / "state" / "cordless-mos.jsonl"
+    sets, notes = [], []
+    ha = types.ModuleType("ha_client")
+    ha.set_state = lambda eid, state, attrs=None: sets.append((eid, state, dict(attrs or {}))) or True
+    ha.notify = lambda msg, title=None, notification_id=None: notes.append((title or "", msg)) or True
+    ha.get_state = lambda eid: None
+
+    class _WP:
+        def __init__(self, ip, password, user="admin", timeout=6.0, cert_pin=""):
+            pass
+
+        def login(self):
+            return True
+
+        def get(self, path):
+            if path.startswith("/api-get_battery_status"):
+                return {"battery": {"capacity": "100", "status": "Charging", "health": "Good"}}
+            if path.startswith("/api-wifi_status_get"):
+                return {"status": {"connected": True, "signal": 4, "connection": {"ssid": "test"}}}
+            if path.startswith("/api-get_rtp_status"):
+                return {"rtpStatus": records}
+            return None
+
+    class _Stop(Exception):
+        pass
+    n = {"c": 0}
+
+    def _sleep(_s):
+        n["c"] += 1
+        if n["c"] >= cycles:
+            raise _Stop()
+
+    saved = {k: getattr(dh, k) for k in ("_WP", "_tcp_open")}
+    saved_seen = dict(dh._capture_seen)
+    real_sleep, real_ha = dh.time.sleep, sys.modules.get("ha_client")
+    real_env = dict(os.environ)
+    try:
+        for k in ("CORDLESS_EXT", "DEVICE_HEALTH_ALERTS", "CORDLESS_MOS_MIN", "CORDLESS_MOS_WINDOW_S"):
+            os.environ.pop(k, None)
+        os.environ.update({"CORDLESS_IP": "192.0.2.1", "CORDLESS_PASSWORD": "x",
+                           "DEVICE_HEALTH_INTERVAL": "30", "SWITCHBOARD_CALLQOS": str(led),
+                           "SWITCHBOARD_CORDLESS_MOS_LOG": str(cap)})
+        dh._capture_seen.update(path=None, keys=set())
+        dh._WP = _WP
+        dh._tcp_open = lambda ip, port, timeout=3.0: True
+        sys.modules["ha_client"] = ha
+        dh.time.sleep = _sleep
+        try:
+            dh.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(dh, k, v)
+        dh._capture_seen.clear()
+        dh._capture_seen.update(saved_seen)
+        dh.time.sleep = real_sleep
+        if real_ha is None:
+            sys.modules.pop("ha_client", None)
+        else:
+            sys.modules["ha_client"] = real_ha
+        os.environ.clear()
+        os.environ.update(real_env)
+    cordless = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
+    rows = [json.loads(ln) for ln in cap.read_text().splitlines()] if cap.exists() else []
+    return cordless, notes, rows, cap
+
+
+def test_the_live_false_degraded_shape_no_longer_degrades_and_is_captured(tmp_path) -> None:
+    end = int(time.time()) - 100
+    legs = [_live_leg(end - 1800, tag="operator"), _live_leg(end)]
+    records = {"record0": _handset(end + 1, "2.2"), "record1": _handset(end - 1800, "4.4")}
+    cordless, notes, rows, cap = _drive_cordless(tmp_path, legs, records)
+
+    check("live shape: three cycles published", len(cordless) == 3)
+    check("live shape: the state never left ok", all(st == "ok" for st, _ in cordless))
+    check("live shape: no degraded alert was sent",
+          not any("degraded" in title for title, _ in notes))
+    attrs = cordless[-1][1]
+    check("live shape: the handset's score is still shown", attrs.get("last_mos") == 2.2)
+    check("live shape: ...and marked uncorroborated", attrs.get("last_mos_uncorroborated") is True)
+    check("live shape: its age is published at last",
+          isinstance(attrs.get("last_mos_age_s"), int) and 90 <= attrs["last_mos_age_s"] <= 400)
+
+    check("capture: one row across three cycles of the same record", len(rows) == 1)
+    r = rows[0] if rows else {}
+    leg = r.get("leg") or {}
+    rec = r.get("record") or {}
+    check("capture: the verdict names why it did not count", r.get("verdict") == "uncorroborated")
+    check("capture: the matched ledger leg's ts and tag",
+          leg.get("ts") == end and leg.get("tag") == "wakeup")
+    check("capture: the ledger's transmit figures ride along",
+          leg.get("mes_tx") == 87.9 and leg.get("txcount") == 458)
+    check("capture: the whole handset record, verbatim",
+          rec.get("packetLost") == "0" and rec.get("moscq") == "2.2" and rec.get("codec") == "PCMU")
+    check("capture: the clock offset between handset and ledger", r.get("leg_offset_s") == 1.0)
+    check("capture: root-only, like the private state it sits beside",
+          cap.exists() and stat.S_IMODE(os.stat(cap).st_mode) == 0o600)
+
+
+def test_a_corroborated_low_score_still_degrades(tmp_path) -> None:
+    """Suppressing a real problem would be the opposite failure."""
+    end = int(time.time()) - 100
+    cordless, notes, rows, _ = _drive_cordless(
+        tmp_path, [_live_leg(end, loss_tx_pct=2.5)], {"record0": _handset(end + 1, "2.2")})
+    check("corroborated: the state is degraded", any(st == "degraded" for st, _ in cordless))
+    check("corroborated: the degraded alert fired",
+          any("degraded" in title for title, _ in notes))
+    check("corroborated: not marked uncorroborated",
+          bool(cordless) and cordless[-1][1].get("last_mos_uncorroborated") is False)
+    check("corroborated: captured with its verdict",
+          [r["verdict"] for r in rows] == ["corroborated"])
+
+
+def test_a_playback_score_beside_a_real_call_is_skipped_through_the_loop(tmp_path) -> None:
+    deliver = int(time.time()) - 100
+    legs = [_live_leg(deliver - 600, tag="rooms"),
+            _live_leg(deliver, tag="wakeup-deliver"),
+            _live_leg(deliver + 12, tag="operator", mes_tx=0.0, mes_rx=0.0)]
+    records = {"record0": _handset(deliver, "2.2"), "record1": _handset(deliver - 600, "4.4")}
+    cordless, notes, rows, _ = _drive_cordless(tmp_path, legs, records)
+    attrs = cordless[-1][1] if cordless else {}
+    check("playback: the delivery's 2.2 did not become the last call", attrs.get("last_mos") == 4.4)
+    check("playback: a good score publishes uncorroborated as false, not absent",
+          attrs.get("last_mos_uncorroborated") is False)
+    check("playback: captured, and says it was skipped as playback",
+          [(r["verdict"], r["leg"]["tag"]) for r in rows] == [("playback", "wakeup-deliver")])
+
+
+def test_the_capture_is_private_capped_and_does_not_duplicate_across_a_restart(tmp_path) -> None:
+    saved_env = os.environ.pop("SWITCHBOARD_CORDLESS_MOS_LOG", None)
+    try:
+        check("capture: defaults to the private state directory, never /share",
+              dh._capture_path() == "/data/state/cordless-mos.jsonl")
+    finally:
+        if saved_env is not None:
+            os.environ["SWITCHBOARD_CORDLESS_MOS_LOG"] = saved_env
+    check("capture: the cap is pinned", dh.CAPTURE_MAX_BYTES == 512 * 1024)
+
+    p = tmp_path / "c.jsonl"
+    leg = {"ts": 5001.0, "tag": "wakeup", "loss_tx_pct": 0.0, "mes_tx": 88.0}
+    judged = dh.judge_rtp_records(
+        {"a": {"moscq": "2.2", "stopTimeSecond": "5000", "startTimeSecond": "4980"}}, [leg])
+    saved = dict(dh._capture_seen)
+    try:
+        dh._capture_seen.update(path=None, keys=set())
+        check("capture: first sighting is written",
+              dh.capture_low_mos(judged, 3.4, now=5100, path=str(p)) == 1)
+        check("capture: the next poll of the same record is not",
+              dh.capture_low_mos(judged, 3.4, now=5220, path=str(p)) == 0)
+        dh._capture_seen.update(path=None, keys=set())      # a new process
+        check("capture: nor after a restart",
+              dh.capture_low_mos(judged, 3.4, now=5340, path=str(p)) == 0)
+        rejudged = [dict(judged[0], match="unmatched", leg=None, ledger_tx="unmeasured")]
+        check("capture: a different judgement of the same record is a new finding",
+              dh.capture_low_mos(rejudged, 3.4, now=5400, path=str(p)) == 1)
+        at_line = dh.judge_rtp_records({"b": {"moscq": "3.4", "stopTimeSecond": "6000"}},
+                                       [{"ts": 6000.0, "tag": "rooms"}])
+        check("capture: a score at mos_min is not low",
+              dh.capture_low_mos(at_line, 3.4, now=6100, path=str(p)) == 0)
+        rows = [json.loads(ln) for ln in p.read_text().splitlines()]
+        check("capture: rows in order with their verdicts",
+              [r["verdict"] for r in rows] == ["uncorroborated", "unmatched"])
+
+        # Past the cap the OLDEST rows go and the new one lands.
+        big = tmp_path / "big.jsonl"
+        with open(big, "w", encoding="utf-8") as fh:
+            for i in range(700):
+                fh.write(json.dumps({"dedupe": f"old{i}", "pad": "x" * 1000}) + "\n")
+        assert big.stat().st_size > dh.CAPTURE_MAX_BYTES
+        dh._capture_seen.update(path=None, keys=set())
+        check("capture: writes past the cap",
+              dh.capture_low_mos(judged, 3.4, now=5100, path=str(big)) == 1)
+        check("capture: and the file is back under it", big.stat().st_size <= dh.CAPTURE_MAX_BYTES)
+        tail = big.read_text().splitlines()
+        check("capture: the newest row survives the trim",
+              json.loads(tail[-1])["verdict"] == "uncorroborated")
+        check("capture: the oldest rows do not", json.loads(tail[0])["dedupe"] != "old0")
+    finally:
+        dh._capture_seen.clear()
+        dh._capture_seen.update(saved)

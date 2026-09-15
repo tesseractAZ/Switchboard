@@ -1220,7 +1220,24 @@ Asterisk logs every reachability change as it happens, and those lines are read
 each cycle; if half the fleet went unreachable *between* two polls and was back
 before the next one, that is reported too. The one whole-house outage this
 system has had lasted 119 seconds and fell entirely inside a single five-minute
-gap, so both surrounding samples read healthy.
+gap, so both surrounding samples read healthy. Only **phone** extensions count
+toward that half: the outside line logs its own reachability changes in the same
+place, and it is not one of the phones the threshold is measured against. Its
+changes still appear in `heartbeat.jsonl`.
+
+**After a restart** the poller checks every 15 s instead of every
+`link_health_interval` until every phone that has ever registered is back — the
+wired gateway ports **and** the cordless — or eight checks (about two minutes)
+have passed, whichever is first. An extension that has never registered (a
+configured softphone that is never used) does not hold it open. Before this, the
+fast checks stopped as soon as the wired ports were back. Three restarts in a row
+ended warm-up with the cordless still missing, so the next check came five minutes
+later. After one of them the cordless showed `offline` for more than four and a
+half minutes after it had re-registered, and the rollup's `worst_rtt_is_partial`
+read `false` with the cordless missing. The published `poll_interval_s` stays at the steady interval
+throughout. The last fast check is always followed by a full-length sleep, and a
+15 s figure would make every staleness check call the sensors stale after every
+restart.
 
 It raises **one** notification on a mass outage — at least half the fleet *and* at
 least 3 phones unreachable for 2 consecutive cycles — so a shared-gateway failure
@@ -1312,13 +1329,45 @@ Both use a 2-cycle hysteresis so a transient blip doesn't alert, and fire a
 recovery notice when they return to normal — again under that device's shared
 `notification_id`, so the recovery replaces the alert rather than removing it.
 
+**When a poor call counts.** The handset scores every call itself. Each score is
+matched to the call-quality ledger leg that hung up **nearest** to it, within 90 s.
+The score is skipped when there is no such leg, or when that leg is a wake-up
+delivery, page or announcement: the handset has been seen to score those playback
+legs between 2.2 and 2.9. A score below `mos_min` (3.4) degrades the sensor only when the same leg
+agrees in the ledger, in the direction the handset hears. That means at least 1 %
+transmit loss, or a transmit MES below 78. The ledger reads those from the
+handset's own receiver reports.
+
+Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and
+`last_mos_uncorroborated: true`), but the state stays `ok`. On 2026-09-14 the
+handset scored 2.2 on three calls the ledger measured at 0 % loss and MES 88, and
+raised three false `degraded` alerts. Why it does that is not yet known.
+
+To find out, every score below `mos_min` is captured once, whether it counted or
+not, to `/data/state/cordless-mos.jsonl`. That file is private to the add-on,
+readable by root only, capped at 512 KB, and never copied to `/share`. Each row
+carries the handset's whole RTP record, the ledger leg it matched, the gap
+between the two clocks, and a `verdict`:
+
+| `verdict` | Meaning |
+|-----------|---------|
+| `corroborated` | The ledger leg was impaired too; the score counts toward `degraded`. |
+| `playback` | The nearest leg was a wake-up delivery, page or announcement; skipped. |
+| `uncorroborated` | The ledger measured that direction clean; published, does not degrade. |
+| `unmatched` | No ledger leg within 90 s; skipped. |
+| `unmeasured` | The ledger leg has no usable transmit figure; published, does not degrade. |
+
+```
+sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
+```
+
 | Sensor | What it tells you |
 |--------|-------------------|
-| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
+| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 | `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
-| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever any phone is missing — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
+| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
 
@@ -1336,7 +1385,12 @@ widened that from *any all-digit value*, which let a number arriving as
 `+1602…` through unmasked, so the mask depended on the caller's own
 formatting), `delivery-outcomes.jsonl`
 (every wake-up and announcement outcome), and `heartbeat.jsonl` (one row per
-health cycle). The assistant's own ledger is deliberately **not** mirrored — see
+health cycle). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
+cycle the row ran in, and `since_prev_s` how long it actually waited. `next_sleep_s`
+is the wait that follows the row. The row that ends warm-up therefore reads
+`phase: warmup` beside `next_sleep_s: 300`. `transitions` lists every reachability
+change Asterisk logged since the previous row, the outside line included.
+The assistant's own ledger is deliberately **not** mirrored — see
 [§4](#4-the-voice-operator--directory-assistance).
 
 ## 12. How it's built

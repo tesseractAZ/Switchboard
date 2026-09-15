@@ -219,18 +219,29 @@ def test_warmup_waits_for_every_wired_port() -> None:
           pm.warmup_done(False, 8, 8, 4, None) is True)
 
 
-def test_wired_down_count() -> None:
+def test_warmup_holdouts() -> None:
     wired = ["11", "12", "13", "14", "15", "16", "17", "18"]
-    # The cordless (19) sleeping and the never-registered softphone (20) must NOT
-    # hold warm-up open — only real gateway ports count.
+    # With no durable set (a first boot) only real gateway ports count, as before.
     summ = {"unreachable_exts": ["19", "20"], "offline_exts": ["19", "20"]}
-    check("wired_down: cordless + softphone ignored", pm.wired_down_count(summ, wired) == 0)
+    check("holdouts: no durable set -> cordless + softphone ignored",
+          pm.warmup_holdouts(summ, wired) == [])
     summ2 = {"unreachable_exts": ["15", "17"], "offline_exts": ["18", "20"]}
-    check("wired_down: counts the 3 real gateway ports", pm.wired_down_count(summ2, wired) == 3)
-    check("wired_down: de-dupes across both lists",
-          pm.wired_down_count({"unreachable_exts": ["15"], "offline_exts": ["15"]}, wired) == 1)
-    check("wired_down: no roster -> 0", pm.wired_down_count(summ2, []) == 0)
-    check("wired_down: no summary -> 0", pm.wired_down_count(None, wired) == 0)
+    check("holdouts: names the 3 real gateway ports",
+          pm.warmup_holdouts(summ2, wired) == ["15", "17", "18"])
+    check("holdouts: de-dupes across both lists",
+          pm.warmup_holdouts({"unreachable_exts": ["15"], "offline_exts": ["15"]}, wired) == ["15"])
+    check("holdouts: no roster -> nothing", pm.warmup_holdouts(summ2, []) == [])
+    check("holdouts: no summary -> nothing", pm.warmup_holdouts(None, wired) == [])
+    # 2026-09-14: three restarts settled with down ["19"] and showed the cordless
+    # offline for five minutes after it was back. It has registered before, so
+    # it holds warm-up now; the softphone that never has still does not.
+    ever = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+    check("holdouts: a cordless that has registered before holds warm-up",
+          pm.warmup_holdouts(summ, wired, ever) == ["19"])
+    check("holdouts: the never-registered softphone never does",
+          "20" not in pm.warmup_holdouts(summ, wired, ever | set()))
+    check("holdouts: without a gateway roster the durable set still counts",
+          pm.warmup_holdouts(summ, [], ever) == ["19"])
 
 
 def test_history_append_caps() -> None:
@@ -463,6 +474,24 @@ def test_worst_rtt_is_flagged_partial_when_phones_are_missing() -> None:
     check("partial: fallback cannot see a full de-registration (documented limit)",
           pm.summarize(degraded, ["11"], set())["worst_rtt_is_partial"] is False)
 
+    # ★ 2026-09-14 — THE DURABLE SET CLOSES THAT LIMIT. After a restart
+    # measured_before is empty, and then holds only the ports that answered
+    # first; link_health read worst_rtt_is_partial FALSE with ext 19 missing.
+    ever = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+    check("partial: a fresh process with the durable set sees the missing cordless",
+          pm.summarize(degraded, ["11"], set(), ever)["worst_rtt_is_partial"] is True)
+    wired_only = {"11", "12", "13", "14", "15", "16", "17", "18"}
+    check("partial: ...and still does on the next cycle, with only the wired ports measured",
+          pm.summarize(degraded, ["11"], wired_only, ever)["worst_rtt_is_partial"] is True)
+    check("partial: the durable set does not flag a healthy fleet",
+          pm.summarize(healthy, ["11"], set(), ever)["worst_rtt_is_partial"] is False)
+    check("partial: a decommissioned extension left in the durable file cannot hold it up",
+          pm.summarize(healthy, ["11"], set(), ever | {"21"})["worst_rtt_is_partial"] is False)
+    unanswering = [p for p in healthy if p["ext"] != "19"]
+    unanswering.append(phone("19", None, up=False, reg=True))
+    check("partial: a registered phone the durable set has not caught up with still counts",
+          pm.summarize(unanswering, ["11"], set(), wired_only)["worst_rtt_is_partial"] is True)
+
 
 def test_rollup_icon_tracks_the_partial_flag_not_raw_unreachable() -> None:
     # Same conflation, second symptom: keyed on `unreachable` the rollup showed
@@ -671,7 +700,7 @@ if __name__ == "__main__":
     test_publish_routing()
     test_warmup_done()
     test_warmup_waits_for_every_wired_port()
-    test_wired_down_count()
+    test_warmup_holdouts()
     test_history_append_caps()
     test_is_mass_outage()
     test_outage_transition()
@@ -873,7 +902,10 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
     class _Stop(Exception):
         pass
 
+    slept = []
+
     def _fake_sleep(_n):
+        slept.append(_n)
         raise _Stop()
 
     phones = [{"ext": "11", "name": "A", "status": "Avail", "rtt_ms": 2.4,
@@ -904,9 +936,11 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         # only caller of endpoint_transitions() (it advances a byte watermark,
         # so whoever calls first is the only caller that sees anything), and it
         # hands the list down rather than letting the heartbeat re-fetch it.
+        # And the sleep that will follow the row (2026-09-14): the last warm-up
+        # row used to say 15 s and be followed by 300 s of silence.
         pm._heartbeat = lambda s, t, wired_down=None, settled=True, first=False, \
-            transitions=None: seen.append((s, t, wired_down, settled, first,
-                                           transitions))
+            transitions=None, next_sleep_s=None: seen.append(
+                (s, t, wired_down, settled, first, transitions, next_sleep_s))
         pm.time.sleep = _fake_sleep
         try:
             pm.run()
@@ -918,7 +952,7 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
         pm.time.sleep = real_sleep
 
     check("run loop: the heartbeat was actually called", len(seen) == 1)
-    s, t, wd, settled, first, trans = seen[0]
+    s, t, wd, settled, first, trans, nxt = seen[0]
     check("run loop: it received this cycle's summary", s == summ)
     check("run loop: it received the trunk status from _trunk_check",
           t == "Registered")
@@ -936,6 +970,8 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
     # and the record would then disagree about what happened.
     check("run loop: the cycle's transitions are passed down, not re-fetched",
           trans is not None)
+    check("run loop: the row records the sleep the loop then actually took",
+          len(slept) == 1 and nxt == slept[0])
 
 
 def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
@@ -1533,3 +1569,209 @@ def test_a_registered_phone_is_never_called_never_registered() -> None:
                         measured_before=set(), ever_registered={"11"})
     assert "16" not in summ["never_registered_exts"]
     assert "19" not in summ["never_registered_exts"]
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09-14 — warm-up waits for the cordless, the heartbeat says when it
+# settles, and the outside line cannot complete a phone mass drop.
+# --------------------------------------------------------------------------- #
+_ALL_EXTS = ("11", "12", "13", "14", "15", "16", "17", "18", "19", "20")
+_WIRED = ["11", "12", "13", "14", "15", "16", "17", "18"]
+
+
+def _drive_restart(tmp_path, cycles, max_sleeps):
+    """Run the REAL loop -- poll_once, summarize, _publish, the warm-up gate and
+    the heartbeat -- across a restart. `cycles` lists the extensions registered
+    at each poll (None = AMI not answering yet); the last entry repeats. The
+    durable set knows 11-19, exactly as the live file does; ext 20 has never
+    registered. Returns (sleeps, link_health attrs, link_19 states, heartbeat rows)."""
+    import types
+    ever_path = tmp_path / "ever.json"
+    ever_path.write_text(json.dumps({"exts": _WIRED + ["19"]}))
+    hb_path = tmp_path / "hb.jsonl"
+    n = {"poll": 0}
+    endpoints = [{"name": e} for e in _ALL_EXTS] + [{"name": "trunk"}]
+
+    def _bundle():
+        up = cycles[min(n["poll"], len(cycles) - 1)]
+        n["poll"] += 1
+        if up is None:
+            raise OSError("AMI not ready")
+        contacts = {e: {"status": "Avail", "uri": "sip:" + e + "@192.0.2.10", "rtt": "2500"}
+                    for e in up}
+        return endpoints, contacts, []
+
+    sleeps, sets = [], []
+    ami = types.ModuleType("ami")
+    ami.get_status_bundle = _bundle
+    ha = types.ModuleType("ha_client")
+    ha.set_state = lambda eid, state, attrs=None: sets.append((eid, state, dict(attrs or {}))) or True
+    ha.notify = lambda *a, **k: True
+
+    class _Stop(Exception):
+        pass
+
+    def _sleep(sec):
+        sleeps.append(sec)
+        if len(sleeps) >= max_sleeps:
+            raise _Stop()
+
+    keys = ("_load_options", "_append_history", "_scrub_share_log", "EVER_REGISTERED_PATH",
+            "HEARTBEAT_PATH", "ENDPOINT_LOG_PATH", "_transition_offset", "_last_heartbeat_mono")
+    saved = {k: getattr(pm, k) for k in keys}
+    real_sleep = pm.time.sleep
+    real_mods = {m: sys.modules.get(m) for m in ("ami", "ha_client")}
+    real_interval = os.environ.pop("LINK_HEALTH_INTERVAL", None)
+    try:
+        pm._load_options = lambda: {"gateway_ports": ",".join(_WIRED), "link_health_alerts": False}
+        pm._append_history = lambda phones: None
+        pm._scrub_share_log = lambda st: None
+        pm.EVER_REGISTERED_PATH = str(ever_path)
+        pm.HEARTBEAT_PATH = str(hb_path)
+        pm.ENDPOINT_LOG_PATH = str(tmp_path / "no-such.log")
+        pm._transition_offset = None
+        pm._last_heartbeat_mono = None
+        sys.modules["ami"] = ami
+        sys.modules["ha_client"] = ha
+        pm.time.sleep = _sleep
+        try:
+            pm.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+        pm.time.sleep = real_sleep
+        for m, mod in real_mods.items():
+            if mod is None:
+                sys.modules.pop(m, None)
+            else:
+                sys.modules[m] = mod
+        if real_interval is not None:
+            os.environ["LINK_HEALTH_INTERVAL"] = real_interval
+    link = [a for e, _st, a in sets if e == "sensor.switchboard_link_health"]
+    l19 = [st for e, st, _a in sets if e == "sensor.switchboard_link_19"]
+    rows = [json.loads(ln) for ln in hb_path.read_text().splitlines() if ln.strip()]
+    return sleeps, link, l19, rows
+
+
+def test_warmup_waits_for_the_cordless_and_the_heartbeat_names_the_settle(tmp_path) -> None:
+    """The live restart: AMI not up, then the eight wired ports, then (two polls
+    later) the cordless. Warm-up used to settle the moment the wired ports were
+    back, sleep 300 s, and leave link_19 'offline' after the phone had returned."""
+    wired = tuple(_WIRED)
+    sleeps, link, l19, rows = _drive_restart(
+        tmp_path, [None, wired, wired, wired + ("19",)], max_sleeps=5)
+
+    check("warm-up: held at 15 s until the cordless was back, then settled",
+          sleeps == [15, 15, 15, 300, 300])
+    check("warm-up: link_19 read offline only while it really was",
+          l19[:2] == ["offline", "offline"] and l19[2] == 2.5)
+    check("partial: flagged on BOTH warm-up cycles the cordless was missing",
+          [a["worst_rtt_is_partial"] for a in link] == [True, True, False, False])
+    # REFUTED half of the finding, pinned so nobody "fixes" it: the final warm-up
+    # publish is followed by a full-interval sleep, so advertising 15 s would make
+    # devhealth and the HA stale automation call every restart stale.
+    check("publish: poll_interval_s stays the steady 300 s through warm-up",
+          len(link) == 4 and all(a["poll_interval_s"] == 300 for a in link))
+
+    check("heartbeat: one row per cycle", len(rows) == 5)
+    check("heartbeat: every row records the sleep that actually followed it",
+          [r.get("next_sleep_s") for r in rows] == sleeps)
+    settle = rows[3] if len(rows) > 3 else {}
+    check("heartbeat: the settling row is still a warm-up row...",
+          settle.get("phase") == "warmup" and settle.get("interval_s") == 15)
+    check("heartbeat: ...and says a full interval follows it",
+          settle.get("next_sleep_s") == 300)
+    check("heartbeat: the next row is steady", rows[4]["phase"] == "steady")
+    check("heartbeat: the poller's first row is still flagged",
+          rows[0].get("poller_started") is True and "poller_started" not in rows[1])
+
+
+def test_a_cordless_that_never_returns_cannot_hold_warmup_past_the_cap(tmp_path) -> None:
+    assert pm.WARMUP_MAX_POLLS == 8
+    assert pm.WARMUP_DELAY == 15
+    sleeps, link, _l19, rows = _drive_restart(tmp_path, [None, tuple(_WIRED)], max_sleeps=9)
+    check("warm-up: a missing cordless holds only up to the cap",
+          sleeps == [15] * 7 + [300, 300])
+    check("partial: flagged on every cycle it was missing",
+          len(link) == 8 and all(a["worst_rtt_is_partial"] is True for a in link))
+    check("heartbeat: the capped settle is recorded on its row",
+          rows[7]["phase"] == "warmup" and rows[7]["next_sleep_s"] == 300)
+
+
+def test_a_trunk_drop_cannot_complete_a_phone_mass_drop() -> None:
+    """endpoint_transitions() reads every `Endpoint X is now ...` line, and the
+    outside line writes them too. is_mass_drop's threshold is half the PHONES,
+    so the trunk must not be counted as one of them."""
+    import types
+    phones = [{"ext": e, "reachable": True, "rtt_ms": 5.0, "name": e} for e in _ALL_EXTS[:9]]
+    summ = {"total": 10, "reachable": 9, "unreachable": 1, "unreachable_exts": ["20"]}
+    four_and_trunk = ([{"ext": e, "state": "Unreachable"} for e in ("11", "12", "13", "14")]
+                      + [{"ext": "trunk", "state": "Unreachable"}])
+    # Precondition: counted unfiltered, those five ARE "half the fleet".
+    check("mass-drop: precondition — the raw list would meet the threshold",
+          pm.is_mass_drop(sorted({t["ext"] for t in four_and_trunk}), summ) is True)
+
+    def _drive(transitions):
+        notes, beats = [], []
+        ha = types.ModuleType("ha_client")
+        ha.notify = lambda msg, **kw: notes.append((msg, kw)) or True
+        ha.set_state = lambda *a, **k: True
+
+        class _Stop(Exception):
+            pass
+        n = {"c": 0}
+
+        def _sleep(_):
+            n["c"] += 1
+            if n["c"] >= 2:
+                raise _Stop
+        keys = ("_load_options", "room_names", "wired_exts", "poll_once", "_append_history",
+                "_publish", "_heartbeat", "trunk_enabled", "endpoint_transitions",
+                "warmup_done", "outage_transition", "_scrub_share_log")
+        saved = {k: getattr(pm, k) for k in keys}
+        real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
+        try:
+            sys.modules["ha_client"] = ha
+            pm._load_options = lambda: {"link_health_alerts": True}
+            pm.room_names = lambda o: {}
+            pm.wired_exts = lambda o: list(_WIRED)
+            pm.poll_once = lambda a, b, c, _ever=None: (phones, summ)
+            pm._append_history = lambda p: None
+            pm._publish = lambda p, s: None
+            pm._heartbeat = lambda *a, **k: beats.append(k.get("transitions"))
+            pm.trunk_enabled = lambda o: False
+            pm.endpoint_transitions = lambda: transitions
+            pm.warmup_done = lambda *a, **k: True
+
+            def _ot(sm, st, settled=True):
+                st["alerted"] = False
+                return ""
+            pm.outage_transition = _ot
+            pm._scrub_share_log = lambda st: None
+            pm.time.sleep = _sleep
+            try:
+                pm.run()
+            except _Stop:
+                pass
+        finally:
+            for k, v in saved.items():
+                setattr(pm, k, v)
+            pm.time.sleep = real_sleep
+            if real_ha is None:
+                sys.modules.pop("ha_client", None)
+            else:
+                sys.modules["ha_client"] = real_ha
+        return notes, beats
+
+    notes, beats = _drive(four_and_trunk)
+    check("mass-drop: four phones and the outside line are not half of ten phones", notes == [])
+    check("mass-drop: the heartbeat still receives the trunk's transition",
+          any(t and any(x["ext"] == "trunk" for x in t) for t in beats))
+    five = [{"ext": e, "state": "Unreachable"} for e in ("11", "12", "13", "14", "15")]
+    notes5, _ = _drive(five)
+    check("mass-drop: five phones of ten still is one", len(notes5) == 1)
+    notes6, _ = _drive(five + [{"ext": "trunk", "state": "Unreachable"}])
+    check("mass-drop: the card names the phones, not the outside line",
+          len(notes6) == 1 and "trunk" not in notes6[0][0])

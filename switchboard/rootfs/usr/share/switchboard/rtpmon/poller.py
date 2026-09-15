@@ -156,7 +156,8 @@ def _median(vals: list):
 
 
 def _sample_is_partial(reachable: list, phones: list,
-                       measured_before: set | None) -> bool:
+                       measured_before: set | None,
+                       ever_registered: set | None = None) -> bool:
     """True when a phone we HAVE measured is missing from the RTT sample.
 
     The distinction that matters is "dropped" vs "never there". v0.52.0 used
@@ -172,18 +173,37 @@ def _sample_is_partial(reachable: list, phones: list,
     since losing the slowest phone makes worst_rtt_ms IMPROVE.
 
     Falling back (measured_before=None) to "any REGISTERED phone missing" keeps
-    a sensible answer for a caller with no history to offer."""
+    a sensible answer for a caller with no history to offer.
+
+    ★ `ever_registered` (the durable set, see summarize) joins the expectation
+    when the caller has it. `measured_before` is per-process and starts EMPTY,
+    so after a restart it could not name the phone that had not come back yet.
+    Live on 2026-09-14: at 03:09:57Z no phone answered, at 03:10:12Z the eight
+    wired ports had and ext 19 had not, and link_health read 4.64 ms with
+    unreachable_exts [19, 20] and worst_rtt_is_partial FALSE — the fallback
+    below cannot see a de-registered phone. On the cycle after, measured_before
+    held only the eight wired ports, so it still could not. The durable set
+    already knows 19 belongs in the sample and 20 never has."""
     contributing = {p["ext"] for p in reachable if p["rtt_ms"] is not None}
+    expected = set(measured_before or ())
+    if ever_registered is not None:
+        # Iterating `phones`, so a decommissioned extension still in the
+        # durable file cannot hold the flag up; registered-right-now counts
+        # for the same reason summarize() unions it in.
+        ever = set(ever_registered)
+        expected |= {p["ext"] for p in phones
+                     if p["ext"] in ever or p.get("registered")}
     # An EMPTY set falls back too, not just None. If the caller's wiring ever
     # stops feeding this (the loop that maintains it is not unit-testable), an
     # empty expectation would make the flag silently False FOREVER — the same
     # inert-but-green failure this fix exists to remove. The heuristic is
     # strictly weaker, not equivalent: it catches a REGISTERED phone that
     # stopped answering, but a phone that de-registered entirely looks exactly
-    # like one that never registered, so only the measured-before set separates
-    # the cordless dropping off from the softphone that was never there.
-    expected = set(measured_before) if measured_before else {
-        p["ext"] for p in phones if p.get("registered")}
+    # like one that never registered, so only the measured-before or durable
+    # set separates the cordless dropping off from the softphone that was never
+    # there.
+    if not expected:
+        expected = {p["ext"] for p in phones if p.get("registered")}
     return bool(expected - contributing)
 
 
@@ -305,7 +325,8 @@ def summarize(phones: list, wired_exts: list | None = None,
         # one meaning, and this flag is published so an automation can refuse to
         # threshold on a partial sample. For latency use wired_link_health; for
         # availability use unreachable_exts.
-        "worst_rtt_is_partial": _sample_is_partial(reachable, phones, measured_before),
+        "worst_rtt_is_partial": _sample_is_partial(reachable, phones, measured_before,
+                                                   ever_registered),
     }
 
 
@@ -804,7 +825,8 @@ _last_heartbeat_mono: float | None = None
 def _heartbeat(summ: dict | None, trunk_status: str | None,
                wired_down: list | None = None, settled: bool = True,
                first: bool = False,
-               transitions: list | None = None) -> None:
+               transitions: list | None = None,
+               next_sleep_s: int | None = None) -> None:
     """Append one liveness record to /share, readable from OUTSIDE the container.
 
     Two problems, one file.
@@ -846,6 +868,14 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         # a process, which is itself the signal that the poller restarted.
         "since_prev_s": (None if _last_heartbeat_mono is None
                          else round(now_mono - _last_heartbeat_mono)),
+        # ★ The sleep that FOLLOWS this row, as the loop is about to take it.
+        # `interval_s`/`settled`/`phase` describe the cycle this row ran in, so
+        # the row that ends warm-up says `interval_s: 15, settled: false` and is
+        # followed by a full-interval gap that nothing announced: 51 of 51
+        # warm-up-to-steady transitions in the 2026-09-14 capture read that way,
+        # and an auditor's first pass took the 300 s hole for a missed cycle.
+        # Always present; null only for a direct caller that did not say.
+        "next_sleep_s": next_sleep_s,
         "trunk": trunk_status or "unknown",
     }
     _last_heartbeat_mono = now_mono
@@ -1031,39 +1061,57 @@ def poll_once(names: dict, wired: list | None = None,
     return phones, summarize(phones, wired, measured_before, ever_registered)
 
 
-def wired_down_count(summ: dict, wired: list | None) -> int:
-    """How many WIRED gateway ports are not currently reachable. The cordless and
-    the unused softphone are deliberately excluded: the cordless is often asleep
-    and ext 20 never registers, so counting them would hold warm-up open forever."""
-    if not summ or not wired:
-        return 0
+def warmup_holdouts(summ: dict, wired: list | None,
+                    ever_registered: set | None = None) -> list:
+    """The extensions warm-up is still waiting for: every WIRED gateway port that
+    is not reachable, plus every OTHER extension that has ever registered and is
+    not back yet. Sorted, so a caller can log it.
+
+    ★ THE CORDLESS HOLDS IT NOW (2026-09-14). This used to count the wired ports
+    only, on the grounds that "the cordless is often asleep". That stopped being
+    true: ext 19 was Reachable on all 363 steady rows of the audit window, and
+    with a 120 s registration expiry it re-registers 38-53 s after Asterisk is
+    ready. On the last three restarts (2026-09-12 01:57:48Z, 2026-09-13
+    16:07:29Z, 2026-09-14 03:10:12Z) warm-up settled with `down: ["19"]` and
+    slept 300 s. After the 09-14 one link_19 read offline for 5 m 15 s — 4 m 38 s
+    of it after the phone was back, because the next sample was a full interval
+    away.
+
+    `ever_registered` is the durable set, so the never-registered softphone
+    (ext 20) cannot hold warm-up open; nothing can, past WARMUP_MAX_POLLS. With
+    no durable set (None or empty: a first boot) only the wired ports count,
+    exactly as before."""
+    if not summ:
+        return []
     down = {str(e) for e in (summ.get("unreachable_exts") or [])}
     down |= {str(e) for e in (summ.get("offline_exts") or [])}
-    return len({str(e) for e in wired} & down)
+    wait_for = {str(e) for e in (wired or [])} | {str(e) for e in (ever_registered or ())}
+    return sorted(wait_for & down)
 
 
 def warmup_done(settled: bool, prev_reachable: int, reachable: int, polls: int,
-                wired_down: int | None = None) -> bool:
+                holdouts: int | None = None) -> bool:
     """True once the poller should switch from the startup fast cadence to the steady
     interval. Settling on the FIRST reachable phone would freeze stragglers still
     re-registering after a restart as 'offline' for a whole interval — e.g. one GXW
     FXS port lagging its siblings. Latches once true.
 
-    `wired_down` (count of gateway ports still not reachable) is the PRECISE gate:
-    stay in warm-up until every wired port is back. The old heuristic — settle as
-    soon as the reachable COUNT stops growing — mistook a plateau for stability:
-    on 2026-08-11 the count sat flat at 6 across two 15 s polls while exts 15/17/18
-    were still re-registering, so the poller settled early and then froze that
-    stale down-list for a full 300 s interval. devhealth reads this rollup, so the
-    GXW falsely read "degraded" for ~4 minutes, twice. WARMUP_MAX_POLLS still caps
-    the wait, so a genuinely dead port cannot hold warm-up open forever.
+    `holdouts` (how many of warmup_holdouts() are still not reachable) is the
+    PRECISE gate: stay in warm-up until every one is back. The old heuristic —
+    settle as soon as the reachable COUNT stops growing — mistook a plateau for
+    stability: on 2026-08-11 the count sat flat at 6 across two 15 s polls while
+    exts 15/17/18 were still re-registering, so the poller settled early and then
+    froze that stale down-list for a full 300 s interval. devhealth reads this
+    rollup, so the GXW falsely read "degraded" for ~4 minutes, twice.
+    WARMUP_MAX_POLLS still caps the wait, so a genuinely dead port — or a
+    cordless that really is asleep — cannot hold warm-up open forever.
 
-    `wired_down=None` keeps the old count-plateau heuristic, for a caller that has
-    no gateway_ports list to check against."""
+    `holdouts=None` keeps the old count-plateau heuristic, for a cycle with no
+    summary to check against."""
     if settled or polls >= WARMUP_MAX_POLLS:
         return True
-    if wired_down is not None:
-        return wired_down == 0
+    if holdouts is not None:
+        return holdouts == 0
     return reachable > 0 and reachable <= prev_reachable
 
 
@@ -1165,7 +1213,18 @@ def run() -> int:
         # endpoint_transitions() advances a byte watermark, so whoever calls it
         # first is the only caller that sees anything.
         trans = endpoint_transitions()
-        went = sorted({t["ext"] for t in trans if t["state"] == "Unreachable"})
+        # ★ PHONES ONLY. `trans` also carries the outside line — every restart's
+        # rows open with {"ext": "trunk", "state": "Reachable"} — and is_mass_drop
+        # compares this list against a threshold computed from the PHONE count
+        # (summ["total"] is the configured extensions, trunk filtered out). A
+        # trunk dropping alongside four phones would count as the fifth of ten
+        # and complete a "half the fleet" verdict half the fleet had not earned.
+        # (Not seen live: the 2026-09-14 capture holds no trunk Unreachable line,
+        # only the Reachable one that opens all 56 restarts.) The heartbeat still
+        # receives `trans` whole, trunk included.
+        fleet = {p["ext"] for p in (phones or [])}
+        went = sorted({t["ext"] for t in trans
+                       if t["state"] == "Unreachable" and t["ext"] in fleet})
         if (phones is not None and is_mass_drop(went, summ) and settled
                 and not outage_st.get("alerted")):
             # `not alerted` is what keeps this from double-reporting an outage
@@ -1184,6 +1243,15 @@ def run() -> int:
         # The readable log, EVERY cycle and whatever AMI is doing: Asterisk writes
         # to it whether or not this poller can reach the manager interface.
         _scrub_share_log(scrub_st)
+        polls += 1
+        # A cycle where AMI was down (summ is None) tells us nothing about the
+        # fleet — don't let it end warm-up on a phantom "all wired ports up".
+        holdouts = warmup_holdouts(summ, wired, ever_registered) if summ else None
+        next_settled = warmup_done(settled, prev_reachable, reachable, polls,
+                                   len(holdouts) if holdouts is not None else None)
+        # Decided BEFORE the heartbeat so the row can record it, and ONE value
+        # feeds both the record and the sleep, so the two cannot disagree.
+        next_sleep = interval if next_settled else WARMUP_DELAY
         # Liveness record, EVERY cycle -- including cycles where AMI was down and
         # nothing else was published. Silence in the heartbeat file is the only
         # signal that separates "the PBX is idle" from "the poller stopped": the
@@ -1192,14 +1260,11 @@ def run() -> int:
         _heartbeat(summ, trunk_status,
                    wired_down=[p["ext"] for p in (phones or [])
                                if p.get("ext") in set(wired) and not p.get("reachable")],
-                   settled=settled, first=(polls == 0), transitions=trans)
-        polls += 1
-        # A cycle where AMI was down (summ is None) tells us nothing about the
-        # fleet — don't let it end warm-up on a phantom "all wired ports up".
-        settled = warmup_done(settled, prev_reachable, reachable, polls,
-                              wired_down_count(summ, wired) if summ else None)
+                   settled=settled, first=(polls == 1), transitions=trans,
+                   next_sleep_s=next_sleep)
+        settled = next_settled
         prev_reachable = reachable
-        time.sleep(interval if settled else WARMUP_DELAY)
+        time.sleep(next_sleep)
 
 
 if __name__ == "__main__":

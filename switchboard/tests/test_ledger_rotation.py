@@ -1,12 +1,13 @@
-"""The three append-only ledgers must ROTATE, not vanish.
+"""The append-only ledgers must ROTATE, not vanish.
 
     python3 -m pytest switchboard/tests/test_ledger_rotation.py
 
-Switchboard writes three unbounded JSONL ledgers, each with its own byte cap:
+Switchboard writes four unbounded JSONL ledgers, each with its own byte cap:
 
     heartbeat.jsonl          rtpmon/poller.py            4 MiB
     delivery-outcomes.jsonl  webui/delivery.py           2 MiB
     callqos-outcomes.jsonl   usr/bin/switchboard-callqos 4 MiB
+    cordless-mos.jsonl       devhealth/poller.py         512 KiB
 
 Through v0.76.0 all three "enforced" the cap with `open(path, "w")` followed by
 `pass` — which truncates the file to ZERO BYTES. The comment above the poller's
@@ -16,10 +17,10 @@ forensic record disappeared, and it disappeared SILENTLY: an empty ledger and a
 quiet, healthy system are indistinguishable to every reader in this repo, which
 is the precise failure mode these ledgers exist to rule out.
 
-The helper is duplicated rather than imported because the three files live in
-three directories with no shared package and are loaded by three different
+The helper is duplicated rather than imported because the files live in
+separate directories with no shared package and are loaded by separate
 interpreters at runtime. `test_the_three_implementations_do_not_drift` is what
-makes the duplication safe: it runs all three over one input and requires the
+makes the duplication safe: it runs every copy over one input and requires the
 resulting bytes to be identical.
 """
 import json
@@ -34,6 +35,8 @@ SOURCES = {
     "poller": ROOT / "usr/share/switchboard/rtpmon/poller.py",
     "delivery": ROOT / "usr/share/switchboard/webui/delivery.py",
     "callqos": ROOT / "usr/bin/switchboard-callqos",
+    # The private low-MOS capture (cordless-mos.jsonl, 512 KiB).
+    "devhealth": ROOT / "usr/share/switchboard/devhealth/poller.py",
 }
 
 
@@ -146,7 +149,7 @@ def test_the_file_keeps_its_inode(tmp_path, impl):
 
 
 def test_the_three_implementations_do_not_drift(tmp_path):
-    """The helper is copied into three files. Copies rot; this is the guard."""
+    """The helper is copied into every ledger writer. Copies rot; this is the guard."""
     results = {}
     for impl, fn in sorted(ROTATORS.items()):
         d = tmp_path / impl
@@ -156,7 +159,7 @@ def test_the_three_implementations_do_not_drift(tmp_path):
         results[impl] = p.read_bytes()
     distinct = set(results.values())
     assert len(distinct) == 1, (
-        "the three _rotate_tail copies disagree: "
+        "the _rotate_tail copies disagree: "
         + ", ".join(f"{k}={len(v)}B" for k, v in results.items()))
 
 

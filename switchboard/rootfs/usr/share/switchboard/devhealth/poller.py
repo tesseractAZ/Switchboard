@@ -168,7 +168,9 @@ class _WP:
 def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     """Return a raw device-health snapshot for the WP826, best-effort. Keys:
     reachable(bool: TCP:443 open), api_ok(bool: logged in + read), and — when api_ok —
-    battery_pct/charging/battery_health, wifi_connected/wifi_signal/wifi_ssid, last_mos."""
+    battery_pct/charging/battery_health, wifi_connected/wifi_signal/wifi_ssid,
+    last_mos/last_mos_age_s/last_mos_ledger_tx, and rtp_judged (every scored
+    record, see judge_rtp_records)."""
     out = {"reachable": _tcp_open(ip, 443), "api_ok": False}
     if not password:
         return out
@@ -195,14 +197,19 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     # next cycle. Accept only a mapping.
     _rtp_raw = (wp.get("/api-get_rtp_status") or {}).get("rtpStatus")
     rtp = _rtp_raw if isinstance(_rtp_raw, dict) else {}
-    # Ledger-gated: only RTP records matching a real dialplan call may drive
-    # health — HA "announce" playback legs leave low-MOS records that are not
-    # calls (see last_call_mos).
-    mos, age = last_call_mos(rtp, now=time.time(), ledger_ts=load_callqos_ts())
-    if mos is not None:
-        out["last_mos"] = mos           # the phone's own conversational MOS for its leg
-        if age is not None:
-            out["last_mos_age_s"] = age  # seconds since that call ended (for a recency gate)
+    # Ledger-gated: an RTP record may drive health only when its NEAREST ledger
+    # leg is a real dialplan call — HA "announce" playback legs leave low-MOS
+    # records that are not calls — and even then a low score counts only if that
+    # leg's own transmit figures agree (see judge_rtp_records).
+    judged = judge_rtp_records(rtp, load_callqos_legs())
+    out["rtp_judged"] = judged           # every scored record, for capture_low_mos
+    last = newest_call(judged, now=time.time())
+    if last is not None:
+        out["last_mos"] = last["mos"]    # the phone's own conversational MOS for its leg
+        if last["age_s"] is not None:
+            out["last_mos_age_s"] = last["age_s"]  # seconds since that call ended (for a recency gate)
+        # What the PBX measured on that SAME leg, in the direction the score is about.
+        out["last_mos_ledger_tx"] = last["ledger_tx"]
     return out
 
 
@@ -217,13 +224,32 @@ CALLQOS_MATCH_WINDOW_S = 90
 # that must not import from /usr/bin.
 PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 
+# The ledger fields a handset score is judged against, plus the ones the capture
+# keeps beside it for studying the score. `*_tx` is PBX -> handset: the audio the
+# handset's own moscq is about, measured from the handset's OWN RTCP receiver
+# reports. Everything else here is kept for the record, not for judging.
+LEG_FIELDS = ("ts", "tag", "ext", "dur", "rxcount", "txcount",
+              "loss_rx_pct", "loss_tx_pct", "jitter_rx_last_ms", "jitter_tx_last_ms",
+              "mes_rx", "mes_tx", "rtt_ms", "rtt_max_ms", "rtt_samples", "quality")
 
-def load_callqos_ts(path: str | None = None, max_bytes: int = 65536) -> list[float]:
-    """Epoch hangup times (`ts`) of recent call-ledger legs, for gating the
-    phone's RTP records to REAL dialplan calls (see last_call_mos). Reads only
-    the file's tail — the ledger is append-only and unbounded; the partial
-    first line a mid-file seek can produce is dropped by the malformed-line
-    skip. Missing/unreadable ledger -> [] (nothing can be confirmed)."""
+
+def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[dict]:
+    """Recent call-ledger legs — EVERY leg, playback included — for matching the
+    phone's RTP records to the leg each one describes (see judge_rtp_records).
+    Each leg is LEG_FIELDS with `ts` a float and `tag` a string. Reads only the
+    file's tail — the ledger is append-only and unbounded; the partial first
+    line a mid-file seek can produce is dropped by the malformed-line skip.
+    Missing/unreadable ledger -> [] (nothing can be confirmed).
+
+    ★ PLAYBACK LEGS ARE KEPT, AND TAGGED, ON PURPOSE (2026-09-14). v0.57.0
+    dropped them here, so the matcher only ever saw the legs that remained — and
+    it accepted a handset record within 90 s of ANY of them. A playback leg that
+    ended beside a real call was therefore confirmed BY THAT CALL. The live
+    shape: a wakeup-deliver leg hung up at 13:00:19Z and an operator leg twelve
+    seconds later at 13:00:31Z, so the handset's score for the delivery could
+    ride in on the operator leg. Removing the playback leg removed the only
+    thing that could tell the two apart. Matching now keeps it, finds the
+    NEAREST leg, and skips the record when that leg is playback."""
     p = path or os.environ.get("SWITCHBOARD_CALLQOS") or "/data/state/callqos.jsonl"
     try:
         with open(p, "rb") as f:
@@ -233,56 +259,109 @@ def load_callqos_ts(path: str | None = None, max_bytes: int = 65536) -> list[flo
             data = f.read()
     except OSError:
         return []
-    out: list[float] = []
+    out: list[dict] = []
     for line in data.splitlines():
         # AttributeError: a syntactically-valid line that isn't an object
         # (e.g. a bare number) has no .get — skipped like any malformed line.
         try:
             rec = json.loads(line)
-            # PLAYBACK legs must NOT confirm a call. This gate exists solely to
-            # keep phone-side RTP records from PLAYBACK out of last_call_mos --
-            # the handset scores them 2.2-2.9 and they fired three false
-            # 'degraded' episodes on 2026-08-05/06. It worked because playback
-            # legs were absent from the ledger; v0.55.0 then added the rtpqos
-            # hook to wakeup-deliver, page and announce, so they ARE in the
-            # ledger now and were confirming themselves -- silently restoring
-            # the exact bug this gate was written to close. Filter by tag, so
-            # the gate no longer depends on an accident of ledger coverage.
-            if str(rec.get("tag") or "") in PLAYBACK_TAGS:
-                continue
-            out.append(float(rec.get("ts")))
+            ts = float(rec.get("ts"))
         except (AttributeError, TypeError, ValueError):
             continue
+        leg = {k: rec.get(k) for k in LEG_FIELDS}
+        leg["ts"] = ts
+        leg["tag"] = str(rec.get("tag") or "")
+        out.append(leg)
     return out
 
 
-def last_call_mos(rtp_status: dict, now: float | None = None,
-                  ledger_ts: list[float] | None = None):
-    """(moscq, age_seconds) for the MOST RECENT call in the phone's retained RTP
-    records — NOT the min across history (an old bad call must not pin the sensor
-    'degraded' forever). Picked by the latest stopTimeSecond. age is seconds since
-    that call ended (None if `now` not given / no timestamp). (None, None) if no
-    record carries a MOS. moscq is the phone's own conversational MOS for its leg —
-    the callee-side quality Asterisk cannot measure.
+# ★★ WHEN A LOW HANDSET SCORE COUNTS (2026-09-14).
+#
+# The WP826 scored moscq 2.2 on three legs in eleven hours — an assistant leg at
+# 02:51:58Z and two dial-42 wake-up legs at 12:42:31Z and 13:10:37Z — and each
+# raised a 'degraded' episode on the alarm handset. For those same legs the PBX
+# ledger, reading the handset's OWN RTCP receiver reports, recorded
+# loss_tx_pct 0.0, mes_tx 87.9-88.0 and jitter_tx 2.4-6.5 ms. Same-shaped wake-up
+# legs that morning scored 4.4. WHY the handset says 2.2 is NOT known: an earlier
+# theory (a playback leg) does not cover these, and a tempting `rxmes/40` rule
+# was refuted in August. Nothing here claims a mechanism. What it does is refuse
+# to raise an alert that NO measurement of the same leg supports, and capture
+# every low score (capture_low_mos) so the mechanism can be studied instead of
+# guessed.
+#
+# The thresholds are callqos's own lines, checked against the ledger. Over the
+# 190 non-playback legs from 2026-07-18 to 2026-09-14, the lowest credible
+# mes_tx is 83.4 (78.5 across all 267 credible legs, playback included), and
+# exactly ONE leg reached 1 % transmit loss (1.339 %, a wake-up leg on
+# 2026-08-25). So:
+#   - loss >= 1.0 % is where G.711 loss stops being inaudible (callqos.classify),
+#     and it would have corroborated that one leg and no other;
+#   - mes < 78 is below callqos's floor for "good" and below every credible
+#     transmit MES the ledger has ever recorded.
+# A handset score under mos_min (3.4, roughly MES 68) caused by the network or
+# by jitter would have to show in the handset's own receiver reports well before
+# either line. When it does not, the low score is published as
+# last_mos_uncorroborated and does not degrade the sensor.
+CORROBORATE_LOSS_TX_PCT = 1.0
+CORROBORATE_MES_TX = 78.0
 
-    `ledger_ts` (recent legs' hangup epochs, see load_callqos_ts) restricts
-    candidates to REAL dialplan calls: HA "announce" playback to the handset
-    leaves phone-side RTP records with low moscq (2.2-2.9 observed) that appear
-    nowhere in the call ledger — three false 'degraded' episodes fired
-    2026-08-05/06. A record qualifies only if some leg lands within
-    CALLQOS_MATCH_WINDOW_S of its stopTimeSecond. None -> no gating (legacy
-    callers); [] -> ledger readable but no legs, so NO record qualifies. When
-    the ledger cannot confirm a call the MOS is SKIPPED: a false 'degraded'
-    costs alert trust, and genuinely poor real calls already notify separately
-    via the callqos path."""
-    best = None  # (stop_ts, mos)
+
+def _leg_num(v):
+    """A ledger number, or None. A bool is not a measurement."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def ledger_tx_judgement(leg: dict | None) -> str:
+    """What the PBX measured on a leg in the direction a handset score is about:
+    'impaired', 'clean' or 'unmeasured'.
+
+    Loss at or above CORROBORATE_LOSS_TX_PCT is positive evidence whatever the
+    MES says. Otherwise the MES decides — but Asterisk writes mes 0.0 for a
+    direction it could not score (no RTCP round completed), and a missing field
+    is an older record, so neither can vouch for a clean leg: 'unmeasured'."""
+    if not isinstance(leg, dict):
+        return "unmeasured"
+    loss, mes = _leg_num(leg.get("loss_tx_pct")), _leg_num(leg.get("mes_tx"))
+    if loss is not None and loss >= CORROBORATE_LOSS_TX_PCT:
+        return "impaired"
+    if mes is None or mes <= 0:
+        return "unmeasured"
+    return "impaired" if mes < CORROBORATE_MES_TX else "clean"
+
+
+def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None) -> list[dict]:
+    """Every retained handset RTP record that carries a real MOS, each matched to
+    the ledger leg it describes. One dict per record:
+
+      key, record   the rtpStatus entry as the handset sent it
+      mos, stop_ts  its moscq and stopTimeSecond
+      match         'call' (nearest leg is a dialplan call), 'playback'
+                    (nearest leg is a playback leg: skipped), or 'unmatched'
+                    (no leg within CALLQOS_MATCH_WINDOW_S: skipped)
+      leg           that nearest leg (LEG_FIELDS), or None
+      ledger_tx     ledger_tx_judgement(leg)
+
+    HA "announce" playback to the handset leaves phone-side RTP records with low
+    moscq (2.2-2.9 observed) — three false 'degraded' episodes fired
+    2026-08-05/06 — so a record may drive health only when its NEAREST leg is a
+    call. Nearest, not merely near: see load_callqos_legs for the playback leg a
+    neighbouring call used to confirm. An exact tie goes to the playback leg,
+    because when the ledger cannot say which leg a score belongs to the MOS is
+    SKIPPED: a false 'degraded' costs alert trust, and genuinely poor real calls
+    already notify separately via the callqos path.
+
+    `ledger=None` means no gating (every record is a 'call' with no leg); `[]`
+    means the ledger was readable and empty, so nothing matches."""
+    out: list[dict] = []
     # Defence in depth beside the caller's isinstance check: the handset can
     # answer with rtpStatus as a plain STRING, and `or {}` does not catch a
     # non-empty one. Reaching .values() with a str raised
     # "'str' object has no attribute 'values'" and killed the whole poll cycle.
     if not isinstance(rtp_status, dict):
-        return None, None
-    for rec in rtp_status.values():
+        return out
+    for key, rec in rtp_status.items():
         if not isinstance(rec, dict):
             continue
         try:
@@ -300,15 +379,193 @@ def last_call_mos(rtp_status: dict, now: float | None = None,
             ts = int(rec.get("stopTimeSecond"))
         except (TypeError, ValueError):
             ts = 0
-        if ledger_ts is not None and not any(
-                abs(ts - lt) <= CALLQOS_MATCH_WINDOW_S for lt in ledger_ts):
+        leg, match = None, "call"
+        if ledger is not None:
+            near = [lg for lg in ledger if abs(ts - lg["ts"]) <= CALLQOS_MATCH_WINDOW_S]
+            if not near:
+                match = "unmatched"
+            else:
+                # (distance, is-a-call): False sorts first, so a tie is playback.
+                leg = min(near, key=lambda lg: (abs(ts - lg["ts"]),
+                                                lg["tag"] not in PLAYBACK_TAGS))
+                match = "playback" if leg["tag"] in PLAYBACK_TAGS else "call"
+        out.append({"key": str(key), "record": rec, "mos": m, "stop_ts": ts,
+                    "match": match, "leg": leg, "ledger_tx": ledger_tx_judgement(leg)})
+    return out
+
+
+def newest_call(judged: list[dict], now: float | None = None) -> dict | None:
+    """The MOST RECENT 'call' among judged records — NOT the min across history
+    (an old bad call must not pin the sensor 'degraded' forever). Picked by the
+    latest stopTimeSecond; a copy with `age_s`, the seconds since that call ended
+    (None if `now` is not given or the record has no timestamp). None when no
+    record matched a call. moscq is the phone's own conversational MOS for its
+    leg — the callee-side quality Asterisk cannot measure."""
+    best = None
+    for j in judged or []:
+        if j.get("match") != "call":
             continue
-        if best is None or ts > best[0]:
-            best = (ts, m)
+        if best is None or j["stop_ts"] > best["stop_ts"]:
+            best = j
     if best is None:
-        return None, None
-    age = int(now - best[0]) if (now is not None and best[0]) else None
-    return best[1], age
+        return None
+    age = int(now - best["stop_ts"]) if (now is not None and best["stop_ts"]) else None
+    return {**best, "age_s": age}
+
+
+def mos_verdict(judged: dict) -> str:
+    """One word for how a scored record was treated. 'unmatched' and 'playback'
+    were skipped outright. A 'call' is 'corroborated' (its leg's transmit side was
+    impaired: a low score counts toward degraded), 'uncorroborated' (the ledger
+    measured that direction clean) or 'unmeasured' (it has no credible figure)."""
+    if judged.get("match") != "call":
+        return str(judged.get("match") or "unmatched")
+    return {"impaired": "corroborated",
+            "clean": "uncorroborated"}.get(judged.get("ledger_tx"), "unmeasured")
+
+
+# --------------------------------------------------------------------------- #
+# Low-MOS capture. PRIVATE: /data/state is add-on-only (container shell blocked,
+# backups encrypted, add-on API 403). The handset's record can name the far end
+# and carry LAN ports, so this is never mirrored to /share.
+# --------------------------------------------------------------------------- #
+CAPTURE_MAX_BYTES = 512 * 1024
+_CAPTURE_TAIL_BYTES = 65536
+# Dedupe keys already on disk, per path. The handset keeps a record for hours
+# and is polled every two minutes, so without this one call would be written
+# ~100 times. Keyed on the path so a test (or a moved file) reloads cleanly.
+_capture_seen: dict = {"path": None, "keys": set()}
+
+
+def _capture_path() -> str:
+    return os.environ.get("SWITCHBOARD_CORDLESS_MOS_LOG") or "/data/state/cordless-mos.jsonl"
+
+
+def _capture_key(j: dict) -> str:
+    """One row per distinct JUDGEMENT of a record. The verdict is part of the
+    key: a record first seen before its ledger leg was written ('unmatched')
+    and judged again once it was is two findings, and both are worth keeping."""
+    rec = j.get("record") if isinstance(j.get("record"), dict) else {}
+    return "|".join(str(x) for x in (j.get("stop_ts"), rec.get("startTimeSecond"),
+                                     j.get("mos"), mos_verdict(j)))
+
+
+def _load_capture_keys(path: str) -> set:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - _CAPTURE_TAIL_BYTES))
+            data = f.read()
+    except OSError:
+        return set()
+    keys = set()
+    for line in data.splitlines():
+        try:
+            keys.add(str(json.loads(line)["dedupe"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return keys
+
+
+def _clip(v):
+    """A handset value as a bounded JSON scalar — a misbehaving handset must not
+    be able to bloat the ledger or break the write."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return str(v)[:256]
+
+
+def capture_low_mos(judged: list[dict], mos_min: float, now: float | None = None,
+                    path: str | None = None) -> int:
+    """Append every NOT-YET-CAPTURED handset record scoring below `mos_min` to a
+    private, capped JSONL ledger, whatever happened to it — skipped as playback,
+    unmatched, corroborated or not. Returns the number of rows written.
+
+    This exists because the 2.2 on the alarm handset has had two explanations:
+    one (`rxmes/40`) was refuted, and the other (playback legs) does not cover
+    the legs that raised the 2026-09-14 alerts. Each row keeps the whole
+    rtpStatus record as received, the
+    ledger leg it matched (ts, tag and the quality fields), the offset between
+    the two clocks and the verdict — so the 2.2 legs can be set beside the 4.4
+    legs of the same shape and the mechanism read off the data. Best-effort: a
+    failed write is reported and retried next cycle, and never stops the poll."""
+    p = path or _capture_path()
+    if _capture_seen["path"] != p:
+        _capture_seen["path"] = p
+        _capture_seen["keys"] = _load_capture_keys(p)
+    seen = _capture_seen["keys"]
+    now = time.time() if now is None else now
+    rows = []
+    for j in judged or []:
+        try:
+            if not float(j.get("mos")) < float(mos_min):
+                continue
+        except (TypeError, ValueError):
+            continue
+        key = _capture_key(j)
+        if key in seen or any(k == key for k, _ in rows):
+            continue
+        rec = j.get("record") if isinstance(j.get("record"), dict) else {}
+        leg = j.get("leg") if isinstance(j.get("leg"), dict) else None
+        stop = j.get("stop_ts") or 0
+        rows.append((key, {
+            "ts": _now_iso(),
+            "verdict": mos_verdict(j),
+            "moscq": j.get("mos"),
+            "mos_min": mos_min,
+            "stop_ts": stop,
+            "age_s": int(now - stop) if stop else None,
+            "record_key": j.get("key"),
+            "record": {str(k)[:64]: _clip(v) for k, v in list(rec.items())[:64]},
+            "leg": {k: leg.get(k) for k in LEG_FIELDS} if leg else None,
+            # handset stop minus ledger hangup: the two clocks' disagreement.
+            "leg_offset_s": round(stop - leg["ts"], 1) if leg else None,
+            "dedupe": key,
+        }))
+    if not rows:
+        return 0
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        _rotate_tail(p, CAPTURE_MAX_BYTES)
+        with open(p, "a", encoding="utf-8") as fh:
+            for _key, row in rows:
+                fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        # Root writes, nobody else reads. Tighter than linkhealth.jsonl's 0640:
+        # nothing running as `asterisk` needs this file, and a handset record
+        # can carry the far end's name or number.
+        os.chmod(p, 0o600)
+    except (OSError, TypeError, ValueError) as e:
+        print(f"[devhealth] low-MOS capture not written ({e}); retrying next cycle", flush=True)
+        return 0
+    for key, row in rows:
+        seen.add(key)
+        print(f"[devhealth] captured handset MOS {row['moscq']:.1f} "
+              f"({row['verdict']}) to {p}", flush=True)
+    return len(rows)
+
+
+def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
+    """Trim an append-only ledger to its newest records. Best-effort.
+
+    A copy of rtpmon/poller.py's helper (see its docstring for the v0.77.0
+    zero-byte truncation it replaced); tests/test_ledger_rotation.py runs every
+    copy over one input and requires identical bytes, so the copies cannot drift.
+    """
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        keep = max(1, int(max_bytes * keep_frac))
+        with open(path, "rb") as fh:
+            fh.seek(-keep, os.SEEK_END)
+            tail = fh.read()
+        # Everything before the first newline is half a record. Drop it: a
+        # reader must never have to guess whether the first line is complete.
+        nl = tail.find(b"\n")
+        tail = tail[nl + 1:] if nl != -1 else b""
+        with open(path, "wb") as fh:
+            fh.write(tail)
+    except OSError:
+        pass                              # a trim must never break the write
 
 
 def _int(v):
@@ -357,8 +614,14 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
         # (within mos_window). The phone retains a few historical RTP records, so a bad
         # call hours ago must not pin this sensor 'degraded' — and callqos already owns
         # per-call alerting; here it's a supporting, current-state signal only.
+        # ...and only when the PBX's own measurement of that leg agrees. Three
+        # 'degraded' episodes on 2026-09-14 rested on a handset 2.2 for legs the
+        # ledger scored 0 % loss / MES 88 from the handset's own receiver
+        # reports (see CORROBORATE_*). A missing judgement counts as no support.
         m, age = snap.get("last_mos"), snap.get("last_mos_age_s")
-        if m is not None and m < th["mos_min"] and age is not None and age <= th["mos_window"]:
+        if (m is not None and m < th["mos_min"] and age is not None
+                and age <= th["mos_window"]
+                and snap.get("last_mos_ledger_tx") == "impaired"):
             reasons.append(f"last call quality poor (MOS {m:.1f}, {age}s ago)")
     elif snap.get("reachable"):
         reasons.append("cordless answers on the network but its admin API is unreadable "
@@ -596,7 +859,8 @@ def _thresholds() -> dict:
     }
 
 
-def _publish_cordless(level: str, reasons: list[str], snap: dict) -> None:
+def _publish_cordless(level: str, reasons: list[str], snap: dict,
+                      th: dict | None = None) -> None:
     try:
         import ha_client
     except Exception:
@@ -610,9 +874,20 @@ def _publish_cordless(level: str, reasons: list[str], snap: dict) -> None:
         # attributes.health while the state was the battery %.
         "health": level,
     }
-    for k in ("battery_pct", "charging", "battery_health", "wifi_connected", "wifi_signal", "wifi_ssid", "last_mos"):
+    # last_mos_age_s was measured every cycle and never published: on
+    # 2026-09-14 the sensor read 'ok' beside last_mos 2.2 with nothing to say
+    # whether that call was two minutes or two hours old.
+    for k in ("battery_pct", "charging", "battery_health", "wifi_connected", "wifi_signal",
+              "wifi_ssid", "last_mos", "last_mos_age_s"):
         if snap.get(k) is not None:
             attrs[k] = snap[k]
+    # A low score the ledger does not support is SHOWN, not hidden — it simply
+    # does not degrade the state (classify_cordless). Always a bool beside
+    # last_mos, so "false" is a statement rather than a missing key.
+    if th is not None and snap.get("last_mos") is not None:
+        attrs["last_mos_uncorroborated"] = bool(
+            snap["last_mos"] < th["mos_min"]
+            and snap.get("last_mos_ledger_tx") != "impaired")
     # The state is ALWAYS the level word. It used to be the battery % whenever
     # the battery read succeeded, which made a battery-driven 'critical'
     # invisible in the state itself (live 2026-08-03: battery 3% discharging
@@ -722,7 +997,14 @@ def run() -> None:
             try:
                 snap = probe_cordless(probe_ip, cordless_pw, cordless_cert_pin)
                 level, reasons = classify_cordless(snap, th)
-                _publish_cordless(level, reasons, snap)
+                _publish_cordless(level, reasons, snap, th)
+                # Every low handset score goes on the record, judged or skipped.
+                # Its own guard: a capture failure must never cost the alert
+                # state machine below its cycle.
+                try:
+                    capture_low_mos(snap.get("rtp_judged") or [], th["mos_min"])
+                except Exception as e:
+                    print(f"[devhealth] low-MOS capture error: {e}", flush=True)
                 # Identify the call the MOS verdict rests on by its END time, so
                 # a clear can be attributed. age_s grows for the SAME call every
                 # cycle, so the difference tells apart "a newer call was measured"
