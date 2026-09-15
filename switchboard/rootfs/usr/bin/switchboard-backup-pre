@@ -60,7 +60,7 @@ def _stamp(phase: str, synced: int = -1) -> None:
         # a link planted in place of the stamp file onto whatever it pointed at.
         # A link or a FIFO now fails the stamp, which is logged; the backup runs.
         fd = os.open(STAMP_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT
-                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666)
+                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 raise OSError(f"{STAMP_PATH}: not a regular file")

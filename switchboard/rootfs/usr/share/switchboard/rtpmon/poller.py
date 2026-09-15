@@ -804,7 +804,7 @@ def _open_no_follow(path: str, flags: int) -> int:
     swapped after the check cannot redirect it. switchboard-config's
     open_share_file() applies the same rule to the boot pass.
     """
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666)
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"{path}: not a regular file")
