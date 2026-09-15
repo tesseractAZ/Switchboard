@@ -23,7 +23,9 @@ never got as far as being said out loud — and the test covering it reached tha
 arm by writing the impossible pair into the fixture by hand.
 """
 import json
+import os
 import re
+import stat
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -325,3 +327,48 @@ def test_the_push_is_critical_so_it_beats_do_not_disturb(tmp_path):
     _ring(sched)
     sched._reconcile_rings(T0 + sched.RETRY_AFTER + 1)
     assert pushes[0][1].get("critical") is True, pushes[0][1]
+
+
+# --------------------------------------------------------------------------- #
+# A ledger replaced by a link (2026-09-14).
+# --------------------------------------------------------------------------- #
+def test_a_ledger_replaced_by_a_link_is_not_written_through_and_not_judged(tmp_path):
+    """★ The scheduler runs as root, and delivery-outcomes.jsonl sits in a
+    directory `asterisk` can write. record() appended to it, trimmed it and added
+    group-write to it by name, so a link planted in its place took all three to
+    whatever the link pointed at.
+
+    Refusing the write is only half of it. The AGI's `answered` and `spoken`
+    records are refused by the same link, so the reconciler can no longer learn
+    that anybody picked up — and is_writable() followed the link too and called
+    the ledger writable. A ring somebody answered would have been escalated with
+    a critical push. It must be judged as the unwritable ledger it is."""
+    sched, delivery, pushes, cards = _load(tmp_path)
+    # Positive control, through the scheduler's own writer: a real ledger is
+    # appended to, made group-writable, and called writable.
+    sched._record("19", "ring-queued", hhmm="06:15", attempt=1)
+    assert [r["outcome"] for r in _rows(delivery)] == ["ring-queued"]
+    assert os.stat(delivery.OUTCOME_PATH).st_mode & stat.S_IWGRP
+    assert delivery.is_writable()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "options.json"
+    secret.write_text('{"secret": "x"}\n' * 20)
+    os.chmod(secret, 0o600)
+    before = secret.read_bytes()
+    link = tmp_path / "linked.jsonl"
+    link.symlink_to(secret)
+    delivery.OUTCOME_PATH = str(link)
+    delivery.MAX_BYTES = 64                   # a trim through the link WOULD bite
+
+    sched._record("19", "ring-queued", hhmm="06:15", attempt=1)
+    assert not delivery.is_writable(), "a link was called a writable ledger"
+
+    _ring(sched, retried=True)
+    sched._reconcile_rings(T0 + sched.RETRY_AFTER + 1)
+
+    assert pushes == [] and cards == [], f"an unjudgeable ring escalated: {pushes} {cards}"
+    assert "19" not in sched._ringing, "the unjudgeable ring was left to be judged again"
+    assert secret.read_bytes() == before, "an append or a trim went through the link"
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600, "group-write went through the link"

@@ -276,6 +276,7 @@ def test_the_words_reach_stderr_only_when_the_policy_says_true(tmp_path, monkeyp
         ("{not json", False),                            # unreadable: fails closed
         ('{"assistant": {"transcripts": "yes"}}', False),  # only a real true
         ('{"wakeup": {}}', False),                       # no policy at all
+        ('{"assistant": {}}', False),                    # a section without the key
     ]
     for body, words in policies:
         if body is None:

@@ -121,6 +121,32 @@ ANNOUNCE_SETTLE_SECONDS = 120.0
 ANNOUNCE_LOOKBACK = 3600.0
 
 
+def _open_no_follow(path: str, flags: int) -> int:
+    """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
+
+    ★ A LEDGER IN A DIRECTORY OTHERS CAN WRITE (2026-09-14). /share/switchboard
+    is owned by `asterisk` and group-writable, and whatever can write the shared
+    folder from the host can add entries to it as well. The wake-up
+    scheduler and the web UI call record() as root; the wake-up AGIs and
+    switchboard-callqos call it as `asterisk`.
+
+    By name, an append, a trim or a chmod follows a symlink planted in place of
+    the ledger and lands on its target. O_NOFOLLOW makes a link fail to open;
+    the fstat refuses a FIFO, a device or a directory; O_NONBLOCK keeps a planted
+    FIFO from hanging the open. Everything after goes through the fd, so a name
+    swapped after the check cannot redirect it. switchboard-config's
+    open_share_file() applies the same rule to the boot pass.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     """Trim an append-only ledger to its newest records. Best-effort.
 
@@ -134,20 +160,32 @@ def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     Keeps the last `keep_frac` of the cap, cut at a line boundary so the first
     surviving record is not half a JSON object. Rewrites in place rather than
     renaming, so a reader holding the path keeps reading the same inode.
+
+    ★ BY FD, NEVER THROUGH A SYMLINK (2026-09-14). This opened the path twice by
+    name, and both opens follow a link: a link planted in place of the ledger
+    turned the trim into a rewrite of whatever it pointed at. See
+    _open_no_follow(). The bytes it leaves are unchanged, and
+    test_ledger_rotation still holds every copy to the same output.
     """
     try:
-        if os.path.getsize(path) <= max_bytes:
-            return
-        keep = max(1, int(max_bytes * keep_frac))
-        with open(path, "rb") as fh:
+        fd = _open_no_follow(path, os.O_RDWR)
+    except OSError:
+        return                            # absent, a link, or not a file: nothing to trim
+    try:
+        with os.fdopen(fd, "r+b") as fh:
+            if os.fstat(fh.fileno()).st_size <= max_bytes:
+                return
+            keep = max(1, int(max_bytes * keep_frac))
             fh.seek(-keep, os.SEEK_END)
             tail = fh.read()
-        # Everything before the first newline is half a record. Drop it: a
-        # reader must never have to guess whether the first line is complete.
-        nl = tail.find(b"\n")
-        tail = tail[nl + 1:] if nl != -1 else b""
-        with open(path, "wb") as fh:
+            # Everything before the first newline is half a record. Drop it: a
+            # reader must never have to guess whether the first line is complete.
+            nl = tail.find(b"\n")
+            tail = tail[nl + 1:] if nl != -1 else b""
+            # Written first and cut after, so the file is never empty.
+            fh.seek(0)
             fh.write(tail)
+            fh.truncate()
     except OSError:
         pass                              # a trim must never break the write
 
@@ -174,20 +212,28 @@ def record(ext: str, kind: str, outcome: str, **extra) -> bool:
     try:
         os.makedirs(os.path.dirname(OUTCOME_PATH), exist_ok=True)
         _rotate_tail(OUTCOME_PATH, MAX_BYTES)
-        with open(OUTCOME_PATH, "a", encoding="utf-8") as fh:
+        # By fd, never through a symlink: the append AND the chmod below. Both
+        # went by name, so a link planted in place of this ledger took a root
+        # append and a root group-write bit to whatever it pointed at. A link now
+        # fails the write, which returns False and says so, as EACCES does.
+        with os.fdopen(_open_no_follow(OUTCOME_PATH,
+                                       os.O_WRONLY | os.O_APPEND | os.O_CREAT),
+                       "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
-        # Group-writable: the scheduler (root) and the AGI (asterisk) both append
-        # here, and whichever creates the file decides whether the other can.
-        #
-        # ADD the group-write bit rather than asserting a literal mode. Writing
-        # 0o664 would also assert world-readable, which is a broader claim than
-        # this needs to make — the file inherits whatever the umask and the
-        # setgid directory already decided, and this only ensures the second
-        # writer is not locked out.
-        try:
-            os.chmod(OUTCOME_PATH, os.stat(OUTCOME_PATH).st_mode | stat.S_IWGRP)
-        except OSError:
-            pass
+            fh.flush()
+            # Group-writable: the scheduler (root) and the AGI (asterisk) both
+            # append here, and whichever creates the file decides whether the
+            # other can.
+            #
+            # ADD the group-write bit rather than asserting a literal mode.
+            # Writing 0o664 would also assert world-readable, which is a broader
+            # claim than this needs to make — the file inherits whatever the
+            # umask and the setgid directory already decided, and this only
+            # ensures the second writer is not locked out.
+            try:
+                os.fchmod(fh.fileno(), os.fstat(fh.fileno()).st_mode | stat.S_IWGRP)
+            except OSError:
+                pass
         return True
     except OSError as exc:
         print(f"[switchboard-delivery] record FAILED ({exc}) — "
@@ -426,7 +472,13 @@ def is_writable() -> bool:
     try:
         d = os.path.dirname(OUTCOME_PATH)
         os.makedirs(d, exist_ok=True)
-        if os.path.exists(OUTCOME_PATH):
+        # ★ A LINK IS NOT WRITABLE (2026-09-14). record() refuses anything that
+        # is not a regular file, so no answer can land there. exists() and
+        # access() both follow a link and called a planted one writable — and
+        # the reconciler would then have escalated a wake-up somebody answered.
+        if os.path.lexists(OUTCOME_PATH):
+            if not stat.S_ISREG(os.lstat(OUTCOME_PATH).st_mode):
+                return False
             return os.access(OUTCOME_PATH, os.W_OK)
         return os.access(d, os.W_OK)
     except OSError:

@@ -151,9 +151,9 @@ control.
   **The journal is the widest of the three, and it is not short-lived.** Earlier
   comments in this code described it as held in memory and gone within hours or
   at a reboot. On a running system the Supervisor still served the previous
-  boot's add-on log 30 hours after a host reboot, and the current boot's log
-  reached back about two days. Treat everything in its row as readable by any
-  Home Assistant administrator for that long. A `log_level` of `notice` or above
+  boot's add-on log 30 hours after a host reboot, and that log still reached
+  back about two days. Treat everything in its row as readable by any Home
+  Assistant administrator for that long. A `log_level` of `notice` or above
   takes the verbose trace off the console; it changes neither file.
 
   The `/data` copy is configured `notice,warning,error,verbose(2)`, and the level
@@ -239,12 +239,29 @@ control.
   lost from this copy, though never from the private one. A line Asterisk is
   still writing is left untouched until it is complete.
 
-  **Root does this in a directory the `asterisk` user can write.** The link-health
-  poller runs as root, and the boot pass, also root, sets group-write and
-  ownership on every file in `/share/switchboard`. Both act through a file
-  descriptor opened without following symbolic links, and skip anything that is
-  not a regular file. A link planted there cannot redirect a root write, trim,
-  chmod or chown to the file it points at.
+  **Root writes in a directory the `asterisk` user can write.**
+  `/share/switchboard` is owned by `asterisk` and group-writable, and whatever
+  can write the shared folder from the host can add entries to it as well. These
+  write there:
+
+  | Writer | Runs as | What it does there |
+  | --- | --- | --- |
+  | Backup hooks (`backup_pre`, `backup_post`) | root | append to `backup-window.jsonl` |
+  | Boot pass (`switchboard-config`) | root | add group-write and hand ownership to `asterisk` on every file; trim and scrub `asterisk.log` |
+  | Call-quality script (`switchboard-callqos`) | `asterisk` | append to and trim `callqos-outcomes.jsonl`; append to `delivery-outcomes.jsonl` |
+  | Link-health poller (`rtpmon`) | root | scrub `asterisk.log`; append to and trim `heartbeat.jsonl` |
+  | Wake-up AGIs | `asterisk` | append to `delivery-outcomes.jsonl` |
+  | Wake-up scheduler, web UI | root | append to `delivery-outcomes.jsonl` |
+
+  Every append to `delivery-outcomes.jsonl` also trims it and adds group-write.
+  Each of these opens the file without following a symbolic link, refuses
+  anything that is not a regular file, and does the rest through that open
+  descriptor. A link planted in place of one of these files makes the write,
+  trim, chmod or chown fail, rather than land on the file the link points at. A
+  heartbeat or delivery record that fails this way is logged. The wake-up
+  reconciler treats a delivery ledger that is not a regular file as unwritable,
+  and declines to judge the ring rather than escalate it. Asterisk's own logger
+  is outside this: it opens `asterisk.log` by name, as `asterisk`.
 
   The scrub rewrites the live `/share` file only. The private copy in
   `/data/state/asterisk.log` keeps all three in full — that is the whole reason
@@ -284,7 +301,9 @@ control.
 
   None of them carries an address, a SIP account or an unmasked telephone
   number. Together they do record a household's routine: when each room's
-  wake-up is set for, and when a room placed an emergency call.
+  wake-up is set for, and when a room placed an emergency call. A fourth file,
+  `backup-window.jsonl`, carries only the time each backup began and ended and
+  how many files were flushed before it.
 - **Home Assistant sensor attributes.** Each `sensor.switchboard_link_<ext>`
   carries its phone's LAN address as `contact_ip` — the cordless's IP
   auto-follow reads it back from there — and

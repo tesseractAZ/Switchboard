@@ -23,6 +23,7 @@ Every `@` is built rather than written, because this repo's email scanner matche
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import shutil
@@ -491,6 +492,25 @@ def test_the_boot_pass_never_follows_a_link_planted_in_the_share_dir(tmp_path, m
     real_chown = shutil.chown
     monkeypatch.setattr(shutil, "chown", lambda p, *a, **k: (by_path.append(str(p)),
                                                              real_chown(p, *a, **k))[1])
+    # Every os-level ownership or mode change, by the inode it LANDED on. The
+    # shutil recorder cannot see these, and the final chown of the log is one:
+    # opened by path, it follows the link to `secret` and nothing else notices.
+    landed = []
+
+    def _by_fd(name):
+        def call(fd, *a):
+            landed.append((name, os.fstat(fd).st_ino))
+            return getattr(os, name)(fd, *a)
+        return call
+
+    def _by_path(name):
+        def call(path, *a, **k):
+            landed.append((name, os.stat(path).st_ino))
+            return getattr(os, name)(path, *a, **k)
+        return call
+
+    monkeypatch.setattr(sbc, "os", _OsProxy(fchown=_by_fd("fchown"), fchmod=_by_fd("fchmod"),
+                                            chown=_by_path("chown"), chmod=_by_path("chmod")))
 
     sbc.ensure_share_log_dir()
 
@@ -503,6 +523,11 @@ def test_the_boot_pass_never_follows_a_link_planted_in_the_share_dir(tmp_path, m
     assert stat.S_IMODE(real.stat().st_mode) & stat.S_IWGRP, "the ownership loop never ran"
     assert any(m.startswith("WARN could not scrub") and "error:" in m for m in logged), logged
     assert by_path in ([], [str(share)]), f"chown by path inside the share dir: {by_path}"
+    outside_inodes = {secret.stat().st_ino, ledger_target.stat().st_ino}
+    assert not [c for c in landed if c[1] in outside_inodes], (
+        f"an ownership or mode change landed outside the share dir: {landed}")
+    # ...and the spy does see them: the loop's change to the real ledger is there.
+    assert ("fchown", real.stat().st_ino) in landed, landed
 
 
 def test_the_boot_trim_still_keeps_the_newest_half_through_the_fd(tmp_path, monkeypatch):
@@ -594,6 +619,66 @@ def test_every_cycle_scrubs_in_place_with_the_advancing_watermark_even_when_ami_
     assert calls == [(pm.SHARE_LOG_PATH, 0), (pm.SHARE_LOG_PATH, 100)], calls
     # ★ Asterisk is running, so the poller must never ask for the rewrite.
     assert kwargs == [{}, {}], f"the per-poll pass asked for {kwargs}"
+
+
+def test_the_heartbeat_is_never_written_through_a_link(tmp_path, monkeypatch, capsys):
+    """★ rtpmon runs as root and appends and trims heartbeat.jsonl in the
+    asterisk-writable share dir — by name until 2026-09-14, so a link planted in
+    its place took the append and the trim to its target. Driven through run()
+    with the REAL _heartbeat(), which the test above stubs: one cycle against a
+    regular ledger (the positive control), one against a link."""
+    fake, _, _ = _fake_logscrub([ls.Scrub(0, 0, 0, "")] * 4)
+    monkeypatch.setitem(sys.modules, "logscrub", fake)
+    share = tmp_path / "share"
+    share.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "options.json"
+    secret.write_text('{"secret": "x"}\n' * 20)
+    os.chmod(secret, 0o600)
+    before = secret.read_bytes()
+    monkeypatch.setattr(pm, "HEARTBEAT_MAX_BYTES", 64)    # a followed trim WOULD bite
+
+    def _one_cycle(path):
+        monkeypatch.setattr(pm, "HEARTBEAT_PATH", str(path))
+        for name, value in {
+            "_load_options": lambda: {"link_health_alerts": False},
+            "room_names": lambda o: {},
+            "wired_exts": lambda o: ["11"],
+            "poll_once": lambda a, b, c, _ever=None: (
+                [{"ext": "11", "reachable": True, "registered": True, "rtt_ms": 2.0}],
+                {"reachable": 1, "total": 1}),
+            "_append_history": lambda p: None,
+            "_publish": lambda p, s: None,
+            "trunk_enabled": lambda o: False,
+            "endpoint_transitions": lambda: [],
+            "warmup_done": lambda *a, **k: True,
+            "outage_transition": lambda *a, **k: "",
+            "load_ever_registered": lambda: set(),
+            "save_ever_registered": lambda s: None,
+        }.items():
+            monkeypatch.setattr(pm, name, value)
+
+        def _sleep(n):
+            raise _Stop
+        monkeypatch.setattr(pm.time, "sleep", _sleep)
+        with pytest.raises(_Stop):
+            pm.run()
+
+    real = share / "heartbeat.jsonl"
+    _one_cycle(real)
+    rows = real.read_text().splitlines()
+    assert len(rows) == 1 and json.loads(rows[0])["poller"] == "rtpmon", rows
+
+    link = share / "linked.jsonl"
+    link.symlink_to(secret)
+    capsys.readouterr()
+    _one_cycle(link)
+
+    assert secret.read_bytes() == before, "the heartbeat append or trim went through the link"
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert link.is_symlink()
+    assert "[switchboard-rtpmon] heartbeat: " in capsys.readouterr().err, "the refusal was not logged"
 
 
 def test_a_persistent_problem_is_logged_once_and_a_recovery_rearms_it(monkeypatch, capsys):

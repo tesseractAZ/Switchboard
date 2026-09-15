@@ -178,3 +178,17 @@ def test_no_ledger_still_truncates_to_empty():
                 if nxt.strip() == "pass":
                     offenders.append(f"{name}:{i}")
     assert not offenders, f"truncate-to-empty idiom is back at {offenders}"
+
+
+@pytest.mark.parametrize("impl", sorted(ROTATORS))
+def test_a_ledger_between_the_kept_half_and_the_cap_is_not_touched(tmp_path, impl):
+    """The under-cap test above uses a ledger smaller than the half a trim keeps,
+    where a trim that ignored the cap would fail its own seek and change nothing
+    anyway. This one is big enough that such a trim would bite (2026-09-14, when
+    every copy moved its size check onto an fd)."""
+    p = _ledger(tmp_path, 30)
+    size = p.stat().st_size
+    assert CAP // 2 < size <= CAP, size
+    before = p.read_bytes()
+    ROTATORS[impl](str(p), CAP)
+    assert p.read_bytes() == before

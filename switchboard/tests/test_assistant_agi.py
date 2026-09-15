@@ -594,6 +594,7 @@ def test_words_and_replies_reach_the_journal_only_when_transcripts_are_on(capsys
     try:
         for policy, words in (({"assistant": {"transcripts": True}}, True),
                               ({"assistant": {"transcripts": False}}, False),
+                              ({"assistant": {}}, False),  # a section without the key
                               ({}, False)):              # unread policy: fails closed
             hc = types.ModuleType("ha_client")
             hc.available = lambda: True
