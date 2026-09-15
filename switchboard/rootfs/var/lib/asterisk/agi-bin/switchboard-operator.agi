@@ -116,13 +116,16 @@ def _stt_finish(proc) -> str:
     if err:
         # NOT the Asterisk log, despite what this line claimed until v0.80.0.
         # AGI stderr is inherited fd 2: it goes to the Asterisk process's own
-        # stderr and lands raw in the RAM-backed container log, never through
-        # Asterisk's logger and so into neither durable file channel. Verified on
-        # the running system — both asterisk.log copies contain zero `heard=`.
+        # stderr and lands in the add-on journal, never through Asterisk's logger
+        # and so into neither asterisk.log channel. Verified on the running
+        # system — both asterisk.log copies contain zero `heard=`. The journal is
+        # not private either: the Supervisor serves it, for about two days and
+        # across a host reboot. That is why switchboard-stt writes the words it
+        # heard only when assistant_transcripts is on (2026-09-14).
         # The wrong comment mattered: an audit read it, concluded household
         # transcripts were already in the world-readable /share log, and nearly
         # justified adding more on the grounds that it "already leaks".
-        sys.stderr.write(err)  # -> container log only; see test_privacy_invariants
+        sys.stderr.write(err)  # -> the add-on journal; see test_privacy_invariants
     return (out or "").strip()
 
 

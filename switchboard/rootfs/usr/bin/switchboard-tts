@@ -78,6 +78,14 @@ def synthesize(text: str, out_base: str) -> bool:
             [espeak, "-v", ESPEAK_VOICE, "-s", str(ESPEAK_WPM), "--stdout", text],
             capture_output=True, timeout=15,
         )
+    except subprocess.TimeoutExpired:
+        # Not `{exc}`: a TimeoutExpired renders its whole command line, and the
+        # text being spoken is the last argument on it. This stderr reaches the
+        # add-on journal through the AGI that ran it, and the assistant's replies
+        # can quote what the caller said (2026-09-14). Each caller logs the text
+        # itself, under its own policy.
+        log("espeak timed out after 15 s")
+        return False
     except (OSError, subprocess.SubprocessError) as exc:
         log(f"espeak failed: {exc}")
         return False

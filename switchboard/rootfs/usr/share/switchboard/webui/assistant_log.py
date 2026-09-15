@@ -6,20 +6,24 @@ turn ended the way it did.
 WHY THIS EXISTS. Before v0.80.0 the assistant recorded nothing that survived the
 call. Its diagnostics went through a private ``log()`` that is a bare
 ``sys.stderr.write``, and AGI stderr does not reach Asterisk's logger at all — it
-is inherited fd 2, so it lands raw in the RAM-backed container log and evaporates
-on rotation. Verified on the running system: ``/data/state/asterisk.log`` and
+is inherited fd 2, so it lands in the add-on journal, which is no substitute for
+a ledger: it rotates after about two days. Nor is it private: the Supervisor
+serves it to anyone with log access, across a host reboot. (This docstring used
+to call it RAM-only and gone on rotation; it is neither, so since 2026-09-14 the
+voice scripts write recognised words there only when ``transcripts`` is on.)
+Verified on the running system: ``/data/state/asterisk.log`` and
 ``/share/switchboard/asterisk.log`` contain ZERO ``[assistant]`` lines. The
 assistant's REPLY was worse off still: ``reply_text(...)`` was evaluated inline as
 a call argument and never bound to anything, so the half of "what the assistant
 heard and said" that says whether it answered correctly did not exist anywhere.
 
 ★ WHY NOT ``Verbose()``. The obvious way to make an AGI diagnostic durable is to
-emit it through Asterisk's logger. Do not do that here. logger.conf routes
-``verbose`` to ``/share/switchboard/asterisk.log`` — and ``/share`` is host-mounted
-and world-readable BY DESIGN, which is the entire point of that directory. Asterisk
-runs ``-vvv``, so a single ``Verbose()`` carrying a transcript would move household
-speech out of an ephemeral container log and into a 32 MB durable file readable
-from outside the container and captured in Supervisor backups. This module writes
+emit it through Asterisk's logger. Do not do that here. Until v0.94.7 logger.conf
+routed ``verbose`` to ``/share/switchboard/asterisk.log``, which is host-mounted and
+world-readable BY DESIGN; today it routes it to the console (the add-on journal)
+and to ``/data/state/asterisk.log``, a durable file captured in add-on backups.
+Asterisk runs ``-vvv``, so a single ``Verbose()`` carrying a transcript would copy
+household speech into both, whatever ``transcripts`` says. This module writes
 to ``/data`` instead, which is unreachable from outside: container shell blocked by
 protection mode, backups encrypted, add-on API 403 on every path.
 

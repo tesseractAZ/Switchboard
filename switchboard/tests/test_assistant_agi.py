@@ -575,3 +575,60 @@ def test_the_failure_counter_is_per_call_not_per_process() -> None:
           not [r for r in mod.ledger if r["outcome"] == "tts-failed"])
     check("tts-latch: and it runs to its own goodbye",
           [r for r in mod.ledger if r["outcome"] == "goodbye"])
+
+
+def test_words_and_replies_reach_the_journal_only_when_transcripts_are_on(capsys) -> None:
+    """★ This AGI's stderr is the add-on journal (2026-09-14): served by the
+    Supervisor, kept about two days, kept across a host reboot. `turn N:` put
+    every utterance there whatever `assistant_transcripts` said.
+
+    Driven through main() with the REAL say() — _load() stubs it — and
+    switchboard-tts timing out, because the timeout's message renders the whole
+    command line, reply included. Home Assistant's "not aware of any device
+    called ..." quotes the caller back, so the reply is speech too."""
+    import subprocess as _sp
+    import types
+    heard = "switch on the zebra lamp"
+    reply = "Sorry, I am not aware of any device called zebra lamp"
+    saved = sys.modules.get("ha_client")
+    try:
+        for policy, words in (({"assistant": {"transcripts": True}}, True),
+                              ({"assistant": {"transcripts": False}}, False),
+                              ({}, False)):              # unread policy: fails closed
+            hc = types.ModuleType("ha_client")
+            hc.available = lambda: True
+            hc.lights_by_area = lambda: {}
+            hc.converse = lambda text, *a, **k: (reply, "error")
+            sys.modules["ha_client"] = hc
+            mod = SourceFileLoader("sb_assistant_journal", str(_AGI)).load_module()
+            mod.read_env = lambda: {}
+            mod.agi = lambda cmd: ""
+            mod.stream = lambda sf: None
+            queue = [heard]
+            mod.listen = lambda tag, attempt, bias="": (
+                (queue.pop(0), {}) if queue else ("", {"stt": "silence"}))
+            mod.assistant_log = types.SimpleNamespace(record=lambda outcome, **kw: True)
+            mod.load_features = lambda p=policy: p
+
+            def _run(cmd, **kw):
+                raise _sp.TimeoutExpired(cmd, 25)
+            mod.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=_sp.TimeoutExpired)
+            capsys.readouterr()
+            mod.main()
+            err = capsys.readouterr().err
+            check(f"assistant journal: the turn is still logged ({policy})", "turn 1: " in err)
+            check(f"assistant journal: the tts failure is still logged ({policy})",
+                  "tts error for " in err)
+            if words:
+                check("assistant journal: the words are there when allowed", repr(heard) in err)
+                check("assistant journal: and so is the reply", reply in err)
+            else:
+                check(f"assistant journal: nothing heard or replied reaches stderr ({policy})",
+                      "zebra" not in err)
+                check(f"assistant journal: the turn carries only its length ({policy})",
+                      f"turn 1: <{len(heard)} chars>" in err)
+                check(f"assistant journal: the timeout keeps its type, not its command ({policy})",
+                      f"<{len(reply)} chars>: TimeoutExpired" in err)
+    finally:
+        if saved is not None:
+            sys.modules["ha_client"] = saved

@@ -45,6 +45,10 @@ except Exception:  # noqa: BLE001
 WHISPER_BIN = os.environ.get("SW_WHISPER_BIN", "/usr/bin/whisper-cli")
 WHISPER_MODEL = os.environ.get("SW_WHISPER_MODEL", "/usr/share/whisper/model.bin")
 OPERATOR_JSON = "/run/switchboard/operator.json"
+# The staged voice-feature settings — the ONLY configuration channel that reaches
+# this process. An AGI forks it as the asterisk user, so no s6 env export arrives,
+# and /run/switchboard/options-effective.json (0600 root) cannot be read.
+FEATURES = "/run/switchboard/features.json"
 
 # Resident whisper-server (loopback HTTP). When up, it transcribes without
 # reloading the 142 MB model per call. '0' disables it (pure whisper-cli).
@@ -71,6 +75,39 @@ _GIVE_UP = object()   # server accepted then hung -> return '' (AGI re-records)
 
 def log(msg: str) -> None:
     sys.stderr.write(f"[switchboard-stt] {msg}\n")
+
+
+def transcripts_allowed() -> bool:
+    """May the words this process recognised go to its stderr?
+
+    ★ STDERR IS NOT A PRIVATE PLACE (2026-09-14). Every AGI that runs this
+    forwards its stderr, and Asterisk's stderr is the add-on journal: served by
+    the Supervisor to anyone with log access, kept about two days, and kept
+    across a host reboot. The `heard=` lines below put every operator, wake-up,
+    home-automation, status, directory and assistant recognition there verbatim,
+    whatever `assistant_transcripts` said — that option reached only the
+    assistant's private ledger, while comments across the repo called the
+    journal short-lived.
+
+    So the words follow the option. FAILS CLOSED: only a policy that was read and
+    says true lets them through, because the destination is the exposed one. The
+    outcome and the length are logged either way, which keeps the line
+    diagnostic.
+    """
+    try:
+        with open(FEATURES, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    section = data.get("assistant") if isinstance(data, dict) else None
+    return isinstance(section, dict) and section.get("transcripts") is True
+
+
+def said(text: str, words: bool) -> str:
+    """What a log line may say about recognised `text`: the words, or only how
+    many characters there were (the shape of assistant_log._redact). The ONLY
+    way recognised text may reach stderr; test_privacy_invariants scans for it."""
+    return repr(text) if words else f"<{len(text)} chars>"
 
 
 def load_operator() -> dict:
@@ -344,6 +381,7 @@ def main() -> int:
     # home-automation flow to seed light/area vocabulary for better recognition.
     ap.add_argument("--bias", default="")
     args = ap.parse_args()
+    words = transcripts_allowed()
 
     if args.mode == "transcribe":
         # Raw transcript only — no room/time resolution. The home-automation AGI
@@ -351,7 +389,7 @@ def main() -> int:
         # optional --bias seeds whisper's --prompt with the live light/area names.
         prompt = " ".join(args.bias.split())
         text = _recording_to_text(args.infile, prompt)
-        log(f"transcribe heard={text!r}")
+        log(f"transcribe heard={said(text, words)}")
         if text:
             print(text)
         return 0
@@ -363,13 +401,13 @@ def main() -> int:
         text = _recording_to_text(args.infile, _TIME_PROMPT)
         hhmm = timeparse.parse(text)
         if hhmm:
-            log(f"heard={text!r} -> time={hhmm}")
+            log(f"heard={said(text, words)} -> time={hhmm}")
             print(hhmm)
         elif re.search(r"\b(cancel|clear|remove|delete|never mind|nevermind|stop|forget)\b", text.lower()):
-            log(f"heard={text!r} -> CANCEL")
+            log(f"heard={said(text, words)} -> CANCEL")
             print("CANCEL")
         else:
-            log(f"heard={text!r} -> time=None")
+            log(f"heard={said(text, words)} -> time=None")
         return 0
 
     # rooms mode (the voice operator).
@@ -393,9 +431,9 @@ def main() -> int:
     # 'automation'; otherwise we resolve the room extension exactly as before.
     result = resolve_rooms_text(text, rooms, synonyms, threshold)
     if result == "automation":
-        log(f"heard={text!r} -> automation")
+        log(f"heard={said(text, words)} -> automation")
     else:
-        log(f"heard={text!r} -> ext={result or None}")
+        log(f"heard={said(text, words)} -> ext={result or None}")
     if result:
         print(result)
     return 0

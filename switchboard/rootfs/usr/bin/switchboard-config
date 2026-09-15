@@ -2064,15 +2064,25 @@ def render_logger(opts: dict) -> str:
     elif level == "info":
         base += ",verbose"
     # console → the add-on's journald/log endpoint (the live view). PLUS a durable
-    # copy on the persistent /data volume: the container's journald log is
-    # RAM-backed and rotates in hours, and the host journal is wiped by a reboot —
-    # so operational forensics (registration flaps, trunk timeouts, RTP
-    # "Network unreachable", any WARNING/ERROR) would otherwise not survive the
-    # very event you want to investigate. The file is scoped to notice,warning,error
-    # (NO verbose/debug, and with res_security_log noloaded no per-REGISTER security
-    # flood), so it grows glacially — the review found ~0 errors in 11h — meaning
-    # negligible SD wear and no rotation needed for months. It lives in /data/state
-    # (already asterisk-owned + persistent; created by ensure_state_dir()).
+    # copy on the persistent /data volume, so operational forensics (registration
+    # flaps, trunk timeouts, RTP "Network unreachable", any WARNING/ERROR) outlive
+    # the journal's reach. It lives in /data/state (already asterisk-owned +
+    # persistent; created by ensure_state_dir()) and is trimmed at boot past 8 MB.
+    #
+    # ★ CORRECTED 2026-09-14 — THE JOURNAL IS NOT EPHEMERAL. This comment used to
+    # describe the container log as RAM-only and short-lived, and the host journal
+    # as lost at every reboot, and three other comments repeated it. On the live
+    # system the Supervisor served the PREVIOUS boot's add-on log 30 h after a
+    # host reboot, and the current boot's log reached back about two days.
+    # Everything the console channel carries lands there — with log_level info
+    # that is the full verbose dialplan trace, every dialled number included — and
+    # so does every line a service or an AGI writes to stderr. Anyone with
+    # Supervisor log access can read it. SECURITY.md lists what it holds; never
+    # reason about it as a place data evaporates.
+    #
+    # The file was notice,warning,error only when it was added (and with
+    # res_security_log noloaded there is no per-REGISTER security flood). It has
+    # carried verbose since v0.84.0; the channel below says what that admits.
     # Channels MUST live under [logfiles] — Asterisk's logger reads ONLY that
     # section (ast_variable_browse(cfg, "logfiles")). With them under [general]
     # Asterisk configured ZERO channels and the durable file never existed;
@@ -2096,10 +2106,16 @@ def render_logger(opts: dict) -> str:
         # world-readable /share twin had the data and is byte-capped, so the
         # forensic record aged out of the only copy that kept it.
         #
-        # The LEVEL NUMBER is load-bearing in both directions. A bare `verbose`
-        # inherits the console's level and would drag the entire verb-3 dialplan
-        # trace onto the persistent volume; `verbose(1)` captures nothing,
-        # because these lines are level 2. Only `verbose(2)` selects them.
+        # ★ CORRECTED 2026-09-14 — THE LEVEL NUMBER DOES NOT FILTER THE TRACE.
+        # This paragraph used to say `verbose(2)` selects the level-2 lines and
+        # keeps the level-3 dialplan trace off the persistent volume. The v0.94.7
+        # note on the next channel measured otherwise, and this file agrees:
+        # between Sep 6 and Sep 14 it held 2,043 `pbx.c: Executing` lines and 16
+        # lines carrying a complete outside number (`Called PJSIP/<number>@trunk`).
+        # So the private copy carries the whole call flow. It is kept anyway: the
+        # reachability lines are what rtpmon's fleet-outage detector reads, and
+        # /data is not readable from outside the container. SECURITY.md says what
+        # the file therefore holds.
         "/data/state/asterisk.log => notice,warning,error,verbose(2)\n"
         # The readable twin, and the one that needed the cap MOST.
         #
@@ -2179,6 +2195,31 @@ SHARE_LOG = SHARE_DIR / "asterisk.log"
 SHARE_LOG_MAX_BYTES = 32 * 1024 * 1024
 
 
+def open_share_file(path, flags: int):
+    """An fd for the REGULAR file at `path`, or None. Never follows a symlink.
+
+    ★ ROOT ACTS IN A DIRECTORY `asterisk` CAN WRITE (2026-09-14). /share/switchboard
+    is asterisk-owned and group-writable, so the asterisk user, or anything that
+    can write the shared folder from the host, can plant a symlink in it, and
+    every by-path open, chmod, chown or truncate this script runs as root would
+    then act on the link's target. O_NOFOLLOW makes a link fail to open; the
+    fstat refuses a directory, FIFO or device; O_NONBLOCK keeps a planted FIFO
+    from hanging the open. The caller does everything else through the fd, so a
+    name swapped after the check cannot redirect the change.
+    """
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
 # The scrubber lives in webui/logscrub.py, so this boot pass and the link-health
 # poller's per-cycle pass run ONE definition — v0.100.4 had it here alone, and a
 # boot-only scrub has a window as long as the uptime. It is loaded by file path
@@ -2208,12 +2249,10 @@ def ensure_share_log_dir() -> None:
     the moment it is wanted. An audit called this "the single highest-value unlock".
 
     /share is mapped writable and readable from the host side, so a second channel
-    here is the whole fix. It also carries `verbose`, which the /data one omits:
-    NOTICE/WARNING/ERROR reach the container log already stamped, but ast_verbose
-    output -- the `-- Executing [...]` dialplan trace, i.e. the actual call flow --
-    does not, and 0 of 3438 container-log lines in one audit window carried a
-    timestamp at all. A file channel stamps every line, so the call flow finally
-    becomes correlatable with host.log and the Supervisor.
+    here is the whole fix. (It first carried `verbose` too, for a timestamped call
+    flow. v0.94.7 took that off, because the dialplan trace quotes every dialled
+    number and this directory is readable from outside; the stamped trace now
+    exists only in /data. See render_logger.)
 
     Asterisk runs as -U asterisk, so it must own the directory to open the file.
     Best-effort throughout: a logging convenience must never block a PBX start."""
@@ -2242,18 +2281,36 @@ def ensure_share_log_dir() -> None:
             _ast = pwd.getpwnam("asterisk")
             os.chown(SHARE_DIR, _ast.pw_uid, _ast.pw_gid)
             for _f in SHARE_DIR.iterdir():
-                if _f.is_file():
+                # ★ Through an fd opened WITHOUT following a symlink. This was
+                # `_f.is_file()` then os.chmod/os.chown by path, and all three
+                # follow a link: a symlink planted in this asterisk-writable
+                # directory made the next boot add group-write to, and hand to
+                # `asterisk`, whatever it pointed at — /data/options.json
+                # included. Anything that is not a regular file is skipped.
+                _fd = open_share_file(_f, os.O_RDONLY)
+                if _fd is None:
+                    continue
+                try:
                     # ADD group-write to the existing mode rather than asserting
                     # a literal one: the fix is "the other writer is not locked
                     # out", not "these files are world-readable" — that part is
                     # already true and is the point of /share.
-                    os.chmod(_f, _f.stat().st_mode | stat.S_IWGRP)
-                    os.chown(_f, _ast.pw_uid, _ast.pw_gid)
+                    os.fchmod(_fd, os.fstat(_fd).st_mode | stat.S_IWGRP)
+                    os.fchown(_fd, _ast.pw_uid, _ast.pw_gid)
+                finally:
+                    os.close(_fd)
         except (OSError, KeyError) as exc:
             log(f"share dir: could not normalise ownership ({exc}); "
                 f"the AGI may be unable to append to the ledgers")
         try:
-            if SHARE_LOG.exists() and SHARE_LOG.stat().st_size > SHARE_LOG_MAX_BYTES:
+            # By fd, without following a symlink, for the reason the loop above
+            # gives: a root rewrite through a planted link would trim its target.
+            _fd = open_share_file(SHARE_LOG, os.O_RDWR)
+            _fh = os.fdopen(_fd, "r+b") if _fd is not None else None
+            if _fh is not None and os.fstat(_fh.fileno()).st_size <= SHARE_LOG_MAX_BYTES:
+                _fh.close()
+                _fh = None
+            if _fh is not None:
                 # ★ v0.100.3 — KEEP THE NEWEST HALF, do not empty the file.
                 #
                 # This was `open(SHARE_LOG, "w")` followed by `pass`, which
@@ -2273,13 +2330,15 @@ def ensure_share_log_dir() -> None:
                 # at a line boundary so the first surviving line is not half a
                 # record.
                 keep = max(1, SHARE_LOG_MAX_BYTES // 2)
-                with open(SHARE_LOG, "rb") as _fh:
+                with _fh:
                     _fh.seek(-keep, os.SEEK_END)
                     _tail = _fh.read()
-                _nl = _tail.find(b"\n")
-                _tail = _tail[_nl + 1:] if _nl != -1 else b""
-                with open(SHARE_LOG, "wb") as _fh:
+                    _nl = _tail.find(b"\n")
+                    _tail = _tail[_nl + 1:] if _nl != -1 else b""
+                    # Written first and cut after, so the file is never empty.
+                    _fh.seek(0)
                     _fh.write(_tail)
+                    _fh.truncate()
                 log(f"trimmed {SHARE_LOG} to its newest "
                     f"{keep // (1024*1024)} MB (was over "
                     f"{SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
@@ -2289,8 +2348,11 @@ def ensure_share_log_dir() -> None:
         # out of it. Runs after the trim so it works on the smaller file. This
         # pass is for what an earlier build or an earlier run left behind; the
         # link-health poller repeats it every cycle for what Asterisk writes next.
+        # `writer_stopped=True` is true HERE AND NOWHERE ELSE: this is the init
+        # oneshot, and s6 starts Asterisk and rtpmon only after it exits, so lines
+        # may move — VERBOSE dropped, masks made canonical. See logscrub.py.
         try:
-            _r = load_logscrub().scrub(SHARE_LOG)
+            _r = load_logscrub().scrub(SHARE_LOG, writer_stopped=True)
             if _r.deferred:
                 log(f"WARN could not scrub {SHARE_LOG}: {_r.deferred}")
             elif _r.dropped or _r.redacted:
@@ -2303,11 +2365,16 @@ def ensure_share_log_dir() -> None:
             _sh.chown(str(SHARE_DIR), user="asterisk", group="asterisk")
         except (LookupError, KeyError, PermissionError, OSError) as exc:
             log(f"WARN could not chown {SHARE_DIR}: {exc}")
-        if SHARE_LOG.exists():
+        # By fd, not by path: shutil.chown follows a symlink.
+        _fd = open_share_file(SHARE_LOG, os.O_RDONLY)
+        if _fd is not None:
             try:
-                _sh.chown(str(SHARE_LOG), user="asterisk", group="asterisk")
-            except (LookupError, KeyError, PermissionError, OSError):
+                _ast = pwd.getpwnam("asterisk")
+                os.fchown(_fd, _ast.pw_uid, _ast.pw_gid)
+            except (KeyError, OSError):
                 pass
+            finally:
+                os.close(_fd)
         log(f"share log dir ready: {SHARE_DIR}")
     except OSError as exc:
         # /share not mapped, read-only, or full -- Asterisk will log its own

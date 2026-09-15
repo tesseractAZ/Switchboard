@@ -138,32 +138,44 @@ control.
   whole trunk is skipped) on the same risks. Display names are stripped of control
   characters, `"`, and `;` before entering quoted caller-ID/comments.
 - **No secrets in logs.** Validation failures log the extension only, never the
-  secret. Asterisk logging goes to **three** destinations, and the difference
-  between them matters:
+  secret, and with `res_security_log` not loaded there is no per-REGISTER flood.
+  Logs are not free of personal detail, though, and where each one goes matters.
+  There are three destinations:
 
-  | Destination | Carries | Readable from outside the add-on |
-  | --- | --- | --- |
-  | console → journald | notice, warning, error, verbose | via the Supervisor |
-  | `/data/state/asterisk.log` | notice, warning, error, **verbose(2)** | **no** |
-  | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose** | **yes** |
+  | Destination | Carries | Kept | Readable from outside the add-on |
+  | --- | --- | --- | --- |
+  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account. Registrations and failed qualifies with each phone's LAN address. Recognised speech when `assistant_transcripts` is `true` (see below) | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
+  | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
-  The `/data` copy takes exactly one level of verbose output, and the level is
-  the point. Endpoint reachability — `Endpoint <n> is now Unreachable` and its
-  `Contact` twin — is emitted by Asterisk at verbosity 2, and until v0.84.0 the
-  durable log did not keep it: across twenty-five days it held no record of
-  whether the phones were reachable, so the one whole-fleet outage this system
-  has had could not be investigated from the copy that survives. `verbose(2)`
-  selects those lines and stops short of the verb-3 dialplan trace, which is
-  where the call detail — and any spoken content a future change might route
-  through the logger — would be. The file is trimmed at boot to its newest half
-  whenever it passes 8 MB. The `/share` copy is capped the same way at 32 MB —
-  and until v0.100.3 that cap **emptied the file** rather than keeping its newest
-  half, which would have discarded the whole readable history the first time it
-  fired.
+  **The journal is the widest of the three, and it is not short-lived.** Earlier
+  comments in this code described it as held in memory and gone within hours or
+  at a reboot. On a running system the Supervisor still served the previous
+  boot's add-on log 30 hours after a host reboot, and the current boot's log
+  reached back about two days. Treat everything in its row as readable by any
+  Home Assistant administrator for that long. A `log_level` of `notice` or above
+  takes the verbose trace off the console; it changes neither file.
 
-  With `res_security_log` not loaded there is no per-REGISTER flood, so still no
-  secrets and negligible growth. The `/share` copy is the one to reason about: `/share` is host-mounted, readable by
-  anything with access to the shared folder, and captured in add-on backups.
+  The `/data` copy is configured `notice,warning,error,verbose(2)`, and the level
+  number does not do what it appears to. It was added in v0.84.0 to keep endpoint
+  reachability — `Endpoint <n> is now Unreachable` and its `Contact` twin, which
+  Asterisk emits at verbosity 2. Until then the durable log did not keep it:
+  across twenty-five days it held no record of whether the phones were
+  reachable, so the one whole-fleet outage this system has had could not be
+  investigated from the copy that survives. The expectation was that
+  `verbose(2)` would stop short of the verbosity-3 dialplan trace. It does not —
+  Asterisk's per-channel level does not filter those lines. On a running system
+  the file held 2,043 `pbx.c: Executing` lines over eight days and 16 lines
+  carrying a complete outside number. So the private copy carries the whole
+  call flow; it is kept because the link-health poller reads the reachability
+  lines from it. The file is trimmed at boot to its newest half whenever it
+  passes 8 MB. The `/share` copy is capped the same way at 32 MB — and until
+  v0.100.3 that cap **emptied the file** rather than keeping its newest half,
+  which would have discarded the whole readable history the first time it fired.
+
+  Of the two files, the `/share` copy is the one to reason about: `/share` is
+  host-mounted, readable by anything with access to the shared folder, and
+  captured in add-on backups.
 
   **Since v0.94.7 it carries no verbose class at all.** It used to, on the
   reasoning that the link-health poller reconstructs endpoint outages from
@@ -181,20 +193,19 @@ control.
     nothing already written. On the deployment this was found on, the readable
     copy still held 6,613 verbose lines — 58 carrying a telephone number — two
     days after the fix. Closing a tap does not drain the bucket.
-  - **The SIP account in a registration URI**, rewritten to `sip:***@<provider>`.
-    This one is not historical: a trunk registration retry writes the full URI at
-    **WARNING**, a class this channel still carries, so it returns on the next
-    hiccup. Redacted rather than dropped — that line is how you learn your trunk
-    is flapping — and the provider host is deliberately kept, because it is what
-    makes the line diagnostic and it identifies nobody.
+  - **The SIP account in a registration URI.** This one is not historical: a
+    trunk registration retry writes the full URI at **WARNING**, a class this
+    channel still carries, so it returns on the next hiccup. Masked rather than
+    dropped — that line is how you learn your trunk is flapping — and the
+    provider host is deliberately kept, because it is what makes the line
+    diagnostic and it identifies nobody.
   - **Private (RFC 1918) IPv4 addresses** — `10.0.0.0/8`, `172.16.0.0/12`,
-    `192.168.0.0/16` — rewritten to `<private-ip>`. A failed qualify is logged at
-    **ERROR** with the phone's contact URI, and that URI carries the phone's LAN
-    address. The port and the AOR survive, so the line still says which phone.
-    Public addresses are left alone: a provider's address is diagnostic and has
-    the same shape as a household's public one, and no public address of the
-    household has been observed in this log. IPv6 is not handled; the phones
-    register over IPv4.
+    `192.168.0.0/16`. A failed qualify is logged at **ERROR** with the phone's
+    contact URI, and that URI carries the phone's LAN address. The port and the
+    AOR survive, so the line still says which phone. Public addresses are left
+    alone: a provider's address is diagnostic and has the same shape as a
+    household's public one, and no public address of the household has been
+    observed in this log. IPv6 is not handled; the phones register over IPv4.
 
   **Why every poll, not only at boot.** v0.100.4 scrubbed at boot alone, and a
   boot-only scrub has a window as long as the uptime: on the deployment it
@@ -206,26 +217,80 @@ control.
   false` that service runs the scrub alone, every 300 s, instead of idling. The
   exposure window is one poll interval, not one uptime.
 
-  The rewrite is in place, because Asterisk holds the file open for append and a
-  rename would strand its handle on an unlinked file. It is refused — and retried
-  on the next poll — if the file grew between the read and the write, since the
-  lines appended in that gap would otherwise be truncated away. A line Asterisk is
+  **How the two passes write.** Both write in place, because Asterisk holds the
+  file open for append and a rename would strand its handle on an unlinked file.
+  They differ in whether anything may move:
+
+  - **At boot**, before Asterisk starts, lines move. `VERBOSE` lines are removed,
+    the account becomes `sip:***@<provider>` and an address `<private-ip>`.
+  - **Every poll**, while Asterisk is appending, nothing moves. Each mask is
+    exactly as long as what it covers and is written over those bytes alone; the
+    file is never truncated and never written past what the pass read, so a line
+    Asterisk appends at the same moment cannot be cut or overwritten. An account
+    becomes `sip:`, one `*` per character, then `@`. An address becomes `<ip`,
+    `*` up to the address's length, then `>`, so `192.168.1.71` reads
+    `<ip********>`. A `VERBOSE` line keeps its timestamp and is `*` to the end.
+    A same-length mask keeps the length of what it hides, and nothing else; the
+    next boot pass turns all three into the forms above.
+
+  In 0.100.6 the per-poll pass used the boot pass's rewrite, guarded by one
+  re-check of the file size. That check covered only the moment it ran: a line
+  appended after it and before the file was cut back to length would have been
+  lost from this copy, though never from the private one. A line Asterisk is
   still writing is left untouched until it is complete.
 
-  The private copy in `/data/state/asterisk.log` keeps all three in full. That is
-  the whole reason the two copies differ, and it is not readable from outside the
-  container.
+  **Root does this in a directory the `asterisk` user can write.** The link-health
+  poller runs as root, and the boot pass, also root, sets group-write and
+  ownership on every file in `/share/switchboard`. Both act through a file
+  descriptor opened without following symbolic links, and skip anything that is
+  not a regular file. A link planted there cannot redirect a root write, trim,
+  chmod or chown to the file it points at.
+
+  The scrub rewrites the live `/share` file only. The private copy in
+  `/data/state/asterisk.log` keeps all three in full — that is the whole reason
+  the two copies differ — and so does the add-on journal. The scrub touches
+  neither of those, nor any backup taken before a line was scrubbed.
 
   What this means in practice: **since v0.94.7 the dialplan trace is no longer
-  published to the shared folder, and the recognised speech never was.**
-  Speech-recognition output is
-  written by the AGIs to their own stderr, which never passes through Asterisk's
-  logger — verified on a running system, both `asterisk.log` copies contain zero
-  transcript lines. The voice assistant's transcripts go to
-  `/data/state/assistant.jsonl`, which is not readable from outside at all, and
-  are not mirrored to `/share`. A test (`test_privacy_invariants.py`) fails the
-  build if any voice script starts routing speech through the logger, because
-  that single change would move it into the readable copy.
+  published to the shared folder, and the recognised speech never was.** It does
+  reach the add-on journal. Speech-recognition output is written by the voice
+  scripts to their own stderr, which never passes through Asterisk's logger —
+  verified on a running system, both `asterisk.log` copies contain zero
+  transcript lines — and that stderr is the journal. With
+  `assistant_transcripts: true` (the default) those lines quote what was heard
+  at the operator, the wake-up menu, home automation, dial-a-status, the
+  directory and the assistant, and the assistant's reply when its voice fails.
+  With `false` they carry the outcome and the length of what was said, and no
+  words. A policy the scripts cannot read counts as `false` for the journal.
+  The voice assistant's own record goes to `/data/state/assistant.jsonl`, which
+  is not readable from outside at all and is not mirrored to `/share`. Tests
+  (`test_privacy_invariants.py`) fail the build if any voice script starts
+  routing speech through Asterisk's logger, which would move it into both
+  files, or writes recognised text to stderr outside that policy.
+- **The other files in the shared folder.** Three JSONL mirrors sit beside the
+  readable log so that an audit can read outcomes without a shell. They are
+  exactly as readable, and as backed up, as that log:
+
+  - `callqos-outcomes.jsonl` — one row per call leg: time, extension, the kind
+    of call (`tag`, which is `emergency` for a call to an emergency number),
+    duration and the audio-quality measurements. An `ext` longer than an
+    extension, which is how an outside number arrives, keeps only its last four
+    digits and is marked `ext_redacted`.
+  - `delivery-outcomes.jsonl` — every wake-up and announcement outcome: time,
+    extension, the wake-up time (`hhmm`) and the announcement's sound name.
+  - `heartbeat.jsonl` — one row per link-health cycle: how many phones were
+    reachable, which extensions were down or changed state, round-trip times,
+    and the trunk's registration state.
+
+  None of them carries an address, a SIP account or an unmasked telephone
+  number. Together they do record a household's routine: when each room's
+  wake-up is set for, and when a room placed an emergency call.
+- **Home Assistant sensor attributes.** Each `sensor.switchboard_link_<ext>`
+  carries its phone's LAN address as `contact_ip` — the cordless's IP
+  auto-follow reads it back from there — and
+  `sensor.switchboard_cordless_health` carries the cordless's Wi-Fi network name
+  as `wifi_ssid`. Both are visible to every Home Assistant user, kept in the
+  recorder's history, and included in Home Assistant backups.
 - `/data/options.json` (which holds the SIP secrets, trunk secret, and announce
   token) stays root-only; runtime state that the voice AGIs need is written to a
   separate `asterisk`-owned `/data/state` directory instead.

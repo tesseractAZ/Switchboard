@@ -1132,6 +1132,12 @@ def _scrub_share_log(st: dict) -> None:
     """
     try:
         import logscrub
+        # ★ NO `writer_stopped`. Asterisk is appending to this file while the
+        # poller runs, so the pass must be the in-place, same-length one: it
+        # never truncates and never writes past what it read, so an append
+        # cannot be cut. v0.100.6 ran the byte-shifting rewrite here, and a line
+        # appended between its size re-check and its truncate() was lost from
+        # the readable copy.
         r = logscrub.scrub(SHARE_LOG_PATH, st.get("to", 0))
     except Exception as exc:  # noqa: BLE001
         problem = f"error: {exc}"
@@ -1140,8 +1146,8 @@ def _scrub_share_log(st: dict) -> None:
         problem = r.deferred
         if not r.deferred and (r.dropped or r.redacted):
             sys.stderr.write(
-                f"switchboard-rtpmon: scrubbed {SHARE_LOG_PATH}: dropped "
-                f"{r.dropped} verbose line(s), redacted {r.redacted} line(s)\n")
+                f"switchboard-rtpmon: scrubbed {SHARE_LOG_PATH} in place: blanked "
+                f"{r.dropped} verbose line(s), masked {r.redacted} line(s)\n")
     if problem and problem != st.get("problem"):
         sys.stderr.write(f"switchboard-rtpmon: WARN readable log not scrubbed "
                          f"({problem}); retrying next cycle\n")

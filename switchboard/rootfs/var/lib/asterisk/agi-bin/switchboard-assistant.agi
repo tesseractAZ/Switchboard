@@ -106,6 +106,9 @@ BIAS_VERBS = (
 
 _tts_seq = 0  # monotonically increasing so each utterance gets a unique file
 _tts_fails = 0  # cumulative espeak failures on THIS call — see MAX_TTS_FAILS
+# Whether recognised words, and the replies built on them, may reach stderr. Set
+# by main() from features.json before anything is heard; False until then.
+_journal_words = False
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +169,20 @@ def log(msg: str) -> None:
     sys.stderr.write(f"[assistant] {msg}\n")
 
 
+def said(text: str, words: bool) -> str:
+    """What a log line may say about what the caller said, or what the assistant
+    replied: the words, or only their length.
+
+    ★ This process's stderr is the add-on journal (2026-09-14), which the
+    Supervisor serves to anyone with log access and keeps for about two days,
+    across a host reboot. `turn N: <words>` went there on every turn whatever
+    `assistant_transcripts` said; the option reached only assistant.jsonl. The
+    same policy now covers both, in the shape assistant_log._redact uses.
+    test_privacy_invariants scans for recognised text reaching stderr any other
+    way."""
+    return repr(text) if words else f"<{len(text or '')} chars>"
+
+
 # --------------------------------------------------------------------------- #
 # Speech: dynamic via switchboard-tts -> Playback; canned fallback otherwise.
 # --------------------------------------------------------------------------- #
@@ -181,13 +198,17 @@ def say(text: str) -> bool:
         proc = subprocess.run([TTS, text, base], capture_output=True,
                               text=True, timeout=25)
         if proc.returncode != 0 or not os.path.exists(wav):
-            log(f"tts failed rc={proc.returncode} for {text!r}: {(proc.stderr or '').strip()}")
+            log(f"tts failed rc={proc.returncode} for {said(text, _journal_words)}: "
+                f"{(proc.stderr or '').strip()}")
             return False
         # Playback wants the path WITHOUT extension.
         agi(f"EXEC Playback {base}")
         return True
     except (subprocess.TimeoutExpired, OSError) as exc:
-        log(f"tts error for {text!r}: {exc}")
+        # A TimeoutExpired renders its whole command line, and the text is an
+        # argument on it, so with the words withheld only the error's type goes.
+        log(f"tts error for {said(text, _journal_words)}: "
+            f"{exc if _journal_words else type(exc).__name__}")
         return False
     finally:
         try:
@@ -476,6 +497,11 @@ def main() -> None:
     # blinded the operator would simply get left on.
     feats = load_features()
     transcripts = bool((feats.get("assistant") or {}).get("transcripts", True))
+    # ...and the journal, the exposed destination, FAILS CLOSED: the words reach
+    # stderr only when the policy was read and says true. The private ledger
+    # above keeps its documented default when the file cannot be read.
+    global _journal_words
+    _journal_words = (feats.get("assistant") or {}).get("transcripts") is True
 
     def note(outcome, **f):
         """One ledger row, written NOW rather than buffered for the end.
@@ -543,7 +569,7 @@ def main() -> None:
             return
 
         empty = 0
-        log(f"turn {turn}: {text!r}")
+        log(f"turn {turn}: {said(text, _journal_words)}")
         c_t0 = time.monotonic()
         speech, response_type = ha_client.converse(text)
         converse_ms = int((time.monotonic() - c_t0) * 1000)
@@ -589,7 +615,7 @@ if __name__ == "__main__":
         sys.stderr.write(f"[assistant] fatal: {exc}\n")
         # A crash is the one outcome that most needs a durable record and the one
         # least likely to leave any other trace: this stderr line goes to the
-        # RAM-backed container log and nowhere else.
+        # add-on journal (about two days, across a reboot) and nowhere else.
         try:
             if assistant_log is not None:
                 assistant_log.record("fatal", detail=f"{type(exc).__name__}: {exc}"[:200])
