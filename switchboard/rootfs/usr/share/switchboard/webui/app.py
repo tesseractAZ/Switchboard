@@ -652,6 +652,29 @@ def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:
         _delivery.record(ext, kind, outcome, **extra)
 
 
+def _record_wakeup_change(ext: str, entry: dict | None = None,
+                          removed: bool | None = None) -> None:
+    """A dashboard wake-up set (`entry`) or cancel (`removed`), in the ledger.
+
+    ★ 2026-09-14. Recorded as `web` so the wake-up reconciler can tell it from
+    the same change dialled on the room's own phone: only the phone proves the
+    sleeper is awake, and a dashboard set during a ring may be somebody setting
+    it FOR them. It also answers a question nothing could that morning — ext
+    14's 05:50 wake-up escalated, and no ledger said who had set it or how.
+
+    Best-effort: the request has already succeeded, and its telemetry must not
+    turn it into an error.
+    """
+    if _delivery is None:
+        return
+    try:
+        _delivery.record_wakeup_change(ext, _delivery.SOURCE_WEB,
+                                       entry=entry, removed=removed)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[switchboard-webui] could not record the wake-up change for "
+              f"{ext}: {exc}", flush=True)
+
+
 @app.post("/api/announce/{ext}")
 async def api_announce(ext: str, request: Request) -> JSONResponse:
     """Speak an announcement OUT one room handset — the SIP "media player" that lets
@@ -981,6 +1004,10 @@ def api_wakeup_cancel(ext: str) -> JSONResponse:
     except Exception as exc:
         print(f"[switchboard-webui] wakeup cancel {ext} failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "error"}, status_code=500)
+    # Only a well-formed extension reaches the ledger. This endpoint does not
+    # check the room list, and the ledger is readable from outside the add-on.
+    if valid_ext(ext):
+        _record_wakeup_change(ext, removed=bool(ok))
     return JSONResponse({"ok": ok})
 
 
@@ -1088,6 +1115,7 @@ async def api_wakeup_set(ext: str, request: Request) -> JSONResponse:
     except Exception as exc:
         print(f"[switchboard-webui] wakeup set {ext} failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "error"}, status_code=500)
+    _record_wakeup_change(ext, entry=entry)
     return JSONResponse({"ok": True, "hhmm": entry.get("hhmm", hhmm)})
 
 

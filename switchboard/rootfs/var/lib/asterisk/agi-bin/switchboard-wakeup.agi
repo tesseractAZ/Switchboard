@@ -15,6 +15,7 @@ works regardless of caller-ID config.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -22,6 +23,15 @@ import sys
 
 sys.path.insert(0, "/usr/share/switchboard/wakeup")
 import store  # noqa: E402
+
+# The delivery ledger, which the wake-up reconciler reads to learn that a ringing
+# room snoozed itself. Inserted AFTER `import store`, so a module in webui/ can
+# never be the `store` this AGI writes wake-ups into.
+sys.path.insert(0, "/usr/share/switchboard/webui")
+try:
+    import delivery  # noqa: E402
+except Exception:  # noqa: BLE001  (a missing ledger must never stop a wake-up being set)
+    delivery = None
 
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
@@ -128,6 +138,37 @@ def recognize(attempt: int) -> str:
     return out
 
 
+def record_change(ext: str, entry: dict | None = None,
+                  removed: bool | None = None) -> None:
+    """Record a set (`entry`) or cancel (`removed`) made from THIS phone.
+
+    ★ 2026-09-14. This row is how the wake-up reconciler learns that a ringing
+    room snoozed itself. Ext 19 dialled 42 during three rings that morning and set
+    a later time each time, and was rung again and sent three critical pushes
+    saying nobody had picked up. The store could not have told the reconciler: a
+    set leaves the same entry whoever made it, and a cancel leaves none.
+
+    Written after the store write succeeds and before the dialplan reads the
+    result back, so somebody who hangs up on the confirmation is still recorded.
+
+    ★ stdout IS THE AGI PROTOCOL. delivery.record() reports a failed write with
+    print(), and on this process's stdout that line would reach Asterisk as a
+    command, and the NEXT reply this script reads would be the answer to it
+    rather than to its own SET VARIABLE. So its output goes to stderr here.
+
+    Best-effort: a wake-up must never fail to be set because its telemetry could
+    not be written.
+    """
+    if delivery is None:
+        return
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            delivery.record_wakeup_change(ext, delivery.SOURCE_PHONE,
+                                          entry=entry, removed=removed)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[wakeup] could not record the change for ext {ext}: {exc}\n")
+
+
 def main() -> None:
     env = read_env()
     ext = channel_ext(env.get("agi_channel", ""))
@@ -162,11 +203,13 @@ def main() -> None:
 
         result = recognize(attempt)
         if result == "CANCEL":
-            store.cancel(ext)
+            removed = store.cancel(ext)
+            record_change(ext, removed=removed)
             set_var("WAKEUP_RESULT", "cancelled")
             return
         if re.fullmatch(r"\d{2}:\d{2}", result):
             entry = store.set_wakeup(ext, result)
+            record_change(ext, entry=entry)
             set_var("WAKEUP_EPOCH", str(entry["target_epoch"]))
             set_var("WAKEUP_RESULT", "set")
             return

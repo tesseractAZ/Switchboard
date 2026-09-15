@@ -866,3 +866,109 @@ def test_a_short_list_is_not_windowed_at_all():
     assert "above" not in joined and "below" not in joined
     assert "(cont.)" not in joined
     assert sum(1 for ln in txt if "○ off" in ln) == 6, "not every light rendered"
+
+
+def test_a_console_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path):
+    """★ 2026-09-14, through the real keys.
+
+    Every console set and cancel writes a delivery-ledger row marked `console`,
+    so a wake-up that escalates can be traced to whoever set it — that morning
+    nothing could say who had set ext 14's. And because an operator setting a
+    wake-up during a ring may be setting it for somebody still asleep, that change
+    must NOT stand the ring down the way the room's own phone does. The control
+    makes the same change as a phone row, to show the set-up can see a snooze.
+    """
+    import json as _json
+    import sys as _sys
+    import time as _time
+
+    d = console.delivery
+    check("console: the ledger module loaded", d is not None)
+    ledger = tmp_path / "delivery-outcomes.jsonl"
+
+    def rows():
+        return ([_json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+                if ledger.exists() else [])
+
+    def set_620(sess, board):
+        for key in ("W", "6", "2", "0", "enter"):
+            console.apply_key(sess, key, board, lambda m: None)
+
+    saved_out = d.OUTCOME_PATH
+    saved_mods = {k: _sys.modules.get(k) for k in ("store", "ami", "ha_client", "delivery")}
+    saved_path = list(_sys.path)
+    try:
+        d.OUTCOME_PATH = str(ledger)
+        console.wakeup_store.cancel("11")
+        board = _board(ROOMS)
+        sess = {"sel": 0, "mode": "normal"}          # sel 0 -> Kitchen (ext 11)
+        set_620(sess, board)
+        [s] = rows()
+        check("console: the set is recorded as console, with the time it rings",
+              (s["ext"], s["kind"], s["outcome"], s["source"], s["hhmm"])
+              == ("11", "wakeup", "set", "console", "06:20")
+              and s["target_epoch"] == console.wakeup_store.get("11")["target_epoch"])
+        console.apply_key(sess, "x", board, lambda m: None)
+        console.apply_key(sess, "x", board, lambda m: None)
+        c1, c2 = rows()[-2:]
+        check("console: the cancel is recorded as console, and says it removed one",
+              (c1["outcome"], c1["source"], c1["removed"]) == ("cancelled", "console", True))
+        check("console: a cancel that found nothing is still recorded, and says so",
+              (c2["outcome"], c2["removed"]) == ("cancelled", False))
+
+        pushed = []
+
+        class _AMI:
+            @staticmethod
+            def get_endpoints():
+                return [{"name": "11", "state": "Not in use"}]
+
+            @staticmethod
+            def originate_wakeup(ext, ring):
+                return True
+
+        class _HA:
+            @staticmethod
+            def push(msg, **k):
+                pushed.append(msg)
+                return True
+
+            @staticmethod
+            def notify(msg, **k):
+                return True
+
+        for k in ("store", "ami", "ha_client"):
+            _sys.modules[k] = _AMI
+        _sys.modules["delivery"] = d
+        sched = SourceFileLoader(
+            "sched_console_snooze",
+            str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+                / "switchboard" / "wakeup" / "scheduler.py")).load_module()
+        sched.ami, sched.ha_client, sched.log = _AMI, _HA, lambda m: None
+
+        def judge(change):
+            """A second ring started 30 s ago; make `change`; judge it."""
+            pushed.clear()
+            sched._ringing.clear()
+            started = _time.time() - 30
+            sched._ringing["11"] = {"target_epoch": int(started), "hhmm": "06:10",
+                                    "started": started, "retried": True}
+            change()
+            sched._reconcile_rings(started + sched.RETRY_AFTER + 1)
+            return list(pushed)
+
+        check("console: a set from the console during the ring still escalates",
+              len(judge(lambda: set_620({"sel": 0, "mode": "normal"}, board))) == 1)
+        entry = console.wakeup_store.get("11")
+        check("control: the same change from the room's own phone is a snooze",
+              judge(lambda: d.record_wakeup_change("11", d.SOURCE_PHONE,
+                                                   entry=entry)) == [])
+    finally:
+        _sys.path[:] = saved_path
+        for k, v in saved_mods.items():
+            if v is None:
+                _sys.modules.pop(k, None)
+            else:
+                _sys.modules[k] = v
+        d.OUTCOME_PATH = saved_out
+        console.wakeup_store.cancel("11")

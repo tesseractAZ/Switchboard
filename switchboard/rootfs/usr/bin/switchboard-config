@@ -742,8 +742,20 @@ def render_wakeup_context() -> list[str]:
         # arguably the part that does the waking. Gating the least dismissible
         # action behind the most dismissible one had it backwards.
         " same = n,Set(SW_STAGE=scene)",
-        " same = n,AGI(switchboard-wakeup-deliver.agi,scene)",
-        " same = n,Wait(1)",
+        # ★ 2026-09-14 — ...BUT IT MUST NOT HOLD THE GREETING HOSTAGE. The AGI
+        # used to CALL Home Assistant and wait for the answer, then Wait(1),
+        # before a word was played: 1.7 to 3.8 s of dead air after every pickup
+        # that morning, longer whenever HA is slow (ha_client allows 5 s per
+        # attempt). At 13:25:10Z a pickup hung up 2.0 s into that silence, and
+        # the AGI was cut off inside the HTTP call — Asterisk SIGHUPs an AGI on
+        # hangup — so the ordering above was protecting less than it claimed.
+        #
+        # `detach` fires the scene from its own session and returns at once: the
+        # scene still starts on answer, now survives a hangup outright, and the
+        # greeting follows within about a second. The short Wait is only a media
+        # settle, so the handset's audio path is open before the first syllable.
+        " same = n,AGI(switchboard-wakeup-deliver.agi,scene,detach)",
+        " same = n,Wait(0.5)",
         " same = n,Set(SW_STAGE=greeting)",
         " same = n,Playback(switchboard/sw-wakeup-greeting)",
         # ★ THE DELIVERY MILESTONE, and it belongs exactly here. Asterisk

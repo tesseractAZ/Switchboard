@@ -213,6 +213,54 @@ def _reconcile_rings(now: float) -> None:
             log(f"wake-up for ext {ext} ({r['hhmm']}) DELIVERED")
             _ringing.pop(ext, None)
             continue
+        # ★ 2026-09-14 — THE ROOM ANSWERED BY SNOOZING.
+        #
+        # Ext 19 dialled 42 during three of that morning's rings (12:42:13Z,
+        # 13:10:20Z, 13:20:35Z) and each time spoke a later time into the
+        # handset. Nothing here looked. The join above reads only the delivery
+        # milestones, so this function rang the phone again after two of those
+        # snoozes and sent three critical, Do-Not-Disturb-bypassing pushes saying
+        # nobody had picked up — to the person who had just picked it up to say
+        # when to call back.
+        #
+        # A set or cancel dialled on THIS room's own phone at or after this ring
+        # started proves somebody is at that phone and awake. Standing down loses
+        # nothing: a new time gets its own ring, re-ring and escalation, and a
+        # cancel was the person's own choice. A change from the dashboard or the
+        # console does NOT count — whoever made it may be setting it for a
+        # sleeper — which is why the ledger records where a change came from and
+        # room_changed_wakeup() returns phone rows only.
+        #
+        # Read AFTER `spoken`: a wake-up that was heard is DELIVERED whatever the
+        # room did next. Read BEFORE both failure branches, so a snooze stands
+        # down the second ring as well as the push.
+        #
+        # ★ FAILS TOWARD THE ALARM. An unreadable ledger, or a read that raises,
+        # is "no snooze", and the ring is judged exactly as it was before this
+        # existed. The join above stops tracking on a failed read; this must not,
+        # because the two mistakes are not the same size — a missed snooze is one
+        # unneeded push to somebody awake, a false one is silence for a sleeper.
+        snooze = None
+        if _delivery is not None:
+            try:
+                snooze = _delivery.room_changed_wakeup(ext, r["started"])
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not read wake-up changes for ext {ext}: {exc} — "
+                    f"judging the ring as usual")
+                snooze = None
+        if snooze is not None:
+            new_hhmm = (snooze.get("hhmm")
+                        if snooze.get("outcome") == _delivery.WAKEUP_SET else None)
+            did = (f"set a new wake-up for {new_hhmm}" if new_hhmm
+                   else "cancelled its wake-up")
+            log(f"wake-up for ext {ext} ({r['hhmm']}) SNOOZED — the room's own "
+                f"phone {did} while it was ringing; not ringing again, not "
+                f"escalating")
+            _record(ext, _delivery.WAKEUP_SNOOZED, hhmm=r["hhmm"],
+                    attempt=2 if r["retried"] else 1,
+                    change=snooze.get("outcome"), new_hhmm=new_hhmm)
+            _ringing.pop(ext, None)
+            continue
         # Everything below is an undelivered wake-up. `answered` now only
         # changes what we CALL it and what the escalation says.
         how = ("was answered but played nothing" if answered
