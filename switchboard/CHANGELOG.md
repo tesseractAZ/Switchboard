@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.101.0
+
+**Snoozing a ringing wake-up from its own phone no longer brings a second ring and a critical alert, even when the snooze is still being dialled. The wake-up call no longer opens with seconds of silence. And the record now says who set each wake-up.**
+
+All of this was found in a review of the live system's logs from the morning of 14 September.
+
+**Snoozing counted as sleeping through it.** That morning one handset dialled the wake-up code during three of its own ringing wake-ups and set a later time each time. The phone system only asked whether the wake-up call had been heard. So it rang that handset a second time twice, and sent three critical alerts (the kind that sound through Do Not Disturb) saying nobody had picked up. The person getting them had just picked up.
+
+Now a wake-up set or cancelled on the ringing room's own phone counts as proof somebody is up. The phone is not rung again, no alert is sent, and the ring is recorded as `snoozed` with the new time. The new time then rings and escalates like any other wake-up.
+
+A snooze takes about ten seconds to register, because the phone has to hear the new time first. If the phone system comes to judge the ring while that room's phone is still on a call, it waits up to 90 seconds for the change to land instead of raising the alarm. A room still on a call after that is judged as before.
+
+Changing a wake-up from the dashboard or the operator console does not count, because whoever does that may be setting it for somebody still asleep. Nor does a change made before the ring started. If the record cannot be read, the ring is judged exactly as before.
+
+**Nothing said who had set a wake-up.** The same morning another room's wake-up rang out and raised an alert. Nothing anywhere recorded whether a person had set it, from where, or when. Every set and cancel now writes a line to the delivery record saying where it came from: a phone, the dashboard or the console. A set also records the time it will ring.
+
+**Nearly four seconds of silence before the greeting.** When a wake-up call was answered, the phone system fired the room's Home Assistant scene first. It then waited for Home Assistant to reply before saying a word. That was between 1.7 and 3.8 seconds of silence that morning, and longer whenever Home Assistant is slow. One pickup hung up two seconds into it. The scene is now fired in the background the moment the call is answered, and the greeting follows within about a second. The scene still fires if the call is hung up a moment after answering. Before, hanging up during the silence could cut the scene off in the middle of its request.
+
+**Nobody could tell whether a missed-alarm card had posted.** The helper that posts the "picked up but nothing played" card runs detached from the call, with nowhere to report an error, and it threw away the result. Each call-quality record now says what became of its card: `posted`, `failed`, `disabled` or `skipped`. The copy in the shared folder carries it too. When cards are sent has not changed. The record that a wake-up was heard is now written before the card is attempted, so it never waits on Home Assistant.
+
 ## 0.100.6
 
 **The shared-folder copy of the phone log kept your home network's addresses,
