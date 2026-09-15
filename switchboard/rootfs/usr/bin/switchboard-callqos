@@ -1098,6 +1098,14 @@ def main(argv=None) -> int:
     try:
         a = _parse_args(argv)
         rec = build_record(a)
+        # The reconciler's witness FIRST. `audio-delivered` is what stops the
+        # wake-up scheduler ringing a phone somebody heard a second time, and
+        # nothing it needs waits on Home Assistant -- so nothing here may make it
+        # wait, least of all the card below, which can take two attempts of
+        # ha_client's timeout. Today a leg that calls for a card never delivered
+        # audio, so the two never meet on one leg; this keeps the witness off the
+        # HA path if the scoring rules ever change.
+        record_delivery(rec)
         # The card is attempted BEFORE the record is written, so the record can
         # say what became of it. Only a leg that calls for an alert waits on Home
         # Assistant here; every other leg returns "skipped" without a request.
@@ -1106,7 +1114,6 @@ def main(argv=None) -> int:
         # Readable proof this program ran and what it decided -- the dialplan's
         # trailing '&' means launch is all it can ever prove.
         append_outcome(rec)
-        record_delivery(rec)
         push_ha(rec)
     except (Exception, SystemExit):
         # A hangup handler must never fail loudly. Swallow and move on.

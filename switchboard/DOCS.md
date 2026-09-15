@@ -629,6 +629,15 @@ was heard stays delivered whatever the room does next. If the ledger cannot be
 read, the ring is judged as if this rule did not exist: an unneeded alert to
 somebody awake is the safer mistake than silence for somebody asleep.
 
+A snooze is recorded once the phone has heard the new time, about ten seconds
+after dialling `42`. So if the scheduler comes to judge a ring while the room's
+own phone is **on a call** — usually somebody part-way through that call — it
+waits up to **90 seconds** before judging, looking again on each scheduler pass
+for the change to land. A room still on a call after 90 seconds is judged as
+usual, so a handset that is genuinely busy delays the alert by at most that
+long. A room the phone system cannot report on never waits, and a phone that is
+merely ringing does not count as on a call.
+
 This is a fix for a real morning. On 2026-09-14 one handset snoozed three of its
 own wake-ups this way, and was rung a second time twice and sent three critical
 alerts saying nobody had picked up.
@@ -651,10 +660,11 @@ without needing the call log.
 - **Scene** (`wakeup_scene`) — activates a Home Assistant scene (e.g. gently raise
   the lights). It is fired the moment the call is answered, in the background, and
   the greeting follows within about a second rather than waiting for Home
-  Assistant to reply; a call hung up straight away still fires it. Until
-  2026-09-14 the greeting waited for the scene — 1.7 to 3.8 seconds of silence
-  after picking up, longer when Home Assistant was slow — and one pickup hung up
-  two seconds into that silence.
+  Assistant to reply; it still fires if the call is hung up a moment after
+  answering (a hangup in the first fraction of a second, before the scene has
+  been handed off, can still stop it). Until 2026-09-14 the greeting waited for
+  the scene — 1.7 to 3.8 seconds of silence after picking up, longer when Home
+  Assistant was slow — and one pickup hung up two seconds into that silence.
 - **Weather** (`wakeup_weather`, on by default) — speaks a short local forecast.
 - **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
 

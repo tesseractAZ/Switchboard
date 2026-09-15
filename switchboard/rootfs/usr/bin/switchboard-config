@@ -751,9 +751,11 @@ def render_wakeup_context() -> list[str]:
         # hangup — so the ordering above was protecting less than it claimed.
         #
         # `detach` fires the scene from its own session and returns at once: the
-        # scene still starts on answer, now survives a hangup outright, and the
-        # greeting follows within about a second. The short Wait is only a media
-        # settle, so the handset's audio path is open before the first syllable.
+        # scene still starts on answer, survives a hangup once the AGI has handed
+        # it off (a hangup in the fraction of a second before that, while the
+        # AGI is still starting, stops it as before), and the greeting follows
+        # within about a second. The short Wait is only a media settle, so the
+        # handset's audio path is open before the first syllable.
         " same = n,AGI(switchboard-wakeup-deliver.agi,scene,detach)",
         " same = n,Wait(0.5)",
         " same = n,Set(SW_STAGE=greeting)",

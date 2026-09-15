@@ -92,12 +92,16 @@ class _World:
         self.store.datetime = _clocked(self.clock)
 
         world = self
+        # What AMI reports for each room. None is AMI itself unreachable.
+        self.states = {"14": "Not in use", "19": "Not in use"}
 
         class _AMI:
             @staticmethod
             def get_endpoints():
-                return [{"name": "14", "state": "Not in use"},
-                        {"name": "19", "state": "Not in use"}]
+                if world.states is None:
+                    raise OSError("AMI unreachable")
+                return [{"name": n, "state": st}
+                        for n, st in sorted(world.states.items())]
 
             @staticmethod
             def originate_wakeup(ext, ring):
@@ -364,3 +368,134 @@ def test_a_failed_ledger_write_never_reaches_the_agi_channel(tmp_path, mst, caps
     assert "record FAILED" in err, err
     assert w.store.get("19")["hhmm"] == "06:20"
     assert 'SET VARIABLE WAKEUP_RESULT "set"' in sent, sent
+
+
+# --------------------------------------------------------------------------- #
+# 4. The edges of the window (review of this fix, 2026-09-14).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("set_at", ["13:09:30", "13:09:59"])
+def test_a_phone_set_before_the_ring_is_not_a_snooze(tmp_path, mst, set_at):
+    """★ THE LOWER EDGE, and the direction that silences a sleeper if it drifts.
+
+    The phone that set a wake-up writes exactly the row a snooze writes — same
+    room, same source — so only the time tells "set this ring" from "snoozed this
+    ring". Widening the cut to catch a slow snooze would excuse every wake-up set
+    on its own phone shortly before it rang. In review `int(since_ts) - 240`
+    passed every wake-up test; the replay above only reaches lookbacks of 257 s
+    or more. Both times here are real: a time already past sets tomorrow's.
+    """
+    w = _World(tmp_path)
+    w.at(Z(set_at)).dial_42("19", "06:10")
+    for t in ("13:10:03", "13:12:03", "13:14:03"):
+        w.at(Z(t)).tick()
+    assert [(round(t - Z("13:10:03")), e) for t, e in w.rings] == \
+        [(0, "19"), (120, "19")], w.rings
+    assert len(w.pushes) == 1 and w.rows(outcome="snoozed") == []
+    [row] = w.rows(ext="19", outcome="set")     # present, and simply too old
+    assert row["source"] == "phone"
+
+
+@pytest.mark.parametrize("second, change, new_hhmm", [
+    ("06:25", "set", "06:25"),
+    ("CANCEL", "cancelled", None),
+])
+def test_the_newest_phone_change_names_the_snooze(tmp_path, mst, second, change,
+                                                  new_hhmm):
+    """Two changes inside one ring: the snoozed row names the LAST one, which is
+    what the store now holds and what will (or will not) ring next."""
+    w = _World(tmp_path)
+    _ring(w, "19", "06:10", Z("13:00:45"), Z("13:10:03"))
+    w.at(Z("13:10:31")).dial_42("19", "06:20")
+    w.at(Z("13:11:10")).dial_42("19", second)
+    w.at(Z("13:12:03")).tick()
+    [s] = w.rows(outcome="snoozed")
+    assert (s["change"], s.get("new_hhmm")) == (change, new_hhmm), s
+    assert (w.store.get("19") or {}).get("hhmm") == new_hhmm
+
+
+def test_the_hold_is_ninety_seconds(tmp_path):
+    """Pinned as a literal. The hold tests below drive the real value, so a
+    changed constant would move their timing with it."""
+    assert _World(tmp_path).sched.SNOOZE_HOLD_SECONDS == 90
+
+
+@pytest.mark.parametrize("on_a_call", ["In use", "Busy", "On Hold", "Ring+Inuse"])
+def test_a_snooze_still_being_dialled_holds_the_verdict(tmp_path, mst, on_a_call):
+    """★ The gap the review found. A snooze lands about 11 s after dialling 42;
+    a verdict falling due inside that call found no row, read the room as busy,
+    skipped the re-ring and pushed — seconds before the set landed.
+
+    The wired-phone order: the 13:10:03 ring times out, somebody lifts the
+    handset and dials 42, the verdict falls due at 13:12:03 mid-call, and the
+    set lands at 13:12:07 while they are still listening to the confirmation.
+    """
+    w = _World(tmp_path)
+    _ring(w, "19", "06:10", Z("13:00:45"), Z("13:10:03"))
+    w.states["19"] = on_a_call
+    w.at(Z("13:12:03")).tick()
+    assert w.pushes == [] and len(w.rings) == 1
+    assert [r["outcome"] for r in w.rows(ext="19")] == ["ring-queued"], \
+        "a held ring must not be half-judged"
+    assert any("holding the verdict" in m for m in w.logs), w.logs
+    w.at(Z("13:12:07")).dial_42("19", "06:20")
+    w.at(Z("13:12:23")).tick()                  # still on the call
+    w.states["19"] = "Not in use"
+    w.at(Z("13:12:43")).tick()
+    assert len(w.rings) == 1 and w.pushes == [] and w.cards == []
+    assert [r["outcome"] for r in w.rows(ext="19")] == \
+        ["ring-queued", "set", "snoozed"]
+    [s] = w.rows(outcome="snoozed")
+    assert (s["attempt"], s["new_hhmm"]) == (1, "06:20"), s
+
+
+def test_a_room_still_on_a_call_is_judged_after_ninety_seconds(tmp_path, mst):
+    """The hold is BOUNDED. A handset genuinely on a call, with nobody snoozing,
+    delays the verdict by 90 s and then gets exactly the verdict it always got."""
+    w = _World(tmp_path)
+    _ring(w, "19", "06:10", Z("13:00:45"), Z("13:10:03"))
+    w.states["19"] = "In use"
+    for t in ("13:12:03", "13:12:23", "13:12:43", "13:13:03", "13:13:23"):
+        w.at(Z(t)).tick()
+    assert w.pushes == [], "the verdict was reached inside the hold"
+    w.at(Z("13:13:33")).tick()                  # 90 s after the hold began
+    assert len(w.rings) == 1 and len(w.pushes) == 1, (w.rings, w.pushes)
+    [skip] = w.rows(outcome="re-ring-skipped")
+    assert skip["device_state"] == "In use"
+    assert [r["reason"] for r in w.rows(outcome="undelivered")] == ["re-ring-skipped"]
+
+
+def test_each_ring_gets_its_own_hold(tmp_path, mst):
+    """A call that ends with no change lets the second ring go out, and the
+    SECOND ring's verdict can wait for a snooze too — on a fresh bound, not on
+    what the first hold left behind."""
+    w = _World(tmp_path)
+    _ring(w, "19", "06:10", Z("13:00:45"), Z("13:10:03"))
+    w.states["19"] = "In use"                  # a call, but no wake-up change
+    w.at(Z("13:12:03")).tick()
+    w.states["19"] = "Not in use"
+    w.at(Z("13:12:23")).tick()                  # the call ended: ring again
+    assert [t for t, _ in w.rings] == [Z("13:10:03"), Z("13:12:23")], w.rings
+    assert w.pushes == []
+    w.states["19"] = "In use"                  # the re-ring rang out; 42 dialled
+    w.at(Z("13:14:23")).tick()                  # 140 s after the FIRST hold began
+    assert w.pushes == [], "the second ring inherited the first ring's hold"
+    w.at(Z("13:14:31")).dial_42("19", "06:30")
+    w.at(Z("13:14:43")).tick()
+    assert len(w.rings) == 2 and w.pushes == []
+    [s] = w.rows(outcome="snoozed")
+    assert (s["attempt"], s["new_hhmm"]) == (2, "06:30"), s
+
+
+@pytest.mark.parametrize("state", [None, "Unavailable", "Ringing", ""])
+def test_a_state_that_is_not_a_call_never_holds(tmp_path, mst, state):
+    """An AMI that cannot answer, an offline handset and a phone being rung are
+    not evidence that anybody is at it. Each is judged at once, as before."""
+    w = _World(tmp_path)
+    _ring(w, "19", "06:10", Z("13:00:45"), Z("13:10:03"))
+    if state is None:
+        w.states = None
+    else:
+        w.states["19"] = state
+    w.at(Z("13:12:03")).tick()
+    assert len(w.rings) == 1 and len(w.pushes) == 1, (w.rings, w.pushes)
+    assert not any("holding the verdict" in m for m in w.logs), w.logs
