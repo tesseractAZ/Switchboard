@@ -1276,7 +1276,7 @@ def test_status_announce_dialplan() -> None:
     # fired at all -- and hanging up is what someone does once a wake-up call has
     # already woken them.
     check("wake-up scene AGI wired into [wakeup-deliver]",
-          _context_of(e, "AGI(switchboard-wakeup-deliver.agi,scene)") == "wakeup-deliver")
+          _context_of(e, "AGI(switchboard-wakeup-deliver.agi,scene,") == "wakeup-deliver")
     check("wake-up extras AGI wired into [wakeup-deliver]",
           _context_of(e, "AGI(switchboard-wakeup-deliver.agi,speak)") == "wakeup-deliver")
 
@@ -1977,11 +1977,11 @@ def test_wakeup_scene_fires_on_answer_not_after_the_narration() -> None:
     wd = e.split("[wakeup-deliver]", 1)[1].split("\n[", 1)[0]
 
     check("wakeup: the scene AGI runs in scene-only mode",
-          "AGI(switchboard-wakeup-deliver.agi,scene)" in wd)
+          "AGI(switchboard-wakeup-deliver.agi,scene," in wd)
     check("wakeup: the extras AGI runs in speak-only mode",
           "AGI(switchboard-wakeup-deliver.agi,speak)" in wd)
     # Ordering is the whole point.
-    i_scene = wd.index("AGI(switchboard-wakeup-deliver.agi,scene)")
+    i_scene = wd.index("AGI(switchboard-wakeup-deliver.agi,scene,")
     i_greet = wd.index("sw-wakeup-greeting")
     i_speak = wd.index("AGI(switchboard-wakeup-deliver.agi,speak)")
     check("wakeup: the scene fires BEFORE the greeting", i_scene < i_greet)

@@ -165,6 +165,12 @@ def test_ha_routing() -> None:
         cq.push_ha(poor)
         check("ha: dialplan poor call sets sensor.switchboard_last_call",
               any(e == "sensor.switchboard_last_call" for e, _ in calls["set_state"]))
+        # The card is post_alert's alone, so main() attempts it exactly once and
+        # can record the result. A sensor push that also posted would be a second
+        # card for the same leg, with nothing recording what became of it.
+        check("ha: the sensor push raises no card of its own", calls["notify"] == [])
+        check("ha: post_alert reports the card it posted",
+              cq.post_alert(poor) == "posted")
         # The id carries the leg TIMESTAMP as well as the channel: Asterisk
         # recycles channel names after a restart, so a channel-only id would let
         # a later bad call silently replace an earlier unread alert.
@@ -481,8 +487,8 @@ def test_alert_id_distinguishes_calls_across_a_restart() -> None:
                                         rxploss="0", txploss="30", rxmes="59", txmes="88"))
             rec["ts"] = ts          # same recycled channel name, different calls
             return rec
-        cq.push_ha(poor_leg(1786700000))          # before a restart
-        cq.push_ha(poor_leg(1786786400))          # a day later, channel name reused
+        cq.post_alert(poor_leg(1786700000))       # before a restart
+        cq.post_alert(poor_leg(1786786400))       # a day later, channel name reused
         check("alert id: notified for both legs", len(ids) == 2)
         check("alert id: recycled channel name still yields distinct ids", ids[0] != ids[1])
         check("alert id: both namespaced to callqos",
@@ -491,11 +497,97 @@ def test_alert_id_distinguishes_calls_across_a_restart() -> None:
         # A repeat report of the SAME leg must still collapse onto one entry.
         ids.clear()
         same = poor_leg(1786700000)
-        cq.push_ha(same); cq.push_ha(same)
+        cq.post_alert(same); cq.post_alert(same)
         check("alert id: the same leg reported twice collapses to one id",
               len(ids) == 2 and ids[0] == ids[1])
     finally:
         cq._alerts_enabled = orig
+        sys.modules.pop("ha_client", None)
+
+
+def test_main_records_what_became_of_the_card(tmp_path) -> None:
+    """★ 2026-09-14 — WHETHER A CARD POSTED COULD NOT BE KNOWN.
+
+    The 13:25:12Z wake-up leg was filed `undelivered` with `notify: true`. This
+    process runs detached with its stdio on /dev/null and threw the post's result
+    away, so nothing anywhere could say whether that card reached Home Assistant.
+
+    Driven through main(), the only caller: the status has to be ON the record in
+    the ledger and in the /share mirror, which is only possible if the post is
+    attempted before the write. Exactly one post per leg, and none for a leg that
+    called for nothing. `alerts` is set through the real features file rather than
+    by replacing the reader.
+    """
+    posts = []
+    mode = {"result": True}
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            return True
+
+        @staticmethod
+        def notify(msg, title="", notification_id=""):
+            posts.append(notification_id)
+            if mode["result"] == "raise":
+                raise OSError("no route to Home Assistant")
+            return mode["result"]
+
+    # The live leg: answered, hung up 2 s later at stage `scene`, nothing sent.
+    silent_pickup = ["--source", "dialplan", "--tag", "wakeup-deliver",
+                     "--chan", "PJSIP/19-00000012", "--cid", "19",
+                     "--billsec", "2", "--hcause", "16", "--stage", "scene",
+                     "--rxcount", "97", "--txcount", "0"]
+    good_call = ["--source", "dialplan", "--tag", "rooms",
+                 "--chan", "PJSIP/11-00000003", "--cid", "11",
+                 "--billsec", "40", "--hcause", "16", "--rxcount", "2000",
+                 "--txcount", "2000", "--rxmes", "88", "--txmes", "88"]
+    features = tmp_path / "features.json"
+    saved = (cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES)
+    sys.modules["ha_client"] = _FakeHA
+
+    def run(argv, result=True, alerts=True):
+        posts.clear()
+        mode["result"] = result
+        features.write_text(json.dumps({"callqos": {"alerts": alerts}}))
+        d = tempfile.mkdtemp(dir=str(tmp_path))
+        cq.PATH = os.path.join(d, "callqos.jsonl")
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        cq.FEATURES = str(features)
+        assert cq.main(list(argv)) == 0
+        ledger = json.loads(open(cq.PATH).read().splitlines()[-1])
+        mirror = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+        return ledger, mirror, list(posts)
+
+    try:
+        led, mir, p = run(silent_pickup, result=True)
+        check("card: the silent pickup is the kind of leg that alerts",
+              led["quality"] == "undelivered" and led["notify"] is True)
+        check("card: an accepted post is recorded as posted, in the ledger",
+              led.get("notify_status") == "posted")
+        check("card: ...and in the /share mirror, the only view from outside",
+              mir.get("notify_status") == "posted")
+        check(f"card: exactly one post per leg ({len(p)})", len(p) == 1)
+
+        led, mir, p = run(silent_pickup, result=False)
+        check("card: a refused post is recorded as failed",
+              led.get("notify_status") == "failed"
+              and mir.get("notify_status") == "failed" and len(p) == 1)
+
+        led, _, p = run(silent_pickup, result="raise")
+        check("card: a post that raised is recorded as failed, not lost",
+              led.get("notify_status") == "failed" and len(p) == 1)
+
+        led, _, p = run(silent_pickup, alerts=False)
+        check("card: call_quality_alerts off is recorded as disabled, with no post",
+              led.get("notify_status") == "disabled" and p == [])
+
+        led, mir, p = run(good_call)
+        check("card: a leg that called for nothing says so, and posts nothing",
+              led["notify"] is False and led.get("notify_status") == "skipped"
+              and mir.get("notify_status") == "skipped" and p == [])
+    finally:
+        cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES = saved
         sys.modules.pop("ha_client", None)
 
 
@@ -1057,14 +1149,14 @@ def test_every_record_says_which_schema_it_is() -> None:
     rec = cq.build_record(_Args(source="dialplan", tag="rooms",
                                 chan="PJSIP/12-1", rxcount="100",
                                 txcount="100", rxmes="88", txmes="88"))
-    check("F54: the ledger record is versioned", rec.get("v") == 3)
+    check("F54: the ledger record is versioned", rec.get("v") == 4)
     d = tempfile.mkdtemp()
     try:
         cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
         cq.append_outcome(rec)
         line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
         check("F54: and so is the /share mirror, which is the only view an "
-              "outside audit gets", line.get("v") == 3)
+              "outside audit gets", line.get("v") == 4)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

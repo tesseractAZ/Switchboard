@@ -538,6 +538,12 @@ back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
   and time.
 - If the room is busy or offline through a **10-minute grace window**, the wake-up
   is dropped and surfaced as a Home Assistant persistent notification.
+- **Every set and cancel is recorded**, in
+  `/share/switchboard/delivery-outcomes.jsonl`, with where it was made: `phone`
+  (dialled on the room's own phone, or asked of the voice operator from it), `web`
+  (the dashboard) or `console` (the operator console). A set carries the time it
+  will ring; a cancel says whether there was anything to remove. Until 2026-09-14
+  a wake-up's record began at its first ring, so nothing could say who had set it.
 
 **If nobody answers** (v0.70.0, corrected in v0.78.0). Ringing a phone is not
 the same as waking somebody, and until v0.70.0 the system could not tell the
@@ -601,12 +607,49 @@ signal is not lost, it just stops sounding through Do Not Disturb.
 `wakeup_retry_seconds` must exceed `wakeup_ring_seconds`, or a call still ringing
 would be judged unanswered.
 
+**Snoozing from the ringing phone.** If the room's own phone sets a new wake-up or
+cancels one while its wake-up is ringing — or in the short gap before the
+scheduler decides whether to ring it again — that is taken as proof somebody is
+up. The phone is not rung again and no alert is sent. The ring is recorded
+`snoozed`, with `change` (`set` or `cancelled`) and, when a new time was set,
+`new_hhmm`. The new time then rings, re-rings and escalates like any other
+wake-up. A cancel counts even when it removed nothing: by the time a wake-up
+rings, its entry has already been used up.
+
+Only the room's **own phone** counts:
+
+| during the ring, the wake-up was changed from | the ring is |
+| --- | --- |
+| the ringing room's phone (dial `42`, or the voice operator) | `snoozed` — no second ring, no alert |
+| the dashboard or the operator console | judged as usual — whoever changed it may be setting it for somebody still asleep |
+| another room's phone | judged as usual |
+
+A change made before the ring began does not count either, and a wake-up that
+was heard stays delivered whatever the room does next. If the ledger cannot be
+read, the ring is judged as if this rule did not exist: an unneeded alert to
+somebody awake is the safer mistake than silence for somebody asleep.
+
+A snooze is recorded once the phone has heard the new time, about ten seconds
+after dialling `42`. So if the scheduler comes to judge a ring while the room's
+own phone is **on a call** — usually somebody part-way through that call — it
+waits up to **90 seconds** before judging, looking again on each scheduler pass
+for the change to land. A room still on a call after 90 seconds is judged as
+usual, so a handset that is genuinely busy delays the alert by at most that
+long. A room the phone system cannot report on never waits, and a phone that is
+merely ringing does not count as on a call.
+
+This is a fix for a real morning. On 2026-09-14 one handset snoozed three of its
+own wake-ups this way, and was rung a second time twice and sent three critical
+alerts saying nobody had picked up.
+
 Every step above is recorded in `/share/switchboard/delivery-outcomes.jsonl`:
 `ring-queued`, `deferred` (the room was busy or offline at the appointed time),
 `originate-refused` or `originate-error` when the call could not be placed at
 all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
 `answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
-finally `undelivered`. One more is worth knowing:
+finally `undelivered` — or `snoozed`, when the room's own phone changed the
+wake-up during the ring. Each set and cancel is a row of its own, `set` or
+`cancelled`, with its `source`. One more is worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
 instrument. Reading that file end to end tells you what happened to a wake-up
@@ -615,7 +658,13 @@ without needing the call log.
 **Smart extras** (during the wake-up call):
 
 - **Scene** (`wakeup_scene`) — activates a Home Assistant scene (e.g. gently raise
-  the lights).
+  the lights). It is fired the moment the call is answered, in the background, and
+  the greeting follows within about a second rather than waiting for Home
+  Assistant to reply; it still fires if the call is hung up a moment after
+  answering (a hangup in the first fraction of a second, before the scene has
+  been handed off, can still stop it). Until 2026-09-14 the greeting waited for
+  the scene — 1.7 to 3.8 seconds of silence after picking up, longer when Home
+  Assistant was slow — and one pickup hung up two seconds into that silence.
 - **Weather** (`wakeup_weather`, on by default) — speaks a short local forecast.
 - **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
 
@@ -1211,6 +1260,14 @@ a chime, and those legs are one-directional by design, so the one-way-audio
 detector (which exists to catch a broken conversation) would fire on their
 perfectly normal shape. Conversations and the interactive menus alert exactly
 as before.
+
+**Whether the card was actually posted** is recorded on the leg itself, as
+`notify_status`: `posted` (Home Assistant accepted it), `failed` (the post was
+refused or could not be made), `disabled` (an alert was called for and
+`call_quality_alerts` is off) or `skipped` (the leg called for none). The
+recorder runs detached from the call with nowhere to write an error, so until
+2026-09-14 a card that failed to post left no trace at all. The field is in the
+`/share` mirror too; records carrying it are schema version `4`.
 
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP

@@ -596,7 +596,9 @@ def build_record(a) -> dict:
         #   v2  the full mirror (v0.62.0)
         #   v3  v0.77.0 -- jitter fields renamed for their real provenance,
         #       null-in-100% octet keys omitted, RTT scored on the distribution
-        "v": 3,
+        #   v4  2026-09-14 -- `notify_status`: what became of the alert this leg
+        #       called for, added by main() once it has been attempted
+        "v": 4,
         "ts": int(time.time()),
         "source": a.source,
         "tag": a.tag or "",
@@ -903,26 +905,59 @@ def push_ha(rec: dict) -> None:
         except Exception:
             pass
 
-    # Proactive alert on a rough call. The id is keyed by channel AND the leg's
-    # timestamp: Asterisk restarts its channel counter at boot, so
-    # "PJSIP/12-00000003" recurs after every restart — keyed on the channel alone,
-    # a later bad call would silently REPLACE an earlier unread alert about a
-    # different call. The timestamp keeps distinct calls distinct while a repeat
-    # report of the SAME leg still collapses onto one entry.
-    if rec["notify"] and _alerts_enabled():
-        who = rec["ext"] or "a phone"
-        leg = f" ({rec['tag']})" if rec["tag"] else ""
-        body = (
-            f"Call quality was {rec['quality']} on {who}{leg}: "
-            + ", ".join(rec["reasons"])
-            + f". Duration {rec['dur']}s, codec {rec['codec'] or '?'}."
-        )
-        nid = (f"switchboard_callqos_{rec['ts']}_"
-               + (rec["chan"] or who).replace("/", "_"))
-        try:
-            ha_client.notify(body, title="Switchboard call quality", notification_id=nid)
-        except Exception:
-            pass
+
+def post_alert(rec: dict) -> str:
+    """Raise the card this leg calls for, and return what became of it.
+
+    ★ 2026-09-14 — WHETHER A CARD POSTED WAS UNKNOWABLE. This process runs
+    detached with its stdio on /dev/null, the notify call sat in `try: ...
+    except: pass`, and its result was thrown away — so ha_client's own failure
+    line went nowhere and the record said only that an alert was CALLED FOR. The
+    13:25:12Z wake-up leg that morning was filed `undelivered` with
+    `notify: true`, and nothing anywhere could say whether its card ever reached
+    Home Assistant. Every other alerting path in the add-on leaves a trace when a
+    post fails; this was the one that did not.
+
+    main() stores the answer on the record as `notify_status`, which is why it
+    runs BEFORE the ledger write rather than after it:
+
+      skipped   the leg called for no alert
+      disabled  it did, and `call_quality_alerts` is off
+      posted    Home Assistant accepted the card
+      failed    the post was refused or raised, or ha_client would not load
+
+    WHEN a card is sent is unchanged; only the result is kept.
+
+    The id is keyed by channel AND the leg's timestamp: Asterisk restarts its
+    channel counter at boot, so "PJSIP/12-00000003" recurs after every restart —
+    keyed on the channel alone, a later bad call would silently REPLACE an
+    earlier unread alert about a different call. The timestamp keeps distinct
+    calls distinct while a repeat report of the SAME leg still collapses onto one
+    entry.
+    """
+    if not rec.get("notify"):
+        return "skipped"
+    if not _alerts_enabled():
+        return "disabled"
+    try:
+        import ha_client  # noqa: E402
+    except Exception:
+        return "failed"
+    who = rec["ext"] or "a phone"
+    leg = f" ({rec['tag']})" if rec["tag"] else ""
+    body = (
+        f"Call quality was {rec['quality']} on {who}{leg}: "
+        + ", ".join(rec["reasons"])
+        + f". Duration {rec['dur']}s, codec {rec['codec'] or '?'}."
+    )
+    nid = (f"switchboard_callqos_{rec['ts']}_"
+           + (rec["chan"] or who).replace("/", "_"))
+    try:
+        ok = ha_client.notify(body, title="Switchboard call quality",
+                              notification_id=nid)
+    except Exception:
+        return "failed"
+    return "posted" if ok else "failed"
 
 
 def _parse_args(argv):
@@ -1063,11 +1098,22 @@ def main(argv=None) -> int:
     try:
         a = _parse_args(argv)
         rec = build_record(a)
+        # The reconciler's witness FIRST. `audio-delivered` is what stops the
+        # wake-up scheduler ringing a phone somebody heard a second time, and
+        # nothing it needs waits on Home Assistant -- so nothing here may make it
+        # wait, least of all the card below, which can take two attempts of
+        # ha_client's timeout. Today a leg that calls for a card never delivered
+        # audio, so the two never meet on one leg; this keeps the witness off the
+        # HA path if the scoring rules ever change.
+        record_delivery(rec)
+        # The card is attempted BEFORE the record is written, so the record can
+        # say what became of it. Only a leg that calls for an alert waits on Home
+        # Assistant here; every other leg returns "skipped" without a request.
+        rec["notify_status"] = post_alert(rec)
         append_record(rec)
         # Readable proof this program ran and what it decided -- the dialplan's
         # trailing '&' means launch is all it can ever prove.
         append_outcome(rec)
-        record_delivery(rec)
         push_ha(rec)
     except (Exception, SystemExit):
         # A hangup handler must never fail loudly. Swallow and move on.

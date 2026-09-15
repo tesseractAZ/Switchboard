@@ -379,6 +379,40 @@ def test_main_actually_writes_it(tmp_path, monkeypatch):
     assert recs[0]["ext"] == "19" and recs[0]["txcount"] == 59
 
 
+def test_the_witness_is_written_before_anything_waits_on_home_assistant(
+        tmp_path, monkeypatch):
+    """★ 2026-09-14 review. main() now attempts the call-quality card BEFORE it
+    writes the quality ledger, so the record can say what became of the card —
+    and a post can take two attempts of ha_client's timeout. `audio-delivered` is
+    what stops the reconciler ringing a phone somebody heard a second time; it
+    must not queue behind that.
+
+    Observed rather than grepped: at the moment the card step runs, the witness
+    has to be on disk already.
+    """
+    mod = _delivery_module(tmp_path)
+    monkeypatch.setitem(sys.modules, "delivery", mod)
+    monkeypatch.setattr(cq, "append_record", lambda rec: None)
+    monkeypatch.setattr(cq, "append_outcome", lambda rec: None)
+    monkeypatch.setattr(cq, "push_ha", lambda rec: None)
+    on_disk_at_post = []
+
+    def _post_alert(rec):
+        p = Path(mod.OUTCOME_PATH)
+        on_disk_at_post.append(
+            [json.loads(l)["outcome"] for l in p.read_text().splitlines() if l.strip()]
+            if p.exists() else [])
+        return "skipped"
+
+    monkeypatch.setattr(cq, "post_alert", _post_alert)
+    assert cq.main(["--source", "dialplan", "--tag", "wakeup-deliver",
+                    "--chan", "PJSIP/19-00000007", "--cid", "19",
+                    "--billsec", "2", "--hcause", "16", "--stage", "greeting",
+                    "--rxcount", "132", "--txcount", "59",
+                    "--rxmes", "0", "--txmes", "0"]) == 0
+    assert on_disk_at_post == [[AUDIO_DELIVERED]], on_disk_at_post
+
+
 def test_both_programs_read_the_outcome_name_from_the_ledger_module():
     """★ The mutant that survived the first battery.
 

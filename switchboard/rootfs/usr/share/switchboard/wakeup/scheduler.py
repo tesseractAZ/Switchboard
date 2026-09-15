@@ -51,11 +51,20 @@ RETRY_AFTER = int(os.environ.get("WAKEUP_RETRY_SECONDS", str(RING + 30)))
 # The notify service an unanswered wake-up escalates to, WITHOUT the `notify.`
 # prefix. Empty disables the push and leaves only the second ring.
 PUSH_TARGET = os.environ.get("WAKEUP_PUSH_TARGET", "mobile_app_iphone").strip()
+# ★ 2026-09-14 — how long a ring's verdict may wait for a snooze that is still
+# being DIALLED. The dial-42 AGI writes its `set`/`cancelled` row only once the
+# recogniser has heard a time: about 11 s after dialling on that morning's
+# evidence, and two attempts of a 7 s recording and its recognition come to about
+# 75 s at worst. While the room's own phone is on a call, _reconcile_rings()
+# waits this long at most for that row, then judges exactly as before. A literal,
+# not an option: it covers one dial-42 call, which nothing configures.
+SNOOZE_HOLD_SECONDS = 90
 
-# ext -> {"target_epoch", "hhmm", "started", "retried"} for rings we have
-# dispatched but not yet reconciled. In memory on purpose: the window is ~90 s,
-# and a restart inside it loses at most one reconciliation rather than requiring
-# a schema change to the on-disk store.
+# ext -> {"target_epoch", "hhmm", "started", "retried", "held_since"} for rings
+# we have dispatched but not yet reconciled. In memory on purpose: the window is
+# ~90 s (plus SNOOZE_HOLD_SECONDS while the room is on a call), and a restart
+# inside it loses at most one reconciliation rather than requiring a schema
+# change to the on-disk store.
 _ringing: dict = {}
 
 _stop = False
@@ -76,6 +85,27 @@ def log(msg: str) -> None:
 def _sig(*_):
     global _stop
     _stop = True
+
+
+# Device states meaning the room's own phone is ON A CALL, spelled the way
+# webui/ami.py's device_busy() normalises them ("In use", "INUSE", "Ring+Inuse").
+# RINGING is left out on purpose: a phone being rung is not a person at it.
+_ON_A_CALL = frozenset({"inuse", "ringinuse", "busy", "onhold"})
+
+
+def _room_state(ext: str) -> str:
+    """The room's device state as AMI reports it, or "" when AMI cannot say."""
+    try:
+        return {e.get("name"): (e.get("state") or "")
+                for e in ami.get_endpoints()}.get(ext, "")
+    except Exception as exc:  # noqa: BLE001  (AMI down -> unknown)
+        log(f"endpoint state unavailable for ext {ext}: {exc}")
+        return ""
+
+
+def _on_a_call(state: str) -> bool:
+    norm = (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
+    return norm in _ON_A_CALL
 
 
 def _escalate(ext: str, hhmm: str, detail: str, reason: str, attempt: int) -> None:
@@ -213,6 +243,82 @@ def _reconcile_rings(now: float) -> None:
             log(f"wake-up for ext {ext} ({r['hhmm']}) DELIVERED")
             _ringing.pop(ext, None)
             continue
+        # ★ 2026-09-14 — THE ROOM ANSWERED BY SNOOZING.
+        #
+        # Ext 19 dialled 42 during three of that morning's rings (12:42:13Z,
+        # 13:10:20Z, 13:20:35Z) and each time spoke a later time into the
+        # handset. Nothing here looked. The join above reads only the delivery
+        # milestones, so this function rang the phone again after two of those
+        # snoozes and sent three critical, Do-Not-Disturb-bypassing pushes saying
+        # nobody had picked up — to the person who had just picked it up to say
+        # when to call back.
+        #
+        # A set or cancel dialled on THIS room's own phone at or after this ring
+        # started proves somebody is at that phone and awake. Standing down loses
+        # nothing: a new time gets its own ring, re-ring and escalation, and a
+        # cancel was the person's own choice. A change from the dashboard or the
+        # console does NOT count — whoever made it may be setting it for a
+        # sleeper — which is why the ledger records where a change came from and
+        # room_changed_wakeup() returns phone rows only.
+        #
+        # Read AFTER `spoken`: a wake-up that was heard is DELIVERED whatever the
+        # room did next. Read BEFORE both failure branches, so a snooze stands
+        # down the second ring as well as the push.
+        #
+        # ★ FAILS TOWARD THE ALARM. An unreadable ledger, or a read that raises,
+        # is "no snooze", and the ring is judged exactly as it was before this
+        # existed. The join above stops tracking on a failed read; this must not,
+        # because the two mistakes are not the same size — a missed snooze is one
+        # unneeded push to somebody awake, a false one is silence for a sleeper.
+        snooze = None
+        if _delivery is not None:
+            try:
+                snooze = _delivery.room_changed_wakeup(ext, r["started"])
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not read wake-up changes for ext {ext}: {exc} — "
+                    f"judging the ring as usual")
+                snooze = None
+        if snooze is not None:
+            new_hhmm = (snooze.get("hhmm")
+                        if snooze.get("outcome") == _delivery.WAKEUP_SET else None)
+            did = (f"set a new wake-up for {new_hhmm}" if new_hhmm
+                   else "cancelled its wake-up")
+            log(f"wake-up for ext {ext} ({r['hhmm']}) SNOOZED — the room's own "
+                f"phone {did} while it was ringing; not ringing again, not "
+                f"escalating")
+            _record(ext, _delivery.WAKEUP_SNOOZED, hhmm=r["hhmm"],
+                    attempt=2 if r["retried"] else 1,
+                    change=snooze.get("outcome"), new_hhmm=new_hhmm)
+            _ringing.pop(ext, None)
+            continue
+        # ★ ...AND A SNOOZE STILL BEING DIALLED (review of the fix above).
+        #
+        # The row that check reads lands when the dial-42 AGI has heard a time,
+        # about 11 s after the room dialled (12:42:13 -> 12:42:25Z, 13:10:20 ->
+        # 13:10:31Z and 13:20:35 -> 13:20:46Z that morning). A judging tick
+        # inside that call found no row and went straight on: the room read
+        # "In use", so the re-ring was skipped and a critical push said nobody
+        # had picked up — seconds before the set landed. On a wired phone that is
+        # the natural order: the ring times out, somebody lifts the handset and
+        # dials 42, and the verdict falls due in the middle of the call.
+        #
+        # So while the room's own phone is ON A CALL the verdict waits, and every
+        # tick reads the ledger again above. BOUNDED: a room still on a call
+        # after SNOOZE_HOLD_SECONDS is judged exactly as it was before this
+        # existed, so a handset that is genuinely busy delays the alert by that
+        # much and no more. Never on an unknown state — an AMI that cannot answer
+        # is not evidence that anybody is at the phone.
+        state = _room_state(ext)
+        if _on_a_call(state):
+            if "held_since" not in r:
+                r["held_since"] = now
+                log(f"wake-up for ext {ext} ({r['hhmm']}): the room is "
+                    f"'{state}' — holding the verdict up to "
+                    f"{SNOOZE_HOLD_SECONDS}s for a change from its phone")
+            if now - r["held_since"] < SNOOZE_HOLD_SECONDS:
+                continue
+            log(f"wake-up for ext {ext} ({r['hhmm']}): still '{state}' after "
+                f"{SNOOZE_HOLD_SECONDS}s with no change from its phone — judging")
         # Everything below is an undelivered wake-up. `answered` now only
         # changes what we CALL it and what the escalation says.
         how = ("was answered but played nothing" if answered
@@ -234,12 +340,9 @@ def _reconcile_rings(now: float) -> None:
             # are in the durable log, four of them for the cordless and three
             # inside an add-on restart window — an originate that returned True
             # to a caller that had no way to learn it had failed.
-            state = ""
-            try:
-                state = {e.get("name"): (e.get("state") or "")
-                         for e in ami.get_endpoints()}.get(ext, "")
-            except Exception as exc:  # noqa: BLE001  (AMI down -> unknown, below)
-                log(f"endpoint state unavailable before re-ring for ext {ext}: {exc}")
+            #
+            # `state` is the reading taken above for the hold, on this same tick;
+            # "" when AMI could not say, which is not "Not in use".
             # ★ Written onto `r`, never a local. v0.84.0 set a local here and
             # stored it AFTER the if/else — but the success branch `continue`s,
             # so the store was unreachable on the one path that needed it. The
@@ -271,6 +374,9 @@ def _reconcile_rings(now: float) -> None:
                         r["retried"] = True
                         r["started"] = now
                         r["rang_again"] = True
+                        # The second ring's verdict gets a hold of its own, not
+                        # whatever the first one's left behind.
+                        r.pop("held_since", None)
                         _record(ext, "ring-requeued", hhmm=r["hhmm"], attempt=2)
                         continue
                     refused = "the phone system refused it"

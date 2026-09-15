@@ -928,3 +928,127 @@ def test_the_wakeup_time_field_cannot_be_squeezed_below_a_time() -> None:
     assert ".wakerow .ringbtn" in css, (
         "the Set button has no .wakerow override, so it inherits width:100% and "
         "squeezes the field again")
+
+
+def test_a_dashboard_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path) -> None:
+    """★ 2026-09-14, through the real handlers.
+
+    Two gaps from one morning. Ext 14's 05:50 wake-up escalated and no ledger
+    could say who had set it; every dashboard set and cancel now writes a row,
+    marked `web`. And ext 19 snoozed three ringing wake-ups from its own phone and
+    was pushed anyway — the fix stands a ring down for the room's PHONE only, so a
+    set from the dashboard during a ring, which may be somebody setting it for a
+    sleeper, must still escalate. The control beside it makes the same change as
+    a phone row, to show this set-up can see a snooze at all.
+    """
+    import asyncio as _aio
+    import json as _json
+    import time as _time
+
+    check("dashboard: the ledger module loaded", app._delivery is not None)
+
+    class _Req:
+        headers = {}
+
+        @staticmethod
+        async def json():
+            return {"hhmm": "06:20"}
+
+    class _Resp:
+        def __init__(self, payload, status_code=200):
+            self.payload, self.status_code = payload, status_code
+
+    def rows(path):
+        return ([_json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+                if path.exists() else [])
+
+    ledger = tmp_path / "delivery-outcomes.jsonl"
+    saved = {k: getattr(app, k) for k in
+             ("load_options", "configured_room_exts", "JSONResponse")}
+    saved_out = app._delivery.OUTCOME_PATH
+    saved_mods = {k: sys.modules.get(k) for k in ("store", "ami", "ha_client", "delivery")}
+    saved_path = list(sys.path)
+    try:
+        app.JSONResponse = _Resp
+        app.load_options = lambda: {}
+        app.configured_room_exts = lambda o: {"19"}
+        app._delivery.OUTCOME_PATH = str(ledger)
+
+        resp = _aio.run(app.api_wakeup_set("19", _Req()))
+        check("dashboard: the set succeeded", resp.status_code == 200)
+        [s] = rows(ledger)
+        check("dashboard: the set is recorded as web, with the time it rings",
+              (s["kind"], s["outcome"], s["source"], s["hhmm"])
+              == ("wakeup", "set", "web", "06:20")
+              and s["target_epoch"] == app.wakeup_store.get("19")["target_epoch"])
+        app.api_wakeup_cancel("19")
+        c = rows(ledger)[-1]
+        check("dashboard: the cancel is recorded as web, and says it removed one",
+              (c["outcome"], c["source"], c["removed"]) == ("cancelled", "web", True))
+        app.api_wakeup_cancel("19\r\nX")
+        check("dashboard: a malformed extension never reaches the ledger",
+              len(rows(ledger)) == 2)
+
+        pushed, rang = [], []
+
+        class _AMI:
+            @staticmethod
+            def get_endpoints():
+                return [{"name": "19", "state": "Not in use"}]
+
+            @staticmethod
+            def originate_wakeup(ext, ring):
+                rang.append(ext)
+                return True
+
+        class _HA:
+            @staticmethod
+            def push(msg, **k):
+                pushed.append(msg)
+                return True
+
+            @staticmethod
+            def notify(msg, **k):
+                return True
+
+        for k in ("store", "ami", "ha_client"):
+            sys.modules[k] = _AMI
+        sys.modules["delivery"] = app._delivery
+        sched = SourceFileLoader(
+            "sched_dashboard_snooze",
+            str(_ROOT / "rootfs" / "usr" / "share" / "switchboard" / "wakeup"
+                / "scheduler.py")).load_module()
+        sched.ami, sched.ha_client, sched.log = _AMI, _HA, lambda m: None
+
+        def judge(change):
+            """A second ring started 30 s ago; make `change`; judge it."""
+            pushed.clear()
+            rang.clear()
+            sched._ringing.clear()
+            started = _time.time() - 30
+            sched._ringing["19"] = {"target_epoch": int(started), "hhmm": "06:10",
+                                    "started": started, "retried": True}
+            change()
+            sched._reconcile_rings(started + sched.RETRY_AFTER + 1)
+            return list(pushed)
+
+        check("dashboard: a set from the dashboard during the ring still escalates",
+              len(judge(lambda: _aio.run(app.api_wakeup_set("19", _Req())))) == 1)
+        entry = app.wakeup_store.get("19")
+        check("control: the same change from the room's own phone is a snooze",
+              judge(lambda: app._delivery.record_wakeup_change(
+                  "19", app._delivery.SOURCE_PHONE, entry=entry)) == [])
+    finally:
+        sys.path[:] = saved_path
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        for k, v in saved.items():
+            setattr(app, k, v)
+        app._delivery.OUTCOME_PATH = saved_out
+        try:
+            app.wakeup_store.cancel("19")
+        except Exception:
+            pass

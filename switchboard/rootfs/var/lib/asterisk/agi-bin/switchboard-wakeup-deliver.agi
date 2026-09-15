@@ -10,6 +10,7 @@ unreachable, and nothing here wedges the channel — the wake-up still delivers.
 
 from __future__ import annotations
 
+import os
 import sys
 
 sys.path.insert(0, "/usr/share/switchboard/operator")
@@ -30,6 +31,68 @@ except Exception:  # noqa: BLE001
     ha_reports = None
 
 
+def _in_background(fn) -> None:
+    """Run `fn()` in a grandchild in its own session, and return at once.
+
+    ★ 2026-09-14 — THE SCENE WAS DEAD AIR. The scene pass called Home Assistant
+    and waited for it before the dialplan could play a word: 1.7 to 3.8 s of
+    silence after every pickup that morning, and one pickup hung up 2.0 s into it
+    with the AGI still inside the HTTP call — so the scene the ordering existed to
+    protect may not have fired either.
+
+    Each step below is load-bearing, and each one failing looks like success:
+
+      * DOUBLE FORK. Asterisk SIGHUPs the AGI's own pid when the channel hangs
+        up. The grandchild has a different pid, and the intermediate child exits
+        at once so this process can reap it and return.
+      * setsid(). A new session and process group, so a signal aimed at the
+        channel's group cannot reach the scene either.
+      * stdin AND stdout TO /dev/null. They are the AGI pipes. Asterisk decides an
+        AGI has finished when its stdout reaches EOF, and a grandchild still
+        holding that pipe would keep the call waiting for Home Assistant exactly
+        as before — the fix inert, and the process list looking detached.
+        stderr is KEPT: it is Asterisk's own, not a pipe it waits on, and it is
+        where "scene ... fired" has always reached the add-on log.
+      * os._exit, never return. A child that returned into main() would carry on
+        as a second copy of this script.
+
+    No fork available: the scene fires inline, which is the old behaviour and
+    still correct, only slower.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        pid = os.fork()
+    except OSError:
+        fn()
+        return
+    if pid:
+        try:
+            os.waitpid(pid, 0)      # the intermediate child exits immediately
+        except OSError:
+            pass
+        return
+    try:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        try:
+            if os.fork():
+                os._exit(0)
+        except OSError:
+            pass                    # no second fork: run here; the parent waits
+        try:
+            null = os.open(os.devnull, os.O_RDWR)
+            os.dup2(null, 0)
+            os.dup2(null, 1)
+        except OSError:
+            pass
+        fn()
+    finally:
+        os._exit(0)
+
+
 def main() -> None:
     env = sp.read_env()
     wk = (sp.load_features() or {}).get("wakeup", {}) or {}
@@ -45,6 +108,11 @@ def main() -> None:
     # without touching HA. It runs immediately after the greeting Playback, which
     # is the earliest point at which audio has demonstrably reached the sleeper.
     do_heard = mode in ("", "heard")
+    # "detach", as a second argument, fires the scene in the background and
+    # returns at once — see _in_background(). The dialplan passes it; a bare
+    # "scene" still fires inline, which is what keeps a test that calls main()
+    # in-process from forking the test runner.
+    detach = any(a.strip().lower() == "detach" for a in sys.argv[2:])
 
     # Per-room scene first (the room this wake-up is ringing), then the
     # whole-house fallback.
@@ -73,11 +141,16 @@ def main() -> None:
     if not do_scene:
         scene = None
     if scene and ha_client:
-        try:
-            ha_client.call_service("scene", "turn_on", {"entity_id": scene})
-            sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
-        except Exception as exc:  # noqa: BLE001
-            sp.log("wakeup-deliver", f"scene failed: {exc}")
+        def _fire_scene() -> None:
+            try:
+                ha_client.call_service("scene", "turn_on", {"entity_id": scene})
+                sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
+            except Exception as exc:  # noqa: BLE001
+                sp.log("wakeup-deliver", f"scene failed: {exc}")
+        if detach:
+            _in_background(_fire_scene)
+        else:
+            _fire_scene()
     elif not scene and do_scene:
         sp.log("wakeup-deliver", f"no wake-up scene configured for ext {ext or '?'}")
 

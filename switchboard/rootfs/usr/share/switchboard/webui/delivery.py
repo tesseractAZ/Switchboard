@@ -48,6 +48,30 @@ ANNOUNCE_UNDELIVERED = "announce-undelivered"
 # while the PBX was still coming back up. See ANNOUNCE_SETTLE_SECONDS.
 ANNOUNCE_UNSETTLED = "announce-unsettled"
 
+# ★ WHO CHANGED A WAKE-UP, AND FROM WHERE (2026-09-14).
+#
+# A wake-up's history in this file used to begin at the ring. That morning ext
+# 14's 05:50 wake-up rang twice unanswered and escalated with a critical push,
+# and no ledger anywhere could say whether a person had set it, from which
+# screen, or when. Every setter now writes one of these once its store write has
+# succeeded — see record_wakeup_change().
+WAKEUP_SET = "set"
+WAKEUP_CANCELLED = "cancelled"
+# ...and WHERE, because that decides what the change proves. A set or cancel
+# dialled on the ringing room's own phone means somebody is at that phone and
+# awake. The same change from the dashboard or the console proves nothing about
+# the sleeper: whoever made it may be setting it FOR them. The dial-42 AGI writes
+# this field and the wake-up reconciler reads it, so it is spelled once, here.
+SOURCE_PHONE = "phone"
+SOURCE_WEB = "web"
+SOURCE_CONSOLE = "console"
+# ...and the verdict for a ring the room answered by changing its wake-up instead
+# of picking up. Live the same morning: ext 19 dialled 42 during three rings and
+# set a later time each time, and the reconciler rang it again twice and sent
+# three Do-Not-Disturb-bypassing pushes saying nobody had picked up — to the
+# person who had just spoken a new time into that handset.
+WAKEUP_SNOOZED = "snoozed"
+
 # The longest an announcement may be. Read here rather than in app.py because the
 # reconciler MUST NOT judge an announcement undelivered while it is still
 # playing, and its horizon is derived from this number; a second copy of it over
@@ -208,6 +232,56 @@ def outcomes_since(ext: str, kind: str, outcome: str, since_ts: float) -> bool:
         if rec.get("ext") == ext and rec.get("kind") == kind and rec.get("outcome") == outcome:
             return True
     return False
+
+
+def record_wakeup_change(ext: str, source: str, entry: dict | None = None,
+                         removed: bool | None = None) -> bool:
+    """Record a wake-up SET (pass the `entry` store.set_wakeup returned) or a
+    CANCEL (pass `removed`, what store.cancel returned). Returns record()'s bool.
+
+    One writer for all three setters — dial 42, the dashboard and the console —
+    kept beside room_changed_wakeup(), the reader that acts on it, so the shape
+    of the row cannot drift between the program writing it and the one deciding
+    whether to push a critical alert because of it.
+
+    `removed` is kept on a cancel because a cancel that found nothing is still a
+    person. While a wake-up is ringing the scheduler has ALREADY consumed its
+    entry, so somebody who dials 42 and says "cancel" to stop the ringing removes
+    nothing — and is exactly as awake as somebody who did.
+
+    Deliberately not carried: anything that was said. This file is in /share.
+    """
+    if entry is not None:
+        return record(str(ext), "wakeup", WAKEUP_SET, source=source,
+                      hhmm=entry.get("hhmm"), target_epoch=entry.get("target_epoch"))
+    return record(str(ext), "wakeup", WAKEUP_CANCELLED, source=source,
+                  removed=removed)
+
+
+def room_changed_wakeup(ext: str, since_ts: float):
+    """The newest wake-up set or cancel dialled on `ext`'s OWN phone at or after
+    `since_ts`, or None.
+
+    ★ THE SNOOZE READER (2026-09-14). The store cannot answer this: `set_at` is
+    written the same whoever set the wake-up, and a cancel leaves no entry at
+    all. Only this ledger records where a change came from, and only a change
+    from the room's own phone says anything about whether its sleeper is awake.
+
+    The cut is floored to the whole second because record() stamps whole seconds:
+    a set made in the same second the ring started would otherwise read as older
+    than the ring.
+
+    An unreadable ledger returns None — "no snooze" — and the caller judges the
+    ring exactly as it did before this existed. That is the safe direction: a
+    missed snooze costs somebody awake one unneeded push, a false one silences the
+    alarm for somebody asleep.
+    """
+    for rec in reversed(_read_records(int(since_ts))):
+        if (rec.get("ext") == str(ext) and rec.get("kind") == "wakeup"
+                and rec.get("outcome") in (WAKEUP_SET, WAKEUP_CANCELLED)
+                and rec.get("source") == SOURCE_PHONE):
+            return rec
+    return None
 
 
 def clip_key(sound) -> str:

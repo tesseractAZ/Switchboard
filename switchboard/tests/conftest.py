@@ -24,6 +24,11 @@ import tempfile
 _STATE_DIR = tempfile.mkdtemp(prefix="switchboard-test-state-")
 os.environ.setdefault("SWITCHBOARD_WAKEUPS", os.path.join(_STATE_DIR, "wakeups.json"))
 os.environ.setdefault("SWITCHBOARD_MWI", os.path.join(_STATE_DIR, "mwi.json"))
+# The delivery ledger, for the same reason: every wake-up set and cancel now
+# writes a row to it, so a console or dashboard test that sets one would
+# otherwise try to create /share/switchboard on the test machine.
+os.environ.setdefault("SWITCHBOARD_DELIVERY_OUTCOME",
+                      os.path.join(_STATE_DIR, "delivery-outcomes.jsonl"))
 
 
 # --------------------------------------------------------------------------- #

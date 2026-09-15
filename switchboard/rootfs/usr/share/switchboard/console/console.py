@@ -36,6 +36,10 @@ try:
 except ImportError:  # pragma: no cover
     wakeup_store = None
 try:
+    import delivery  # noqa: E402  (webui/ on sys.path; who changed a wake-up)
+except ImportError:  # pragma: no cover
+    delivery = None
+try:
     import timeparse  # noqa: E402
 except ImportError:  # pragma: no cover
     timeparse = None
@@ -929,6 +933,28 @@ def _label_for(rooms: list, ext: str) -> str:
     return ext
 
 
+def record_wakeup_change(ext: str, log, entry: dict | None = None,
+                         removed: bool | None = None) -> None:
+    """A console wake-up set (`entry`) or cancel (`removed`), in the ledger.
+
+    ★ 2026-09-14. Recorded as `console` so the wake-up reconciler can tell it
+    from the same change dialled on the room's own phone. Only the phone proves
+    the sleeper is awake; an operator setting a wake-up during a ring may well be
+    setting it for somebody still asleep. It also closes the gap that morning
+    exposed: ext 14's 05:50 wake-up escalated and nothing recorded who set it.
+
+    Best-effort: the change has already been made, and its telemetry must not
+    turn a success into a failure on screen.
+    """
+    if delivery is None:
+        return
+    try:
+        delivery.record_wakeup_change(ext, delivery.SOURCE_CONSOLE,
+                                      entry=entry, removed=removed)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not record the wake-up change for {ext}: {exc}")
+
+
 def apply_key(sess: dict, key: str, board: Board, log) -> None:
     """Mutate session state / fire AMI actions for a keypress. Pure-ish: the
     only side effects are the explicit ami.* calls."""
@@ -1054,6 +1080,7 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
                     sess.pop(k, None)
                 flash("Set wake-up failed")
                 return
+            record_wakeup_change(ext, log, entry=entry)
             tgt = entry.get("target_epoch", time.time())
             flash(f"Wake-up for {label} at {fmt12(hhmm)} {wakeup_when(tgt, time.time())}")
             sess["mode"] = "normal"
@@ -1178,6 +1205,7 @@ def apply_key(sess: dict, key: str, board: Board, log) -> None:
             log(f"wakeup cancel {room['ext']} failed: {exc}")
             flash("Wake-up cancel failed")
             return
+        record_wakeup_change(room["ext"], log, removed=bool(cancelled))
         flash(f"Cancelled wake-up for {room['label']}" if cancelled
               else f"{room['label']} has no wake-up set")
         return
