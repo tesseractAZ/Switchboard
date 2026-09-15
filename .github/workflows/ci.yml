@@ -82,30 +82,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      # Read BUILD_FROM from build.yaml rather than hardcoding it: duplicating
-      # the base image with nothing checking the two agree lets CI go on
-      # smoke-building an image the add-on no longer uses.
-      # ARCH goes through the environment, never straight into the script body —
-      # `${{ }}` is expanded before bash sees the line, so interpolating an input
-      # directly into `run:` splices text into the script.
-      - name: Resolve BUILD_FROM from build.yaml
-        id: base
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          img=$(awk -v arch="$ARCH" '
-            /^build_from:/      { inblock = 1; next }
-            inblock && /^[^[:space:]]/ { inblock = 0 }
-            inblock && $1 == arch":" { print $2; found = 1; exit }
-            END { if (!found) exit 1 }
-          ' switchboard/build.yaml) || {
-            echo "::error::no build_from entry for '$ARCH' in switchboard/build.yaml"
-            exit 1
-          }
-          echo "image=$img" >> "$GITHUB_OUTPUT"
-          echo "BUILD_FROM($ARCH) = $img"
-
+      # No base image is passed, on purpose. The Dockerfile's own
+      # SWITCHBOARD_BASE_IMAGE default is the one place it is written, and it is
+      # exactly what the Supervisor builds from on the device. This step used to
+      # read build.yaml so CI could not go on smoke-building a base the add-on no
+      # longer used; the Supervisor deprecated build.yaml (the v0.100.6 update
+      # logged the warning) and it is gone. Passing a base here would reopen that
+      # drift, and tests/test_build_config.py fails if any workflow does.
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ./switchboard
@@ -114,7 +97,6 @@ jobs:
           push: false
           load: false
           build-args: |
-            BUILD_FROM=${{ steps.base.outputs.image }}
             BUILD_ARCH=${{ matrix.arch }}
             BUILD_DATE=ci
             BUILD_DESCRIPTION=Switchboard (smoke)
