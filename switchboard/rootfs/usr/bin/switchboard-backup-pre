@@ -14,7 +14,7 @@ night. A dropped phone line is a worse failure than a torn trailing log line.
 So this does the cheap, safe half instead: flush the page cache for the state
 directory to disk so everything written up to this instant is durable in the
 snapshot. A record still being written when the copy starts can be torn, but
-every reader already tolerates that -- load_callqos_ts() and the ledger readers
+every reader already tolerates that -- load_callqos_legs() and the ledger readers
 skip malformed lines by design -- and the torn record is at most the newest one.
 
 Never fails the backup: any error is logged and swallowed. A backup that runs is

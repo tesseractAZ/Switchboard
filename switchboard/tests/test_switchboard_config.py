@@ -1842,8 +1842,9 @@ def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
 
     It must also keep the tag "announce", which is in callqos's PLAYBACK_TAGS: the
     record is stored honestly but never notifies, never moves last_call, and never
-    confirms a call for devhealth's last_call_mos. A NEW tag would silently opt
-    these legs back into all three."""
+    confirms a call for the cordless's last_mos (devhealth's judge_rtp_records skips
+    a score whose nearest leg is playback). A NEW tag would silently opt these legs
+    back into all three."""
     o = {"rooms": sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"},
                                    {"ext": "19", "name": "Cordless", "secret": "s2"}])}
     e = sbc.render_extensions(o)
