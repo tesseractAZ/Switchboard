@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.102.0
+
+**The alarm cordless no longer reports "degraded" on a single number nothing else agrees with. The health monitor also stops counting the outside line as a phone, and waits for the cordless after a restart.**
+
+**A poor score from the cordless now needs a second opinion.** The cordless scores the sound quality of every call itself. On 14 September it scored three calls 2.2 out of 5: a question to the assistant and two wake-up settings. Each score raised a "cordless degraded" alert. For those same calls the phone system's own records, built from reports the cordless itself sends, showed no lost audio and excellent quality. Similar calls that morning scored 4.4. Why the cordless does this is still not known.
+
+A low score now marks the cordless "degraded" only when the phone system saw a problem on the same call: at least 1% of the audio sent to the handset lost, or its quality measure below the line where the phone system stops calling a call "good". Otherwise the sensor stays "ok" and still shows the score, marked `last_mos_uncorroborated`. Every low score is also saved once, whether it counted or not, to a private file, `/data/state/cordless-mos.jsonl`. That file is readable by root only, limited to 512 KB, and never copied to the shared folder. It keeps the handset's full record, the call it was matched to, and why it did or did not count, so the cause can be found from real data.
+
+**The sensor now says how old the score is.** `sensor.switchboard_cordless_health` gains `last_mos_age_s`, the number of seconds since the scored call ended. Before this, "ok" beside "2.2" could not tell you whether that call was two minutes or two hours old.
+
+**A wake-up delivery next to a real call can no longer borrow its confirmation.** Scores from calls that only play something to the phone (wake-up deliveries, pages, announcements) are ignored. The check that ignored them could still be fooled: a delivery that ended a few seconds before an ordinary call was vouched for by that call. Each score is now matched to the call that ended closest to it, and skipped when that call was a playback.
+
+**The outside line no longer counts as a phone.** If half the phones drop and come back between two health checks, you get a notice. The outside line reports its own connection changes in the same log, and it was being counted as one of the phones. A trunk hiccup together with four phones could therefore have reported half of ten phones down. Only phones count now. The outside line's changes are still recorded in the heartbeat file.
+
+**After a restart, the health check waits for the cordless too.** The fast checks after a restart used to stop as soon as the wired phones were back. On three restarts in a row the next check then came five minutes later. After one of them the cordless showed offline for more than four and a half minutes after it had already reconnected. The fast checks now also wait for any phone that has ever connected, for at most about two minutes. A phone that has never connected does not hold them up. During that wait the summary sensor's `worst_rtt_is_partial` now correctly reads `true` while the cordless is missing.
+
+**Heartbeat rows say how long the next wait is.** Each row in `heartbeat.jsonl` now has `next_sleep_s`. The last fast check after a restart used to say "15 seconds" and then be followed by five minutes of silence, which looked like a missed check. The reporting interval Home Assistant sees has not changed, so the staleness alerts behave as before.
+
+**The cordless's call quality is now judged against its own calls, not a neighbour's.** Each score the cordless gives a call is matched against the phone system's record of that same call. The match used to go by time alone. So if another phone's call ended a second or two closer to the cordless's, that other phone's record decided whether the cordless's poor score counted. It could clear a real problem or back up a false one.
+
+The cordless's own call record is now preferred unless another phone's call ended more than 5 seconds closer. A call made to the cordless is recorded under the caller's phone, so its figures never count for or against the cordless. Wake-up deliveries, pages and announcements are still never counted. Over the call history from July to September no two phones' calls were close enough for this to have mattered. The private capture file now also records whether the score was matched to the cordless's own call.
+
 ## 0.101.0
 
 **Snoozing a ringing wake-up from its own phone no longer brings a second ring and a critical alert, even when the snooze is still being dialled. The wake-up call no longer opens with seconds of silence. And the record now says who set each wake-up.**
