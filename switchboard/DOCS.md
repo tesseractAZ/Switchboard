@@ -1226,8 +1226,8 @@ place, and it is not one of the phones the threshold is measured against. Its
 changes still appear in `heartbeat.jsonl`.
 
 **After a restart** the poller checks every 15 s instead of every
-`link_health_interval` until every phone that has ever registered is back — the
-wired gateway ports **and** the cordless — or eight checks (about two minutes)
+`link_health_interval` until every gateway port, and every other phone that has
+ever registered (in practice the cordless), is back — or eight checks (about two minutes)
 have passed, whichever is first. An extension that has never registered (a
 configured softphone that is never used) does not hold it open. Before this, the
 fast checks stopped as soon as the wired ports were back. Three restarts in a row
@@ -1330,13 +1330,20 @@ recovery notice when they return to normal — again under that device's shared
 `notification_id`, so the recovery replaces the alert rather than removing it.
 
 **When a poor call counts.** The handset scores every call itself. Each score is
-matched to the call-quality ledger leg that hung up **nearest** to it, within 90 s.
-The score is skipped when there is no such leg, or when that leg is a wake-up
+matched to a call-quality ledger leg that hung up within 90 s of it: the
+**nearest** one, except that the cordless's own leg (`cordless_ext`) is preferred
+unless another phone's leg hung up more than 5 s nearer. On the three occasions
+measured, the handset's clock and the phone system's put the same hangup within
+2 s of each other. The score is skipped when there is no such leg,
+or when the nearest leg, or the cordless's own leg preferred over it, is a wake-up
 delivery, page or announcement: the handset has been seen to score those playback
-legs between 2.2 and 2.9. A score below `mos_min` (3.4) degrades the sensor only when the same leg
-agrees in the ledger, in the direction the handset hears. That means at least 1 %
-transmit loss, or a transmit MES below 78. The ledger reads those from the
-handset's own receiver reports.
+legs between 2.2 and 2.9.
+
+A score below `mos_min` (3.4) degrades the sensor only when the same leg agrees in
+the ledger, in the direction the handset hears. That means at least 1 % transmit
+loss, or a transmit MES below 78. The ledger reads those from the handset's own
+receiver reports. A call made **to** the cordless is logged under the caller's
+extension, so its figures describe the caller's phone and never count either way.
 
 Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and
 `last_mos_uncorroborated: true`), but the state stays `ok`. On 2026-09-14 the
@@ -1346,16 +1353,17 @@ raised three false `degraded` alerts. Why it does that is not yet known.
 To find out, every score below `mos_min` is captured once, whether it counted or
 not, to `/data/state/cordless-mos.jsonl`. That file is private to the add-on,
 readable by root only, capped at 512 KB, and never copied to `/share`. Each row
-carries the handset's whole RTP record, the ledger leg it matched, the gap
-between the two clocks, and a `verdict`:
+carries the handset's whole RTP record, the ledger leg it matched, `match_rule`
+(`own-ext` for the cordless's own leg; `nearest` for another phone's leg, or when
+`cordless_ext` is not set), the gap between the two clocks, and a `verdict`:
 
 | `verdict` | Meaning |
 |-----------|---------|
 | `corroborated` | The ledger leg was impaired too; the score counts toward `degraded`. |
-| `playback` | The nearest leg was a wake-up delivery, page or announcement; skipped. |
+| `playback` | The nearest leg, or the cordless's own leg preferred over it, was a wake-up delivery, page or announcement; skipped. |
 | `uncorroborated` | The ledger measured that direction clean; published, does not degrade. |
 | `unmatched` | No ledger leg within 90 s; skipped. |
-| `unmeasured` | The ledger leg has no usable transmit figure; published, does not degrade. |
+| `unmeasured` | No usable transmit figure for the cordless: Asterisk could not score that direction, or the leg belongs to another phone (such as a call made to the cordless). Published, does not degrade. |
 
 ```
 sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl

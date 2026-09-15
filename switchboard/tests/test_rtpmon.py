@@ -1775,3 +1775,9 @@ def test_a_trunk_drop_cannot_complete_a_phone_mass_drop() -> None:
     notes6, _ = _drive(five + [{"ext": "trunk", "state": "Unreachable"}])
     check("mass-drop: the card names the phones, not the outside line",
           len(notes6) == 1 and "trunk" not in notes6[0][0])
+    # The filter is the PHONES, not the wired ports: the cordless is one of the
+    # ten the threshold counts, so four ports and the cordless are half.
+    with_cordless = [{"ext": e, "state": "Unreachable"} for e in ("11", "12", "13", "14", "19")]
+    notes7, _ = _drive(with_cordless)
+    check("mass-drop: four wired ports and the cordless are half of ten phones",
+          len(notes7) == 1 and "(exts 11, 12, 13, 14, 19)" in notes7[0][0])

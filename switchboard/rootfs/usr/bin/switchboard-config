@@ -917,8 +917,9 @@ def render_announce_play_context() -> list[str]:
     Originating into this thin context instead yields a hangup cause, a billsec
     and a QoS record, at the cost of one dialplan hop. The tag stays "announce"
     (NOT a new one) so it lands in callqos's PLAYBACK_TAGS: recorded honestly,
-    but it never notifies, never moves sensor.switchboard_last_call, and — via
-    devhealth's load_callqos_ts filter — never confirms a call for last_call_mos.
+    but it never notifies, never moves sensor.switchboard_last_call, and never
+    confirms a call for the cordless's last_mos — devhealth's judge_rtp_records
+    skips a handset score whose nearest ledger leg is a playback tag.
 
     SW_ANN_FILE is charset-validated in ami.announce_to_ext before it is sent."""
     return [

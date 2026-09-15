@@ -165,12 +165,14 @@ class _WP:
             return None
 
 
-def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
+def probe_cordless(ip: str, password: str, cert_pin: str = "",
+                   cordless_ext: str = "") -> dict:
     """Return a raw device-health snapshot for the WP826, best-effort. Keys:
     reachable(bool: TCP:443 open), api_ok(bool: logged in + read), and — when api_ok —
     battery_pct/charging/battery_health, wifi_connected/wifi_signal/wifi_ssid,
     last_mos/last_mos_age_s/last_mos_ledger_tx, and rtp_judged (every scored
-    record, see judge_rtp_records)."""
+    record, see judge_rtp_records). `cordless_ext` lets the matcher tell the
+    handset's own ledger legs from other phones'."""
     out = {"reachable": _tcp_open(ip, 443), "api_ok": False}
     if not password:
         return out
@@ -191,7 +193,8 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
         out["wifi_ssid"] = (wifi.get("connection") or {}).get("ssid")
     # `or {}` alone is not enough: it catches None/"" but NOT a non-empty
     # string, and the handset does sometimes answer with rtpStatus as a plain
-    # string. That reached last_call_mos().values() and raised
+    # string. That reached last_call_mos().values() (the reader
+    # judge_rtp_records has since replaced) and raised
     # "'str' object has no attribute 'values'", aborting the WHOLE cordless poll
     # cycle (seen live 2026-08-03) — so battery/Wi-Fi went unpublished until the
     # next cycle. Accept only a mapping.
@@ -200,8 +203,9 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
     # Ledger-gated: an RTP record may drive health only when its NEAREST ledger
     # leg is a real dialplan call — HA "announce" playback legs leave low-MOS
     # records that are not calls — and even then a low score counts only if that
-    # leg's own transmit figures agree (see judge_rtp_records).
-    judged = judge_rtp_records(rtp, load_callqos_legs())
+    # leg's own transmit figures agree (see judge_rtp_records). The extension
+    # decides whose leg that is: another phone's figures never judge this one.
+    judged = judge_rtp_records(rtp, load_callqos_legs(), cordless_ext)
     out["rtp_judged"] = judged           # every scored record, for capture_low_mos
     last = newest_call(judged, now=time.time())
     if last is not None:
@@ -217,6 +221,15 @@ def probe_cordless(ip: str, password: str, cert_pin: str = "") -> dict:
 # (handset clock) describe the same hangup; 90 s absorbs their skew plus the
 # ledger's write latency without letting a neighbouring call match instead.
 CALLQOS_MATCH_WINDOW_S = 90
+
+# How far apart the two clocks put the SAME hangup, in practice. The three
+# 2026-09-14 'degraded' notices, read as notice time minus their "Ns ago", place
+# the handset's stopTimeSecond at most 0.7, 0.8 and 1.8 s after the ledger `ts`
+# of its leg (both clocks count whole seconds, and the notice prints after the
+# probe). Two legs whose distances from one record differ by no more than this
+# cannot be told apart by time, so the cordless's OWN leg wins (judge_rtp_records).
+# 5 s is the largest measured offset plus rounding on both clocks plus margin.
+CALLQOS_CLOCK_SLOP_S = 5
 
 
 # Legs the PBX originates to play something AT a phone. Mirrors PLAYBACK_TAGS in
@@ -289,13 +302,15 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 # every low score (capture_low_mos) so the mechanism can be studied instead of
 # guessed.
 #
-# The thresholds are callqos's own lines, checked against the ledger. Over the
-# 190 non-playback legs from 2026-07-18 to 2026-09-14, the lowest credible
-# mes_tx is 83.4 (78.5 across all 267 credible legs, playback included), and
-# exactly ONE leg reached 1 % transmit loss (1.339 %, a wake-up leg on
-# 2026-08-25). So:
-#   - loss >= 1.0 % is where G.711 loss stops being inaudible (callqos.classify),
-#     and it would have corroborated that one leg and no other;
+# The thresholds come from callqos, checked against the ledger. MES 78 is
+# classify()'s floor for "good". 1.0 % is NOT one of classify()'s cut-offs (it
+# labels at 0.5, 1.5 and 4 % and alerts above 3 %); it is the bound classify()'s
+# own docstring gives for loss that is inaudible on G.711. Over the 190 non-playback
+# legs from 2026-07-18 to 2026-09-14, the lowest credible mes_tx is 83.4 (78.5
+# across all 267 credible legs, playback included), and exactly ONE leg reached
+# 1 % transmit loss (1.339 %, a wake-up leg on 2026-08-25). So:
+#   - loss >= 1.0 % is where G.711 loss stops being inaudible, and it would have
+#     corroborated that one leg and no other;
 #   - mes < 78 is below callqos's floor for "good" and below every credible
 #     transmit MES the ledger has ever recorded.
 # A handset score under mos_min (3.4, roughly MES 68) caused by the network or
@@ -331,17 +346,28 @@ def ledger_tx_judgement(leg: dict | None) -> str:
     return "impaired" if mes < CORROBORATE_MES_TX else "clean"
 
 
-def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None) -> list[dict]:
+def _nearest_leg(ts: int, legs: list[dict]) -> dict:
+    """The leg that hung up nearest `ts`. The key is (distance, is-a-call):
+    False sorts first, so an exact tie goes to the playback leg."""
+    return min(legs, key=lambda lg: (abs(ts - lg["ts"]), lg["tag"] not in PLAYBACK_TAGS))
+
+
+def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None,
+                      cordless_ext: str = "") -> list[dict]:
     """Every retained handset RTP record that carries a real MOS, each matched to
     the ledger leg it describes. One dict per record:
 
       key, record   the rtpStatus entry as the handset sent it
       mos, stop_ts  its moscq and stopTimeSecond
-      match         'call' (nearest leg is a dialplan call), 'playback'
-                    (nearest leg is a playback leg: skipped), or 'unmatched'
-                    (no leg within CALLQOS_MATCH_WINDOW_S: skipped)
-      leg           that nearest leg (LEG_FIELDS), or None
-      ledger_tx     ledger_tx_judgement(leg)
+      match         'call' (the matched leg is a dialplan call), 'playback'
+                    (the nearest leg, or the cordless's own leg preferred over
+                    it, is a playback leg: skipped), or 'unmatched' (no leg
+                    within CALLQOS_MATCH_WINDOW_S: skipped)
+      leg           the matched leg (LEG_FIELDS), or None
+      match_rule    'own-ext' (the leg is the cordless's own), 'nearest' (another
+                    extension's leg, or no cordless_ext to tell), None (no leg)
+      ledger_tx     ledger_tx_judgement(leg); 'unmeasured' for another
+                    extension's leg
 
     HA "announce" playback to the handset leaves phone-side RTP records with low
     moscq (2.2-2.9 observed) — three false 'degraded' episodes fired
@@ -352,9 +378,32 @@ def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None) -> list[dict]
     SKIPPED: a false 'degraded' costs alert trust, and genuinely poor real calls
     already notify separately via the callqos path.
 
+    ★ WHOSE LEG IT IS (2026-09-14 review). A leg's `ext` is the channel that ran
+    the context: the cordless for everything it dials and for the wake-up
+    deliveries, announcements and HA pages played AT it, but the CALLER for a
+    call made to it, and the DIALLING phone for a page dialled from a handset
+    (that one Page()s every room from the dialler's own channel). Matching on
+    time alone let another phone's leg that hung up a second nearer judge the
+    cordless's score with THAT phone's transmit figures — clearing a real
+    problem or corroborating a phantom one.
+    So, when `cordless_ext` is known:
+      - the cordless's own leg is preferred unless another leg hung up more than
+        CALLQOS_CLOCK_SLOP_S nearer. Beyond that the own leg is an earlier call,
+        and the record belongs to the nearer one (a call made to the cordless);
+      - a record is still skipped when the NEAREST leg of any extension is
+        playback — a dialled page is logged under the dialler, so preferring the
+        own leg must not reopen the playback gate — and when the own leg it
+        prefers is;
+      - another extension's leg never judges the score: its `*_tx` figures are
+        about a different phone, so it reads 'unmeasured' and cannot degrade.
+    Not seen live: no leg of another extension hung up within 90 s of a cordless
+    leg anywhere in the 2026-07-18..09-14 ledger. `cordless_ext=""` matches on
+    time alone and judges whatever leg that finds, as before.
+
     `ledger=None` means no gating (every record is a 'call' with no leg); `[]`
     means the ledger was readable and empty, so nothing matches."""
     out: list[dict] = []
+    ext = str(cordless_ext or "").strip()
     # Defence in depth beside the caller's isinstance check: the handset can
     # answer with rtpStatus as a plain STRING, and `or {}` does not catch a
     # non-empty one. Reaching .values() with a str raised
@@ -385,12 +434,24 @@ def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None) -> list[dict]
             if not near:
                 match = "unmatched"
             else:
-                # (distance, is-a-call): False sorts first, so a tie is playback.
-                leg = min(near, key=lambda lg: (abs(ts - lg["ts"]),
-                                                lg["tag"] not in PLAYBACK_TAGS))
+                leg = _nearest_leg(ts, near)
+                own = [lg for lg in near
+                       if ext and str(lg.get("ext") or "").strip() == ext
+                       and abs(ts - lg["ts"]) <= abs(ts - leg["ts"]) + CALLQOS_CLOCK_SLOP_S]
+                # A nearest playback leg skips the record whoever it was logged under.
+                if leg["tag"] not in PLAYBACK_TAGS and own:
+                    leg = _nearest_leg(ts, own)
                 match = "playback" if leg["tag"] in PLAYBACK_TAGS else "call"
+        rule, tx = None, ledger_tx_judgement(leg)
+        if leg is not None:
+            if ext and str(leg.get("ext") or "").strip() == ext:
+                rule = "own-ext"
+            else:
+                rule = "nearest"
+                if ext:
+                    tx = "unmeasured"     # another phone's transmit figures, not this one's
         out.append({"key": str(key), "record": rec, "mos": m, "stop_ts": ts,
-                    "match": match, "leg": leg, "ledger_tx": ledger_tx_judgement(leg)})
+                    "match": match, "leg": leg, "match_rule": rule, "ledger_tx": tx})
     return out
 
 
@@ -417,7 +478,8 @@ def mos_verdict(judged: dict) -> str:
     """One word for how a scored record was treated. 'unmatched' and 'playback'
     were skipped outright. A 'call' is 'corroborated' (its leg's transmit side was
     impaired: a low score counts toward degraded), 'uncorroborated' (the ledger
-    measured that direction clean) or 'unmeasured' (it has no credible figure)."""
+    measured that direction clean) or 'unmeasured' (no credible figure for this
+    handset: Asterisk could not score it, or the leg is another phone's)."""
     if judged.get("match") != "call":
         return str(judged.get("match") or "unmatched")
     return {"impaired": "corroborated",
@@ -518,6 +580,8 @@ def capture_low_mos(judged: list[dict], mos_min: float, now: float | None = None
             "record_key": j.get("key"),
             "record": {str(k)[:64]: _clip(v) for k, v in list(rec.items())[:64]},
             "leg": {k: leg.get(k) for k in LEG_FIELDS} if leg else None,
+            # Why THAT leg: the cordless's own, or the nearest of any extension.
+            "match_rule": j.get("match_rule"),
             # handset stop minus ledger hangup: the two clocks' disagreement.
             "leg_offset_s": round(stop - leg["ts"], 1) if leg else None,
             "dedupe": key,
@@ -995,7 +1059,7 @@ def run() -> None:
             last_ip = probe_ip
         if probe_ip:
             try:
-                snap = probe_cordless(probe_ip, cordless_pw, cordless_cert_pin)
+                snap = probe_cordless(probe_ip, cordless_pw, cordless_cert_pin, cordless_ext)
                 level, reasons = classify_cordless(snap, th)
                 _publish_cordless(level, reasons, snap, th)
                 # Every low handset score goes on the record, judged or skipped.

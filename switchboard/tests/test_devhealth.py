@@ -6,8 +6,9 @@ Pins classify_cordless (the ok/degraded/critical rules that decide whether the a
 cordless is healthy), classify_gateway (deriving GXW health from which ports are down),
 health_transition (the alert state machine), and judge_rtp_records / newest_call (newest
 ledger-matched call MOS, recency-gated and corroborated against the ledger).
-The WP826 HTTP client + the poll loop are I/O and are not exercised here (mirrors how
-test_rtpmon.py leaves the AMI socket untested).
+The poll loop itself, run(), is driven against a fake WP826 API and a real ledger
+file (see _drive_cordless); the WP826's HTTPS socket is exercised only as far as the
+certificate-pin check (mirrors how test_rtpmon.py leaves the AMI socket untested).
 """
 import json
 import os
@@ -727,15 +728,20 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
         {"reachable": True, "api_ok": True, "battery_pct": 80, "wifi_connected": True,
          "wifi_signal": 4, "last_mos": 2.2, "last_mos_ledger_tx": "impaired", "last_mos_age_s": 1000},
     ]
-    calls = {"n": 0}
+    calls = {"n": 0, "sleeps": 0}
 
-    def _probe(ip, pw, pin):
+    def _probe(ip, pw, pin, cordless_ext=""):
         i = min(calls["n"], len(snaps) - 1)
         calls["n"] += 1
         return dict(snaps[i])
 
     def _sleep(_n):
-        if calls["n"] >= len(snaps):
+        # The sleep cap is what turns a broken stub into a FAILURE rather than a
+        # hang: run() catches every exception from the probe, so a stub whose
+        # signature no longer matches the call site never counts a cycle, and a
+        # stop keyed only on probe calls never came (it hung the suite once).
+        calls["sleeps"] += 1
+        if calls["n"] >= len(snaps) or calls["sleeps"] > 20:
             raise _Stop()
 
     saved = {k: getattr(dh, k) for k in
@@ -848,7 +854,7 @@ def _handset(stop, mos):
             "packetLost": "0", "jitter": "3", "codec": "PCMU"}
 
 
-def _drive_cordless(tmp_path, legs, records, cycles=3):
+def _drive_cordless(tmp_path, legs, records, cycles=3, cordless_ext=None):
     """Run the REAL poll loop -- probe_cordless, the ledger read, the judgement,
     classify, publish, capture and the alert state machine -- against a fake
     handset API. Returns (cordless publishes, notifications, capture rows, path)."""
@@ -897,6 +903,8 @@ def _drive_cordless(tmp_path, legs, records, cycles=3):
         os.environ.update({"CORDLESS_IP": "192.0.2.1", "CORDLESS_PASSWORD": "x",
                            "DEVICE_HEALTH_INTERVAL": "30", "SWITCHBOARD_CALLQOS": str(led),
                            "SWITCHBOARD_CORDLESS_MOS_LOG": str(cap)})
+        if cordless_ext is not None:
+            os.environ["CORDLESS_EXT"] = cordless_ext
         dh._capture_seen.update(path=None, keys=set())
         dh._WP = _WP
         dh._tcp_open = lambda ip, port, timeout=3.0: True
@@ -1036,3 +1044,98 @@ def test_the_capture_is_private_capped_and_does_not_duplicate_across_a_restart(t
     finally:
         dh._capture_seen.clear()
         dh._capture_seen.update(saved)
+
+
+def test_an_unmeasured_leg_publishes_the_low_score_as_uncorroborated(tmp_path) -> None:
+    """The 13:00:31Z operator leg's shape: Asterisk wrote mes_tx 0.0 because no
+    RTCP round scored that direction. That is no support for a low score and no
+    evidence the leg was clean either, and the flag must still say so."""
+    end = int(time.time()) - 100
+    cordless, notes, rows, _ = _drive_cordless(
+        tmp_path, [_live_leg(end, tag="operator", mes_tx=0.0, mes_rx=0.0)],
+        {"record0": _handset(end + 1, "2.2")})
+    check("unmeasured: three cycles published", len(cordless) == 3)
+    check("unmeasured: the state stays ok", all(st == "ok" for st, _ in cordless))
+    check("unmeasured: no degraded alert", not any("degraded" in t for t, _ in notes))
+    attrs = cordless[-1][1] if cordless else {}
+    check("unmeasured: the score is shown", attrs.get("last_mos") == 2.2)
+    check("unmeasured: and flagged uncorroborated", attrs.get("last_mos_uncorroborated") is True)
+    check("unmeasured: captured with its verdict", [r["verdict"] for r in rows] == ["unmeasured"])
+
+
+# ── Whose leg: a neighbour's figures must not judge the cordless's score ─────
+#
+# A ledger leg's `ext` is the channel that ran the context: the cordless for its
+# own calls and for the playbacks aimed at it, the CALLER for a call made to it,
+# the dialling phone for a page dialled from a handset. Matching on time alone
+# let a wired phone's leg that hung
+# up a second nearer decide the cordless's score with that phone's figures.
+
+def test_the_cordless_is_judged_by_its_own_leg_not_a_neighbours() -> None:
+    assert dh.CALLQOS_CLOCK_SLOP_S == 5          # a literal: see the slop edge below
+    T = 50000
+
+    def rec(stop, mos="2.2"):
+        return {"r": {"moscq": mos, "stopTimeSecond": str(stop)}}
+    own_bad = {"ts": float(T), "tag": "wakeup", "ext": "19", "loss_tx_pct": 2.5, "mes_tx": 85.0}
+    wired_clean = {"ts": float(T + 3), "tag": "operator", "ext": "12",
+                   "loss_tx_pct": 0.0, "mes_tx": 88.0}
+    ledger = [own_bad, wired_clean]
+    # Precondition: time alone picks the wired phone's leg, one second nearer.
+    j0 = dh.judge_rtp_records(rec(T + 2), ledger)[0]
+    assert (j0["leg"]["ext"], j0["ledger_tx"], j0["match_rule"]) == ("12", "clean", "nearest"), j0
+    j = dh.judge_rtp_records(rec(T + 2), ledger, "19")[0]
+    assert (j["match"], j["leg"]["ext"], j["match_rule"], j["ledger_tx"]) == (
+        "call", "19", "own-ext", "impaired"), j
+    assert dh.mos_verdict(j) == "corroborated"
+    # ...and the reverse: a neighbour's loss cannot corroborate a clean own leg.
+    j = dh.judge_rtp_records(rec(T + 2), [dict(own_bad, loss_tx_pct=0.0, mes_tx=88.0),
+                                          dict(wired_clean, loss_tx_pct=4.0)], "19")[0]
+    assert (j["leg"]["ext"], j["ledger_tx"]) == ("19", "clean"), j
+
+    # The slop edge. Record at T+10, wired leg at T+10: an own leg 5 s away still
+    # wins; 6 s away it is an earlier call, and the record is the nearer one's.
+    edge = [dict(own_bad, ts=float(T + 5)), dict(wired_clean, ts=float(T + 10))]
+    assert dh.judge_rtp_records(rec(T + 10), edge, "19")[0]["leg"]["ext"] == "19"
+    past = [dict(own_bad, ts=float(T + 4)), dict(wired_clean, ts=float(T + 10))]
+    jp = dh.judge_rtp_records(rec(T + 10), past, "19")[0]
+    # A call made TO the cordless is logged under the caller.
+    assert (jp["match"], jp["leg"]["ext"], jp["match_rule"]) == ("call", "12", "nearest"), jp
+    # ...and the caller's transmit figures say nothing about what the cordless heard.
+    assert jp["ledger_tx"] == "unmeasured" and dh.mos_verdict(jp) == "unmeasured", jp
+    assert dh.judge_rtp_records(rec(T + 10), past)[0]["ledger_tx"] == "clean"   # time alone
+
+    # Preferring the own leg must not reopen the playback gate. A page dialled
+    # from a handset is logged under the DIALLER, so a nearest playback leg of any
+    # extension still skips...
+    page = [dict(own_bad, loss_tx_pct=0.0, mes_tx=88.0),
+            {"ts": float(T + 3), "tag": "page", "ext": "12", "mes_tx": 88.0}]
+    jg = dh.judge_rtp_records(rec(T + 3), page, "19")[0]
+    assert (jg["match"], jg["leg"]["tag"]) == ("playback", "page"), jg
+    # ...and an own playback leg within the slop skips even beside a nearer call.
+    deliver = [{"ts": float(T), "tag": "wakeup-deliver", "ext": "19", "mes_tx": 88.1},
+               {"ts": float(T + 3), "tag": "operator", "ext": "12", "mes_tx": 88.0}]
+    jd = dh.judge_rtp_records(rec(T + 2), deliver, "19")[0]
+    assert (jd["match"], jd["leg"]["tag"]) == ("playback", "wakeup-deliver"), jd
+    assert dh.judge_rtp_records(rec(T + 2), deliver)[0]["match"] == "call"   # time alone let it in
+
+    # No leg, no rule. A padded configured ext and a numeric ledger ext still match.
+    assert dh.judge_rtp_records(rec(T + 2), None, "19")[0]["match_rule"] is None
+    jn = dh.judge_rtp_records(rec(T + 2), [dict(own_bad, ext=19), wired_clean], " 19 ")[0]
+    assert (jn["leg"]["ext"], jn["match_rule"]) == (19, "own-ext"), jn
+
+
+def test_the_loop_judges_the_cordless_by_its_own_leg(tmp_path) -> None:
+    """Through run(): CORDLESS_EXT has to reach the matcher. A wired phone's clean
+    leg one second nearer must not clear the cordless's own impaired leg."""
+    end = int(time.time()) - 100
+    legs = [_live_leg(end, loss_tx_pct=2.5),                     # the cordless's own leg, impaired
+            _live_leg(end + 3, tag="operator", ext="12")]        # a wired phone's leg, clean
+    records = {"record0": _handset(end + 2, "2.2")}
+    cordless, notes, rows, _ = _drive_cordless(tmp_path, legs, records, cordless_ext="19")
+    check("own leg: the cordless's impaired leg corroborates its score",
+          any(st == "degraded" for st, _ in cordless))
+    check("own leg: the degraded alert fired", any("degraded" in t for t, _ in notes))
+    check("own leg: the capture names the rule and the leg",
+          [(r["verdict"], r["match_rule"], r["leg"]["ext"]) for r in rows]
+          == [("corroborated", "own-ext", "19")])
