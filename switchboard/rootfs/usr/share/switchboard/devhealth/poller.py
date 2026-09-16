@@ -346,6 +346,38 @@ def ledger_tx_judgement(leg: dict | None) -> str:
     return "impaired" if mes < CORROBORATE_MES_TX else "clean"
 
 
+def leg_carries_no_measurement(leg: dict | None) -> bool:
+    """True for a ledger leg that CANNOT corroborate anything, ever.
+
+    ★ A MISDIAL MUST NOT GET TO JUDGE THE CORDLESS (2026-09-15). A leg that was
+    never connected still lands in the ledger, and the matcher below was happy to
+    pick one as the nearest leg to a handset RTP record. When it did, the verdict
+    read 'unmeasured' and a genuinely degraded score was quietly dropped —
+    suppressed by a call that never happened.
+
+    Live shape: ext 19 dialled an invalid room three times on 2026-09-15
+    (12:50:54Z, 13:11:49Z, 13:11:52Z). Each was written `quality: "unreachable"`,
+    `hcause: 34`, `billsec: 0`, `mes_tx: null` — Congestion() rejected the dial,
+    no channel was ever created, no RTP flowed. There is nothing in such a record
+    for `ledger_tx_judgement` to read and there never will be.
+
+    The test is DELIBERATELY NARROW: the leg must both be unable to have carried
+    audio (zero duration, or `unreachable`) AND have no transmit figure. An
+    ordinary answered call that Asterisk simply could not score — the 13:00:31Z
+    operator leg, `mes_tx: 0.0` on 18 seconds of real audio — is a leg, is still
+    matched, and still reads 'unmeasured'. That is a measurement that came back
+    empty, which is a different fact from a call that never took place, and the
+    matcher must not conflate the two."""
+    if not isinstance(leg, dict):
+        return True
+    dur = _leg_num(leg.get("dur"))
+    zero_length = dur is not None and dur <= 0
+    unreachable = str(leg.get("quality") or "").strip() == "unreachable"
+    if not (zero_length or unreachable):
+        return False
+    return ledger_tx_judgement(leg) == "unmeasured"
+
+
 def _nearest_leg(ts: int, legs: list[dict]) -> dict:
     """The leg that hung up nearest `ts`. The key is (distance, is-a-call):
     False sorts first, so an exact tie goes to the playback leg."""
@@ -400,6 +432,13 @@ def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None,
     leg anywhere in the 2026-07-18..09-14 ledger. `cordless_ext=""` matches on
     time alone and judges whatever leg that finds, as before.
 
+    ★ AND A LEG THAT NEVER CONNECTED IS NOT A CANDIDATE (2026-09-15). A
+    zero-duration misdial is in the ledger like anything else, and being nearest
+    used to be enough to make it the judge — after which the verdict read
+    'unmeasured' and a real degrade was suppressed by a call that never happened.
+    Such legs are filtered out before the nearest is chosen, unless every
+    candidate is one. See leg_carries_no_measurement().
+
     `ledger=None` means no gating (every record is a 'call' with no leg); `[]`
     means the ledger was readable and empty, so nothing matches."""
     out: list[dict] = []
@@ -434,6 +473,19 @@ def judge_rtp_records(rtp_status: dict, ledger: list[dict] | None,
             if not near:
                 match = "unmatched"
             else:
+                # A leg that carried no call cannot judge one. Drop the misdials
+                # (see leg_carries_no_measurement) BEFORE anything picks a
+                # nearest, so they cannot win on distance and cannot come back
+                # through the own-extension preference below — the live misdials
+                # were the cordless's OWN dials, so filtering only at the end
+                # would have left them in. Playback legs are never dropped here,
+                # whatever they carry: their job is to SKIP the record, and this
+                # filter must not reopen that gate. When every candidate is a
+                # misdial there is nothing better to pick, so they are all kept
+                # and the record reads 'unmeasured' exactly as before.
+                usable = [lg for lg in near if lg["tag"] in PLAYBACK_TAGS
+                          or not leg_carries_no_measurement(lg)]
+                near = usable or near
                 leg = _nearest_leg(ts, near)
                 own = [lg for lg in near
                        if ext and str(lg.get("ext") or "").strip() == ext
