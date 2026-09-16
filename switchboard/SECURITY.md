@@ -166,7 +166,9 @@ control.
   `verbose(2)` would stop short of the verbosity-3 dialplan trace. It does not —
   Asterisk's per-channel level does not filter those lines. On a running system
   the file held 2,043 `pbx.c: Executing` lines over eight days and 16 lines
-  carrying a complete outside number. So the private copy carries the whole
+  carrying a complete outside number when that was first counted; counted again
+  on 2026-09-15 the same file held 2,385 and 18. The figures move because the
+  file rolls — the shape does not. So the private copy carries the whole
   call flow; it is kept because the link-health poller reads the reachability
   lines from it. The file is trimmed at boot to its newest half whenever it
   passes 8 MB. The `/share` copy is capped the same way at 32 MB — and until

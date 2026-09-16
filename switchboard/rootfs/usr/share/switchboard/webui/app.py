@@ -71,6 +71,7 @@ from ami import (  # noqa: E402
     codecs_for_channels,
     connect_extensions,
     device_busy,
+    device_state_unjudged,
     device_unreachable,
     get_device_state,
     get_endpoints,
@@ -542,6 +543,15 @@ ANNOUNCE_BYTES_PER_SECOND = 16000
 # alarm aimed squarely at the LONGEST announcements, the ones most worth getting
 # right. The literal below is the dev-box fallback for when the module is absent.
 ANNOUNCE_MAX_SECONDS = float(getattr(_delivery, "ANNOUNCE_MAX_SECONDS", 90.0))
+# ...and the two outcome names this file writes that another program has to be
+# able to spell: taken from `delivery` for the same reason the cap is. The
+# fallbacks are INERT — with the module absent _record_delivery() writes nothing
+# at all, so no ledger can ever receive them; they exist only so this module
+# still imports on a dev box without it.
+ANNOUNCE_ORIGINATE_FAILED = getattr(_delivery, "ANNOUNCE_ORIGINATE_FAILED",
+                                    "announce-originate-failed")
+ANNOUNCE_GUARD_UNJUDGED = getattr(_delivery, "ANNOUNCE_GUARD_UNJUDGED",
+                                  "announce-guard-unjudged")
 ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
 # ext -> (digest, monotonic seconds). Process-local by design: a restart should
 # not inherit a suppression decision made before it.
@@ -788,15 +798,43 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         _record_delivery(ext, "announce", "unreachable", device_state=state)
         return JSONResponse({"ok": False, "skipped": "unreachable",
                              "device_state": state}, status_code=503)
+    # ★ AND WHEN THE PRE-FLIGHT COULD NOT ANSWER AT ALL (2026-09-15).
+    #
+    # Both guards above fail open by design: get_device_state() returns "" on any
+    # failure to read, and refusing to announce because we could not ask would
+    # silence an alarm. That direction is kept. What is NOT kept is doing it in
+    # silence — live at 01:42:12Z, 8.4 s after an add-on restart, AMI was not
+    # answering yet, the unreachable guard written for exactly that window saw ""
+    # and passed, and the Originate went to an endpoint that had not
+    # re-registered. Asterisk logged `Could not create dialog to invalid URI
+    # '19'` and that ERROR line was the whole trace: the ledger showed a queued
+    # announcement and, three minutes later, `announce-unsettled`, with nothing
+    # to say the check had been SKIPPED rather than passed. Third occurrence of
+    # that shape (see delivery.py's ANNOUNCE_SETTLE_SECONDS for the 09-11 one).
+    #
+    # Carries the clip, so this row sits in the same join as every other row
+    # about this announcement. No return: the announcement goes out exactly as
+    # it did before.
+    if device_state_unjudged(state):
+        print(f"[switchboard-webui] announce {ext}: device state unreadable "
+              f"({state!r}) — the reachability guard could not judge; "
+              "announcing anyway", flush=True)
+        _record_delivery(ext, "announce", ANNOUNCE_GUARD_UNJUDGED,
+                         sound=os.path.basename(sound),
+                         device_state=state or None, reason="state-unreadable")
     try:
         ok = await asyncio.to_thread(announce_to_ext, ext, sound)
     except (AMIError, OSError) as exc:
         print(f"[switchboard-webui] announce originate {ext} failed: {exc}", flush=True)
-        _record_delivery(ext, "announce", "originate-error", detail=str(exc)[:120])
+        _record_delivery(ext, "announce", ANNOUNCE_ORIGINATE_FAILED,
+                         sound=os.path.basename(sound), reason="ami-error",
+                         detail=str(exc)[:120])
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
     if not ok:
-        # AMI accepted the connection but refused the Originate.
-        _record_delivery(ext, "announce", "originate-refused")
+        # AMI accepted the connection but refused the Originate. One row per
+        # attempt and the cause on the row — see ANNOUNCE_ORIGINATE_FAILED.
+        _record_delivery(ext, "announce", ANNOUNCE_ORIGINATE_FAILED,
+                         sound=os.path.basename(sound), reason="refused")
     else:
         # v0.77.0 — the announce path recorded SIX failure outcomes and no
         # success one, so an announcement that rang out left nothing in any
@@ -812,10 +850,11 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         _record_delivery(ext, "announce", "originate-queued",
                          sound=os.path.basename(sound))
         # ...and only NOW does the suppression window start. Every path above
-        # this one — too-long, busy, unreachable, originate-error,
-        # originate-refused — leaves it untouched, so a caller that retries a
-        # refusal is not answered with a duplicate verdict for something that
-        # never played.
+        # this one — too-long, busy, unreachable and either flavour of
+        # announce-originate-failed — leaves it untouched, so a caller that
+        # retries a refusal is not answered with a duplicate verdict for
+        # something that never played. (announce-guard-unjudged is not a refusal
+        # and does not return, so it reaches here like any other announcement.)
         _mark_announce_played(ext, digest)
     return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
 

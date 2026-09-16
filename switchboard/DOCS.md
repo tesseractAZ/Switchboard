@@ -656,7 +656,16 @@ all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
 `answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
 finally `undelivered` — or `snoozed`, when the room's own phone changed the
 wake-up during the ring. Each set and cancel is a row of its own, `set` or
-`cancelled`, with its `source`. One more is worth knowing:
+`cancelled`, with its `source`.
+
+A room holds **one** pending wake-up, so setting a second one replaces the
+first. Since v0.103.1 the `set` row for a replacement also names the time it
+displaced, as `replaced_hhmm` and `replaced_target_epoch` — one row, not two,
+and a first-ever set is unchanged. Before that a replacement left no trace at
+all: on 2026-09-15 a 06:20 wake-up set at 13:10:35Z was replaced at 13:15:09Z by
+a 04:00 one, and the ledger showed the 06:20 being set, then no ring and no
+cancel — which is also exactly what a wake-up the system had lost would look
+like. One more is worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
 instrument. Reading that file end to end tells you what happened to a wake-up
@@ -768,9 +777,32 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   once per window, rather than once and then never again.
 - **Every outcome is recorded**, in `/share/switchboard/delivery-outcomes.jsonl`:
   `originate-queued` when the call was placed, and `too-long`,
-  `duplicate-suppressed`, `skipped-busy`, `unreachable`, `originate-error` or
-  `originate-refused` when it was not. An announcement that never became a call
-  has no call-quality record, so this ledger is the only place it appears.
+  `duplicate-suppressed`, `skipped-busy`, `unreachable` or
+  `announce-originate-failed` when it was not. An announcement that never became
+  a call has no call-quality record, so this ledger is the only place it appears.
+
+  `announce-originate-failed` carries the reason on the row — `ami-error` when
+  the request to Asterisk itself failed, `refused` when Asterisk answered and
+  declined it — and the name of the clip, so a failed send appears in the same
+  place in an announcement's history as a successful one. Until v0.103.1 those
+  two cases were written as `originate-error` and `originate-refused`, the same
+  two names the wake-up call uses for its own failures and with no clip on
+  either, so an announce failure could not be joined to the announcement it
+  belonged to. (The wake-up rows are unchanged; §11's table still lists them.)
+- **...and when the pre-flight check could not answer.** Before placing the call
+  the add-on asks Asterisk whether the handset is registered, and if the answer
+  is "no contact" the call is skipped and recorded `unreachable`. If that
+  question cannot be answered at all — Asterisk not yet talking to the add-on, a
+  few seconds after a restart — the announcement goes out anyway, because a check
+  that refuses to announce when it cannot ask would silence an alert.
+
+  Since v0.103.1 that also writes an `announce-guard-unjudged` row naming the
+  clip, so "the handset looked fine" and "nobody could tell" stop looking
+  identical in the ledger. Live on 2026-09-15 at 01:42:12Z, 8.4 seconds after an
+  add-on restart, an announcement went to the cordless before it had
+  re-registered; Asterisk logged one error line, the clip never played, and
+  nothing recorded that the check had been skipped. It is **not** a refusal: the
+  announcement still goes out and is still judged normally afterwards.
 - **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
   accepted the request. The handset's hangup now records `audio-delivered` once at
   least a second of the clip has actually played, and anything still unaccounted

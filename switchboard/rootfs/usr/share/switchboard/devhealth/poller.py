@@ -250,9 +250,29 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
     """Recent call-ledger legs — EVERY leg, playback included — for matching the
     phone's RTP records to the leg each one describes (see judge_rtp_records).
     Each leg is LEG_FIELDS with `ts` a float and `tag` a string. Reads only the
-    file's tail — the ledger is append-only and unbounded; the partial first
-    line a mid-file seek can produce is dropped by the malformed-line skip.
-    Missing/unreadable ledger -> [] (nothing can be confirmed).
+    file's tail; the partial first line a mid-file seek can produce is dropped by
+    the malformed-line skip. Missing/unreadable ledger -> [] (nothing can be
+    confirmed).
+
+    ★ THE LEDGER IS NEITHER APPEND-ONLY NOR UNBOUNDED, whatever this said until
+    v0.103.1. switchboard-callqos caps it at MAX_RECORDS = 300 legs and enforces
+    that by rewriting the WHOLE file and os.replace()-ing it into position on
+    every write. Live on 2026-09-15 the file was sitting at exactly 300 rows and
+    rolling, its oldest 2026-07-27. Two things follow, and both matter here:
+
+      * the tail read is still correct, but it is not an optimisation over an
+        ever-growing file — the whole ledger is about 300 lines, and max_bytes is
+        what decides how much of that we look at;
+      * the file is REPLACED, not extended, so its inode changes under any reader
+        holding it open. Opening by path per call (as this does) is the only safe
+        way to read it, and any future "seek where we left off" scheme would
+        quietly read a file that no longer exists.
+
+    A reader who believed the old comment would also believe the ledger holds
+    every leg the system has ever recorded. It holds 300, which at this house's
+    call volume reached back to 2026-07-27 — about seven weeks — and that window
+    shortens as the phones get busier. Any analysis run against this file can
+    only speak for whatever window the newest 300 legs happen to cover.
 
     ★ PLAYBACK LEGS ARE KEPT, AND TAGGED, ON PURPOSE (2026-09-14). v0.57.0
     dropped them here, so the matcher only ever saw the legs that remained — and

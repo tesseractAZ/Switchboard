@@ -112,6 +112,25 @@ def get(ext: str):
 
 
 def set_wakeup(ext: str, hhmm: str, now_epoch: float | None = None) -> dict:
+    """Set (or REPLACE) the room's one pending wake-up. Returns the stored entry.
+
+    ★ THE REPLACEMENT IS REPORTED, NOT JUST PERFORMED (2026-09-15). One entry per
+    extension means a second set overwrites the first with no trace anywhere.
+    Live that day: ext 19's 06:20, set at 13:10:35Z, was replaced at 13:15:09Z by
+    a 04:00 one — 4 m 51 s before the first was due. The delivery ledger held
+    `set 06:20` and then nothing: no ring, no cancel. A reader cannot tell that
+    from a wake-up the scheduler dropped on the floor, which is the failure this
+    store's callers most need to be able to rule out.
+
+    So the displaced entry comes back with the new one, under `replaced`, and
+    delivery.record_wakeup_change() puts both times on the row it already writes.
+
+    ★ ON THE RETURNED DICT ONLY. `data[str(ext)]` and the returned value are
+    deliberately different objects: what goes to disk is the entry alone. A
+    `replaced` key in the FILE would be read back by the next set and chain, so
+    each entry would carry the whole history of the room's wake-ups into a file
+    that is rewritten whole on every write.
+    """
     entry = {
         "hhmm": hhmm,
         "target_epoch": next_epoch(hhmm, now_epoch),
@@ -119,8 +138,12 @@ def set_wakeup(ext: str, hhmm: str, now_epoch: float | None = None) -> dict:
     }
     with _Lock(PATH):
         data = _read()
+        previous = data.get(str(ext))
         data[str(ext)] = entry
         _write(data)
+    if isinstance(previous, dict):
+        # A copy, so the persisted entry above cannot acquire the key.
+        return dict(entry, replaced=dict(previous))
     return entry
 
 

@@ -21,8 +21,11 @@ to test and tune. Everything is wrapped so this can NEVER take down a call leg: 
 dialplan invokes us backgrounded via TrySystem, and we always exit 0.
 
 Outputs:
-  * /data/state/callqos.jsonl  — append-only, last MAX_RECORDS legs (readers dedupe
-    by channel, preferring source=dialplan). The "record everything" ledger.
+  * /data/state/callqos.jsonl  — the last MAX_RECORDS legs (readers dedupe by
+    channel, preferring source=dialplan). The "record everything" ledger, within
+    that window: it is a ROLLING cap, rewritten whole and os.replace()d on every
+    write, not an append-only file. It was sitting at exactly 300 rows reaching
+    back about seven weeks on 2026-09-15.
   * sensor.switchboard_last_call (dialplan source only) — numeric worst-leg MES so
     HA's Recorder graphs the trend; all metrics ride along as attributes.
   * a persistent notification (bell menu) when a call scores poorly — keyed by
@@ -853,6 +856,31 @@ def append_outcome(rec: dict) -> None:
 
 
 def append_record(rec: dict) -> None:
+    """The /data call ledger: read, append, cap to MAX_RECORDS, atomic replace.
+
+    ★ WHY THIS ONE GOES BY NAME WHILE append_outcome() USES _open_no_follow().
+    The asymmetry is deliberate and was, until v0.103.1, written down nowhere —
+    which reads as an oversight rather than a decision. The O_NOFOLLOW helper
+    answers a threat that exists in `/share` and not here: `/share` is
+    host-mounted and writable from outside the container, so anything with access
+    to the shared folder can plant a symlink in place of a ledger and redirect a
+    root append. `/data` is the add-on's private volume — to plant that link you
+    already have write access inside the container, at which point the ledger is
+    the least of it.
+
+    The cap is also why the same idiom would not transfer. Enforcing
+    MAX_RECORDS means rewriting the whole file, and that is done the only safe
+    way for a file two users write: a temp file and os.replace(). rename(2) acts
+    on the NAME, never through it, so a link planted in place of this ledger gets
+    REPLACED by the rewrite rather than written through. Holding an fd open
+    across a read-modify-write would not improve on that, and the flock above is
+    what actually keeps the root poller and the asterisk-user dialplan from
+    interleaving.
+
+    The remaining exposure is the read: `open(PATH)` follows a link, so a planted
+    one would have this copy some other file's lines into the ledger. Inside the
+    container only, and it lands in /data rather than the host-visible mirror.
+    """
     d = os.path.dirname(PATH) or "."
     os.makedirs(d, exist_ok=True)
     lock_path = PATH + ".lock"
