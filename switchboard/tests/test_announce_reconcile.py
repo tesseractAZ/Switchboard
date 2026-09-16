@@ -761,3 +761,145 @@ def test_the_settling_window_matches_the_fleet_monitors_own_cap():
         f"fleet monitor settles after {delay * polls}s ({polls} x {delay}s)")
     # ...and it must fit inside the horizon, or nothing would ever be judged at all.
     assert mod.ANNOUNCE_SETTLE_SECONDS < mod.ANNOUNCE_LOOKBACK
+
+
+# --------------------------------------------------------------------------- #
+# 8. ★ The 2026-09-15 rows, and what the reconciler must go on doing.
+#
+# 01:42:12Z, 8.4 s after an add-on restart: the pre-flight guard could not read
+# the device state, the announcement went out anyway, and the clip never played.
+# The ledger now also carries `announce-guard-unjudged` for that, written BEFORE
+# the Originate and alongside the queued row rather than instead of it.
+#
+# That makes it a new kind of row inside an announcement's own join, which is
+# where this reconciler could be broken without anybody noticing: treat it as a
+# verdict and every announcement whose state read hiccuped silently stops being
+# judged — the failure mode that would retire this feature for exactly the
+# population most likely to have failed.
+# --------------------------------------------------------------------------- #
+def _guard_row(mod, ext, sound, ago):
+    """The row app.py writes when the pre-flight could not read the state."""
+    import datetime
+    ts = datetime.datetime.fromtimestamp(NOW - ago, datetime.timezone.utc)
+    rec = {"ts": ts.isoformat(timespec="seconds"), "ext": ext, "kind": "announce",
+           "outcome": mod.ANNOUNCE_GUARD_UNJUDGED, "sound": sound,
+           "reason": "state-unreadable"}
+    with open(mod.OUTCOME_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
+def test_the_guard_row_is_not_a_verdict(tmp_path):
+    """★ It says the CHECK could not judge, not that the ANNOUNCEMENT was judged.
+
+    An unreadable device state is not evidence about whether the clip played —
+    it is the absence of evidence about whether the phone was there. If this row
+    resolved the clip, an announcement that rang out unanswered after a
+    state-read hiccup would be quietly filed as settled.
+    """
+    mod = _delivery(tmp_path)
+    _guard_row(mod, "19", "ann-19-aaaa", ago=401)
+    _queue(mod, "19", "ann-19-aaaa", ago=400)
+    assert _sounds(mod.unresolved_announcements(now=NOW)) == ["ann-19-aaaa"]
+
+
+def test_the_guard_row_alone_creates_no_work(tmp_path):
+    """It is not a queued announcement either. Only `originate-queued` starts a
+    clock, and a guard note with no Originate behind it must not invent one."""
+    mod = _delivery(tmp_path)
+    _guard_row(mod, "19", "ann-19-orphan", ago=400)
+    assert mod.unresolved_announcements(now=NOW) == []
+
+
+def test_an_originate_that_failed_creates_no_work(tmp_path):
+    """The other new row. It is written INSTEAD of `originate-queued` — there is
+    no announcement in flight to judge, and filing one would be a second failure
+    record for a failure already recorded."""
+    mod = _delivery(tmp_path)
+    import datetime
+    ts = datetime.datetime.fromtimestamp(NOW - 400, datetime.timezone.utc)
+    with open(mod.OUTCOME_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": ts.isoformat(timespec="seconds"), "ext": "19",
+                             "kind": "announce", "sound": "ann-19-failed",
+                             "outcome": mod.ANNOUNCE_ORIGINATE_FAILED,
+                             "reason": "refused"}) + "\n")
+    assert mod.unresolved_announcements(now=NOW) == []
+
+
+def test_inside_the_settling_window_unsettled_still_wins(tmp_path):
+    """★ THE LIVE SEQUENCE, END TO END, THROUGH THE SCHEDULER.
+
+    01:42:12Z guard-unjudged + originate-queued, 8 s after the add-on came up;
+    01:45:25Z the reconciler's verdict. That verdict was `announce-unsettled`
+    and it must stay `announce-unsettled`: the cause was a restart the operator
+    had just performed, and `announce-undelivered` would be true and useless.
+    The new row sits in the same join and must not change which branch wins.
+    """
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    logged = []
+    sched._delivery = mod
+    sched.log = logged.append
+    sched._STARTED = NOW - 600            # the add-on came up 10 minutes ago
+    _guard_row(mod, "19", "ann-19-restart", ago=592)   # 8 s after start
+    _queue(mod, "19", "ann-19-restart", ago=592)
+    sched._reconcile_announcements(NOW)
+    recs = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+            if l.strip()]
+    assert recs[-1]["outcome"] == mod.ANNOUNCE_UNSETTLED, recs
+    assert recs[-1]["reason"] == "pbx-restarting"
+    assert recs[-1]["sound"] == "ann-19-restart"
+    # ...and it is still filed exactly once, however many times the loop ticks.
+    sched._reconcile_announcements(NOW)
+    again = [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+             if l.strip()]
+    assert len(again) == len(recs), again
+
+
+def test_the_new_rows_never_escalate_or_push(tmp_path):
+    """★ Observability only — an owner decision, and the one thing these rows
+    must NOT do.
+
+    An announcement has no deadline; an alarm clock does. A guard that could not
+    judge is a note for a reader, not a reason to wake anybody at 01:42.
+    """
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    pushed, carded = [], []
+
+    class _HA:
+        @staticmethod
+        def push(*a, **k):
+            pushed.append((a, k))
+            return True
+
+        @staticmethod
+        def notify(*a, **k):
+            carded.append((a, k))
+            return True
+
+    sched._delivery = mod
+    sched.ha_client = _HA
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 600
+    _guard_row(mod, "19", "ann-19-restart", ago=592)
+    _queue(mod, "19", "ann-19-restart", ago=592)
+    _guard_row(mod, "19", "ann-19-genuine", ago=400)
+    _queue(mod, "19", "ann-19-genuine", ago=400)
+    sched._reconcile_announcements(NOW)
+    outcomes = [json.loads(l)["outcome"] for l in
+                Path(mod.OUTCOME_PATH).read_text().splitlines() if l.strip()]
+    assert mod.ANNOUNCE_UNSETTLED in outcomes and mod.ANNOUNCE_UNDELIVERED in outcomes
+    assert pushed == [], pushed
+    assert carded == [], carded
+
+
+def test_the_new_names_are_a_durable_on_disk_format():
+    """Renaming one orphans every historical row, and both are spelled by app.py
+    from here rather than as literals at the call site."""
+    mod = SourceFileLoader("delivery_newnames", str(WEBUI / "delivery.py")).load_module()
+    assert mod.ANNOUNCE_ORIGINATE_FAILED == "announce-originate-failed"
+    assert mod.ANNOUNCE_GUARD_UNJUDGED == "announce-guard-unjudged"
+    # ...and they must not collide with the vocabulary the reconciler resolves on.
+    assert mod.ANNOUNCE_GUARD_UNJUDGED not in (
+        mod.AUDIO_DELIVERED, mod.ANNOUNCE_UNDELIVERED, mod.ANNOUNCE_UNSETTLED,
+        mod.ANNOUNCE_QUEUED)

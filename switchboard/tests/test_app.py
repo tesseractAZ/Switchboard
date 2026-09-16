@@ -661,12 +661,22 @@ def test_announce_duration_guard_and_dedup(tmp_path) -> None:
         app._ANNOUNCE_LAST.clear()
 
 
-def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None):
+def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None,
+                    originate=None, real_state_guards=False):
     """Run the real api_announce handler with the renderer producing `payload`.
 
     The guards live INSIDE the handler, so testing the helper functions proves
     nothing about whether they run -- mutation testing showed both call sites
-    surviving while the helpers were fully covered."""
+    surviving while the helpers were fully covered.
+
+    `originate` replaces what ami.announce_to_ext does: the default appends the
+    ext and returns True. Pass a callable that raises, or returns False, to
+    replay an Originate that never became a call.
+
+    `real_state_guards` leaves device_busy / device_unreachable unstubbed so the
+    handler classifies `state` for itself. The stubs below are what let a caller
+    say "busy" without spelling an Asterisk state; a test ABOUT the states has to
+    turn them off, or it is asserting against its own lambdas."""
     import asyncio as _aio
 
     class _Resp:
@@ -702,10 +712,17 @@ def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None):
         app.load_options = lambda: {}
         app.configured_room_exts = lambda o: {"19"}
         app.valid_ext = lambda e: True
-        app.device_busy = lambda s: False
-        app.device_unreachable = lambda s: False
+        if not real_state_guards:
+            app.device_busy = lambda s: False
+            app.device_unreachable = lambda s: False
         app.get_device_state = lambda e: state
-        app.announce_to_ext = lambda e, s: originated.append(e) or True
+        if originate is None:
+            app.announce_to_ext = lambda e, s: originated.append(e) or True
+        else:
+            def _originate(e, s, _fn=originate):
+                originated.append(e)
+                return _fn(e, s)
+            app.announce_to_ext = _originate
         if out is not None:
             app._delivery.OUTCOME_PATH = str(out)
         resp = _aio.run(app.api_announce("19", _Req()))
@@ -761,6 +778,211 @@ def test_announce_handler_suppresses_an_identical_repeat(tmp_path) -> None:
     check("dedup: the record carries the payload digest", len(rec["digest"]) == 12)
 
 
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-15 — AN ANNOUNCEMENT THAT FAILED TO ORIGINATE, AND A GUARD THAT
+#   COULD NOT JUDGE.
+#
+# 01:42:12Z, 8.4 s after an add-on restart. The webui queued an announcement to
+# the cordless before ext 19 had re-registered. Asterisk logged
+# `ast_sip_create_dialog_uac: Endpoint '19': Could not create dialog to invalid
+# URI '19'` and `Failed to create outgoing session`, the clip never played, and
+# nobody was told. Third occurrence of that shape.
+#
+# The pre-flight guard written for exactly this (device_unreachable) PASSED,
+# because ami.get_device_state() returns "" when it cannot read the state and
+# AMI was not answering yet — and an empty state is deliberately not
+# "unreachable", so that a state-read hiccup can never silence an alarm. The
+# fail-open is kept. What these pin is that it stops being SILENT, and that the
+# rows carry the clip so they join to the announcement they are about.
+# --------------------------------------------------------------------------- #
+def _announce_rows(out):
+    import json as _json
+    return [_json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+
+
+def test_the_outcome_names_are_the_shared_ones() -> None:
+    """These rows are read by a different program from the one that writes them,
+    so app.py must be spelling `delivery`'s constants and not its own fallbacks.
+    A silent divergence here is a ledger nobody can join — the exact failure the
+    clip-name canonicalisation exists to prevent, one layer up."""
+    check("names: the originate failure is delivery's constant",
+          app.ANNOUNCE_ORIGINATE_FAILED == app._delivery.ANNOUNCE_ORIGINATE_FAILED)
+    check("names: the unjudged guard is delivery's constant",
+          app.ANNOUNCE_GUARD_UNJUDGED == app._delivery.ANNOUNCE_GUARD_UNJUDGED)
+
+
+def test_an_originate_that_raises_is_recorded_against_its_clip(tmp_path) -> None:
+    """The Originate raised. Before this the row said `originate-error` with no
+    clip on it — the same name the WAKE-UP path writes for its own failures, and
+    unjoinable to the announcement it belonged to."""
+    out = tmp_path / "d3.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+
+    def _boom(e, s):
+        raise app.AMIError("Could not create dialog to invalid URI '19'")
+
+    try:
+        resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                           originate=_boom)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    check("raise: reported as a failure to the caller",
+          getattr(resp, "status_code", None) == 502)
+    check("raise: the Originate was attempted", originated == ["19"])
+    rows = _announce_rows(out)
+    check("raise: exactly one row for one attempt", len(rows) == 1)
+    rec = rows[-1]
+    check("raise: named as an announce originate failure",
+          rec["outcome"] == app._delivery.ANNOUNCE_ORIGINATE_FAILED)
+    check("raise: the row names the extension", rec["ext"] == "19")
+    check("raise: the row carries the clip, so it joins",
+          rec.get("sound", "").startswith("ann-19-"))
+    check("raise: the row carries the reason", rec["reason"] == "ami-error")
+    check("raise: and what Asterisk said", "invalid URI" in rec["detail"])
+    check("raise: nothing claims the announcement was queued",
+          all(r["outcome"] != app._delivery.ANNOUNCE_QUEUED for r in rows))
+
+
+def test_an_originate_the_pbx_refuses_is_recorded_against_its_clip(tmp_path) -> None:
+    """AMI answered and declined. Same row, different reason — one name per
+    event with the cause ON it, because writing two rows for one attempt is a
+    defect this repo has already shipped once (test_boundary_audit_fixes)."""
+    out = tmp_path / "d4.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                           originate=lambda e, s: False)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    check("refused: the caller is told it did not play",
+          getattr(resp, "payload", {}).get("ok") is False)
+    rows = _announce_rows(out)
+    check("refused: exactly one row for one attempt", len(rows) == 1)
+    rec = rows[-1]
+    check("refused: named as an announce originate failure",
+          rec["outcome"] == app._delivery.ANNOUNCE_ORIGINATE_FAILED)
+    check("refused: the row carries the clip",
+          rec.get("sound", "").startswith("ann-19-"))
+    check("refused: the row says the PBX refused it", rec["reason"] == "refused")
+    check("refused: a refusal carries no Asterisk text", "detail" not in rec)
+
+
+def test_an_unreadable_device_state_records_that_the_guard_could_not_judge(tmp_path) -> None:
+    """★ THE LIVE SHAPE. get_device_state() returns "" seconds after a restart.
+
+    Two things must hold at once, and they pull in opposite directions: the
+    announcement STILL GOES OUT (a guard that refuses because it could not ask
+    would silence an alarm), and the fact that the check was skipped rather than
+    passed is now on the record.
+
+    The real device_busy / device_unreachable run here — with them stubbed this
+    test would be asserting against its own lambdas.
+    """
+    out = tmp_path / "d5.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                           state="", real_state_guards=True)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    check("unjudged: the announcement still went out", originated == ["19"])
+    check("unjudged: and is reported as placed",
+          getattr(resp, "payload", {}).get("ok") is True)
+    rows = _announce_rows(out)
+    check("unjudged: two rows — the note and the dispatch", len(rows) == 2)
+    note, queued = rows
+    check("unjudged: the guard's row comes first",
+          note["outcome"] == app._delivery.ANNOUNCE_GUARD_UNJUDGED)
+    check("unjudged: it says why", note["reason"] == "state-unreadable")
+    check("unjudged: an empty state is omitted rather than written as ''",
+          "device_state" not in note)
+    check("unjudged: the announcement was still queued",
+          queued["outcome"] == app._delivery.ANNOUNCE_QUEUED)
+    check("unjudged: both rows name the SAME clip, so they join",
+          note["sound"] == queued["sound"] and note["sound"].startswith("ann-19-"))
+
+
+def test_a_state_asterisk_does_not_use_is_also_unjudged(tmp_path) -> None:
+    """A spelling nothing classifies is exactly as much of an answer as no
+    spelling at all. Without this, "" is the only case and a future Asterisk
+    that renames a state would go back to failing open in silence."""
+    out = tmp_path / "d6.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        _drive_announce(tmp_path, payload=payload, out=out,
+                        state="NOT_A_REAL_STATE", real_state_guards=True)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    rows = _announce_rows(out)
+    check("unknown state: the guard records that it could not judge",
+          rows[0]["outcome"] == app._delivery.ANNOUNCE_GUARD_UNJUDGED)
+    check("unknown state: and the state it could not make sense of is kept",
+          rows[0]["device_state"] == "NOT_A_REAL_STATE")
+
+
+def test_a_normal_announcement_writes_nothing_new(tmp_path) -> None:
+    """★ THE CONTROL, and the one that matters most.
+
+    A registered, idle handset is the overwhelmingly common case. If the guard
+    row appeared on those too it would be noise in the ledger every single time
+    and a reader would learn to ignore it — which is the same as not having it.
+    """
+    out = tmp_path / "d7.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                           state="NOT_INUSE", real_state_guards=True)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    check("normal: it played", originated == ["19"])
+    rows = _announce_rows(out)
+    check("normal: exactly one row", len(rows) == 1)
+    check("normal: and it is the one the ledger has always had",
+          rows[0]["outcome"] == app._delivery.ANNOUNCE_QUEUED)
+
+
+def test_an_idle_handset_in_the_pretty_spelling_is_judged_too(tmp_path) -> None:
+    """Asterisk spells the same state two ways ("NOT_INUSE" from DEVICE_STATE(),
+    "Not in use" from PJSIPShowEndpoints). Treating one of them as unreadable
+    would put the guard row on every ordinary announcement."""
+    out = tmp_path / "d8.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        _drive_announce(tmp_path, payload=payload, out=out,
+                        state="Not in use", real_state_guards=True)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    rows = _announce_rows(out)
+    check("pretty spelling: one row, and it is the dispatch",
+          len(rows) == 1 and rows[0]["outcome"] == app._delivery.ANNOUNCE_QUEUED)
+
+
+def test_an_unreachable_handset_is_still_refused_outright(tmp_path) -> None:
+    """The new row must not have softened the guard that DOES have an answer.
+    `UNAVAILABLE` means no contact: that announcement is still skipped, not
+    announced-with-a-note."""
+    out = tmp_path / "d9.jsonl"
+    payload = b"\0" * 44 + b"\1" * (16000 * 5)
+    app._ANNOUNCE_LAST.clear()
+    try:
+        resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                           state="UNAVAILABLE", real_state_guards=True)
+    finally:
+        app._ANNOUNCE_LAST.clear()
+    check("unreachable: no Originate was attempted", originated == [])
+    check("unreachable: refused with 503",
+          getattr(resp, "status_code", None) == 503)
+    rows = _announce_rows(out)
+    check("unreachable: one row, the refusal",
+          len(rows) == 1 and rows[0]["outcome"] == "unreachable")
+
+
 def test_the_suppression_window_starts_only_where_something_played() -> None:
     """★ The wiring, not the function.
 
@@ -771,7 +993,12 @@ def test_the_suppression_window_starts_only_where_something_played() -> None:
     lockout it replaced, and every behavioural test above would still pass.
 
     The refusal paths this must sit below: too-long (413), duplicate,
-    skipped-busy, unreachable (503), originate-error (502), originate-refused.
+    skipped-busy, unreachable (503), and both flavours of
+    announce-originate-failed — the raise (502) and the refusal.
+
+    announce-guard-unjudged is deliberately NOT in that list: it is a note that
+    the pre-flight could not answer, not a refusal, and the announcement goes on
+    to be dispatched. Adding it here would pin the opposite of what it means.
     """
     import inspect
     import re
@@ -791,9 +1018,20 @@ def test_the_suppression_window_starts_only_where_something_played() -> None:
 
     # And every refusal must return before reaching it.
     for outcome in ("too-long", "duplicate-suppressed", "skipped-busy",
-                    "unreachable", "originate-error", "originate-refused"):
+                    "unreachable"):
         pos = src.index(f'"announce", "{outcome}"')
         check(f"wiring: the {outcome} path precedes the window start",
+              pos < calls[0])
+    # The two originate failures are written through the shared constant rather
+    # than a literal (the name has to be spelled identically by the programs that
+    # read the ledger), so they are matched by the constant's name. Both of them
+    # — the raise and the refusal — must still sit above the window start.
+    failed = [m.start() for m in
+              re.finditer(r'"announce", ANNOUNCE_ORIGINATE_FAILED', src)]
+    check(f"wiring: both originate-failure paths write the row ({len(failed)})",
+          len(failed) == 2)
+    for pos in failed:
+        check("wiring: the announce-originate-failed path precedes the window start",
               pos < calls[0])
 
     # The checker itself must not write. A single assignment inside it is how

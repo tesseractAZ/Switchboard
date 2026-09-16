@@ -48,6 +48,53 @@ ANNOUNCE_UNDELIVERED = "announce-undelivered"
 # while the PBX was still coming back up. See ANNOUNCE_SETTLE_SECONDS.
 ANNOUNCE_UNSETTLED = "announce-unsettled"
 
+# ★ THE ORIGINATE THAT NEVER BECAME A CALL (2026-09-15).
+#
+# The announce path used to write two bare literals here, `originate-error` when
+# the Originate raised and `originate-refused` when AMI accepted the connection
+# and refused the action. Neither carried the CLIP NAME, and both spell the same
+# two strings the WAKE-UP path writes for its own originates — so an announce
+# failure could be joined to nothing and read like a wake-up row. One name, one
+# row per attempt (writing both was a live defect once: see
+# test_boundary_audit_fixes), and the cause moves onto the row as `reason`:
+#
+#     reason="ami-error"  the Originate raised — AMI down, auth, a socket
+#     reason="refused"    AMI answered and declined the Originate
+#
+# The clip name rides along under `sound`, exactly as ANNOUNCE_QUEUED carries it,
+# so a reader joining an announcement's history on the clip sees the failure in
+# the same place a success would be. Deliberately NOT in the `resolved` set of
+# unresolved_announcements(): this outcome is written INSTEAD of ANNOUNCE_QUEUED,
+# never after it, so there is no queued row for it to resolve.
+#
+# The wake-up path keeps `originate-error` / `originate-refused` untouched —
+# those are read by the escalation logic and by DOCS.md's table.
+ANNOUNCE_ORIGINATE_FAILED = "announce-originate-failed"
+
+# ★ THE GUARD THAT COULD NOT JUDGE (2026-09-15).
+#
+# Live at 01:42:12Z, 8.4 s after an add-on restart: the webui queued an
+# announcement to the cordless before ext 19 had re-registered, Asterisk logged
+# `Could not create dialog to invalid URI '19'`, and the clip never played.
+# app.py HAS a pre-flight guard written for exactly that (device_unreachable),
+# and it passed — because ami.get_device_state() returns "" on any failure to
+# read, AMI was not answering seconds after the restart, and an empty state is
+# deliberately NOT unreachable. The guard fails OPEN so that an AMI hiccup can
+# never silence an alarm, which is the right direction and is kept.
+#
+# What was missing is that failing open left NO TRACE. The ledger showed
+# `originate-queued` and then, three minutes later, `announce-unsettled` — and
+# nothing anywhere said the reachability check had been skipped rather than
+# passed. This row says so: the guard ran, it could not judge, and the
+# announcement went out anyway.
+#
+# NOT a refusal and NOT a verdict. It is written BEFORE the Originate and the
+# announcement still proceeds, so a clip can carry both this row and a later
+# terminal one. It is therefore kept OUT of the `resolved` set below — treating
+# it as resolving would silently retire the reconciler for every announcement
+# whose state read hiccuped, which is precisely the population it exists for.
+ANNOUNCE_GUARD_UNJUDGED = "announce-guard-unjudged"
+
 # ★ WHO CHANGED A WAKE-UP, AND FROM WHERE (2026-09-14).
 #
 # A wake-up's history in this file used to begin at the ring. That morning ext
@@ -295,11 +342,32 @@ def record_wakeup_change(ext: str, source: str, entry: dict | None = None,
     entry, so somebody who dials 42 and says "cancel" to stop the ringing removes
     nothing — and is exactly as awake as somebody who did.
 
+    ★ A SET THAT REPLACED ONE IS STILL ONE ROW (2026-09-15). store.set_wakeup
+    keeps one entry per extension, so setting a second wake-up for a room
+    silently overwrites the first. Live that day: a 06:20 set at 13:10:35Z was
+    replaced by a 04:00 one at 13:15:09Z, and the ledger held `set 06:20`, then
+    no ring and no cancel — indistinguishable from a wake-up the system LOST.
+    When the store reports an entry it displaced, the row it already writes names
+    the time that went away as well as the one that replaced it.
+
+    ONE row, not two. A separate `replaced` row would be the obvious shape and it
+    is wrong twice over: it doubles every replacement in the ledger, and
+    room_changed_wakeup() below matches on WAKEUP_SET / WAKEUP_CANCELLED, so a
+    replacement dialled on the room's own phone — a snooze, the exact thing that
+    reader exists to catch — would stop counting as a change at all.
+
     Deliberately not carried: anything that was said. This file is in /share.
     """
     if entry is not None:
+        # store.set_wakeup returns the displaced entry under `replaced` on the
+        # dict it HANDS BACK only; nothing of the sort is ever persisted. Absent
+        # on a first-ever set, and record() omits None extras, so a first set is
+        # byte-for-byte the row it always was.
+        replaced = entry.get("replaced") or {}
         return record(str(ext), "wakeup", WAKEUP_SET, source=source,
-                      hhmm=entry.get("hhmm"), target_epoch=entry.get("target_epoch"))
+                      hhmm=entry.get("hhmm"), target_epoch=entry.get("target_epoch"),
+                      replaced_hhmm=replaced.get("hhmm"),
+                      replaced_target_epoch=replaced.get("target_epoch"))
     return record(str(ext), "wakeup", WAKEUP_CANCELLED, source=source,
                   removed=removed)
 
