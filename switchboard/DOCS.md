@@ -656,7 +656,16 @@ all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
 `answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
 finally `undelivered` — or `snoozed`, when the room's own phone changed the
 wake-up during the ring. Each set and cancel is a row of its own, `set` or
-`cancelled`, with its `source`. One more is worth knowing:
+`cancelled`, with its `source`.
+
+A room holds **one** pending wake-up, so setting a second one replaces the
+first. Since v0.103.1 the `set` row for a replacement also names the time it
+displaced, as `replaced_hhmm` and `replaced_target_epoch` — one row, not two,
+and a first-ever set is unchanged. Before that a replacement left no trace at
+all: on 2026-09-15 a 06:20 wake-up set at 13:10:35Z was replaced at 13:15:09Z by
+a 04:00 one, and the ledger showed the 06:20 being set, then no ring and no
+cancel — which is also exactly what a wake-up the system had lost would look
+like. One more is worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
 instrument. Reading that file end to end tells you what happened to a wake-up
@@ -768,9 +777,32 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   once per window, rather than once and then never again.
 - **Every outcome is recorded**, in `/share/switchboard/delivery-outcomes.jsonl`:
   `originate-queued` when the call was placed, and `too-long`,
-  `duplicate-suppressed`, `skipped-busy`, `unreachable`, `originate-error` or
-  `originate-refused` when it was not. An announcement that never became a call
-  has no call-quality record, so this ledger is the only place it appears.
+  `duplicate-suppressed`, `skipped-busy`, `unreachable` or
+  `announce-originate-failed` when it was not. An announcement that never became
+  a call has no call-quality record, so this ledger is the only place it appears.
+
+  `announce-originate-failed` carries the reason on the row — `ami-error` when
+  the request to Asterisk itself failed, `refused` when Asterisk answered and
+  declined it — and the name of the clip, so a failed send appears in the same
+  place in an announcement's history as a successful one. Until v0.103.1 those
+  two cases were written as `originate-error` and `originate-refused`, the same
+  two names the wake-up call uses for its own failures and with no clip on
+  either, so an announce failure could not be joined to the announcement it
+  belonged to. (The wake-up rows are unchanged; §11's table still lists them.)
+- **...and when the pre-flight check could not answer.** Before placing the call
+  the add-on asks Asterisk whether the handset is registered, and if the answer
+  is "no contact" the call is skipped and recorded `unreachable`. If that
+  question cannot be answered at all — Asterisk not yet talking to the add-on, a
+  few seconds after a restart — the announcement goes out anyway, because a check
+  that refuses to announce when it cannot ask would silence an alert.
+
+  Since v0.103.1 that also writes an `announce-guard-unjudged` row naming the
+  clip, so "the handset looked fine" and "nobody could tell" stop looking
+  identical in the ledger. Live on 2026-09-15 at 01:42:12Z, 8.4 seconds after an
+  add-on restart, an announcement went to the cordless before it had
+  re-registered; Asterisk logged one error line, the clip never played, and
+  nothing recorded that the check had been skipped. It is **not** a refusal: the
+  announcement still goes out and is still judged normally afterwards.
 - **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
   accepted the request. The handset's hangup now records `audio-delivered` once at
   least a second of the clip has actually played, and anything still unaccounted
@@ -1265,25 +1297,38 @@ only the first four reported, so the ledger under-reported activity roughly
 fivefold.
 
 **Recorded is not the same as alerted.** The legs the PBX originates to play
-something *at* a phone — wake-up delivery, paging, announcements — are scored and
-stored honestly but never move `sensor.switchboard_last_call`, and never raise an
-ordinary poor-quality alert.
+something *at* a phone — wake-up delivery, paging, announcements — never move
+`sensor.switchboard_last_call`. A three-second chime is not "the last call", and
+those legs are one-directional by design, so the one-way-audio detector (which
+exists to catch a broken *conversation*) would fire on their perfectly normal
+shape. Both of those exemptions are about the shape of the leg.
 
-**One exception, added in v0.78.0.** A wake-up delivery that was answered and
-then failed to deliver is recorded `undelivered` and *does* alert. A page cut
-short is not worth waking anyone over; an alarm clock that did not go off is the
-one thing on this list with a deadline.
+**A bad line under one of them now speaks up.** Until 2026-09-15 those same tags
+also silenced the ordinary poor-quality alert, and that turned out to be the
+wrong thing to silence. The rule had been written for a clip that got *cut
+short*, which is a fair thing to stay quiet about — but a cut-short clip is
+handled earlier and never reached the rule. All the rule could actually suppress
+was a **bad connection to the handset**, and that is the same connection the next
+real conversation on that phone will use. Over fifty days it hid five of them.
+The worst was an announcement at 00:26 that played all the way through while the
+cordless was hearing it at MOS 3.4 with round trips peaking near nine tenths of a
+second; nothing else noticed, because the phone was reachable the whole time — it
+just sounded bad. Those legs now raise a card like any other. On the same fifty
+days of real calls that is a change from about **1.8 to 4.8 cards a month**.
+
+**A clip that was cut short still stays quiet, with one exception, added in
+v0.78.0.** A wake-up delivery that was answered and then failed to deliver is
+recorded `undelivered` and *does* alert. A page cut short is not worth waking
+anyone over; an alarm clock that did not go off is the one thing on this list
+with a deadline.
 
 Where that line falls was corrected in v0.97.0. A wake-up counts as delivered
 once the script has reached the **greeting** *and* at least a second of audio has
 left the box — so somebody woken by the greeting who hangs up on it is a success,
 not an alarm. It is `undelivered` when the call stopped before the greeting, or
 when it was answered and carried no audio at all. That second case is the one
-this whole mechanism exists for: an alarm clock picked up in silence. Nobody is on the line to act on an alert about
-a chime, and those legs are one-directional by design, so the one-way-audio
-detector (which exists to catch a broken conversation) would fire on their
-perfectly normal shape. Conversations and the interactive menus alert exactly
-as before.
+this whole mechanism exists for: an alarm clock picked up in silence.
+Conversations and the interactive menus alert exactly as before.
 
 **Whether the card was actually posted** is recorded on the leg itself, as
 `notify_status`: `posted` (Home Assistant accepted it), `failed` (the post was
@@ -1291,7 +1336,16 @@ refused or could not be made), `disabled` (an alert was called for and
 `call_quality_alerts` is off) or `skipped` (the leg called for none). The
 recorder runs detached from the call with nowhere to write an error, so until
 2026-09-14 a card that failed to post left no trace at all. The field is in the
-`/share` mirror too; records carrying it are schema version `4`.
+`/share` mirror too; records carrying it are schema version `4` or later.
+
+**Two spellings of the time, on purpose.** Each record's `ts` is plain epoch
+seconds, and has to stay that way because the cordless health monitor reads it as
+a number on every line. But every *other* ledger in `/share/switchboard` writes
+its timestamp as an ordinary `2026-09-15T00:26:35+00:00` date string, so anyone
+filtering the folder by date quietly matched nothing here and read the file as
+empty — one review reported "no calls" for a stretch that held eighteen. Records
+from 2026-09-15 carry `ts_iso` as well: the same instant, in the same spelling as
+its neighbours. Those records are schema version `5`.
 
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP
@@ -1345,6 +1399,16 @@ measured, the handset's clock and the phone system's put the same hangup within
 or when the nearest leg, or the cordless's own leg preferred over it, is a wake-up
 delivery, page or announcement: the handset has been seen to score those playback
 legs between 2.2 and 2.9.
+
+Calls that never happened are left out of that search, as of 2026-09-15. A
+misdialled room number still leaves a row in the ledger — dialled, rejected, zero
+seconds long, no audio either way — and one of those landing a few seconds nearer
+than the real call used to win the match. When it did, there was nothing in it to
+agree or disagree with, so a genuinely poor score was quietly written off as
+unmeasured. The nearest leg that actually carried audio is now preferred. A real
+call the phone system simply could not score is *not* in this category: that is a
+measurement that came back empty, and it still matches and still reads
+`unmeasured`.
 
 A score below `mos_min` (3.4) degrades the sensor only when the same leg agrees in
 the ledger, in the direction the handset hears. That means at least 1 % transmit

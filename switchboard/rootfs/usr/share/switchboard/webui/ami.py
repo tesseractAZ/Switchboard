@@ -556,16 +556,26 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
 _BUSY_DEVICE_STATES = frozenset({"inuse", "ringing", "ringinuse", "busy", "onhold"})
 
 
+def _norm_device_state(state: str) -> str:
+    """One spelling for the two Asterisk uses for the same state.
+
+    The DEVICE_STATE() function form ("INUSE", "NOT_INUSE", "RINGINUSE") and the
+    PJSIPShowEndpoints pretty form ("In use", "Not in use", "Ring+Inuse") differ
+    only in case, spaces, underscores and the '+'. Written once because three
+    predicates below classify the SAME string: three copies of this expression
+    would let one of them start disagreeing with the others about what "Ring+
+    Inuse" is, and the disagreement would be invisible until a guard let an
+    announcement through onto a phone that was already ringing."""
+    return (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
+
+
 def device_busy(state: str) -> bool:
     """True when a device-state string means the phone is on/being offered a call.
 
-    Accepts both spellings Asterisk uses for the same states: the DEVICE_STATE()
-    function form ("INUSE", "NOT_INUSE", "RINGINUSE") and the PJSIPShowEndpoints
-    pretty form ("In use", "Not in use", "Ring+Inuse") — normalized by dropping
-    case, spaces, underscores and the '+'. Empty/unknown input is NOT busy (the
-    announce busy-guard fails open). Pure — unit-tested."""
-    norm = (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
-    return norm in _BUSY_DEVICE_STATES
+    Accepts both spellings Asterisk uses for the same states (see
+    _norm_device_state). Empty/unknown input is NOT busy (the announce busy-guard
+    fails open). Pure — unit-tested."""
+    return _norm_device_state(state) in _BUSY_DEVICE_STATES
 
 
 # Device states meaning "this endpoint has no usable contact right now". An
@@ -583,9 +593,38 @@ def device_unreachable(state: str) -> bool:
     spellings for these ("UNAVAILABLE" / "Unavailable"). An EMPTY state is NOT
     treated as unreachable: the state read itself can fail, and refusing to
     announce because we could not ask would silence an alarm. Fails open, the
-    same direction as the busy guard."""
-    norm = (state or "").strip().lower().replace(" ", "").replace("_", "").replace("+", "")
-    return norm in _UNREACHABLE_DEVICE_STATES
+    same direction as the busy guard — and device_state_unjudged() below is how
+    that open door stops being silent."""
+    return _norm_device_state(state) in _UNREACHABLE_DEVICE_STATES
+
+
+# The one state that positively clears a phone for an announcement: registered,
+# idle, nothing in progress. Everything Asterisk can say is either this, busy or
+# unreachable — so anything else is not an answer.
+_IDLE_DEVICE_STATES = frozenset({"notinuse"})
+
+
+def device_state_unjudged(state: str) -> bool:
+    """True when a device-state read told the announce pre-flight NOTHING.
+
+    ★ WHY A THIRD PREDICATE (2026-09-15). device_busy() and device_unreachable()
+    both fail open, on purpose — a guard that refuses to announce because it
+    could not ask would silence an alarm. But "the guard said no" and "the guard
+    could not tell" then look identical from outside: both simply proceed. Live
+    at 01:42:12Z, 8.4 s after an add-on restart, the second one happened —
+    get_device_state() returned "" because AMI was not answering yet, the
+    unreachable guard written for precisely that restart window passed, and the
+    Originate went into a void that logged one ERROR line and nothing else.
+
+    This does not change what the caller DOES. It gives the caller something true
+    to record before it proceeds. "" is the live case (get_device_state returns
+    it on AMI down, auth failure or a bad ext); an unrecognised non-empty state
+    counts too, because a spelling nothing here classifies is exactly as much of
+    an answer as no spelling at all. Pure — unit-tested."""
+    norm = _norm_device_state(state)
+    return not (norm in _BUSY_DEVICE_STATES
+                or norm in _UNREACHABLE_DEVICE_STATES
+                or norm in _IDLE_DEVICE_STATES)
 
 
 def get_device_state(ext: str) -> str:

@@ -974,6 +974,38 @@ def test_device_unreachable_classifies_a_contactless_endpoint() -> None:
           not (ami.device_busy("INUSE") and ami.device_unreachable("INUSE")))
 
 
+def test_device_state_unjudged_separates_no_from_dont_know() -> None:
+    """★ 2026-09-15. Both guards above fail open on purpose, and that made "the
+    guard said no" and "the guard could not tell" look identical from outside:
+    both simply proceed. Live at 01:42:12Z, 8.4 s after an add-on restart,
+    get_device_state() returned "" because AMI was not answering yet, the
+    unreachable guard written for that very window passed, and the Originate
+    went to an endpoint that had not re-registered.
+
+    This predicate does not change what happens. It gives the caller something
+    true to record before it proceeds."""
+    check("unjudged: an unread state is not an answer",
+          ami.device_state_unjudged("") is True)
+    check("unjudged: None is not an answer either",
+          ami.device_state_unjudged(None) is True)
+    # A spelling nothing classifies is exactly as much of an answer as none.
+    check("unjudged: an unrecognised state is not an answer",
+          ami.device_state_unjudged("SOMETHING_NEW") is True)
+    # ...and every state Asterisk actually uses IS one, in both spellings.
+    for s in ("NOT_INUSE", "Not in use", "INUSE", "In use", "RINGING",
+              "RINGINUSE", "Ring+Inuse", "BUSY", "ONHOLD", "UNAVAILABLE",
+              "Unavailable", "INVALID", "UNKNOWN"):
+        check(f"unjudged: {s!r} is a state the guard can judge",
+              ami.device_state_unjudged(s) is False)
+    # The three predicates classify the SAME string, so exactly one of
+    # busy/unreachable/idle must own each judgeable state.
+    for s in ("NOT_INUSE", "INUSE", "UNAVAILABLE"):
+        answers = [ami.device_busy(s), ami.device_unreachable(s),
+                   not ami.device_state_unjudged(s)]
+        check(f"unjudged: {s!r} is classified exactly once",
+              sum(1 for a in answers[:2] if a) <= 1 and answers[2])
+
+
 def test_no_ha_client_path_double_prefixes_api() -> None:
     """Every _request() path must start at "/services" or "/states", never "/api".
 

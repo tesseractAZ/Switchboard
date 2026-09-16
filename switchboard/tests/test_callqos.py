@@ -8,6 +8,7 @@ Pins down the quality classification, the tolerant parsing (RTCP can emit "" /
 "unavailable" / non-finite), the durable JSONL ledger (append + cap), and the HA
 routing (dialplan drives the sensor; the notification is gate-able + dedup-keyed).
 """
+import datetime
 import json
 import os
 import shutil
@@ -591,16 +592,27 @@ def test_main_records_what_became_of_the_card(tmp_path) -> None:
         sys.modules.pop("ha_client", None)
 
 
-def test_playback_legs_are_recorded_but_never_alert() -> None:
-    """Every leg the system carries belongs in the ledger; not every leg
-    deserves a notification.
+def test_a_playback_leg_keeps_its_shape_exemption_but_not_its_silence() -> None:
+    """Every leg the system carries belongs in the ledger, and a playback leg is
+    exempt from the checks about a leg's SHAPE — not from the ones about its LINK.
 
     v0.55.0 gave the machine-initiated contexts an h-extension so the ledger
     stops under-reporting (ten legs ran in one window and one was recorded).
-    But a wake-up delivery, an intercom page and a recorded announcement are
-    the PBX talking AT a phone: nobody is on the line to act on a popup, and
-    the one-way-audio detector — which exists to catch a broken CONVERSATION —
-    would fire on their perfectly normal one-directional shape."""
+    A wake-up delivery, an intercom page and a recorded announcement are the PBX
+    talking AT a phone, so the one-way-audio detector — which exists to catch a
+    broken CONVERSATION — would fire on their perfectly normal one-directional
+    shape. That exemption is about shape and it stands.
+
+    ★ THE QUALITY SILENCE DOES NOT (2026-09-15). The same tags also masked the
+    MES / loss / RTT alert, and that mask was written for a different case
+    entirely — a clip cut short, which never reaches the branch it sat in. What
+    it actually suppressed was a BAD LINK to the handset, which is the same link
+    the next conversation on that phone will use. So the two halves now part
+    company, and this test pins both:
+
+      a LINK fault on a playback leg ALERTS  (the second block below);
+      a TRUNCATED playback leg still does not (test_a_truncated_delivery_is_
+      named_but_only_the_alarm_clock_alerts, where ALARM_TAG decides)."""
     # The shape that would look "one-way" on a conversation: we sent plenty,
     # the handset sent almost nothing back.
     def leg(tag):
@@ -612,7 +624,7 @@ def test_playback_legs_are_recorded_but_never_alert() -> None:
         check(f"{tag}: recorded with its tag", rec["tag"] == tag)
         check(f"{tag}: NOT flagged one-way (that shape is its design)",
               not any("one-way" in r for r in rec["reasons"]))
-        check(f"{tag}: never notifies", rec["notify"] is False)
+        check(f"{tag}: a clean playback leg calls for nothing", rec["notify"] is False)
 
     # A real conversation with the same shape is still a genuine fault.
     conv = leg("rooms")
@@ -623,9 +635,11 @@ def test_playback_legs_are_recorded_but_never_alert() -> None:
     for tag in ("wakeup", "automation", "status"):
         check(f"{tag}: interactive menu still alerts", leg(tag)["notify"] is True)
 
-    # Genuinely BAD audio on a playback leg: it is still scored and recorded
-    # honestly, but it must not raise an alert. (Without this the suppression
-    # is untested — a healthy playback leg would not notify anyway.)
+    # Genuinely BAD audio on a playback leg — MES 59 and 3.3 % transmit loss,
+    # with no stage, so nothing about DELIVERY is in question. This block used to
+    # assert silence. It now asserts the opposite, because that is a description
+    # of the wire and not of the clip: the announcement got through and the link
+    # it got through on is one a person will be talking over next.
     def rough(tag):
         return cq.build_record(_Args(source="dialplan", tag=tag, chan="PJSIP/19-2",
                                      cid="19", billsec="20", hcause="16",
@@ -636,9 +650,10 @@ def test_playback_legs_are_recorded_but_never_alert() -> None:
         rec = rough(tag)
         check(f"{tag}: poor audio is still SCORED honestly", rec["quality"] == "poor")
         check(f"{tag}: ...and recorded with its reasons", bool(rec["reasons"]))
-        check(f"{tag}: ...but raises no alert", rec["notify"] is False)
+        check(f"{tag}: ...and a link that bad now raises a card",
+              rec["notify"] is True)
     conv = rough("operator")
-    check("operator: the same poor audio DOES alert",
+    check("operator: the same poor audio alerts as it always did",
           conv["quality"] == "poor" and conv["notify"] is True)
 
 
@@ -1149,14 +1164,14 @@ def test_every_record_says_which_schema_it_is() -> None:
     rec = cq.build_record(_Args(source="dialplan", tag="rooms",
                                 chan="PJSIP/12-1", rxcount="100",
                                 txcount="100", rxmes="88", txmes="88"))
-    check("F54: the ledger record is versioned", rec.get("v") == 4)
+    check("F54: the ledger record is versioned", rec.get("v") == 5)
     d = tempfile.mkdtemp()
     try:
         cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
         cq.append_outcome(rec)
         line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
         check("F54: and so is the /share mirror, which is the only view an "
-              "outside audit gets", line.get("v") == 4)
+              "outside audit gets", line.get("v") == 5)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1427,3 +1442,132 @@ def test_more_than_one_stage_counts_as_delivered() -> None:
         "a wake-up that stopped at 'scene' having transmitted nothing is the "
         "failure this alarm exists for")
     assert cut["notify"] is True, "an alarm clock that did not go off must say so"
+
+
+def test_a_link_fault_on_a_playback_leg_raises_the_alert_it_called_for() -> None:
+    """★ 2026-09-15T00:26:35Z — the worst-sounding leg in fifty days of ledger,
+    and not one thing in the house said a word about it.
+
+    An announcement played to the WiFi cordless, and it played IN FULL: stage
+    `complete`, 1114 packets transmitted, 0 % loss in both directions. The
+    handset's own RTCP told the other half of the story — MES 68.4 (MOS 3.42),
+    RTT mean 287 ms, RTT peak 883 ms. classify() flagged all three. The record
+    then met `notify and (a.tag or "") not in PLAYBACK_TAGS` and came out False,
+    so the ledger kept every number and the house was told nothing. Nothing else
+    could have caught it either: the 5-minute reachability poller read 9/9 right
+    through it, because the link was up the whole time. Just bad.
+
+    That mask was written for TRUNCATED clips, and truncation CANNOT REACH the
+    line it sat on — delivery_failures() runs first and routes every cut-short
+    scripted leg down the `undelivered` path, where ALARM_TAG decides. So the
+    only thing the mask could ever silence was a LINK fault, and over the same
+    fifty days it silenced five of them.
+
+    The fixture below is that leg, with its real metrics."""
+    ann = cq.build_record(_Args(
+        source="dialplan", tag="announce", chan="PJSIP/19-000000f3", cid="19",
+        billsec="22", hcause="16", stage="complete",
+        rxcount="1111", txcount="1114", rxploss="0", txploss="0",
+        rxmes="76.847575", txmes="68.374881",
+        rtt="0.011596", normdevrtt="0.287193", maxrtt="0.882507",
+        stdevrtt="0.356696"))
+    # Not the truncation case wearing a disguise: this clip finished.
+    check("link: the announcement played to the end",
+          ann["stage"] == "complete" and ann["quality"] != "undelivered")
+    check("link: and it lost nothing on the way",
+          (ann["loss_rx_pct"], ann["loss_tx_pct"]) == (0.0, 0.0))
+    check("link: the handset's own score is what it was",
+          (ann["mes_worst"], ann["mos_worst"]) == (68.4, 3.42))
+    check("link: ...as is the RTT distribution the alert rests on",
+          (ann["rtt_mean_ms"], ann["rtt_max_ms"]) == (287.19, 882.51))
+    check("link: the record names what was wrong with it",
+          any(r.startswith("MES ") for r in ann["reasons"])
+          and any(r.startswith("RTT ") for r in ann["reasons"]))
+    check("link: ★ and the leg raises the card it called for",
+          ann["notify"] is True)
+
+    # Guard 1. A TRUNCATED announcement is a different question and is answered
+    # somewhere else — delivery_failures() sends it to the `undelivered` branch
+    # before this one is reached, and there ALARM_TAG rules that only the alarm
+    # clock may speak. Same bad link, same numbers; still silent, on purpose.
+    cut = cq.build_record(_Args(
+        source="dialplan", tag="announce", chan="PJSIP/19-000000f4", cid="19",
+        billsec="22", hcause="16", stage="playing",
+        rxcount="1111", txcount="1114", rxploss="0", txploss="0",
+        rxmes="76.847575", txmes="68.374881",
+        rtt="0.011596", normdevrtt="0.287193", maxrtt="0.882507",
+        stdevrtt="0.356696"))
+    check("link: a clip cut short is still undelivered",
+          cut["quality"] == "undelivered")
+    check("link: ...and a cut-short announcement is still not worth waking anyone",
+          cut["notify"] is False)
+
+    # Guard 2. The other direction: the 06:15 wake-up that was answered and
+    # transmitted ZERO packets must keep paging. Unmasking the link check must
+    # not have quietly rerouted the delivery verdict.
+    silent = cq.build_record(_Args(
+        source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000f5",
+        cid="19", billsec="1", hcause="16", stage="scene",
+        rxcount="34", txcount="0", rxmes="88", txmes="0"))
+    check("link: the sleeper who heard silence is still paged",
+          silent["quality"] == "undelivered" and silent["notify"] is True)
+
+
+def test_the_ledger_timestamp_carries_an_iso_twin() -> None:
+    """★ A reviewer read "no calls" out of a window that held eighteen.
+
+    `ts` in THIS ledger is epoch seconds. `ts` in every sibling ledger under
+    /share/switchboard — webui/delivery.py's, rtpmon/poller.py's, both backup
+    hooks' — is an ISO-8601 string. Filtering the folder's ledgers by ISO prefix
+    therefore matched nothing here and raised nothing either: comparing a string
+    to an int is simply False, every time, silently.
+
+    `ts` KEEPS ITS TYPE. devhealth/poller.py floats it on every line to match a
+    handset RTP record to the leg it describes, and post_alert() keys the
+    notification id on it. So the ISO form is added BESIDE it, derived from the
+    same integer — which is why they cannot drift apart across a second
+    boundary — and the schema version says a new shape is in the file.
+    """
+    rec = cq.build_record(_Args(source="dialplan", tag="rooms",
+                                chan="PJSIP/12-000000c1", cid="12", billsec="40",
+                                rxcount="2000", txcount="2000",
+                                rxmes="88", txmes="88"))
+    check("iso: the epoch field is untouched and still an int",
+          isinstance(rec["ts"], int) and not isinstance(rec["ts"], bool))
+    check("iso: and an ISO-8601 twin rides beside it",
+          isinstance(rec.get("ts_iso"), str) and rec["ts_iso"])
+    twin = datetime.datetime.fromisoformat(rec["ts_iso"])
+    check("iso: the twin is UTC", twin.utcoffset() == datetime.timedelta(0))
+    check("iso: the two are the same instant, to the second",
+          int(twin.timestamp()) == rec["ts"])
+    check("iso: the schema says the shape changed", rec["v"] == 5)
+
+    # The two readers that matter, on a file that was actually written: the
+    # /share mirror an outside audit reads, and the devhealth matcher in the
+    # container. Neither may be broken by the other's field.
+    _dh_src = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+               / "switchboard" / "devhealth" / "poller.py")
+    dh = SourceFileLoader("devhealth_poller", str(_dh_src)).load_module()
+    d = tempfile.mkdtemp()
+    saved = (cq.PATH, cq.SHARE_OUTCOME_PATH)
+    try:
+        cq.PATH = os.path.join(d, "callqos.jsonl")
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        cq.append_record(rec)
+        cq.append_outcome(rec)
+        written = json.loads(open(cq.PATH).read().splitlines()[0])
+        mirrored = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
+        check("iso: the written ledger line carries both",
+              (written["ts"], written["ts_iso"]) == (rec["ts"], rec["ts_iso"]))
+        check("iso: so does the /share mirror, the only view from outside",
+              (mirrored["ts"], mirrored["ts_iso"]) == (rec["ts"], rec["ts_iso"]))
+        check("iso: a reader filtering /share by ISO date now matches this file",
+              mirrored["ts_iso"].startswith(
+                  datetime.datetime.fromtimestamp(
+                      rec["ts"], datetime.timezone.utc).strftime("%Y-%m-%d")))
+        legs = dh.load_callqos_legs(cq.PATH)
+        check("iso: and devhealth still reads ts as the float it always did",
+              len(legs) == 1 and legs[0]["ts"] == float(rec["ts"]))
+    finally:
+        cq.PATH, cq.SHARE_OUTCOME_PATH = saved
+        shutil.rmtree(d, ignore_errors=True)

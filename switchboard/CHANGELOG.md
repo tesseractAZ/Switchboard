@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.104.0
+
+**An announcement that sounded terrible used to tell you nothing, and two
+deliveries that went missing left no trace. All three are recorded now.**
+
+Found in a review of the first day's logs from the four releases of 14-15
+September.
+
+**A bad-sounding announcement raised nothing.** When the phone system plays
+something at a handset — a wake-up call, a page, an announcement — it has always
+kept a full record of how that audio travelled, and it has always kept quiet
+about it, on the reasoning that a clip cut short is not worth an alert. That
+reasoning was sound, and it was guarding the wrong door: a clip cut short is
+handled somewhere else entirely and never reached the rule. All the rule actually
+silenced was a bad connection to the phone — the same connection the next real
+conversation on it will use. Over the last fifty days it hid five of them. The
+worst was an announcement just after midnight on the 15th that played all the way
+through, lost not a single packet, and was still arriving at the cordless
+sounding like a bad mobile call, with round trips peaking near nine tenths of a
+second. Nothing else in the house noticed, because the phone was reachable the
+whole time. It just sounded bad. Those legs now raise a card like any other call,
+which on the same fifty days works out at about three extra cards a month. A clip
+genuinely cut short still stays quiet, and a wake-up call that did not go off
+still wakes you about itself.
+
+**An announcement nobody could check on.** On the 15th an announcement went to
+the cordless 8.4 seconds after the add-on restarted, before that handset had
+finished re-registering. It never played, and nothing told you: the system has a
+check for exactly this — is the phone actually there? — but that check asks
+Asterisk, Asterisk was not answering yet, and a check that cannot get an answer
+lets the announcement through rather than risk silencing an alert. That is still
+what it does, and deliberately so. What it does now as well is write down that it
+could not tell. "The handset looked fine" and "nobody could tell" used to look
+identical in the record; they no longer do. An announcement the phone system
+refuses outright is also recorded properly now, naming the clip it was about.
+
+**A wake-up that quietly replaced another.** The same morning, a 06:20 wake-up was
+replaced by a 04:00 one less than five minutes before the first was due, and the
+record showed the 06:20 being set and then nothing at all — no ring, no cancel —
+which is also exactly what a wake-up the system had lost would look like. A room
+only ever holds one wake-up, so setting a second one quietly discards the first;
+from now on that entry names the time that went away as well as the one that took
+its place, whether it was set from a phone, the dashboard or the console.
+
+**Two smaller things.** The call record now writes its timestamp in plain date
+form alongside the raw number, because the two spellings across the shared folder
+made one review report "no calls" for a stretch that held eighteen. And a
+misdialled room number can no longer be mistaken for the call that judges how the
+cordless sounded — three of those went in on the 15th, and a call that never
+happened has nothing to say about one that did.
+
+None of this rings anything, retries anything or sends anything new, apart from
+the quality cards described above.
+
 ## 0.103.1
 
 **Add-on updates will keep installing after Home Assistant retires an old build file.**

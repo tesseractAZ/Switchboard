@@ -1139,3 +1139,99 @@ def test_the_loop_judges_the_cordless_by_its_own_leg(tmp_path) -> None:
     check("own leg: the capture names the rule and the leg",
           [(r["verdict"], r["match_rule"], r["leg"]["ext"]) for r in rows]
           == [("corroborated", "own-ext", "19")])
+
+
+def _misdial_leg(ts, ext="19"):
+    """A 2026-09-15 misdial, as the ledger wrote it: ext 19 dialled a room number
+    that does not exist, Congestion() rejected it, no channel was ever created.
+    Three of these landed within twenty minutes (12:50:54Z, 13:11:49Z, 13:11:52Z).
+    Zero duration, no RTP, no MES in either direction."""
+    return {"v": 5, "ts": ts, "source": "dialplan", "tag": "rooms", "ext": ext,
+            "dur": 0, "billsec_raw": None, "hcause": 34,
+            "rxcount": None, "txcount": None,
+            "loss_rx_pct": None, "loss_tx_pct": None,
+            "mes_rx": None, "mes_tx": None, "mes_worst": None,
+            "rtt_ms": None, "rtt_max_ms": None, "rtt_samples": "none",
+            "quality": "unreachable", "notify": False,
+            "reasons": ["channel could not be created"]}
+
+
+def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
+    """★ 2026-09-15 — a call that never happened was suppressing a real degrade.
+
+    A zero-duration misdial reaches the ledger like anything else, and the
+    matcher only ever asked which leg hung up NEAREST. When one of these landed
+    closer to a handset RTP record than the genuine call it belonged to, it won,
+    `ledger_tx_judgement` had nothing to read, the verdict came back
+    'unmeasured', and a low score that a real leg WOULD have corroborated was
+    dropped in silence.
+
+    It is not a hypothetical near-miss: all three live misdials were dialled BY
+    THE CORDLESS, so the own-extension preference added the same day would have
+    handed them the verdict even where distance did not.
+    """
+    assert dh.leg_carries_no_measurement(_misdial_leg(0.0)) is True
+    T = 60000
+
+    def rec(stop, mos="2.2"):
+        return {"r": {"moscq": mos, "stopTimeSecond": str(stop)}}
+
+    genuine = {"ts": float(T), "tag": "rooms", "ext": "19",
+               "dur": 18, "loss_tx_pct": 0.0, "mes_tx": 70.0, "quality": "fair"}
+    misdial = _misdial_leg(float(T + 10))
+
+    # The record belongs to the genuine leg; the misdial hung up 10 s nearer.
+    ledger = [genuine, misdial]
+    j = dh.judge_rtp_records(rec(T + 12), ledger, "19")[0]
+    check("misdial: the leg that carried audio is the one that judges",
+          j["leg"]["ts"] == float(T) and j["leg"]["quality"] == "fair")
+    check("misdial: so the low score is corroborated, not swallowed",
+          j["ledger_tx"] == "impaired" and dh.mos_verdict(j) == "corroborated")
+    check("misdial: ledger order cannot change the answer",
+          dh.judge_rtp_records(rec(T + 12), list(reversed(ledger)), "19")[0]
+          ["leg"]["ts"] == float(T))
+    check("misdial: nor can matching on time alone, with no cordless_ext",
+          dh.judge_rtp_records(rec(T + 12), ledger)[0]["leg"]["ts"] == float(T))
+
+    # Without the filter the misdial is genuinely nearer — the precondition this
+    # test would be vacuous without.
+    check("misdial: ...and it really was the nearer leg",
+          dh._nearest_leg(T + 12, ledger)["ts"] == float(T + 10))
+
+    # BOTH halves of "carried no call" have to stand on their own, because the
+    # live misdial satisfies both at once and would have hidden either one being
+    # dead. `_bs = billsec or 0` in callqos means a leg reaches `unreachable`
+    # with billsec ABSENT as readily as with billsec 0, and then `dur` is null.
+    for name, variant in (("with no duration field at all", dict(misdial, dur=None)),
+                          ("with no quality label", dict(misdial, quality="unknown"))):
+        check(f"misdial: a misdial {name} carries nothing too",
+              dh.leg_carries_no_measurement(variant) is True)
+        check(f"misdial: ...and is filtered out {name}",
+              dh.judge_rtp_records(rec(T + 12), [genuine, variant], "19")[0]
+              ["leg"]["ts"] == float(T))
+
+    # A misdial is still MATCHED when it is all there is: the record is honestly
+    # unmeasured, which is a different claim from being dropped.
+    lone = dh.judge_rtp_records(rec(T + 12), [misdial], "19")[0]
+    check("misdial: alone, it still matches and reads unmeasured",
+          lone["match"] == "call" and dh.mos_verdict(lone) == "unmeasured")
+
+    # ...and the playback gate is untouched. A page is not a measurement of the
+    # link, but it IS the reason a handset score must be skipped, so the filter
+    # must never drop one in favour of a call further away.
+    page = [{"ts": float(T + 10), "tag": "page", "ext": "12", "dur": 0,
+             "mes_tx": None, "quality": "unreachable"},
+            dict(genuine)]
+    check("misdial: a playback leg is never filtered out of the way",
+          dh.judge_rtp_records(rec(T + 12), page, "19")[0]["match"] == "playback")
+
+    # The narrow edge that keeps the 13:00:31Z operator leg working: a REAL call
+    # Asterisk could not score is a measurement that came back empty, not a call
+    # that never happened. It stays eligible and stays 'unmeasured'.
+    unscored = {"ts": float(T + 10), "tag": "operator", "ext": "19",
+                "dur": 18, "loss_tx_pct": 0.0, "mes_tx": 0.0, "quality": "unknown"}
+    check("misdial: an answered leg Asterisk could not score is still a leg",
+          dh.leg_carries_no_measurement(unscored) is False)
+    ju = dh.judge_rtp_records(rec(T + 12), [genuine, unscored], "19")[0]
+    check("misdial: ...and it still wins on distance, as it always did",
+          ju["leg"]["ts"] == float(T + 10) and dh.mos_verdict(ju) == "unmeasured")
