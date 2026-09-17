@@ -1006,6 +1006,36 @@ def test_device_state_unjudged_separates_no_from_dont_know() -> None:
               sum(1 for a in answers[:2] if a) <= 1 and answers[2])
 
 
+def test_device_idle_is_the_only_positive_green_light() -> None:
+    """★ v0.105.0 — THE PREDICATE THE RETRY GATES ON, and the one that fails CLOSED.
+
+    device_busy() and device_unreachable() fail open, deliberately: refusing to
+    announce because the state could not be read would silence an alarm. A REPLAY
+    asks the opposite question, where "we could not ask" must mean no — a duplicate
+    announcement in a quiet house is worse than one more silent minute, and the
+    fail-open read is exactly what sent an announcement into a void on 2026-09-15.
+
+    It lives here, beside _IDLE_DEVICE_STATES, rather than being hand-rolled in the
+    scheduler: three predicates already classify the same string through
+    _norm_device_state, and a fourth private copy is how one of them starts
+    disagreeing with the others about what "Ring+Inuse" is."""
+    for s in ("NOT_INUSE", "Not in use", "not in use", "not_inuse"):
+        check(f"idle: {s!r} is the green light", ami.device_idle(s) is True)
+    for s in ("", None, "INUSE", "In use", "RINGING", "Ringing", "RINGINUSE",
+              "Ring+Inuse", "BUSY", "ONHOLD", "On hold", "UNAVAILABLE",
+              "Unavailable", "INVALID", "UNKNOWN", "SOMETHING_NEW"):
+        check(f"idle: {s!r} is NOT a green light", ami.device_idle(s) is False)
+    # ...and the unjudged predicate reads through it rather than keeping its own
+    # copy of the idle set, so the two can never disagree about a spelling.
+    for s in ("NOT_INUSE", "Not in use"):
+        check(f"idle: {s!r} is a state the announce guard can also judge",
+              ami.device_state_unjudged(s) is False)
+    src = AMI_PATH.read_text()
+    body = src[src.index("def device_state_unjudged("):src.index("def get_device_state(")]
+    check("idle: device_state_unjudged asks device_idle rather than the set",
+          "device_idle(state)" in body and "_IDLE_DEVICE_STATES" not in body)
+
+
 def test_no_ha_client_path_double_prefixes_api() -> None:
     """Every _request() path must start at "/services" or "/states", never "/api".
 

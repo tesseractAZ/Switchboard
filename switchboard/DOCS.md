@@ -848,6 +848,46 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
 
   120 s is the same settling cap the fleet monitor uses to decide the phones have
   finished re-registering, rather than a second number for the same question.
+- **...and one it sends AGAIN** (v0.105.0). An announcement whose audio never
+  played is now **retried automatically**, because three times in a fortnight one
+  was sent to the cordless in the seconds after an add-on restart, before that
+  handset had re-registered — the phone never rang, nothing played, and the only
+  outcome was a ledger row minutes later. The handset in question was back 38
+  seconds after the send that failed.
+
+  The retry runs in the same 20-second loop as the reconciler above, and it will
+  only send again once the phone **positively reports itself registered and idle,
+  twice in a row**. Anything else — ringing, in a call, unregistered, or a state
+  Asterisk could not report at all — waits. A check that cannot ask is what caused
+  the original miss, and for a replay the safe answer to "we could not ask" is no.
+
+  **An announcement whose audio played is never replayed.** The confirming record
+  carries the name of the clip (§6 above), and a clip that has one is excluded
+  permanently, at any age, whichever order the records arrive in.
+
+  Bounded at **two attempts**, and **never started more than 150 seconds** after
+  the original send: an announcement is often time-sensitive, and dinner being
+  ready is not worth saying twenty minutes late. Two attempts spaced a poll apart
+  straddle the 30-45 seconds a cordless handset takes to come back after a
+  restart; past that the cause is no longer the restart. The 150 seconds is
+  measured against how long a clip lives on disk (five minutes), not against the
+  settling window above — the phone is not even available until most of a minute
+  into that window. Both numbers can be changed in the environment, and
+  `ANNOUNCE_RETRY_MAX_ATTEMPTS=0` switches the whole thing off.
+
+  Each attempt is recorded as `announce-retry-attempted` with the clip, the
+  attempt number and the handset state that cleared it; the row is written
+  **before** the call is placed, and the call is abandoned if it could not be
+  written, because an attempt that cannot be counted cannot be limited. When the
+  retry gives up it records `announce-retry-skipped` once, saying why: `too-old`,
+  `budget-exhausted`, `ext-superseded` (the room has since been spoken to) or
+  `clip-gone`. Neither row is a verdict — the reconciler above still files
+  `announce-undelivered` or `announce-unsettled` for the announcement itself, now
+  carrying how many retries it had.
+
+  A restart inside the window abandons the retry, deliberately: the clip lives in
+  memory-backed storage that the restart clears, and a run that may not judge an
+  announcement may certainly not replay one.
 
 ---
 
