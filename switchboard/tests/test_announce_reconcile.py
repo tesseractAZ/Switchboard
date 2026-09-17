@@ -65,6 +65,17 @@ def _played(mod, ext, sound, ago):
         fh.write(json.dumps(rec) + "\n")
 
 
+def _attempted(mod, ext, sound, ago, attempt=1):
+    """An `announce-retry-attempted` row: the scheduler re-originated this clip."""
+    import datetime
+    ts = datetime.datetime.fromtimestamp(NOW - ago, datetime.timezone.utc)
+    rec = {"ts": ts.isoformat(timespec="seconds"), "ext": ext, "kind": "announce",
+           "outcome": mod.ANNOUNCE_RETRY_ATTEMPTED, "sound": sound,
+           "attempt": attempt, "of": 2}
+    with open(mod.OUTCOME_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
 def _sounds(recs):
     return [r["sound"] for r in recs]
 
@@ -106,6 +117,72 @@ def test_an_announcement_is_not_judged_while_it_could_still_be_playing(tmp_path)
     mod = _delivery(tmp_path)
     _queue(mod, "19", "ann-19-aaaa", ago=mod.ANNOUNCE_HORIZON - 5)
     assert mod.unresolved_announcements(now=NOW) == []
+
+
+def test_a_retry_still_in_flight_is_not_judged_undelivered(tmp_path):
+    """★ v0.105.0 — THE HORIZON RUNS FROM THE NEWEST ATTEMPT, NOT FROM THE QUEUE.
+
+    The scheduler may now re-originate a missed announcement up to
+    ANNOUNCE_RETRY_MAX_AGE after it was queued. Measured from the queue alone, the
+    horizon would then expire while a REPLAY was still ringing or still playing,
+    and file `announce-undelivered` against an announcement that was in the middle
+    of arriving — the same false verdict this horizon exists to prevent, arriving
+    through the other door.
+
+    Both ledgers below hold the identical queued record at the identical age. The
+    ONLY difference is the attempt row, so nothing else can be what separates
+    them.
+    """
+    bare = _delivery(tmp_path / "bare")
+    _queue(bare, "19", "ann-19-aaaa", ago=185)
+    assert _sounds(bare.unresolved_announcements(now=NOW)) == ["ann-19-aaaa"], (
+        "fixture premise: at 185s, with no retry, this IS judged")
+
+    mod = _delivery(tmp_path / "retried")
+    _queue(mod, "19", "ann-19-aaaa", ago=185)
+    _attempted(mod, "19", "ann-19-aaaa", ago=35)          # replayed 150s in
+    assert mod.unresolved_announcements(now=NOW) == [], (
+        "an announcement re-originated 35s ago was judged undelivered while its "
+        "replay could still be playing")
+    # ...and once the horizon has passed from the ATTEMPT, the verdict lands.
+    later = NOW + mod.ANNOUNCE_HORIZON
+    assert _sounds(mod.unresolved_announcements(now=later)) == ["ann-19-aaaa"]
+
+
+def test_a_verdict_says_how_hard_the_system_tried(tmp_path):
+    """A verdict filed after two replays is a different fact from one filed after
+    none, and the row now says which. Omitted rather than written as 0 when the
+    announcement was never retried, so an unretried verdict is byte-for-byte the
+    row it always was."""
+    mod = _delivery(tmp_path)
+    sched = _load_scheduler(mod)
+    sched._delivery = mod
+    sched.log = lambda m: None
+    sched._STARTED = NOW - 3600
+    _queue(mod, "19", "ann-19-tried", ago=600)
+    _attempted(mod, "19", "ann-19-tried", ago=560, attempt=1)
+    _attempted(mod, "19", "ann-19-tried", ago=540, attempt=2)
+    _queue(mod, "18", "ann-18-never", ago=600)
+    sched._reconcile_announcements(NOW)
+    verdicts = {r["sound"]: r for r in
+                [json.loads(l) for l in Path(mod.OUTCOME_PATH).read_text().splitlines()
+                 if l.strip()]
+                if r["outcome"] == mod.ANNOUNCE_UNDELIVERED}
+    assert set(verdicts) == {"ann-19-tried", "ann-18-never"}, verdicts
+    assert verdicts["ann-19-tried"]["retries"] == 2
+    assert "retries" not in verdicts["ann-18-never"]
+
+
+def test_a_retry_that_gave_up_does_not_replace_the_verdict(tmp_path):
+    """`announce-retry-skipped` is deliberately NOT terminal. The retry reports
+    what it tried; the announcement still never arrived, so the reconciler must
+    still speak — treating it as terminal would silently retire the reconciler for
+    exactly the population it exists for."""
+    mod = _delivery(tmp_path)
+    _queue(mod, "19", "ann-19-gaveup", ago=400)
+    mod.record("19", "announce", mod.ANNOUNCE_RETRY_SKIPPED, sound="ann-19-gaveup",
+               reason="too-old")
+    assert _sounds(mod.unresolved_announcements(now=NOW)) == ["ann-19-gaveup"]
 
 
 def test_an_announcement_that_never_arrived_is_reported(tmp_path):

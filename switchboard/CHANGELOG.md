@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.105.0
+
+## 0.105.0
+
+### An announcement whose audio never played is sent again
+
+For the third time in a fortnight, an announcement went to the cordless in the seconds after an add-on restart, before that handset had re-registered: Asterisk logged one error line, the phone never rang, nothing played, and the only record was a ledger row minutes later. The handset was back 38 seconds after the send that failed. v0.104.0 recorded that; this release **retries it**.
+
+The retry runs in the same 20-second loop as the announce reconciler, and it will only send again once the phone **positively reports itself registered and idle, twice in a row**. Ringing, in a call, unregistered, or a state Asterisk could not report at all — all wait. A check that could not ask is what caused the original miss, and for a replay the safe answer to "we could not ask" is no.
+
+**An announcement whose audio played is never replayed.** The confirming record carries the name of the clip, and a clip that has one is excluded permanently, at any age, in whichever order the records arrive.
+
+It is the audio that decides, not the reason it was missing, so **an announcement nobody answers is retried too** — on a room phone with no auto-answer that means one message can ring the room up to three times inside two and a half minutes. The new **Announce Retry Attempts** option (`announce_retry_attempts`, default 2) is how you change that: set it to 1, or to 0 to switch the whole thing off.
+
+Bounded at two attempts, and **never started more than 150 seconds** after the original send — dinner being ready is not worth saying twenty minutes late. Two attempts a poll apart straddle the 30-45 seconds a cordless handset takes to come back after a restart. The 150 seconds is measured against how long a clip lives on disk (five minutes), not against the 120-second settling window: the phone is not even available until most of a minute into that window, and at 120 the second attempt could not happen at all for a handset that comes back slowly.
+
+- **Never two calls at once to one phone.** Only the newest announcement queued to a room is replayed; an older one waiting for the same handset is retired as `ext-superseded` rather than rung in behind it. A second call to a handset that is mid-announcement cannot auto-answer — it would ring as call waiting — and the room would hear yesterday's message after today's.
+- Each attempt is recorded as `announce-retry-attempted` with the clip, the attempt number and the handset state that cleared it. The row is written **before** the call is placed and the call is abandoned if it could not be written: an attempt that cannot be counted cannot be limited, and the count lives on disk so a restart cannot hand a clip a fresh budget.
+- When the retry gives up it records `announce-retry-skipped` once, saying why: `too-old`, `budget-exhausted`, `ext-superseded` or `clip-gone`. Neither row is a verdict — `announce-undelivered` / `announce-unsettled` still land, now carrying how many retries there were.
+- The undelivered deadline is now measured from the newest attempt, so a replay that is still ringing or playing is not reported as never delivered.
+- A refused announcement no longer starts the duplicate-suppression window when the registration check **could not judge**. That night the window was armed by an announcement nobody heard, so an identical re-send would have been answered "duplicate" for audio that never existed.
+- Clip storage and what a legal clip name is now live in one module shared by the web UI and the scheduler, and a replayed clip is re-validated against it: the right name for the right room, a real file inside the announce directory, never a link, and still short enough to play.
+- A restart inside the retry window abandons the retry, deliberately: the clip lives in memory-backed storage that the restart clears, and a run that may not judge an announcement may certainly not replay one.
+
+No new notifications. 68 new tests (802 → 870).
+
 ## 0.104.0
 
 **An announcement that sounded terrible used to tell you nothing, and two

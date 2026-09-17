@@ -1290,3 +1290,127 @@ def test_a_dashboard_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path) -> 
             app.wakeup_store.cancel("19")
         except Exception:
             pass
+
+
+def _announce_bench(tmp_path, state):
+    """api_announce, driven for real, with everything outside it stubbed.
+
+    Returns (call, originated): `call(text)` runs one POST and hands back the
+    response, `originated` collects the clips that reached the Originate. The
+    device-state PREDICATES are the real ones — the whole question here is what
+    the handler does when they cannot judge."""
+    import asyncio as _aio
+    import os as _os
+
+    originated = []
+
+    class _Req:
+        headers = {}
+
+        def __init__(self, text):
+            self._text = text
+
+        async def json(self):
+            return {"text": self._text}
+
+    class _Resp:
+        def __init__(self, payload, status_code=200):
+            self.payload, self.status_code = payload, status_code
+
+    class _Renderer:
+        """Byte-IDENTICAL output for identical text, which is what makes the
+        content digest — and therefore the suppression window — meaningful."""
+        @staticmethod
+        def build_announcement_8k(text, path):
+            with open(path, "wb") as fh:
+                fh.write(b"\0" * 44 + text.encode() * 100)
+            return True
+
+    saved = {k: getattr(app, k) for k in
+             ("load_options", "configured_room_exts", "valid_ext",
+              "get_device_state", "announce_to_ext", "announce_asterisk",
+              "ANNOUNCE_DIR", "JSONResponse")}
+    saved_out = app._delivery.OUTCOME_PATH
+    app.JSONResponse = _Resp
+    app.announce_asterisk = _Renderer
+    app.ANNOUNCE_DIR = str(tmp_path / "ann")
+    _os.makedirs(app.ANNOUNCE_DIR, exist_ok=True)
+    app.load_options = lambda: {}
+    app.configured_room_exts = lambda o: {"19"}
+    app.valid_ext = lambda e: True
+    app.get_device_state = lambda e: state
+    app.announce_to_ext = lambda e, s: originated.append(s) or True
+    app._delivery.OUTCOME_PATH = str(tmp_path / "delivery.jsonl")
+    app._ANNOUNCE_LAST.clear()
+
+    def call(text="dinner is ready"):
+        return _aio.run(app.api_announce("19", _Req(text)))
+
+    def restore():
+        for k, v in saved.items():
+            setattr(app, k, v)
+        app._delivery.OUTCOME_PATH = saved_out
+        app._ANNOUNCE_LAST.clear()
+
+    return call, originated, restore
+
+
+def test_a_judged_announcement_still_arms_the_duplicate_window(tmp_path) -> None:
+    """The window is unchanged for the normal case: the handset answered the
+    pre-flight, the clip was dispatched, and an identical payload moments later is
+    still suppressed. Without this the change below would be indistinguishable
+    from deleting the suppression window."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        first = call()
+        second = call()
+    finally:
+        restore()
+    check("dedup: the first announcement is dispatched",
+          getattr(first, "payload", {}).get("ok") is True and len(originated) == 1)
+    check("dedup: an identical payload right after a PLAYBACK is suppressed",
+          getattr(second, "payload", {}).get("skipped") == "duplicate")
+    check("dedup: and it is not sent twice", len(originated) == 1)
+
+
+def test_an_unjudged_announcement_does_not_arm_the_duplicate_window(tmp_path) -> None:
+    """★ THE v0.85.0 LOCKOUT IN A NEW DRESS, and the 2026-09-15 incident armed it.
+
+    _mark_announce_played() was called on AMI ACCEPTANCE. That night the
+    reachability pre-flight read "" because AMI was not answering 8 s after a
+    restart, the Originate was accepted, `originate-queued` was written — and
+    nothing played, because ext 19 had no contact. The window was armed anyway, so
+    an identical re-send from Home Assistant inside the 300 s window would have
+    been answered {"ok": true, "skipped": "duplicate"} for audio nobody heard.
+
+    The window means "this exact payload ALREADY PLAYED". When the guard could not
+    judge, acceptance is not evidence that anything played, so the window stays
+    shut and the producer's retry is answered on its merits. The only producers
+    that re-send an identical payload are the alerting ones.
+    """
+    call, originated, restore = _announce_bench(tmp_path, "")      # AMI says nothing
+    try:
+        first = call()
+        second = call()
+        third = call()
+    finally:
+        restore()
+    check("unjudged: the announcement still goes out (the guard fails open)",
+          getattr(first, "payload", {}).get("ok") is True)
+    check("unjudged: an identical re-send is NOT called a duplicate",
+          getattr(second, "payload", {}).get("skipped") is None)
+    check("unjudged: nor is the one after that",
+          getattr(third, "payload", {}).get("skipped") is None)
+    check("unjudged: every attempt reached the Originate", len(originated) == 3)
+    # ...and the ledger still says why, once per attempt.
+    import json as _json
+    recs = [_json.loads(l) for l in
+            open(str(tmp_path / "delivery.jsonl"), encoding="utf-8").read().splitlines()
+            if l.strip()]
+    outcomes = [r["outcome"] for r in recs]
+    check("unjudged: each attempt recorded the unjudged guard",
+          outcomes.count("announce-guard-unjudged") == 3)
+    check("unjudged: no duplicate-suppressed row was written",
+          "duplicate-suppressed" not in outcomes)
+    check("unjudged: every guard row names the clip",
+          all(r.get("sound") for r in recs if r["outcome"] == "announce-guard-unjudged"))

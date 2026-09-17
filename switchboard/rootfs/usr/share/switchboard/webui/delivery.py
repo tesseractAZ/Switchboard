@@ -48,6 +48,19 @@ ANNOUNCE_UNDELIVERED = "announce-undelivered"
 # while the PBX was still coming back up. See ANNOUNCE_SETTLE_SECONDS.
 ANNOUNCE_UNSETTLED = "announce-unsettled"
 
+# ★ ONE DEFINITION OF "SETTLED" (2026-09-16). unresolved_announcements() spelled
+# this as an inline tuple of its own, and the automatic retry needs the SAME
+# three names: a clip this set covers is exactly a clip that must never be
+# replayed, and one it does not cover is exactly a clip the reconciler will still
+# speak a verdict for. Two copies of a three-name tuple is how the retry starts
+# replaying announcements the reconciler has already judged, or stops retrying
+# ones it has not, with every test still green.
+#
+# NOT a list to add rows to. An outcome belongs here only when it is a FINAL
+# verdict about the audio — which is why ANNOUNCE_ORIGINATE_FAILED,
+# ANNOUNCE_GUARD_UNJUDGED and both retry outcomes below are outside it.
+ANNOUNCE_TERMINAL = (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED, ANNOUNCE_UNSETTLED)
+
 # ★ THE ORIGINATE THAT NEVER BECAME A CALL (2026-09-15).
 #
 # The announce path used to write two bare literals here, `originate-error` when
@@ -94,6 +107,37 @@ ANNOUNCE_ORIGINATE_FAILED = "announce-originate-failed"
 # it as resolving would silently retire the reconciler for every announcement
 # whose state read hiccuped, which is precisely the population it exists for.
 ANNOUNCE_GUARD_UNJUDGED = "announce-guard-unjudged"
+
+# ★ THE AUTOMATIC RETRY (2026-09-16), and why it needs two names of its own.
+#
+# The owner's decision after the third occurrence of the shape above: an
+# announcement whose audio never played must be RETRIED, not merely recorded.
+# wakeup/scheduler.py's _retry_announcements() does it, and these are the only
+# two rows it writes itself.
+#
+# ANNOUNCE_RETRY_ATTEMPTED is written BEFORE each retry Originate and GATES it —
+# an attempt that could not be counted is an attempt that could repeat forever,
+# so if record() returns False the Originate does not happen. It carries the
+# ORIGINAL clip name, so every row about one announcement stays in one join, and
+# `attempt`/`of` say which of how many. It is NOT a verdict: the audio may still
+# arrive, and ANNOUNCE_TERMINAL deliberately excludes it.
+#
+# ★ IT IS ALSO THE BUDGET. The count of these rows on disk is what bounds the
+# retry — never a counter in memory, because a restart inside the window would
+# hand the same clip a fresh budget and the announcement could be replayed
+# without limit. (The v1.159.0 lesson from the power add-on: a retry slot that
+# does not survive the process cannot count.)
+ANNOUNCE_RETRY_ATTEMPTED = "announce-retry-attempted"
+# ...and why the retry gave up, exactly once per clip: reason=too-old |
+# budget-exhausted | ext-superseded | clip-gone. TRANSIENT deferrals (the handset
+# is not idle yet, AMI could not be read, only one clean observation so far) are
+# LOGGED and NOT recorded — a row every 20 s would trim the history this ledger
+# exists to keep. Terminal for the RETRY only, and deliberately NOT in
+# ANNOUNCE_TERMINAL: the announcement still never arrived, so the reconciler must
+# still file announce-undelivered / announce-unsettled for it. The candidate scan
+# excludes any clip that already has one of these, which is what makes "exactly
+# once" hold across a restart without any in-memory bookkeeping.
+ANNOUNCE_RETRY_SKIPPED = "announce-retry-skipped"
 
 # ★ WHO CHANGED A WAKE-UP, AND FROM WHERE (2026-09-14).
 #
@@ -166,6 +210,73 @@ ANNOUNCE_SETTLE_SECONDS = 120.0
 # failure — a burst of alarming records about a period nobody can act on any
 # more. Beyond this the answer is "unknown", which is not the same as "failed".
 ANNOUNCE_LOOKBACK = 3600.0
+
+# ─── the automatic retry's bounds ──────────────────────────────────────────
+# Read by wakeup/scheduler.py's _retry_announcements(). Here rather than there
+# for the same reason the horizon is here: the retry and the reconciler judge the
+# same population from opposite ends, and a number that decides both must have
+# one home. Every one of these is env-overridable, and
+# ANNOUNCE_RETRY_MAX_ATTEMPTS=0 is a complete kill switch.
+
+# How many real Originates a missed announcement may get, counted from
+# ANNOUNCE_RETRY_ATTEMPTED rows ON DISK.
+#
+# ★ TWO, FROM THE MEASURED RE-REGISTRATION BAND. Every handset was back inside
+# ~46 s of the scheduler starting on the build that produced the 2026-09-15
+# incident: ext 19's contact returned 37.9 s after the failed Originate, ext 14
+# last at 45.6 s, the other seven between 0.1 s and 30 s; the 09-15 review
+# measures the cordless at 30-45 s on this build. Two attempts spaced at least
+# one poll apart straddle that band from either side. A third buys nothing —
+# past ~110 s the cause is no longer the restart, and steady-state
+# unreachability for this handset measured 2 of 1,714 polls (0.12 %), where a
+# fourth INVITE is noise and announce-undelivered is the honest record.
+ANNOUNCE_RETRY_MAX_ATTEMPTS = int(os.environ.get("ANNOUNCE_RETRY_MAX_ATTEMPTS", "2") or 2)
+
+# How old an announcement must be before its first retry, and how long after one
+# attempt before the next.
+#
+# ★ ONE POLL (WAKEUP_POLL_SECONDS is 20). Two things make this the floor rather
+# than a preference. The resolving row lands essentially AT hangup — the journal
+# has the `h` extension at 04:45:21.897 and the detached callqos spawned at
+# .898, and record() stamps whole seconds — so 20 s is four orders of magnitude
+# of headroom over the race between "it played" and "we decided it had not". And
+# as the inter-attempt spacing it guarantees attempt 1 is visible before attempt
+# 2 is considered: 20 s in, attempt 1 is either still ringing (not idle, see
+# ANNOUNCE_RING_SECONDS) or has already failed.
+ANNOUNCE_RETRY_MIN_AGE = float(os.environ.get("ANNOUNCE_RETRY_MIN_AGE", "20") or 20)
+
+# How many CONSECUTIVE idle observations, one poll apart, clear a handset for a
+# replay. Two, at a cost of one poll of latency, because a duplicate
+# announcement in a quiet house at 03:00 is worse than the original miss.
+# Honest about what it buys: it closes the hangup-versus-ledger race, and it does
+# NOT close a stale AOR contact that still reads idle for a handset that has left
+# the network.
+ANNOUNCE_RETRY_CLEAN_TICKS = int(os.environ.get("ANNOUNCE_RETRY_CLEAN_TICKS", "2") or 2)
+
+# ★ HOW LATE A REPLAY MAY STILL START, measured from the ORIGINAL queued row.
+#
+# NOT ANNOUNCE_SETTLE_SECONDS, and that is the whole point of this comment.
+# 120 s is the right answer to "has the PBX come back yet?" and the wrong
+# quantity for this question, because the endpoint is not even available until
+# 38-46 s into that window: at 120 s a SECOND attempt is structurally
+# unreachable for two real shapes. A handset that is registered and never
+# answers reads Ringing for the full ANNOUNCE_RING_SECONDS, so the first attempt
+# cannot start before ~60 s and the second cannot be reached before ~120 s; a
+# 46 s re-registration (the top of the measured band) puts attempt 1 at ~86 s
+# and attempt 2 at ~106 s. A bound that cannot fire for a whole population is a
+# feature that looks shipped and is not.
+#
+# 150 s is pinned against the HARD PHYSICAL CEILING instead: the clip's life.
+# app.py's _cleanup_announce_dir prunes by mtime at the top of every announce
+# POST, and a retry's clip must survive until Playback runs — the ring plus the
+# clip cap after the Originate. 150 + 30 + 90 = 270 < that 300 s, so at these
+# bounds the clip cannot be pruned out from under a retry, which demotes the
+# clip-gone check to defence in depth against a forged or stale ledger name.
+# Pinned by test, both ways (see tests/test_announce_retry.py, §invariants).
+#
+# In household terms it is 2.5 minutes — the same moment in a house. The owner's
+# "20 minutes late is worse than never" is eight times further away.
+ANNOUNCE_RETRY_MAX_AGE = float(os.environ.get("ANNOUNCE_RETRY_MAX_AGE", "150") or 150)
 
 
 def _open_no_follow(path: str, flags: int) -> int:
@@ -457,9 +568,67 @@ def _read_records(since_ts: float) -> list:
     return out
 
 
+def announce_floor(now: float, lookback: float | None = None,
+                   not_before: float | None = None) -> float:
+    """The oldest timestamp an announce pass may look at. One expression, because
+    the two passes below MUST share a floor to be able to share one read."""
+    lookback = ANNOUNCE_LOOKBACK if lookback is None else lookback
+    floor = now - lookback
+    if not_before is not None:
+        floor = max(floor, not_before)
+    return floor
+
+
+def announce_records(now: float | None = None, lookback: float | None = None,
+                     not_before: float | None = None) -> list:
+    """The ledger tail both announce passes read, for ONE caller to read once.
+
+    The reconciler and the retry ask different questions of the same handful of
+    rows, and _read_records() does a full readlines() of a ledger capped at 2 MB.
+    Two reads per 20 s tick doubles that on a Pi for no gain, and — worse — lets
+    the two passes see two different ledgers when a row lands between them.
+    Pass the result to both as `recs=`.
+    """
+    now = time.time() if now is None else now
+    return _read_records(announce_floor(now, lookback, not_before))
+
+
+def _announce_tail(recs: list | None, floor: float) -> list:
+    """Records at or after `floor`, read from disk when the caller has none.
+
+    The floor is applied to a caller-supplied list too, rather than trusted: a
+    caller that read with a wider window (a longer lookback, an earlier
+    not_before) would otherwise silently widen the pass's own boundary — and one
+    of those boundaries is the restart rule that keeps this reconciler from
+    judging a window it was not running for. Pinned by test with a list that
+    reaches back further than the floor.
+    """
+    if recs is None:
+        return _read_records(floor)
+    return [r for r in recs if r.get("_ts", 0.0) >= floor]
+
+
+def _retry_attempts(recs: list) -> dict:
+    """clip_key -> (how many retry Originates, the newest one's timestamp).
+
+    Counted from the rows on disk and nowhere else. A counter in memory would be
+    refilled by the restart that causes this defect in the first place, and an
+    uncountable attempt is an unbounded one.
+    """
+    out: dict = {}
+    for r in recs:
+        if (r.get("kind") == "announce"
+                and r.get("outcome") == ANNOUNCE_RETRY_ATTEMPTED and r.get("sound")):
+            key = clip_key(r["sound"])
+            n, ts = out.get(key, (0, 0.0))
+            out[key] = (n + 1, max(ts, r.get("_ts", 0.0)))
+    return out
+
+
 def unresolved_announcements(now: float | None = None, horizon: float | None = None,
                              lookback: float | None = None,
-                             not_before: float | None = None) -> list:
+                             not_before: float | None = None,
+                             recs: list | None = None) -> list:
     """Announcements queued long enough ago to be judged, with nothing to show.
 
     ★ THE HOLE THIS CLOSES. app.py records `originate-queued` the moment AMI
@@ -498,36 +667,210 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
     Judging across that boundary manufactures failures about announcements that
     worked, which is precisely the noise a delivery ledger cannot afford.
 
+    ★ v0.105.0 — THE HORIZON RUNS FROM THE NEWEST ATTEMPT. Since the scheduler
+    may now RETRY a missed announcement (ANNOUNCE_RETRY_ATTEMPTED), a clip can be
+    re-originated up to ANNOUNCE_RETRY_MAX_AGE after it was queued. Measuring the
+    horizon from the queue alone would then file `announce-undelivered` against a
+    replay that was still ringing or still playing — the same false verdict this
+    function's own horizon exists to prevent, arriving through the other door.
+    The returned record carries `retries` so the verdict can say how hard the
+    system tried before filing it.
+
     Returns the queued records, oldest first. Already-judged ones are excluded by
     the same join, so calling this on a timer does not re-file anything.
     """
     now = time.time() if now is None else now
     horizon = ANNOUNCE_HORIZON if horizon is None else horizon
-    lookback = ANNOUNCE_LOOKBACK if lookback is None else lookback
-    floor = now - lookback
-    if not_before is not None:
-        floor = max(floor, not_before)
-    # One floor, applied once: _read_records stops at it, so every record below
-    # has already passed it. A second `_ts >= floor` test here read as belt and
-    # braces and was provably dead — no mutation of it could change a result —
-    # which makes it a line that invites a reader to believe it is load-bearing.
-    recs = _read_records(floor)
+    # One floor, computed once and applied once — by _announce_tail, whether the
+    # rows came from the file or from the caller's shared read. A second
+    # `_ts >= floor` test in the loop below read as belt and braces and was
+    # provably dead, which makes it a line that invites a reader to believe it is
+    # load-bearing.
+    floor = announce_floor(now, lookback, not_before)
+    recs = _announce_tail(recs, floor)
     # Sounds that already have an answer, either way.
     # Any terminal verdict resolves a clip — including "not judged". Leaving
     # ANNOUNCE_UNSETTLED out would re-file it on every 20 s tick forever, which
-    # is the failure this exclusion set exists to prevent.
+    # is the failure this exclusion set exists to prevent. ANNOUNCE_TERMINAL is
+    # that set, shared with the retry so the two cannot drift apart.
     resolved = {clip_key(r.get("sound")) for r in recs
                 if r.get("kind") == "announce"
-                and r.get("outcome") in (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED,
-                                         ANNOUNCE_UNSETTLED)
+                and r.get("outcome") in ANNOUNCE_TERMINAL
                 and r.get("sound")}
+    attempts = _retry_attempts(recs)
     out = []
     for r in recs:
-        if (r.get("kind") == "announce" and r.get("outcome") == ANNOUNCE_QUEUED
-                and r.get("sound") and clip_key(r["sound"]) not in resolved
-                and now - r["_ts"] >= horizon):
-            out.append(r)
+        if not (r.get("kind") == "announce" and r.get("outcome") == ANNOUNCE_QUEUED
+                and r.get("sound")):
+            continue
+        key = clip_key(r["sound"])
+        if key in resolved:
+            continue
+        tried, last_attempt = attempts.get(key, (0, 0.0))
+        if now - max(r["_ts"], last_attempt) < horizon:
+            continue
+        rec = dict(r)          # a copy: the caller's shared list is not ours to mark
+        rec["retries"] = tried or None
+        out.append(rec)
     return out
+
+
+def retryable_announcements(now: float | None = None,
+                            not_before: float | None = None,
+                            lookback: float | None = None,
+                            recs: list | None = None,
+                            max_attempts: int | None = None,
+                            min_age: float | None = None,
+                            max_age: float | None = None) -> list:
+    """Announcements whose audio never played and which may still be REPLAYED.
+
+    ★ THE OWNER'S DECISION, 2026-09-15, after the third occurrence. An
+    announcement whose audio never played must be retried automatically. This is
+    the ledger half of it: which clip, how many attempts it has already had, and
+    — when it is past helping — why it is being retired. The scheduler decides
+    whether the handset can take a call; nothing here touches AMI, so a forged or
+    stale row costs no traffic and a clip still ages out correctly while AMI is
+    down.
+
+    Every condition below is a LEDGER fact, and all of them must hold:
+
+    L1  a newest `originate-queued` row with a non-empty `sound`, at or after
+        `not_before`. Inherited unchanged from unresolved_announcements: a window
+        this process was not running for is unknowable, and is never replayed.
+        (Live reason, not theory: the 47 announce QoS legs before 2026-09-11
+        carry `sound: None`, so no delivered row could ever exist for them.)
+    L2  no row for that clip in ANNOUNCE_TERMINAL — which is what makes "an
+        announcement whose audio DID play is never replayed" true at any age, in
+        any order, including a delivered row that lands AFTER an attempt row —
+        and no ANNOUNCE_RETRY_SKIPPED row, which is what makes the retirement
+        below happen exactly once per clip without any memory.
+    L3  fewer than `max_attempts` ANNOUNCE_RETRY_ATTEMPTED rows on disk.
+    L4  at least `min_age` since the queue AND since the newest attempt. This
+        gates the retirements as well, so a clip is never retired while its own
+        last attempt could still be ringing.
+    L5  no more than `max_age` since the QUEUED row.
+    L6  it is the NEWEST announcement QUEUED to its extension. A newer one to
+        the same room supersedes it: the producer has moved on, and replaying the
+        older message now would speak stale content into that room, after the
+        newer one, out of order. Exactly ONE clip per extension is ever live, so
+        a burst of announcements to one room cannot each earn their own replay —
+        which the app no longer collapses either, since an originate whose
+        pre-flight could not judge deliberately stops arming the duplicate
+        window. Ties (record() stamps whole seconds) are broken by ledger order,
+        the producer's own order within that second. (Not idle chatter — 34 of
+        the 35 announcements on this build went to one extension.)
+
+        Judged on the QUEUE times, not on when audio arrived. A long clip queued
+        BEFORE this one writes its `audio-delivered` row AFTER it, which read as
+        "the room has been spoken to since" while the truth was the reverse, and
+        retired a newer announcement that had never played. A newer clip that
+        DID play still supersedes this one — its queue row is newer too — and
+        its own delivered row is what retires it under L2 in any case.
+
+    A clip that fails only L3/L5/L6 is returned with a `stale_reason`, for the
+    caller to retire with ONE ANNOUNCE_RETRY_SKIPPED row. Precedence is
+    ext-superseded, then budget-exhausted, then too-old: the most specific fact
+    about why replaying it would be wrong, rather than the first one tested.
+
+    `max_attempts <= 0` returns nothing at all — the kill switch is here, in the
+    function that defines the population, so it cannot be bypassed by a caller.
+    """
+    now = time.time() if now is None else now
+    max_attempts = (ANNOUNCE_RETRY_MAX_ATTEMPTS if max_attempts is None
+                    else max_attempts)
+    if max_attempts <= 0:
+        return []
+    min_age = ANNOUNCE_RETRY_MIN_AGE if min_age is None else min_age
+    max_age = ANNOUNCE_RETRY_MAX_AGE if max_age is None else max_age
+    floor = announce_floor(now, lookback, not_before)
+    recs = _announce_tail(recs, floor)
+
+    queued: dict = {}            # clip_key -> its newest queued row
+    order: dict = {}             # clip_key -> where that row sits in the ledger
+    retired: set = set()         # clip_key -> already answered, or already retired
+    for i, r in enumerate(recs):
+        if r.get("kind") != "announce" or not r.get("sound"):
+            continue
+        key = clip_key(r["sound"])
+        outcome = r.get("outcome")
+        if outcome == ANNOUNCE_QUEUED:
+            prev = queued.get(key)
+            if prev is None or r.get("_ts", 0.0) >= prev.get("_ts", 0.0):
+                queued[key] = r
+                order[key] = i
+        elif outcome in ANNOUNCE_TERMINAL or outcome == ANNOUNCE_RETRY_SKIPPED:
+            retired.add(key)
+    attempts = _retry_attempts(recs)
+
+    # ★ ONE LIVE CANDIDATE PER EXTENSION (L6), and it is the NEWEST queue to that
+    # room. Two candidates for one handset are two Originates deciding they may
+    # fire from ONE endpoint read — neither can see the other's call, and a second
+    # INVITE to the cordless cannot auto-answer, it rings as call waiting. The
+    # newest wins because it is the message the house is currently owed; the
+    # others are retired with a row that says so.
+    #
+    # Retired clips are deliberately still counted as superseders: an announcement
+    # that has already been ANSWERED is the strongest possible evidence that the
+    # room has moved on.
+    newest: dict = {}            # ext -> (rank, clip_key) of its newest queue
+    for key, r in queued.items():
+        ext = str(r.get("ext") or "")
+        rank = (r.get("_ts", 0.0), order.get(key, 0))
+        if ext not in newest or rank > newest[ext][0]:
+            newest[ext] = (rank, key)
+
+    out = []
+    for key, r in queued.items():
+        if key in retired:                                          # L2
+            continue
+        ext = str(r.get("ext") or "")
+        queued_ts = r.get("_ts", 0.0)
+        tried, last_attempt = attempts.get(key, (0, 0.0))
+        if now - max(queued_ts, last_attempt) < min_age:            # L4
+            continue
+        if newest.get(ext, (None, key))[1] != key:
+            reason = "ext-superseded"                               # L6
+        elif tried >= max_attempts:
+            reason = "budget-exhausted"                             # L3
+        elif now - queued_ts > max_age:
+            reason = "too-old"                                      # L5
+        else:
+            reason = None
+        out.append({"sound": r["sound"], "ext": ext, "queued": r.get("ts"),
+                    "queued_ts": queued_ts, "attempts": tried,
+                    "stale_reason": reason})
+    out.sort(key=lambda c: c["queued_ts"])
+    return out
+
+
+def announce_clip_resolved(sound, now: float | None = None,
+                           not_before: float | None = None,
+                           lookback: float | None = None) -> bool:
+    """Does this clip ALREADY have a terminal verdict? The last look before a replay.
+
+    ★ WHY A SECOND, NARROWER READ. The retry decides on three things in order: the
+    ledger tail, then the handset's device state (an AMI round trip), then this.
+    Reading the veto LAST means a delivered row that lands while we are deciding
+    can only APPEAR, never be missed — the ordering rule that keeps the
+    duplicate-safety join honest across the AMI latency.
+
+    An empty tail is NOT a green light. A candidate was just derived from this
+    same file in this same tick, so no rows at all means the ledger has gone away
+    or become unreadable — in which case neither "it played" nor the attempt
+    count can be known, and the answer must be the one that plays nothing.
+    """
+    now = time.time() if now is None else now
+    key = clip_key(sound)
+    if not key:
+        return True                       # unjoinable: never replayable
+    tail = _read_records(announce_floor(now, lookback, not_before))
+    if not tail:
+        return True
+    for r in reversed(tail):
+        if (r.get("kind") == "announce" and r.get("outcome") in ANNOUNCE_TERMINAL
+                and clip_key(r.get("sound")) == key):
+            return True
+    return False
 
 
 def is_writable() -> bool:

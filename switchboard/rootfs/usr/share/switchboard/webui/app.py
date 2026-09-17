@@ -65,6 +65,13 @@ except ImportError:  # pragma: no cover
 # and this module contributes only the route wiring.
 import console_bridge  # noqa: E402
 
+# Where announcement clips live and what a legal clip name is. A sibling module
+# because the wake-up scheduler now reads this directory too (it replays an
+# announcement whose audio never played), and a second copy of the path literal
+# is how one of the two ends up playing out of a directory the other does not
+# write to.
+import announce_clip  # noqa: E402
+
 from ami import (  # noqa: E402
     AMIError,
     announce_to_ext,
@@ -388,7 +395,7 @@ def wakeups_list(rooms_by_ext: dict) -> list[dict]:
     return out
 
 
-ANNOUNCE_DIR = "/run/switchboard/announce"
+ANNOUNCE_DIR = announce_clip.ANNOUNCE_DIR
 _ANNOUNCE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\.wav$")
 ANNOUNCE_MAX_TEXT = 500  # cap the espeak render length (defence against a huge run)
 
@@ -533,8 +540,11 @@ except Exception:  # noqa: BLE001 - the webui must import without it
 
 
 # 8 kHz mono 16-bit PCM = 16000 bytes/s. 90 s is generous for a spoken alert and
-# still well under the 72 s that was observed repeating on the cordless.
-ANNOUNCE_BYTES_PER_SECOND = 16000
+# still well under the 72 s that was observed repeating on the cordless. Taken
+# from announce_clip for the same reason the cap is taken from `delivery`: the
+# retry re-measures a clip's duration before replaying it, and two copies of the
+# arithmetic would let the two admit different clips.
+ANNOUNCE_BYTES_PER_SECOND = announce_clip.ANNOUNCE_BYTES_PER_SECOND
 # ★ THE CAP IS READ FROM `delivery`, NOT DEFINED HERE. v0.98.0 gave the announce
 # path a reconciler, and that reconciler's horizon — how long it waits before
 # calling an announcement undelivered — is derived from this number. Two copies
@@ -563,13 +573,11 @@ def _announce_seconds(path: str) -> float | None:
 
     A byte count is enough to catch a runaway announcement and needs no audio
     library. Returns None when the file cannot be measured -- an unmeasurable
-    clip must not be refused, since failing closed here would silence alerts."""
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return None
-    # 44-byte canonical WAV header; ignore anything smaller than that.
-    return max(0.0, (size - 44)) / ANNOUNCE_BYTES_PER_SECOND
+    clip must not be refused, since failing closed here would silence alerts.
+
+    Delegates to announce_clip so the retry, which re-measures a clip it is about
+    to replay, cannot measure it differently from the handler that admitted it."""
+    return announce_clip.clip_seconds(path)
 
 
 def _announce_digest(path: str) -> str:
@@ -815,7 +823,8 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     # Carries the clip, so this row sits in the same join as every other row
     # about this announcement. No return: the announcement goes out exactly as
     # it did before.
-    if device_state_unjudged(state):
+    guard_unjudged = device_state_unjudged(state)
+    if guard_unjudged:
         print(f"[switchboard-webui] announce {ext}: device state unreadable "
               f"({state!r}) — the reachability guard could not judge; "
               "announcing anyway", flush=True)
@@ -853,9 +862,24 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         # this one — too-long, busy, unreachable and either flavour of
         # announce-originate-failed — leaves it untouched, so a caller that
         # retries a refusal is not answered with a duplicate verdict for
-        # something that never played. (announce-guard-unjudged is not a refusal
-        # and does not return, so it reaches here like any other announcement.)
-        _mark_announce_played(ext, digest)
+        # something that never played.
+        #
+        # ★ ...AND NOT WHEN THE PRE-FLIGHT COULD NOT JUDGE (v0.105.0). This is
+        # the v0.85.0 lockout in a new dress, and the 2026-09-15 incident armed
+        # it: the reachability guard read "" because AMI was not answering yet,
+        # the Originate was ACCEPTED, `originate-queued` was written — and this
+        # line then declared the payload played. Nothing played. An identical
+        # re-send from Home Assistant inside ANNOUNCE_DEDUP_WINDOW_S would have
+        # been answered {"ok": true, "skipped": "duplicate"}, and the only
+        # producer that re-sends an identical payload is an alerting one.
+        #
+        # `ok` means AMI ACCEPTED the Originate, which on an endpoint with no
+        # contact is exactly as much as it meant that night. When the guard could
+        # not judge, acceptance is not evidence of audio, so the window stays
+        # shut and the producer's retry is answered on its merits. The scheduler's
+        # own retry covers the same clip from the other side.
+        if not guard_unjudged:
+            _mark_announce_played(ext, digest)
     return JSONResponse({"ok": ok, "sound": os.path.basename(sound)})
 
 

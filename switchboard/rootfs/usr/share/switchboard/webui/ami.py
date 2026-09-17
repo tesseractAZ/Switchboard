@@ -604,6 +604,26 @@ def device_unreachable(state: str) -> bool:
 _IDLE_DEVICE_STATES = frozenset({"notinuse"})
 
 
+def device_idle(state: str) -> bool:
+    """True ONLY when the device state positively says: registered, idle, nothing
+    in progress. Everything else — busy, ringing, unavailable, invalid, unknown,
+    empty, or a spelling this module does not classify — is False.
+
+    ★ THE ONE PREDICATE THAT FAILS CLOSED, and the direction is deliberate.
+    device_busy() and device_unreachable() fail OPEN because refusing to announce
+    because we could not ask would silence an alarm. The automatic retry
+    (wakeup/scheduler.py) asks the opposite question — may a clip be REPLAYED? —
+    where the safe answer to "we could not ask" is no: a replay nobody needed,
+    into a quiet house, is worse than one more silent minute. A fail-OPEN read is
+    exactly what put an announcement into a void on 2026-09-15.
+
+    Written here, beside _IDLE_DEVICE_STATES, rather than hand-rolled in the
+    scheduler: _norm_device_state() folds two Asterisk spellings into one, and a
+    fourth private copy of that classification is how one caller starts
+    disagreeing with the others about what "Ring+Inuse" is. Pure — unit-tested."""
+    return _norm_device_state(state) in _IDLE_DEVICE_STATES
+
+
 def device_state_unjudged(state: str) -> bool:
     """True when a device-state read told the announce pre-flight NOTHING.
 
@@ -624,7 +644,7 @@ def device_state_unjudged(state: str) -> bool:
     norm = _norm_device_state(state)
     return not (norm in _BUSY_DEVICE_STATES
                 or norm in _UNREACHABLE_DEVICE_STATES
-                or norm in _IDLE_DEVICE_STATES)
+                or device_idle(state))
 
 
 def get_device_state(ext: str) -> str:

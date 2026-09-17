@@ -26,6 +26,15 @@ try:
 except Exception:  # noqa: BLE001 - the scheduler must run without it
     _delivery = None
 
+# Where announcement clips live, and what a legal clip name is. The retry below
+# is handed a clip NAME out of a ledger in group-writable /share and must decide
+# whether it names a real, playable file — so the rules live once, beside the
+# directory, in the module the webui uses to mint the same names.
+try:
+    import announce_clip  # noqa: E402
+except Exception:  # noqa: BLE001 — no clip validator means no retry, never a guess
+    announce_clip = None
+
 
 def _record(ext: str, outcome: str, **extra) -> None:
     """Record a wake-up delivery attempt, shared shape with the announce path.
@@ -76,6 +85,16 @@ _stop = False
 # this and filed a failure against an announcement that had played perfectly,
 # within ten minutes, on the upgrade boundary itself.
 _STARTED = time.time()
+
+# clip_key -> {"clean": consecutive idle observations, "defers": how many ticks
+# we have waited, "state": the last device state seen} for announcements the
+# retry below is watching. In memory for the same reason _ringing is: the window
+# is at most ANNOUNCE_RETRY_MAX_AGE, and a restart inside it MUST lose the retry
+# — `not_before=_STARTED` already forbids the new process from judging that
+# window, and a process that may not judge an announcement may certainly not
+# replay one. Bounded by construction: pruned every tick to the clips the ledger
+# still reports as candidates.
+_retry_seen: dict = {}
 
 
 def log(msg: str) -> None:
@@ -409,7 +428,7 @@ def _reconcile_rings(now: float) -> None:
         _ringing.pop(ext, None)
 
 
-def _reconcile_announcements(now: float) -> None:
+def _reconcile_announcements(now: float, recs: list | None = None) -> None:
     """File a terminal outcome for announcements that never arrived.
 
     ★ THE ANNOUNCE PATH HAD NO ENDING. app.py records `originate-queued` the
@@ -442,7 +461,8 @@ def _reconcile_announcements(now: float) -> None:
     try:
         if not _delivery.is_writable():
             return
-        stale = _delivery.unresolved_announcements(now, not_before=_STARTED)
+        stale = _delivery.unresolved_announcements(now, not_before=_STARTED,
+                                                  recs=recs)
     except Exception as exc:  # noqa: BLE001  (telemetry must never kill the loop)
         log(f"could not reconcile announcements: {exc}")
         return
@@ -478,7 +498,12 @@ def _reconcile_announcements(now: float) -> None:
             try:
                 _delivery.record(ext, "announce", _delivery.ANNOUNCE_UNSETTLED,
                                  sound=sound, queued=rec.get("ts"),
-                                 reason="pbx-restarting")
+                                 reason="pbx-restarting",
+                                 # How hard the system tried before filing this.
+                                 # Omitted when it never retried (record() drops
+                                 # None extras), so a row about an announcement
+                                 # nobody could retry is the row it always was.
+                                 retries=rec.get("retries"))
             except Exception as exc:  # noqa: BLE001
                 log(f"could not record the unsettled announcement {sound}: {exc}")
             continue
@@ -486,9 +511,269 @@ def _reconcile_announcements(now: float) -> None:
             f"{int(now - rec['_ts'])}s ago and never reached the handset")
         try:
             _delivery.record(ext, "announce", _delivery.ANNOUNCE_UNDELIVERED,
-                             sound=sound, queued=rec.get("ts"))
+                             sound=sound, queued=rec.get("ts"),
+                             retries=rec.get("retries"))
         except Exception as exc:  # noqa: BLE001
             log(f"could not record the undelivered announcement {sound}: {exc}")
+
+
+def _announce_records(now: float):
+    """The ledger tail this tick's two announce passes SHARE, or None.
+
+    One read per tick, for two reasons. _read_records() does a full readlines()
+    of a ledger capped at 2 MB, and this loop's real job is ringing alarm clocks
+    on a Pi; and two reads would let the reconciler and the retry see two
+    different ledgers when a row lands between them — the retry deciding a clip
+    is unresolved from an older view than the one the verdict was filed from.
+    None means "could not read", which both passes treat as a deferral.
+    """
+    if _delivery is None:
+        return None
+    try:
+        return _delivery.announce_records(now, not_before=_STARTED)
+    except Exception as exc:  # noqa: BLE001  (telemetry must never kill the loop)
+        log(f"could not read the delivery ledger: {exc}")
+        return None
+
+
+def _retry_max_attempts() -> int:
+    return int(getattr(_delivery, "ANNOUNCE_RETRY_MAX_ATTEMPTS", 0) or 0)
+
+
+def _retire_announcement(cand: dict, reason: str, seen: dict | None,
+                         now: float) -> None:
+    """File the ONE terminal retry row for an announcement past helping.
+
+    Only for a reason that cannot change: too old, out of attempts, superseded by
+    a newer announcement to the same room, or a clip that is no longer on disk. A
+    TRANSIENT deferral — the handset is not idle yet, AMI could not be read, one
+    clean observation so far — is logged and NOT recorded: a row every 20 s would
+    trim away the history this ledger exists to keep.
+
+    Not a verdict on the announcement. ANNOUNCE_RETRY_SKIPPED is deliberately
+    outside ANNOUNCE_TERMINAL, so the reconciler still speaks its
+    announce-undelivered / announce-unsettled for the same clip afterwards. This
+    row says only what the RETRY did, and it is what excludes the clip from every
+    later candidate scan without any in-memory bookkeeping.
+    """
+    seen = seen or {}
+    log(f"announcement {cand['sound']} to ext {cand['ext']} will not be retried "
+        f"({reason}); {cand['attempts']} attempt(s), "
+        f"{int(now - cand['queued_ts'])}s old")
+    try:
+        _delivery.record(cand["ext"], "announce", _delivery.ANNOUNCE_RETRY_SKIPPED,
+                         sound=cand["sound"], reason=reason,
+                         attempts=cand["attempts"], queued=cand.get("queued"),
+                         age_s=int(now - cand["queued_ts"]),
+                         device_state=seen.get("state") or None,
+                         defers=seen.get("defers") or None)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not record the skipped retry of {cand['sound']}: {exc}")
+
+
+def _retry_announcements(now: float, recs: list | None = None) -> None:
+    """Replay an announcement whose audio never played, while that still helps.
+
+    ★ THE OWNER'S DECISION (2026-09-15), after the third occurrence of one shape:
+    an announcement was queued to the cordless 8.4 s after an add-on restart,
+    before that handset had re-registered; Asterisk logged `Could not create
+    dialog to invalid URI '19'`, no channel existed, no audio played, and the only
+    thing anybody was told was a ledger row three minutes later. v0.104.0 shipped
+    the RECORD half of that. This is the other half: the announcement is sent
+    again once the handset can actually take it.
+
+    ★ WHY HERE and not in the webui, which is where the announcement came from.
+    This loop already ticks every POLL seconds, already reads the ledger with
+    `not_before=_STARTED`, already owns the settling window, already reads
+    endpoint states and already originates. Decisively, it SURVIVES the restart
+    that causes this defect: a retry held in the webui's own process would be
+    killed by the next deploy, and the evidence for this one is a deploy storm —
+    four releases in 29 minutes, plus a restart eight minutes later.
+
+    ★ WHAT MAKES A REPLAY SAFE, in order, because the ORDER is the guarantee:
+      1. the ledger, alone: a clip with any ANNOUNCE_TERMINAL row — above all the
+         `audio-delivered` row callqos writes with the SAME clip name — is never a
+         candidate, at any age, in any order (delivery.retryable_announcements);
+      2. the clip, before any AMI traffic: a name out of group-writable /share
+         must still resolve to a real, contained, non-empty, short-enough file;
+      3. the handset, POSITIVELY: `ami.device_idle` — the single state "not in
+         use" — twice, one POLL apart. Ringing or in-use is never idle, so a
+         replay cannot land on top of audio in progress, and an unreadable state
+         is a deferral rather than a green light. The fail-OPEN pre-flight that
+         caused the incident is exactly what must not be reused here. That
+         argument holds ACROSS ticks and not within one, so at most ONE replay
+         per extension per tick: the states below were read ONCE, before any
+         Originate, so a second candidate for the same handset would be cleared
+         by a read taken before our own call to it existed;
+      4. the ledger again, narrowly, AFTER the state read, so a delivered row
+         landing mid-decision can only appear, never be missed;
+      5. the attempt row BEFORE the Originate, and the Originate only if that row
+         was actually written — an attempt that cannot be counted cannot be
+         bounded.
+
+    Deliberately silent: like the reconciler it writes ledger rows and journal
+    lines and notifies nobody. An announcement is not an alarm clock.
+    """
+    if _delivery is None:
+        return
+    if announce_clip is None:
+        return
+    # SAME FAIL-SAFE AS THE RECONCILER. A ledger that cannot be written cannot
+    # hold the attempt row that bounds the retry, nor the delivered row that
+    # proves a replay arrived — so its silence proves nothing and authorises
+    # nothing.
+    try:
+        if not _delivery.is_writable():
+            return
+        cands = _delivery.retryable_announcements(now, not_before=_STARTED, recs=recs)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not look for retryable announcements: {exc}")
+        return
+    max_attempts = _retry_max_attempts()
+    clean_ticks = int(getattr(_delivery, "ANNOUNCE_RETRY_CLEAN_TICKS", 2) or 2)
+
+    # PHASE 1+2 — the ledger, then the clip. Neither costs AMI traffic, so a clip
+    # ages out correctly even while AMI is down, and a forged row is refused for
+    # free.
+    live, watched = [], set()
+    for cand in cands:
+        key = _delivery.clip_key(cand["sound"])
+        if cand.get("stale_reason"):
+            _retire_announcement(cand, cand["stale_reason"], _retry_seen.pop(key, None), now)
+            continue
+        clip = announce_clip.retry_clip_path(cand["ext"], cand["sound"])
+        if not clip:
+            _retire_announcement(cand, "clip-gone", _retry_seen.pop(key, None), now)
+            continue
+        live.append((cand, key, clip))
+        watched.add(key)
+    # Nothing to watch is nothing to remember: a clip that left the candidate set
+    # was either answered or retired ON DISK, so this dict cannot grow.
+    for key in [k for k in _retry_seen if k not in watched]:
+        _retry_seen.pop(key, None)
+    if not live:
+        return
+
+    # PHASE 3 — ONE endpoint read for the whole tick, and only now that a
+    # candidate has survived the two free phases. At the measured rate (3 in 4.5
+    # days) a quiet tick adds no AMI traffic at all.
+    try:
+        eps = {e.get("name"): e for e in ami.get_endpoints()}
+    except Exception as exc:  # noqa: BLE001
+        log(f"endpoint states unavailable ({exc}); deferring "
+            f"{len(live)} announcement retr{'y' if len(live) == 1 else 'ies'}")
+        for _cand, key, _clip in live:
+            seen = _retry_seen.setdefault(key, {"clean": 0, "defers": 0, "state": ""})
+            seen["clean"] = 0            # an unreadable state is not an observation
+            seen["defers"] += 1
+        return
+
+    fired: set = set()
+    for cand, key, clip in live:
+        seen = _retry_seen.setdefault(key, {"clean": 0, "defers": 0, "state": ""})
+        # ★ ONE REPLAY PER EXTENSION PER TICK — the second lock on the hazard
+        # delivery.retryable_announcements closes by returning only the newest
+        # clip per ext. Kept here as well because the cost of being wrong is
+        # unsolicited ringing in a house of antique phones: `eps` was read before
+        # any of these Originates, so it cannot possibly show a channel this pass
+        # has just created, and app.py's own busy-guard would then report a
+        # genuinely fresh announcement as skipped-busy behind our stale one.
+        # The observations are given back, not banked: they were earned against a
+        # state read that this tick's own call has invalidated.
+        if cand["ext"] in fired:
+            seen["clean"] = 0
+            seen["defers"] += 1
+            log(f"announcement {cand['sound']} waits a tick — ext {cand['ext']} "
+                f"has already been re-originated this pass")
+            continue
+        ep = eps.get(cand["ext"])
+        state = str((ep or {}).get("state") or "")
+        seen["state"] = state
+        # ActiveChannels from the same EndpointList event, SECONDARY and
+        # fail-closed. What this field holds while a clip is playing is not
+        # established by anything in this repo (the captured fixture has it empty
+        # for an idle endpoint and no in-use endpoint at all), so it can only ever
+        # make the retry more conservative, never less — and if a live probe shows
+        # it empty during a playback it should be deleted rather than kept as a
+        # check that cannot discriminate.
+        chans = str((ep or {}).get("channels", "") or "").strip()
+        if ep is None or not ami.device_idle(state) or chans not in ("", "0"):
+            seen["clean"] = 0
+            seen["defers"] += 1
+            log(f"announcement {cand['sound']} to ext {cand['ext']} is waiting for "
+                f"the handset — state '{state or 'unknown'}', channels "
+                f"'{chans}', {int(now - cand['queued_ts'])}s old")
+            continue
+        seen["clean"] += 1
+        if seen["clean"] < clean_ticks:
+            log(f"announcement {cand['sound']} to ext {cand['ext']}: ext idle "
+                f"({seen['clean']} of {clean_ticks} clean observations)")
+            continue
+
+        # PHASE 4 — the last look, then the row, then the call. This order is the
+        # duplicate guarantee: the ledger is consulted AFTER the state read, so a
+        # delivered row that lands while we were asking AMI can only appear.
+        try:
+            if _delivery.announce_clip_resolved(cand["sound"], now=now,
+                                                not_before=_STARTED):
+                log(f"announcement {cand['sound']} was settled while the retry was "
+                    f"deciding — not replaying it")
+                _retry_seen.pop(key, None)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not re-check {cand['sound']} before replaying it: {exc}")
+            continue
+        attempt = cand["attempts"] + 1
+        try:
+            wrote = _delivery.record(
+                cand["ext"], "announce", _delivery.ANNOUNCE_RETRY_ATTEMPTED,
+                sound=cand["sound"], attempt=attempt, of=max_attempts,
+                queued=cand.get("queued"), device_state=state or None,
+                age_s=int(now - cand["queued_ts"]))
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not record the retry of {cand['sound']}: {exc}")
+            continue
+        if not wrote:
+            # ★ TELEMETRY GATES THE ACTION, uniquely here. Everywhere else in
+            # this file a failed record must never stop the delivery it describes.
+            # The budget IS these rows, so an unwritten one is an unbounded retry.
+            log(f"the retry of {cand['sound']} was NOT recorded — not replaying "
+                f"it: an attempt that cannot be counted cannot be bounded")
+            continue
+        seen["clean"] = 0        # this attempt must be observed out before another
+        fired.add(cand["ext"])   # ...and so must this handset, however it goes
+        try:
+            ok = ami.announce_to_ext(cand["ext"], clip)
+        except Exception as exc:  # noqa: BLE001
+            log(f"retry originate of {cand['sound']} to ext {cand['ext']} "
+                f"failed: {exc}")
+            _record_retry_failure(cand, attempt, "retry-ami-error", str(exc)[:120])
+            continue
+        if ok:
+            log(f"announcement {cand['sound']} re-originated to ext {cand['ext']} "
+                f"(attempt {attempt} of {max_attempts}, "
+                f"{int(now - cand['queued_ts'])}s after it was queued)")
+        else:
+            log(f"the phone system refused the retry of {cand['sound']} to ext "
+                f"{cand['ext']} (attempt {attempt} of {max_attempts})")
+            _record_retry_failure(cand, attempt, "retry-refused")
+
+
+def _record_retry_failure(cand: dict, attempt: int, reason: str,
+                          detail: str | None = None) -> None:
+    """A retry Originate that raised or was declined, in the ledger.
+
+    ANNOUNCE_ORIGINATE_FAILED reused rather than renamed: it already means exactly
+    this, already carries the clip, and is already correctly outside
+    ANNOUNCE_TERMINAL — so the announcement still gets its verdict. The reason
+    says which side of the retry it came from.
+    """
+    try:
+        _delivery.record(cand["ext"], "announce",
+                         _delivery.ANNOUNCE_ORIGINATE_FAILED, sound=cand["sound"],
+                         reason=reason, attempt=attempt, detail=detail)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not record the failed retry of {cand['sound']}: {exc}")
 
 
 def tick() -> None:
@@ -601,22 +886,72 @@ def tick() -> None:
                 log(f"could not clear wake-up for ext {ext}: {exc}")
 
 
+def _log_retry_bounds() -> None:
+    """Print the retry's bounds at startup, and WARN when they cannot fire.
+
+    ★ A BOUND THAT CANNOT FIRE IS A FEATURE THAT LOOKS SHIPPED AND IS NOT. The
+    first attempt cannot happen before ANNOUNCE_RETRY_MIN_AGE plus one POLL per
+    required clean observation; if that already exceeds ANNOUNCE_RETRY_MAX_AGE,
+    every announcement is retired as `too-old` before it can ever be replayed —
+    and every test stays green, because each number is individually sane. Pinned
+    by test as well (invariant I3); this is the half a reader sees in the journal.
+    """
+    if _delivery is None:
+        log("announce retry is OFF (the delivery ledger module is unavailable)")
+        return
+    if announce_clip is None:
+        # Said out loud rather than left as a silent no-op: a feature that is
+        # inert because an import failed looks exactly like one that is working
+        # and has nothing to do.
+        log("announce retry is OFF (the clip validator module is unavailable)")
+        return
+    attempts = _retry_max_attempts()
+    if attempts <= 0:
+        log("announce retry is OFF (ANNOUNCE_RETRY_MAX_ATTEMPTS=0)")
+        return
+    min_age = float(getattr(_delivery, "ANNOUNCE_RETRY_MIN_AGE", 0.0))
+    clean = int(getattr(_delivery, "ANNOUNCE_RETRY_CLEAN_TICKS", 0) or 0)
+    max_age = float(getattr(_delivery, "ANNOUNCE_RETRY_MAX_AGE", 0.0))
+    log(f"announce retry: up to {attempts} attempt(s), no sooner than "
+        f"{int(min_age)}s after the originate, {clean} clean endpoint "
+        f"observation(s) required, never started later than {int(max_age)}s")
+    if min_age + clean * POLL >= max_age:
+        log(f"WARNING: announce retry is INERT at poll {POLL}s — "
+            f"{int(min_age)}s + {clean} x {POLL}s >= {int(max_age)}s, so no "
+            f"attempt can be reached before the age cap retires the clip")
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
     log(f"scheduler started (poll {POLL}s, ring {RING}s, store {store.PATH})")
+    _log_retry_bounds()
     while not _stop:
         try:
             tick()
         except Exception as exc:  # never let the loop die
             log(f"tick error: {exc}")
+        # ONE ledger read, shared by the two announce passes below. Also one
+        # `now`: the retry and the reconciler judge the same clips from opposite
+        # ends of the same timeline, and two clocks a read apart is how a clip
+        # falls between them.
+        announce_now = time.time()
+        announce_recs = _announce_records(announce_now)
         # Separate try: an announcement reconciler that raised must not be able
         # to stop wake-up calls from ringing. The alarm clock is the load-bearing
         # half of this service.
         try:
-            _reconcile_announcements(time.time())
+            _reconcile_announcements(announce_now, announce_recs)
         except Exception as exc:  # noqa: BLE001
             log(f"announce reconcile error: {exc}")
+        # ...and a THIRD try, for the same reason again one level down: the retry
+        # is the newest and the only one of the three that WRITES on the announce
+        # path. A fault in it must not stop verdicts being filed, and neither may
+        # stop the alarm clock ringing.
+        try:
+            _retry_announcements(announce_now, announce_recs)
+        except Exception as exc:  # noqa: BLE001
+            log(f"announce retry error: {exc}")
         for _ in range(POLL):  # short sleeps so SIGTERM is responsive
             if _stop:
                 break
