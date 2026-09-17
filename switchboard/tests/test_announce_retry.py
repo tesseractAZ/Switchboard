@@ -321,11 +321,120 @@ def test_the_room_having_been_spoken_to_since_retires_the_clip(tmp_path):
     34 of the 35 announcements on this build went to one extension."""
     b = _Bench(tmp_path)
     b.queue(ago=90)
-    b.delivered(sound="ann-19-" + "b" * 32, ago=30)
+    b.queue(sound="ann-19-" + "b" * 32, ago=45)          # the newer message...
+    b.delivered(sound="ann-19-" + "b" * 32, ago=30)      # ...and it arrived
     b.ticks(3)
     assert b.originated == []
     skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
     assert len(skipped) == 1 and skipped[0]["reason"] == "ext-superseded", skipped
+
+
+def test_a_newer_announcement_to_the_same_room_is_the_one_replayed(tmp_path):
+    """★ ONE LIVE CANDIDATE PER ROOM, even when NEITHER has played.
+
+    Two unresolved announcements to one handset are two Originates that would
+    both be cleared to fire by ONE endpoint read: neither can see the other's
+    call, and a second INVITE to the cordless does not auto-answer, it rings as
+    call waiting. The newest is the message the house is currently owed; the
+    older is retired with a row that says why, rather than replayed after it and
+    out of order.
+
+    Not a hypothetical population: an originate whose pre-flight could not judge
+    deliberately stops arming the duplicate window (test_app.py), so a Home
+    Assistant re-send during exactly the AMI-blind window this feature exists for
+    now lands as several queued rows where v0.104.0 collapsed them to one."""
+    b = _Bench(tmp_path)
+    older, newer = "ann-19-" + "a" * 32, "ann-19-" + "b" * 32
+    b.queue(sound=older, ago=90)
+    b.queue(sound=newer, ago=45)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [newer], b.originated
+    skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
+    assert len(skipped) == 1, skipped
+    assert (skipped[0]["sound"], skipped[0]["reason"]) == (older, "ext-superseded")
+
+
+def test_two_announcements_queued_in_the_same_second_still_replay_once(tmp_path):
+    """The tie a whole-second stamp makes possible — and the one shape that can
+    put two candidates for one handset in front of the scheduler in one tick.
+    Ledger order, which is the producer's own order inside that second, decides;
+    the loser is retired rather than played after the winner."""
+    b = _Bench(tmp_path)
+    first, second = "ann-19-" + "1" * 32, "ann-19-" + "2" * 32
+    b.queue(sound=first, ago=40)
+    b.queue(sound=second, ago=40)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [second], b.originated
+    skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
+    assert [(r["sound"], r["reason"]) for r in skipped] == [(first, "ext-superseded")]
+
+
+def test_a_late_delivery_of_an_older_announcement_keeps_the_newer_replay(tmp_path):
+    """★ THE LOCK READS THE QUEUE TIMES, NOT WHEN AUDIO ARRIVED. A 60 s clip
+    answered before this announcement was even queued writes its `audio-delivered`
+    row a minute AFTER it — which read as "the room has been spoken to since"
+    while the truth was the reverse, and retired the one message the room had not
+    heard. Reachable only through the fail-open busy guard, which is precisely the
+    read this whole feature exists because of."""
+    b = _Bench(tmp_path)
+    older = "ann-19-" + "d" * 32
+    b.queue(sound=older, ago=120)                 # queued FIRST...
+    b.queue(ago=60)                               # ...this one is newer...
+    b.delivered(sound=older, ago=55)              # ...and the older one lands last
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [SOUND], b.originated
+    assert [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"] == []
+
+
+def test_at_most_one_replay_per_extension_per_tick(tmp_path):
+    """★ THE SECOND LOCK ON THE SAME HAZARD, downstream of the ledger.
+
+    delivery.retryable_announcements returns only the newest clip per extension,
+    so this guard is what stands if that ever changes — and being wrong here
+    means unsolicited ringing in a house of antique phones. The candidate list is
+    widened here (real rows, `stale_reason` stripped) precisely because the pass
+    above would not hand the scheduler two live clips for one handset.
+
+    The held-back clip gives its observations BACK rather than banking them: they
+    were earned against the one endpoint read this tick has just invalidated by
+    calling that handset."""
+    b = _Bench(tmp_path)
+    one, two = "ann-19-" + "3" * 32, "ann-19-" + "4" * 32
+    b.queue(sound=one, ago=40)
+    b.queue(sound=two, ago=40)
+    real = b.delivery.retryable_announcements
+
+    def _uncollapsed(now, not_before=None, recs=None, **kw):
+        """Both clips, each judged on its OWN rows — what the ledger pass would
+        hand over if its one-per-extension rule were ever removed. Every other
+        rule (the budget, the ages, the terminal join) is still the real one."""
+        rows = b.delivery.announce_records(now, not_before=not_before)
+        out = []
+        for name in (one, two):
+            out += real(now, not_before=not_before,
+                        recs=[r for r in rows if r.get("sound") == name], **kw)
+        return sorted(out, key=lambda c: c["queued_ts"])
+    b.delivery.retryable_announcements = _uncollapsed
+    try:
+        per_tick = []
+        for i in range(6):
+            before = len(b.originated)
+            b.tick(NOW + i * POLL)
+            per_tick.append(len(b.originated) - before)
+            if len(b.originated) == 1 and per_tick[-1] == 1:
+                played = b.originated[0][1].rsplit("/", 1)[-1]
+                held = one if played == two else two
+                assert b.sched._retry_seen[b.delivery.clip_key(held)]["clean"] == 0
+        # ★ Never two INVITEs to one handset off one endpoint read...
+        assert max(per_tick) <= 1, per_tick
+        # ...and the guard DEFERS rather than drops: the clip it held back goes
+        # out on a later tick, against a read taken after the earlier call.
+        assert {s.rsplit("/", 1)[-1] for _e, s in b.originated} == {one, two}, \
+            b.originated
+        assert any("has already been re-originated this pass" in m
+                   for m in b.sched.LOGGED), b.sched.LOGGED
+    finally:
+        b.delivery.retryable_announcements = real
 
 
 def test_a_delivery_to_another_room_does_not_retire_it(tmp_path):
@@ -1006,6 +1115,16 @@ def test_the_ring_out_shape_reaches_both_attempts(tmp_path):
     fired = _ring_out_run(b)
     assert len(fired) == 2, (fired, b.sched.LOGGED)
     assert fired[1] - fired[0] >= b.delivery.ANNOUNCE_RETRY_MIN_AGE
+    # ★ AND THE MANUAL MUST SAY SO. This is not only the post-restart shape: the
+    # gate is the AUDIO, not the reason it was missing, so a registered room phone
+    # that nobody picks up is a green light the moment it stops ringing — up to
+    # three rings for one message on the FXS phones, which have no auto-answer.
+    # The manual motivated the feature entirely with the restart incident, which a
+    # reader would fairly take as its only trigger.
+    docs = (ROOT / "DOCS.md").read_text()
+    assert "announcement nobody answers is retried too" in docs, (
+        "DOCS.md does not tell the owner that an UNANSWERED announcement is "
+        "replayed as well — the behaviour they will actually notice")
 
 
 def test_the_second_attempt_would_be_unreachable_at_the_settling_window(tmp_path):
@@ -1119,12 +1238,48 @@ def test_the_age_cap_is_not_the_settling_window(tmp_path):
 
 
 def test_every_bound_can_be_overridden_from_the_environment():
-    """An option is inert until the run script exports it; the environment is the
-    kill switch that needs no add-on option (and none is added here)."""
+    """Every bound is an environment read, so a bad one can be corrected on the
+    box without a build. Only the attempt count is exposed as an add-on option
+    (below); the timings are derived from each other and from this loop's poll,
+    and are deliberately not four independent dials."""
     src = (WEBUI / "delivery.py").read_text()
     for name in ("ANNOUNCE_RETRY_MAX_ATTEMPTS", "ANNOUNCE_RETRY_MIN_AGE",
                  "ANNOUNCE_RETRY_CLEAN_TICKS", "ANNOUNCE_RETRY_MAX_AGE"):
         assert f'os.environ.get("{name}"' in src, name
+
+
+def test_the_off_switch_actually_reaches_the_scheduler():
+    """★ AN OPTION IS INERT UNTIL A RUN SCRIPT EXPORTS IT — and an environment
+    variable nothing in the add-on ever sets is not a kill switch, it is a
+    sentence in a manual. The scheduler reads os.environ; the Supervisor writes
+    options; the `export` in the run script is the only bridge between them, and
+    it is the edit this project has forgotten more often than any other. It
+    matters here because this is the owner's way to stop a feature that PLACES
+    PHONE CALLS in a house of antique phones.
+
+    Four edits, and this pins all four plus the name that joins them."""
+    import yaml
+    run = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+           / "wakeup-scheduler" / "run").read_text()
+    m = re.search(r'^([A-Z_][A-Z0-9_]*)="\$\(switchboard-opt\s+'
+                  r'announce_retry_attempts\s*\)"', run, re.M)
+    assert m, "the scheduler's run script never reads announce_retry_attempts"
+    assert re.search(rf'^export\s+ANNOUNCE_RETRY_MAX_ATTEMPTS='
+                     rf'"\$\{{{m.group(1)}:-2\}}"', run, re.M), run
+    # The exported NAME must be the one the code reads: a typo here is a knob
+    # that turns nothing, with every test green.
+    assert ('os.environ.get("ANNOUNCE_RETRY_MAX_ATTEMPTS"'
+            in (WEBUI / "delivery.py").read_text())
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    assert cfg["options"]["announce_retry_attempts"] == 2
+    # 0 must be INSIDE the range, or the documented off switch cannot be set.
+    assert cfg["schema"]["announce_retry_attempts"] == "int(0,3)?"
+    # ...and anything ANNOUNCE_RETRY_* the manual tells the owner to set must be
+    # bridged by that same script. The manual used to promise all four.
+    docs = (ROOT / "DOCS.md").read_text()
+    for name in sorted(set(re.findall(r"ANNOUNCE_RETRY_[A-Z_]+", docs))):
+        assert f"export {name}=" in run, (
+            f"DOCS.md tells the reader about {name}, which no run script exports")
 
 
 # --------------------------------------------------------------------------- #
@@ -1215,6 +1370,11 @@ def test_a_raising_retry_cannot_stop_the_verdicts_or_the_alarm(tmp_path):
     assert rang == ["tick"], "the alarm clock did not run"
     assert "announce-undelivered" in b.outcomes(), b.outcomes()
     assert any("announce retry error" in m for m in b.sched.LOGGED), b.sched.LOGGED
+    # ...and main() PRINTS the retry's bounds. That line is the only production
+    # signal separating "live and idle" from "OFF because an import failed",
+    # "OFF because the attempt count is 0" and "INERT at this poll" — and its
+    # own test called it directly, so deleting the call site kept the suite green.
+    assert any("announce retry: up to" in m for m in b.sched.LOGGED), b.sched.LOGGED
 
 
 def test_the_retry_never_pushes(tmp_path):

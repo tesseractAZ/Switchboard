@@ -84,6 +84,13 @@ configuration:
   announce_players:
     name: Announce Target Speakers
     description: Home Assistant media_player entity IDs an announcement plays on (e.g. media_player.kitchen_speaker). Add one entity ID per line. REQUIRED for announcements to work — while this is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up.
+  announce_retry_attempts:
+    name: Announce Retry Attempts
+    description: >-
+      How many times an announcement whose audio never played is sent again,
+      once the phone reports itself registered and idle (never later than 150
+      seconds after the original, and never if the announcement did play). 0
+      turns retries off entirely and leaves only the delivery record.
   announce_token:
     name: Announce API Token
     description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / another add-on to speak alerts on the cordless). Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.

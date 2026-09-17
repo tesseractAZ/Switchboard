@@ -112,6 +112,7 @@ options:
   announce_enabled: true
   announce_ext: "46"
   announce_players: []
+  announce_retry_attempts: 2
   wakeup_scene: ""
   wakeup_scenes: []
   wakeup_weather: true
@@ -200,6 +201,7 @@ schema:
   announce_ext: "match(^[0-9]{2,6}$)?"
   announce_players:
     - str?
+  announce_retry_attempts: int(0,3)?
   wakeup_scene: str?
   wakeup_scenes:
     - ext: "match(^[0-9]{2,6}$)"

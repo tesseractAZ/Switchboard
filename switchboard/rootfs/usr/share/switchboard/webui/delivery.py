@@ -711,7 +711,6 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
             continue
         rec = dict(r)          # a copy: the caller's shared list is not ours to mark
         rec["retries"] = tried or None
-        rec["_attempt_ts"] = last_attempt or None
         out.append(rec)
     return out
 
@@ -750,10 +749,23 @@ def retryable_announcements(now: float | None = None,
         gates the retirements as well, so a clip is never retired while its own
         last attempt could still be ringing.
     L5  no more than `max_age` since the QUEUED row.
-    L6  no `audio-delivered` announce row for the SAME ext, a DIFFERENT clip,
-        NEWER than the queued row: the room has been spoken to since, so the
-        producer has superseded this message. (Not idle chatter — 34 of the 35
-        announcements on this build went to one extension.)
+    L6  it is the NEWEST announcement QUEUED to its extension. A newer one to
+        the same room supersedes it: the producer has moved on, and replaying the
+        older message now would speak stale content into that room, after the
+        newer one, out of order. Exactly ONE clip per extension is ever live, so
+        a burst of announcements to one room cannot each earn their own replay —
+        which the app no longer collapses either, since an originate whose
+        pre-flight could not judge deliberately stops arming the duplicate
+        window. Ties (record() stamps whole seconds) are broken by ledger order,
+        the producer's own order within that second. (Not idle chatter — 34 of
+        the 35 announcements on this build went to one extension.)
+
+        Judged on the QUEUE times, not on when audio arrived. A long clip queued
+        BEFORE this one writes its `audio-delivered` row AFTER it, which read as
+        "the room has been spoken to since" while the truth was the reverse, and
+        retired a newer announcement that had never played. A newer clip that
+        DID play still supersedes this one — its queue row is newer too — and
+        its own delivered row is what retires it under L2 in any case.
 
     A clip that fails only L3/L5/L6 is returned with a `stale_reason`, for the
     caller to retire with ONE ANNOUNCE_RETRY_SKIPPED row. Precedence is
@@ -774,9 +786,9 @@ def retryable_announcements(now: float | None = None,
     recs = _announce_tail(recs, floor)
 
     queued: dict = {}            # clip_key -> its newest queued row
+    order: dict = {}             # clip_key -> where that row sits in the ledger
     retired: set = set()         # clip_key -> already answered, or already retired
-    delivered: list = []         # (ts, ext, clip_key) for the freshness lock
-    for r in recs:
+    for i, r in enumerate(recs):
         if r.get("kind") != "announce" or not r.get("sound"):
             continue
         key = clip_key(r["sound"])
@@ -785,11 +797,27 @@ def retryable_announcements(now: float | None = None,
             prev = queued.get(key)
             if prev is None or r.get("_ts", 0.0) >= prev.get("_ts", 0.0):
                 queued[key] = r
+                order[key] = i
         elif outcome in ANNOUNCE_TERMINAL or outcome == ANNOUNCE_RETRY_SKIPPED:
             retired.add(key)
-        if outcome == AUDIO_DELIVERED:
-            delivered.append((r.get("_ts", 0.0), str(r.get("ext") or ""), key))
     attempts = _retry_attempts(recs)
+
+    # ★ ONE LIVE CANDIDATE PER EXTENSION (L6), and it is the NEWEST queue to that
+    # room. Two candidates for one handset are two Originates deciding they may
+    # fire from ONE endpoint read — neither can see the other's call, and a second
+    # INVITE to the cordless cannot auto-answer, it rings as call waiting. The
+    # newest wins because it is the message the house is currently owed; the
+    # others are retired with a row that says so.
+    #
+    # Retired clips are deliberately still counted as superseders: an announcement
+    # that has already been ANSWERED is the strongest possible evidence that the
+    # room has moved on.
+    newest: dict = {}            # ext -> (rank, clip_key) of its newest queue
+    for key, r in queued.items():
+        ext = str(r.get("ext") or "")
+        rank = (r.get("_ts", 0.0), order.get(key, 0))
+        if ext not in newest or rank > newest[ext][0]:
+            newest[ext] = (rank, key)
 
     out = []
     for key, r in queued.items():
@@ -800,10 +828,7 @@ def retryable_announcements(now: float | None = None,
         tried, last_attempt = attempts.get(key, (0, 0.0))
         if now - max(queued_ts, last_attempt) < min_age:            # L4
             continue
-        # Strictly newer: record() stamps whole seconds, and a delivered row for
-        # a DIFFERENT clip in the same second as this queue is the previous
-        # announcement finishing, not a fresher one superseding it.
-        if any(ts > queued_ts and e == ext and k != key for ts, e, k in delivered):
+        if newest.get(ext, (None, key))[1] != key:
             reason = "ext-superseded"                               # L6
         elif tried >= max_attempts:
             reason = "budget-exhausted"                             # L3
@@ -813,7 +838,6 @@ def retryable_announcements(now: float | None = None,
             reason = None
         out.append({"sound": r["sound"], "ext": ext, "queued": r.get("ts"),
                     "queued_ts": queued_ts, "attempts": tried,
-                    "last_attempt_ts": last_attempt or None,
                     "stale_reason": reason})
     out.sort(key=lambda c: c["queued_ts"])
     return out

@@ -600,7 +600,11 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
          use" — twice, one POLL apart. Ringing or in-use is never idle, so a
          replay cannot land on top of audio in progress, and an unreadable state
          is a deferral rather than a green light. The fail-OPEN pre-flight that
-         caused the incident is exactly what must not be reused here;
+         caused the incident is exactly what must not be reused here. That
+         argument holds ACROSS ticks and not within one, so at most ONE replay
+         per extension per tick: the states below were read ONCE, before any
+         Originate, so a second candidate for the same handset would be cleared
+         by a read taken before our own call to it existed;
       4. the ledger again, narrowly, AFTER the state read, so a delivered row
          landing mid-decision can only appear, never be missed;
       5. the attempt row BEFORE the Originate, and the Originate only if that row
@@ -664,8 +668,24 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
             seen["defers"] += 1
         return
 
+    fired: set = set()
     for cand, key, clip in live:
         seen = _retry_seen.setdefault(key, {"clean": 0, "defers": 0, "state": ""})
+        # ★ ONE REPLAY PER EXTENSION PER TICK — the second lock on the hazard
+        # delivery.retryable_announcements closes by returning only the newest
+        # clip per ext. Kept here as well because the cost of being wrong is
+        # unsolicited ringing in a house of antique phones: `eps` was read before
+        # any of these Originates, so it cannot possibly show a channel this pass
+        # has just created, and app.py's own busy-guard would then report a
+        # genuinely fresh announcement as skipped-busy behind our stale one.
+        # The observations are given back, not banked: they were earned against a
+        # state read that this tick's own call has invalidated.
+        if cand["ext"] in fired:
+            seen["clean"] = 0
+            seen["defers"] += 1
+            log(f"announcement {cand['sound']} waits a tick — ext {cand['ext']} "
+                f"has already been re-originated this pass")
+            continue
         ep = eps.get(cand["ext"])
         state = str((ep or {}).get("state") or "")
         seen["state"] = state
@@ -721,6 +741,7 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
                 f"it: an attempt that cannot be counted cannot be bounded")
             continue
         seen["clean"] = 0        # this attempt must be observed out before another
+        fired.add(cand["ext"])   # ...and so must this handset, however it goes
         try:
             ok = ami.announce_to_ext(cand["ext"], clip)
         except Exception as exc:  # noqa: BLE001

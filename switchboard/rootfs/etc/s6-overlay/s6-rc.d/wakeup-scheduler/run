@@ -37,6 +37,14 @@ WPT="$(switchboard-opt wakeup_push_target)"
 # said empty disables it; the code was the one that was wrong.
 export WAKEUP_PUSH_TARGET="${WPT-mobile_app_iphone}"
 
+# v0.105.0 — how many times an announcement whose audio never played is sent
+# again. The scheduler reads delivery.ANNOUNCE_RETRY_MAX_ATTEMPTS out of
+# os.environ, so this export is what makes the option (and 0, the off switch)
+# anything other than decoration. ${ARA:-2}, WITH the colon: this is an int, so
+# an empty read means the key is absent and the default is what belongs there.
+ARA="$(switchboard-opt announce_retry_attempts)"
+export ANNOUNCE_RETRY_MAX_ATTEMPTS="${ARA:-2}"
+
 # Read options from the post-overlay snapshot (init-switchboard writes it);
 # falls back to /data/options.json when absent. Keeps every consumer on ONE
 # effective view of the config.
