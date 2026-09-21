@@ -233,6 +233,22 @@ def test_wakeup_ui_formatting() -> None:
     check("ui: cancel hook retained", "data-cancel=" in html)
 
 
+def test_a_pending_wakeup_can_be_cancelled_from_its_room_card() -> None:
+    # 2026-09-21, owner report: "no way to cancel a wakeup call on the GUI". The
+    # only Cancel lived in the list below the room grid; the card where the
+    # wake-up was SET offered Set alone. The card now carries its own Cancel,
+    # shown only when that room has one pending, and every cancel is a checked
+    # request so a refusal cannot look like success.
+    html = app.INDEX_HTML
+    check("ui: card renders a Cancel beside Set when a wake-up is pending",
+          "data-wakecancel=" in html and "wkPending ?" in html)
+    check("ui: the card's Cancel is wired to the cancel endpoint",
+          "getAttribute('data-wakecancel')" in html and "/cancel', {})" in html)
+    check("ui: the card's Cancel confirms out loud", "'Cancelled ✓'" in html)
+    check("ui: no cancel is a bare fetch any more (a 403 would look like success)",
+          "/cancel', {method: 'POST'}" not in html)
+
+
 def test_announce_serve_guard() -> None:
     # The LAN-exempt /announce route resolves names via safe_announce_path: strict
     # *.wav name regex AND realpath containment to the announce dir — so no
