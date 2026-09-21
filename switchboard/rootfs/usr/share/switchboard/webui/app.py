@@ -1701,12 +1701,18 @@ async function refresh() {
 
       // Per-room wake-up setter: a small time input + Set. fill the input with
       // any pending time so it round-trips.
-      const wkVal = esc(pendingHHMM(data.wakeups, r.ext));
+      const wkPending = pendingHHMM(data.wakeups, r.ext);
+      const wkVal = esc(wkPending);
       // Clock prefix so the time box reads as "set a wake-up", not a stray field.
       const wakeRow = '<div class="wakerow">' +
         '<span class="wklab" title="Set a wake-up for this room">⏰</span>' +
         '<input type="time" data-waketime="' + ex + '" value="' + wkVal + '" title="Wake-up time">' +
-        '<button class="ringbtn" data-wakeset="' + ex + '" title="Set wake-up">Set</button></div>';
+        '<button class="ringbtn" data-wakeset="' + ex + '" title="Set wake-up">Set</button>' +
+        // ★ 2026-09-21: cancel where you set it. The only Cancel used to live in
+        // the "Wake-up calls" list further down the page, so from the card — the
+        // place the wake-up was made — there was no visible way to undo it.
+        (wkPending ? '<button class="ringbtn wkcancel" data-wakecancel="' + ex +
+                     '" title="Cancel this wake-up">Cancel</button>' : '') + '</div>';
 
       return '<div class="card"><div class="ext">ext ' + ex + mwiBadge + '</div>' +
              '<div class="name">' + esc(r.label) + '</div>' +
@@ -1869,6 +1875,17 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     return;
   }
 
+  // Cancel this card's pending wake-up. Confirmed out loud like Set, so a
+  // refused or failed cancel cannot look like one that worked.
+  ext = btn.getAttribute('data-wakecancel');
+  if (ext) {
+    const done = busy(btn);
+    try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/cancel', {});
+          done('Cancelled ✓'); refresh(); }
+    catch (err) { done('Failed'); }
+    return;
+  }
+
   // Set a wake-up from this card's time input.
   ext = btn.getAttribute('data-wakeset');
   if (ext) {
@@ -1900,10 +1917,12 @@ document.getElementById('wakeups').addEventListener('click', async (e) => {
   if (!btn || btn.disabled) return;
   const ext = btn.getAttribute('data-cancel');
   btn.disabled = true; btn.textContent = '…';
+  // postJSON, not a bare fetch: fetch resolves on a 403/500 too, so a refused
+  // cancel used to refresh silently as if it had worked.
   try {
-    await fetch('./api/wakeup/' + encodeURIComponent(ext) + '/cancel', {method: 'POST'});
+    await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/cancel', {});
     refresh();
-  } catch (err) { btn.disabled = false; btn.textContent = 'Cancel'; }
+  } catch (err) { btn.disabled = false; flash(btn, 'Failed'); }
 });
 
 // ---- Lights (separate endpoint + cadence; a slow HA call must not stall the
