@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.105.0
+## 0.105.1
+
+**A wake-up can now be cancelled from the room card where you set it.**
+
+The dashboard's only Cancel button lived in the "Wake-up calls" list further down
+the page, below every room card and the active calls. The room card — where the
+⏰ time box and Set button are — offered no way to undo what it had just set, so
+from where you would naturally look there appeared to be no way to cancel a
+wake-up at all. Each room card now shows a Cancel button beside Set whenever
+that room has a wake-up pending, and it says "Cancelled ✓" when it worked.
+
+Both Cancel buttons now also check the answer. The one in the list used to
+refresh the page whatever happened, so a cancel the phone system refused looked
+exactly like one that worked; it now says "Failed".
+
+Also fixes the 0.105.0 entry below, which carried its heading twice.
 
 ## 0.105.0
 
