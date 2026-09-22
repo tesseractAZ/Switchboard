@@ -739,8 +739,11 @@ def _drive_announce(tmp_path, *, payload: bytes, state="NOT_INUSE", out=None,
                 originated.append(e)
                 return _fn(e, s)
             app.announce_to_ext = _originate
-        if out is not None:
-            app._delivery.OUTCOME_PATH = str(out)
+        # The handler READS the ledger now (the content half of the duplicate
+        # check), so every drive gets its own — a shared one would carry one
+        # test's deliveries into the next.
+        app._delivery.OUTCOME_PATH = str(out if out is not None
+                                         else tmp_path / "delivery-outcomes.jsonl")
         resp = _aio.run(app.api_announce("19", _Req()))
     finally:
         for k, v in saved.items():
@@ -789,9 +792,13 @@ def test_announce_handler_suppresses_an_identical_repeat(tmp_path) -> None:
           getattr(r2, "status_code", 200) == 200)
     import json as _json
     rec = _json.loads(out.read_text().splitlines()[-1])
-    check("dedup: the suppression is recorded",
-          rec["outcome"] == "duplicate-suppressed")
-    check("dedup: the record carries the payload digest", len(rec["digest"]) == 12)
+    # v0.106.0: the first copy is still on its way, so the repeat is PENDING —
+    # kept as a retry candidate (it carries its clip) in case the first never
+    # arrives, and retired by the retry's content check if it does.
+    check("dedup: the suppression is recorded as pending behind the first copy",
+          rec["outcome"] == "duplicate-pending" and rec["basis"] == "pending")
+    check("dedup: the record carries the clip and the content tag",
+          rec.get("sound") and len(rec["digest"]) == 12)
 
 
 # --------------------------------------------------------------------------- #
@@ -1070,9 +1077,14 @@ def test_the_suppression_window_starts_only_where_something_played() -> None:
           calls and calls[0] > queued)
 
     # And every refusal must return before reaching it.
-    for outcome in ("too-long", "duplicate-suppressed"):
-        pos = src.index(f'"announce", "{outcome}"')
-        check(f"wiring: the {outcome} path precedes the window start",
+    pos = src.index('"announce", "too-long"')
+    check("wiring: the too-long path precedes the window start", pos < calls[0])
+    # Both duplicate answers are written through delivery's constants (the retry
+    # joins on them): the ledger's heard/pending row and the memory fallback's.
+    for anchor in ("ANNOUNCE_DUPLICATE_SUPPRESSED if heard else ANNOUNCE_DUPLICATE_PENDING",
+                   '"announce", ANNOUNCE_DUPLICATE_SUPPRESSED, basis="memory"'):
+        pos = src.index(anchor)
+        check(f"wiring: the duplicate path ({anchor[:40]}...) precedes the window start",
               pos < calls[0])
     # The two guard refusals are written through delivery's constants (the retry
     # joins on them), so they are matched by the constant's name.
@@ -1455,20 +1467,581 @@ def test_an_unjudged_announcement_does_not_arm_the_duplicate_window(tmp_path) ->
         restore()
     check("unjudged: the announcement still goes out (the guard fails open)",
           getattr(first, "payload", {}).get("ok") is True)
-    check("unjudged: an identical re-send is NOT called a duplicate",
-          getattr(second, "payload", {}).get("skipped") is None)
-    check("unjudged: nor is the one after that",
-          getattr(third, "payload", {}).get("skipped") is None)
-    check("unjudged: every attempt reached the Originate", len(originated) == 3)
-    # ...and the ledger still says why, once per attempt.
+    check("unjudged: the in-memory window was not armed", "19" not in app._ANNOUNCE_LAST)
+    # v0.106.0 — the lockout this test was written against was an identical
+    # re-send answered "duplicate" and then DROPPED, for audio nobody heard. The
+    # ledger now knows the first copy is still in flight, so a re-send is answered
+    # "duplicate" but KEPT: recorded duplicate-pending with its clip, a retry
+    # candidate that is replayed if the first copy never plays and retired if it
+    # does. Not dropped, and not a second call on top of the first either.
     import json as _json
     recs = [_json.loads(l) for l in
             open(str(tmp_path / "delivery.jsonl"), encoding="utf-8").read().splitlines()
             if l.strip()]
     outcomes = [r["outcome"] for r in recs]
-    check("unjudged: each attempt recorded the unjudged guard",
-          outcomes.count("announce-guard-unjudged") == 3)
-    check("unjudged: no duplicate-suppressed row was written",
-          "duplicate-suppressed" not in outcomes)
-    check("unjudged: every guard row names the clip",
-          all(r.get("sound") for r in recs if r["outcome"] == "announce-guard-unjudged"))
+    check("unjudged: only the first reached the Originate", len(originated) == 1)
+    check("unjudged: the re-sends are PENDING, never plain suppressed",
+          outcomes.count("duplicate-pending") == 2 and "duplicate-suppressed" not in outcomes)
+    check("unjudged: each pending copy keeps its own clip (a retry candidate)",
+          all(r.get("sound") for r in recs if r["outcome"] == "duplicate-pending")
+          and len({r["sound"] for r in recs if r["outcome"] == "duplicate-pending"}) == 2)
+    check("unjudged: the first attempt recorded the unjudged guard, with its clip",
+          outcomes.count("announce-guard-unjudged") == 1
+          and all(r.get("sound") for r in recs if r["outcome"] == "announce-guard-unjudged"))
+
+
+# --------------------------------------------------------------------------- #
+# ★ THE LEDGER HALF OF THE DUPLICATE CHECK (v0.106.0). The in-memory window is
+# armed only by an Originate from this process whose pre-flight judged; these
+# drive the real handler past it (a cleared _ANNOUNCE_LAST stands in for a
+# restart) and pin what the ledger decides, and that it decides NOTHING when it
+# cannot answer.
+# --------------------------------------------------------------------------- #
+def _ledger_row(path, outcome, sound, ago, ext="19", **extra):
+    import datetime as _dt
+    import json as _json
+    import time as _t
+    ts = _dt.datetime.fromtimestamp(_t.time() - ago, _dt.timezone.utc)
+    rec = {"ts": ts.isoformat(timespec="seconds"), "ext": ext, "kind": "announce",
+           "outcome": outcome, "sound": sound}
+    rec.update(extra)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(_json.dumps(rec) + "\n")
+
+
+def _ledger_rows(tmp_path):
+    import json as _json
+    p = tmp_path / "delivery.jsonl"
+    return ([_json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            if p.exists() else [])
+
+
+def _heard(tmp_path, sound):
+    _ledger_row(tmp_path / "delivery.jsonl", "audio-delivered", sound, 0,
+                stage="complete", txcount=300)
+
+
+def test_an_identical_announcement_after_a_restart_is_a_duplicate(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("dinner is ready")
+        a = _ledger_rows(tmp_path)[-1]
+        check("ledger dedupe: the ask row carries a 12-hex tag",
+              a["outcome"] == "originate-queued" and len(a.get("digest") or "") == 12)
+        _heard(tmp_path, a["sound"])
+        app._ANNOUNCE_LAST.clear()                          # the restart
+        r = call("dinner is ready")
+    finally:
+        restore()
+    check("ledger dedupe: one Originate", len(originated) == 1)
+    check("ledger dedupe: answered as a duplicate, unchanged shape",
+          r.status_code == 200 and r.payload == {"ok": True, "skipped": "duplicate"})
+    last = _ledger_rows(tmp_path)[-1]
+    check("ledger dedupe: recorded with its basis and evidence",
+          last["outcome"] == "duplicate-suppressed" and last["basis"] == "delivered"
+          and last["matched"] == a["sound"] and last.get("delivered_at"))
+    check("ledger dedupe: the suppression row carries its clip (the room's newest ask)",
+          bool(last.get("sound")) and last["sound"] != a["sound"])
+
+
+def test_the_content_tag_is_keyed_not_a_plain_hash(tmp_path) -> None:
+    import hashlib as _h
+    import os as _os
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("dinner is ready")
+    finally:
+        restore()
+    a = _ledger_rows(tmp_path)[-1]
+    payload = b"\0" * 44 + b"dinner is ready" * 100
+    check("tag: not the plain sha256 prefix of the audio",
+          a["digest"] != _h.sha256(payload).hexdigest()[:12])
+    st = _os.stat(app.ANNOUNCE_TAG_KEY_PATH)
+    check("tag: the key is 32 bytes, owner-only", st.st_mode & 0o077 == 0 and st.st_size == 32)
+
+
+def test_the_memory_window_decides_only_when_the_ledger_cannot(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    real = app._delivery.read_content_tail
+    try:
+        app._delivery.read_content_tail = lambda since, max_bytes=None: None
+        call("dinner is ready")
+        call("dinner is ready")                              # the in-memory window
+    finally:
+        app._delivery.read_content_tail = real
+        restore()
+    check("memory fallback: the repeat did not play", len(originated) == 1)
+    a, d = _ledger_rows(tmp_path)[-2:]
+    check("memory dedupe: suppressed with basis=memory",
+          d["outcome"] == "duplicate-suppressed" and d["basis"] == "memory")
+    check("memory dedupe: the same keyed tag, never a plain hash",
+          d["digest"] == a["digest"])
+
+
+def test_something_different_in_flight_is_not_a_duplicate(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("door open")
+        _heard(tmp_path, _ledger_rows(tmp_path)[-1]["sound"])
+        call("door closed")                                  # dispatched, still playing
+        app._ANNOUNCE_LAST.clear()
+        r = call("door open")
+    finally:
+        restore()
+    check("in flight: 'door open' after 'door closed' is said again",
+          r.payload.get("skipped") != "duplicate" and len(originated) == 3)
+
+
+def test_something_different_heard_since_is_not_a_duplicate(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("door open")
+        _heard(tmp_path, _ledger_rows(tmp_path)[-1]["sound"])
+        call("door closed")
+        _heard(tmp_path, _ledger_rows(tmp_path)[-1]["sound"])
+        app._ANNOUNCE_LAST.clear()
+        r = call("door open")
+    finally:
+        restore()
+    check("sequential: open, closed, open are three announcements",
+          r.payload.get("skipped") != "duplicate" and len(originated) == 3)
+
+
+def test_the_ledger_is_read_after_the_state_read(tmp_path) -> None:
+    """A delivery that lands while AMI is being asked must be seen."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("dinner is ready")
+        a = _ledger_rows(tmp_path)[-1]
+        app._ANNOUNCE_LAST.clear()
+
+        def _state(_e):
+            _heard(tmp_path, a["sound"])
+            return "Not in use"
+        app.get_device_state = _state
+        r = call("dinner is ready")
+    finally:
+        restore()
+    check("ordering: the delivery written during the state read suppresses",
+          r.payload == {"ok": True, "skipped": "duplicate"} and len(originated) == 1)
+
+
+def _tag_of(text):
+    import hashlib as _h
+    return app._content_tag(_h.sha256(b"\0" * 44 + text.encode() * 100).hexdigest())
+
+
+def test_both_refusals_carry_the_content_tag(tmp_path) -> None:
+    """The retry recognises a copy only by its tag, so both guard refusals must
+    carry it — the unreachable one is the post-restart shape this release is for."""
+    for state, outcome in (("In use", "skipped-busy"), ("Unavailable", "unreachable")):
+        call, originated, restore = _announce_bench(tmp_path / outcome, state)
+        try:
+            call("x")
+        finally:
+            restore()
+        b = _ledger_rows(tmp_path / outcome)[-1]
+        check(f"{outcome}: refused, not originated",
+              b["outcome"] == outcome and originated == [])
+        check(f"{outcome}: carries the keyed tag of its content", b["digest"] == _tag_of("x"))
+
+
+def test_the_tag_depends_on_the_key(tmp_path) -> None:
+    """The privacy guarantee: the same audio under a different key gives a
+    different tag, so a reader of /share without the key cannot compute it."""
+    import hashlib as _h
+    saved = app.ANNOUNCE_TAG_KEY_PATH
+    digest = _h.sha256(b"door open").hexdigest()
+    tags = []
+    try:
+        for i in (1, 2):
+            app._TAG_KEY[0] = b""
+            app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / f"key{i}")
+            tags.append(app._content_tag(digest))
+    finally:
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+    check("tag: 12 hex", all(len(t) == 12 for t in tags))
+    check("tag: a different key gives a different tag", tags[0] != tags[1])
+
+
+def test_an_identical_announcement_that_never_played_is_sent_again(tmp_path) -> None:
+    """The first copy was handed over more than a horizon ago and never arrived:
+    it can no longer be heard, so the same words are said now."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        p = tmp_path / "delivery.jsonl"
+        horizon = app._delivery.ANNOUNCE_HORIZON
+        _ledger_row(p, "originate-queued", "ann-19-" + "d" * 32, horizon + 20,
+                    digest=_tag_of("x"))
+        r = call("x")
+    finally:
+        restore()
+    check("rang out: the second copy is originated",
+          len(originated) == 1 and r.payload.get("skipped") is None)
+
+
+def test_an_identical_copy_behind_one_still_in_flight_waits_for_it(tmp_path) -> None:
+    """Handed over moments ago, not yet heard: the copy is answered duplicate but
+    KEPT as a retry candidate (it may be the only one that plays)."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        p = tmp_path / "delivery.jsonl"
+        first = "ann-19-" + "d" * 32
+        _ledger_row(p, "originate-queued", first, 5, digest=_tag_of("x"))
+        r = call("x")
+    finally:
+        restore()
+    last = _ledger_rows(tmp_path)[-1]
+    check("in flight: not originated, answered duplicate",
+          originated == [] and r.payload == {"ok": True, "skipped": "duplicate"})
+    check("in flight: recorded pending, with its clip and the one it waits for",
+          last["outcome"] == "duplicate-pending" and last.get("sound")
+          and last["matched"] == first and last.get("asked_at"))
+
+
+def test_the_same_words_to_another_room_are_not_a_duplicate(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        p = tmp_path / "delivery.jsonl"
+        other = "ann-18-" + "c" * 32
+        _ledger_row(p, "originate-queued", other, 5, ext="18", digest=_tag_of("x"))
+        _ledger_row(p, "audio-delivered", other, 0, ext="18", stage="complete", txcount=300)
+        call("x")
+    finally:
+        restore()
+    check("other room: originated", len(originated) == 1)
+
+
+def test_a_ledger_that_cannot_be_read_decides_nothing(tmp_path) -> None:
+    import os as _os
+    for kind in ("dir", "fifo", "link"):
+        call, originated, restore = _announce_bench(tmp_path / kind, "Not in use")
+        try:
+            (tmp_path / kind).mkdir(exist_ok=True)
+            target = tmp_path / kind / "planted"
+            if kind == "dir":
+                _os.mkdir(target)
+            elif kind == "fifo":
+                _os.mkfifo(target)
+            else:
+                # A link whose TARGET says "already heard": following it would
+                # suppress, so this case can actually fail.
+                real = tmp_path / kind / "real.jsonl"
+                real.write_text("")
+                _ledger_row(real, "originate-queued", "ann-19-" + "e" * 32, 30,
+                            digest=_tag_of("x"))
+                _ledger_row(real, "audio-delivered", "ann-19-" + "e" * 32, 10,
+                            stage="complete", txcount=300)
+                _os.symlink(real, target)
+            app._delivery.OUTCOME_PATH = str(target)
+            r = call("x")
+            # ..."as before" means the in-memory window is still deciding.
+            r2 = call("x")
+        finally:
+            restore()
+        check(f"unreadable ({kind}): announced as before, no hang", len(originated) == 1)
+        check(f"unreadable ({kind}): the memory window still catches the repeat",
+              r2.payload == {"ok": True, "skipped": "duplicate"})
+
+
+def test_a_duplicate_check_that_raises_decides_nothing(tmp_path) -> None:
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    real = app._delivery.content_verdict
+    try:
+        app._delivery.content_verdict = lambda *a, **k: 1 / 0
+        call("x")
+    finally:
+        app._delivery.content_verdict = real
+        restore()
+    check("raising predicate: announced as before", len(originated) == 1)
+
+
+def test_no_key_means_no_tag_and_memory_only(tmp_path) -> None:
+    import os as _os
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    saved = app.ANNOUNCE_TAG_KEY_PATH
+    try:
+        app._TAG_KEY[0] = b""
+        # A key path whose parent is a FILE: ENOTDIR, for root as well.
+        (tmp_path / "notadir").write_text("x")
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "notadir" / "k")
+        call("x")
+        a = _ledger_rows(tmp_path)[-1]
+        call("x")                                   # ...and the repeat
+        b = _ledger_rows(tmp_path)[-1]
+    finally:
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+        restore()
+    check("no key: the first announcement plays", len(originated) == 1)
+    check("no key: no row carries a tag", "digest" not in a)
+    check("no key: identical repeats are still caught, in memory",
+          b["outcome"] == "duplicate-suppressed" and b["basis"] == "memory"
+          and "digest" not in b)
+
+
+def test_a_planted_link_in_place_of_the_key_is_refused(tmp_path) -> None:
+    import os as _os
+    saved = app.ANNOUNCE_TAG_KEY_PATH
+    try:
+        app._TAG_KEY[0] = b""
+        (tmp_path / "attacker").write_bytes(b"k" * 32)
+        _os.symlink(tmp_path / "attacker", tmp_path / "key")
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "key")
+        check("key link: refused, no tag", app._content_tag("ab" * 32) == "")
+        check("key link: the target was not used or replaced",
+              (tmp_path / "attacker").read_bytes() == b"k" * 32
+              and _os.path.islink(tmp_path / "key"))
+    finally:
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+
+
+def test_the_duplicate_window_bounds_the_ledger_half(tmp_path) -> None:
+    """Five minutes, either side of it — and 0 turns the ledger half off."""
+    W = app.ANNOUNCE_DEDUP_WINDOW_S
+    check("window: taken from delivery, not a second copy",
+          W == app._delivery.ANNOUNCE_DEDUP_WINDOW_S and W == 300)
+    for ago, dup in ((W - 30, True), (W + 30, False)):
+        call, originated, restore = _announce_bench(tmp_path / f"w{ago}", "Not in use")
+        try:
+            p = tmp_path / f"w{ago}" / "delivery.jsonl"
+            old = "ann-19-" + "f" * 32
+            _ledger_row(p, "originate-queued", old, ago + 20, digest=_tag_of("x"))
+            _ledger_row(p, "audio-delivered", old, ago, stage="complete", txcount=300)
+            r = call("x")
+        finally:
+            restore()
+        check(f"window: heard {int(ago)}s ago -> duplicate={dup}",
+              (r.payload.get("skipped") == "duplicate") is dup)
+    # ...and with the window at 0 the ledger is never consulted.
+    call, originated, restore = _announce_bench(tmp_path / "off", "Not in use")
+    saved = app.ANNOUNCE_DEDUP_WINDOW_S
+    try:
+        app.ANNOUNCE_DEDUP_WINDOW_S = 0
+        p = tmp_path / "off" / "delivery.jsonl"
+        old = "ann-19-" + "f" * 32
+        _ledger_row(p, "originate-queued", old, 30, digest=_tag_of("x"))
+        _ledger_row(p, "audio-delivered", old, 10, stage="complete", txcount=300)
+        r = call("x")
+    finally:
+        app.ANNOUNCE_DEDUP_WINDOW_S = saved
+        restore()
+    check("window: 0 turns the ledger half off", r.payload.get("skipped") is None
+          and len(originated) == 1)
+
+
+def test_the_read_reaches_back_far_enough_to_find_the_ask(tmp_path) -> None:
+    """A replayed clip is heard long after it was ASKED for. The read floor must
+    reach back past the window by the retry's age cap plus a playing horizon, or
+    the delivery is read with no ask row to give it a content tag."""
+    reach = app._delivery.CONTENT_ASK_REACH
+    check("reach: the retry's age cap plus a horizon",
+          reach == app._delivery.ANNOUNCE_RETRY_MAX_AGE + app._delivery.ANNOUNCE_HORIZON)
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        p = tmp_path / "delivery.jsonl"
+        slow = "ann-19-" + "9" * 32
+        _ledger_row(p, "originate-queued", slow, 400, digest=_tag_of("x"))   # outside the window
+        _ledger_row(p, "announce-retry-attempted", slow, 120, attempt=1)
+        _ledger_row(p, "audio-delivered", slow, 60, stage="complete", txcount=300)
+        r = call("x")
+    finally:
+        restore()
+    check("reach: the old ask row is still read, so the delivery counts",
+          r.payload.get("skipped") == "duplicate" and originated == [])
+
+
+def test_a_duplicate_is_answered_before_the_busy_and_unreachable_guards(tmp_path) -> None:
+    """DOCS: a duplicate is answered as a duplicate whatever the handset is doing."""
+    for state in ("In use", "Unavailable"):
+        call, originated, restore = _announce_bench(tmp_path / state, state)
+        try:
+            p = tmp_path / state / "delivery.jsonl"
+            old = "ann-19-" + "7" * 32
+            _ledger_row(p, "originate-queued", old, 40, digest=_tag_of("x"))
+            _ledger_row(p, "audio-delivered", old, 20, stage="complete", txcount=300)
+            r = call("x")
+        finally:
+            restore()
+        rows = _ledger_rows(tmp_path / state)
+        check(f"order: {state} still answers duplicate",
+              r.payload == {"ok": True, "skipped": "duplicate"})
+        check(f"order: {state} records the duplicate, not the refusal",
+              rows[-1]["outcome"] == "duplicate-suppressed")
+
+
+def test_a_key_that_cannot_be_written_leaves_nothing_behind(tmp_path) -> None:
+    """A half-made key must never be renamed into place, and no temp file may
+    accumulate in /data when the write or the rename fails."""
+    import os as _os
+    saved, saved_replace = app.ANNOUNCE_TAG_KEY_PATH, _os.replace
+    try:
+        app._TAG_KEY[0] = b""
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "keydir" / "k")
+        _os.makedirs(tmp_path / "keydir")
+        app.os.replace = lambda *a, **k: (_ for _ in ()).throw(OSError("no rename"))
+        check("key: a failed rename yields no tag", app._content_tag("ab" * 32) == "")
+        check("key: and no key file", not (tmp_path / "keydir" / "k").exists())
+        check("key: and no temp file left behind",
+              [p.name for p in (tmp_path / "keydir").iterdir()] == [])
+    finally:
+        app.os.replace = saved_replace
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+    # ...and with the rename working, the key is created once and reused.
+    try:
+        app._TAG_KEY[0] = b""
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "keydir" / "k2")
+        first = app._content_tag("ab" * 32)
+        app._TAG_KEY[0] = b""                        # a restart: read it back
+        check("key: reused across a restart, same tag",
+              first and app._content_tag("ab" * 32) == first)
+        check("key: exactly one file", [p.name for p in (tmp_path / "keydir").iterdir()] == ["k2"])
+    finally:
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+
+
+def test_a_ledger_full_of_garbage_is_refused_rather_than_ground_through(tmp_path) -> None:
+    """Anything that can write /share can fill the ledger. The read must give up,
+    not parse a megabyte of it on the announce path."""
+    D = app._delivery
+    p = tmp_path / "garbage.jsonl"
+    p.write_text("x\n" * (D.CONTENT_TAIL_MAX_BAD + 50))
+    saved = D.OUTCOME_PATH
+    try:
+        D.OUTCOME_PATH = str(p)
+        check("garbage: refused (None), not an empty answer",
+              D.read_content_tail(0) is None)
+        p.write_text("x\n" * 3)
+        check("garbage: a few bad lines are still tolerated", D.read_content_tail(0) == [])
+    finally:
+        D.OUTCOME_PATH = saved
+
+
+def test_the_tail_reader_takes_the_newest_bytes(tmp_path) -> None:
+    D = app._delivery
+    p = tmp_path / "big.jsonl"
+    for i in range(200):
+        _ledger_row(p, "originate-queued", f"ann-19-{i:032d}", 100 - i * 0.1)
+    saved = D.OUTCOME_PATH
+    try:
+        D.OUTCOME_PATH = str(p)
+        tail = D.read_content_tail(0, max_bytes=2000)
+        check("tail: bounded by max_bytes", 0 < len(tail) < 200)
+        check("tail: the NEWEST rows, oldest-first, no partial line",
+              tail[-1]["sound"] == "ann-19-" + "0" * 29 + "199"
+              and all(r.get("ts") for r in tail))
+    finally:
+        D.OUTCOME_PATH = saved
+
+
+def test_the_ledger_overrides_the_memory_window(tmp_path) -> None:
+    """★ The memory window remembers only "this web UI sent that audio", which is
+    not the same as "the room heard it". Here it did NOT arrive — the reconciler
+    filed announce-undelivered — so the same words must be said again even though
+    memory holds them. Whenever the ledger can answer, it is the one that decides."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        call("x")
+        first = _ledger_rows(tmp_path)[-1]
+        check("override: the first copy armed the memory window",
+              "19" in app._ANNOUNCE_LAST)
+        _ledger_row(tmp_path / "delivery.jsonl", "announce-undelivered",
+                    first["sound"], 0, reason="ring-no-answer")
+        r = call("x")
+    finally:
+        restore()
+    check("override: the second copy is announced, not called a duplicate",
+          len(originated) == 2 and r.payload.get("skipped") is None)
+
+
+def test_a_ledger_with_no_history_for_this_room_decides_nothing(tmp_path) -> None:
+    """★ An emptied, rotated or unwritable ledger reads exactly like a room that
+    has never been announced to. Answering "not a duplicate" from that would turn
+    the memory window off as well — the only half left when rows are not being
+    written. Unless this room's own history is there, memory decides."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    real = app._delivery.record
+    try:
+        app._delivery.record = lambda *a, **k: False          # every write fails
+        call("x")
+        r2 = call("x")
+    finally:
+        app._delivery.record = real
+        restore()
+    check("no history: the first copy played", len(originated) == 1)
+    check("no history: the repeat is still caught in memory",
+          r2.payload == {"ok": True, "skipped": "duplicate"})
+
+
+def test_a_room_with_history_is_judged_from_the_ledger(tmp_path) -> None:
+    """The other side of it: rows for THIS room are evidence, so the ledger
+    decides and a first-ever announcement is not called a duplicate."""
+    call, originated, restore = _announce_bench(tmp_path, "Not in use")
+    try:
+        p = tmp_path / "delivery.jsonl"
+        _ledger_row(p, "originate-queued", "ann-19-" + "5" * 32, 40, digest=_tag_of("y"))
+        _ledger_row(p, "audio-delivered", "ann-19-" + "5" * 32, 20,
+                    stage="complete", txcount=300)
+        r = call("x")                                        # different content
+    finally:
+        restore()
+    check("history: different content is announced", len(originated) == 1
+          and r.payload.get("skipped") is None)
+
+
+def test_the_key_file_shape_is_checked(tmp_path) -> None:
+    import os as _os
+    saved = app.ANNOUNCE_TAG_KEY_PATH
+    try:
+        # A FIFO must not hang the open, and must not be used as a key.
+        app._TAG_KEY[0] = b""
+        _os.mkfifo(tmp_path / "fifo")
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "fifo")
+        check("key: a FIFO is refused, not read", app._content_tag("ab" * 32) == "")
+        # A file of the wrong size is replaced by a fresh 32-byte key.
+        app._TAG_KEY[0] = b""
+        short = tmp_path / "short"
+        short.write_bytes(b"x" * 8)
+        app.ANNOUNCE_TAG_KEY_PATH = str(short)
+        tag = app._content_tag("ab" * 32)
+        check("key: a wrong-size key is regenerated",
+              len(tag) == 12 and short.stat().st_size == 32)
+        # A short write must never be renamed into place.
+        app._TAG_KEY[0] = b""
+        app.ANNOUNCE_TAG_KEY_PATH = str(tmp_path / "keyd" / "k")
+        _os.makedirs(tmp_path / "keyd")
+        real_write = app.os.write
+        app.os.write = lambda fd, data: real_write(fd, data[:8])
+        try:
+            check("key: a short write yields no tag", app._content_tag("ab" * 32) == "")
+            check("key: and no file of any kind is left",
+                  [p.name for p in (tmp_path / "keyd").iterdir()] == [])
+        finally:
+            app.os.write = real_write
+    finally:
+        app.ANNOUNCE_TAG_KEY_PATH = saved
+        app._TAG_KEY[0] = b""
+
+
+def test_the_tail_reader_drops_only_the_partial_first_line(tmp_path) -> None:
+    D = app._delivery
+    p = tmp_path / "cut.jsonl"
+    for i in range(50):
+        _ledger_row(p, "originate-queued", f"ann-19-{i:032d}", 50 - i)
+    saved = D.OUTCOME_PATH
+    try:
+        D.OUTCOME_PATH = str(p)
+        whole = D.read_content_tail(0)
+        size = p.stat().st_size
+        one = len(p.read_text().splitlines()[-1]) + 1
+        cut = D.read_content_tail(0, max_bytes=int(one * 4.5))   # lands mid-line
+        check("cut: the newest rows only, in order",
+              cut == whole[-4:] and [r["sound"] for r in cut] == [r["sound"] for r in whole[-4:]])
+        check("cut: nothing malformed survives the cut",
+              all(r.get("sound") and r.get("_ts") for r in cut) and size > one * 4.5)
+    finally:
+        D.OUTCOME_PATH = saved

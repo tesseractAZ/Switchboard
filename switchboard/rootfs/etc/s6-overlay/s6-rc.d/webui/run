@@ -27,5 +27,13 @@ export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 #   X-Forwarded-For. NEVER "fix" this with --forwarded-allow-ips: the client
 #   would then resolve to the BROWSER's LAN address and every legitimate
 #   Ingress request would 403.
+# The duplicate check asks `delivery` whether a replay is still coming before it
+# answers an identical announcement "duplicate" — and with the retry switched off
+# none is, so the repeat must go out instead. The scheduler exports this for
+# itself; without it here the web UI would read the built-in default and hold
+# back repeats no retry would ever send (an option is inert until it is bridged).
+ARA="$(switchboard-opt announce_retry_attempts)"
+export ANNOUNCE_RETRY_MAX_ATTEMPTS="${ARA:-2}"
+
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log \
      --ws websockets --ws-max-size 65536 --no-proxy-headers

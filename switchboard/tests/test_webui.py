@@ -154,17 +154,19 @@ def test_login_failure() -> None:
     check("auth: success not flagged", ami.login_failed(ami.parse_ami_blocks(ENDPOINTS)) is False)
 
 
-def test_stream_terminator() -> None:
-    # Real terminator line ends the stream...
-    check("term: real Event Complete line ends stream", ami.stream_complete(ENDPOINTS) is True)
-    # ...but an attacker-controlled field VALUE containing "Complete" must not.
-    spoof = (
-        b"Event: CoreShowChannel\r\nChannel: PJSIP/11-0001\r\n"
-        b"CallerIDName: Complete\r\nChannelStateDesc: Up\r\n\r\n"
-    )
-    check("term: spoofed CallerIDName 'Complete' does NOT end stream", ami.stream_complete(spoof) is False)
-    check("term: partial stream (no terminator) not complete",
-          ami.stream_complete(b"Event: ContactList\r\nEndpoint: 11\r\n\r\n") is False)
+def test_an_unrelated_complete_cannot_end_a_read() -> None:
+    # Every list read is ActionID-tagged now (stream_complete is retired). An
+    # untagged Complete — an unsolicited AgentComplete, say, which the account's
+    # `agent` read class could deliver — or a field VALUE saying "Complete" must
+    # never finish an action.
+    ids = {"A"}
+    untagged = b"Event: AgentComplete\r\nQueue: q\r\n\r\n"
+    check("term: an untagged Complete event does not finish A",
+          ami.actions_complete(untagged, ids) is False)
+    spoof = (b"Event: CoreShowChannel\r\nActionID: A\r\nChannel: PJSIP/11-0001\r\n"
+             b"CallerIDName: Complete\r\nChannelStateDesc: Up\r\n\r\n")
+    check("term: a spoofed CallerIDName 'Complete' does not finish A",
+          ami.actions_complete(spoof, ids) is False)
 
 
 ROOMS_BY_EXT = {"11": "Kitchen", "16": "Office", "17": "Garage"}
@@ -337,6 +339,30 @@ def test_actions_complete() -> None:
     torn = partial + b"Event: CoreShowChannelsComplete\r\nActionID: C\r\n"
     check("multi-term: an unterminated Complete does not end the read",
           ami.actions_complete(torn, ids) is False)
+
+    # ★ An ERROR as an action's first reply finishes it: that is how Asterisk
+    # answers an empty contact or endpoint list, and nothing follows it. The live
+    # bytes carry a bare LF inside the Message (the C string's own "\n").
+    err_c = b"Response: Error\r\nActionID: C\r\nMessage: No Contacts found\n\r\n\r\n"
+    check("multi-term: an error as C's first reply finishes C",
+          ami.actions_complete(partial + err_c, ids) is True)
+    check("multi-term: ...but not before its terminator arrives",
+          ami.actions_complete(partial + err_c[:-4], ids) is False)
+    # A mid-list error AFTER a Success listack does not: the Complete still follows
+    # (ast_sip_create_ami_event's out-of-memory path).
+    listack = b"Response: Success\r\nActionID: C\r\nEventList: start\r\nMessage: follows\r\n\r\n"
+    oom = b"Response: Error\r\nActionID: C\r\nMessage: Unable create event for ContactList\r\n\r\n"
+    check("multi-term: a mid-list error after the listack does not finish C",
+          ami.actions_complete(partial + listack + oom, ids) is False)
+    check("multi-term: ...its Complete still does",
+          ami.actions_complete(partial + listack + oom
+                               + b"Event: ContactListComplete\r\nActionID: C\r\n\r\n", ids) is True)
+    # An untagged error (the login reply's shape) and a foreign one never count.
+    check("multi-term: an untagged error does not finish C",
+          ami.actions_complete(partial + b"Response: Error\r\nMessage: x\r\n\r\n", ids) is False)
+    check("multi-term: a foreign ActionID's error does not finish C",
+          ami.actions_complete(partial + b"Response: Error\r\nActionID: Z\r\nMessage: x\r\n\r\n",
+                               ids) is False)
 
 
 def test_status_bundle_parse() -> None:
@@ -927,16 +953,26 @@ def test_send_register_uses_an_action_the_ami_account_is_allowed_to_run() -> Non
 
     def _fake(action_lines, timeout=4.0, single_response=False, action_id=""):
         sent["lines"] = list(action_lines)
-        return [{"response": "success"}]
+        return [{"response": "success"}, {"response": "success", "actionid": action_id}]
+
+    def _refused(action_lines, timeout=4.0, single_response=False, action_id=""):
+        # The login's own untagged Success, then OUR reply: an error.
+        return [{"response": "success", "message": "Authentication accepted"},
+                {"response": "error", "actionid": action_id,
+                 "message": "Unable to retrieve registration entry"}]
 
     real = ami._ami_command
     ami._ami_command = _fake
     try:
         ok = ami.send_register("trunk-reg")
+        ami._ami_command = _refused
+        refused = ami.send_register("trunk-reg")
     finally:
         ami._ami_command = real
 
     check("send_register: reports success", ok is True)
+    check("send_register: a refused kick is NOT reported sent (the login's "
+          "untagged Success does not count)", refused is False)
     action = next((l.split(":", 1)[1].strip() for l in sent["lines"]
                    if l.lower().startswith("action:")), "")
     check("send_register: uses the native PJSIPRegister action",
@@ -1226,3 +1262,181 @@ def test_converse_is_local_and_parses_the_spoken_reply() -> None:
               hc.converse("   ") == (None, None) and calls == [])
     finally:
         hc._request = real
+
+
+
+# --------------------------------------------------------------------------- #
+# ★ A LIST THAT ASTERISK ANSWERS WITH AN ERROR (2026-09-22). The live bytes, write
+# by write, from Asterisk 20.11.1; `timeouts` counts how often the read loop had to
+# fall through to its socket timeout — a read that stopped on the right block
+# never reaches one.
+# --------------------------------------------------------------------------- #
+class _ScriptedAMISocket:
+    """An AMI peer that answers with a SCRIPT of writes, one per recv(), built
+    from what the caller actually sent (so ActionIDs are echoed faithfully), then
+    raises socket.timeout — and counts every one it raises."""
+
+    def __init__(self, script) -> None:
+        self.script, self.sent, self._q, self.timeouts = script, b"", None, 0
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def ids(self) -> list:
+        return re.findall(r"ActionID: (\S+)", self.sent.decode())
+
+    def recv(self, _n: int) -> bytes:
+        if self._q is None:
+            self._q = [b"Asterisk Call Manager/9.0.0\r\n"]      # manager.c: ONE CRLF
+            return self._q.pop(0)
+        if not self._q and self.script is not None:
+            self._q, self.script = [b"Response: Success\r\nMessage: Authentication accepted\r\n\r\n"] + [
+                w.encode() for w in self.script(self.ids())], None
+        if self._q:
+            return self._q.pop(0)
+        self.timeouts += 1
+        import socket as _s
+        raise _s.timeout()
+
+
+def _with_socket(fake, fn):
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    ami.socket.create_connection = lambda *a, **k: fake
+    try:
+        return fn()
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
+
+
+def test_a_status_poll_with_no_phone_registered_does_not_stall() -> None:
+    def script(ids):
+        ep, ct, ch = ids[:3]
+        return [
+            f"Response: Success\r\nActionID: {ep}\r\nEventList: start\r\nMessage: A listing of Endpoints follows\r\n\r\n",
+            f"Event: EndpointList\r\nActionID: {ep}\r\nObjectName: 11\r\nDeviceState: Unavailable\r\n\r\n",
+            f"Event: EndpointListComplete\r\nActionID: {ep}\r\nEventList: Complete\r\nListItems: 1\r\n",
+            "\r\n",
+            f"Response: Error\r\nActionID: {ct}\r\nMessage: No Contacts found\n\r\n\r\n",
+            f"Response: Success\r\nActionID: {ch}\r\nEventList: start\r\nMessage: Channels will follow\r\n\r\n"
+            f"Event: CoreShowChannelsComplete\r\nActionID: {ch}\r\nEventList: Complete\r\nListItems: 0\r\n\r\n",
+        ]
+    fake = _ScriptedAMISocket(script)
+    eps, cs, chans = _with_socket(fake, ami.get_status_bundle)
+    check("no contacts: the poll ends without waiting out its timeout", fake.timeouts == 0)
+    check("no contacts: endpoints still parsed", [e["name"] for e in eps] == ["11"])
+    check("no contacts: no contacts, no channels", cs == {} and chans == [])
+
+
+def test_an_empty_endpoint_list_does_not_stall() -> None:
+    fake = _ScriptedAMISocket(lambda ids: [
+        f"Response: Error\r\nActionID: {ids[0]}\r\nMessage: No endpoints found\n\r\n\r\n"])
+    eps = _with_socket(fake, ami.get_endpoints)
+    check("no endpoints: [] without waiting out the timeout", eps == [] and fake.timeouts == 0)
+    check("no endpoints: the list read is ActionID-tagged", len(fake.ids()) == 1)
+
+
+def test_the_trunk_registration_read_waits_for_its_whole_complete() -> None:
+    # The Complete is written in two pieces (list_complete_start, then the
+    # Registered/NotRegistered tail); the read must end on the terminated block.
+    def script(ids):
+        r = ids[0]
+        return [
+            f"Response: Success\r\nActionID: {r}\r\nEventList: start\r\nMessage: Following are Events for each Outbound registration\r\n\r\n",
+            f"Event: OutboundRegistrationDetail\r\nActionID: {r}\r\nObjectName: trunk-reg\r\nStatus: Registered\r\nNextReg: 60\r\n\r\n",
+            f"Event: AuthDetail\r\nActionID: {r}\r\nObjectName: trunk-auth\r\nAuthType: userpass\r\n\r\n",
+            f"Event: OutboundRegistrationDetailComplete\r\nActionID: {r}\r\nEventList: Complete\r\nListItems: 1\r\n",
+            "Registered: 1\r\nNotRegistered: 0\r\n\r\n",
+        ]
+    fake = _ScriptedAMISocket(script)
+    regs = _with_socket(fake, ami.get_registrations_or_none)
+    check("registrations: parsed", regs == {"trunk-reg": {"status": "Registered", "server_uri": "",
+                                                          "next_reg": "60"}})
+    check("registrations: no timeout", fake.timeouts == 0)
+    check("registrations: the auth object is never carried", "trunk-auth" not in (regs or {}))
+    # The read must not end on the torn Complete: every scripted write is consumed.
+    check("registrations: waited for the Complete's own terminator", fake._q == [])
+
+
+def test_an_ami_that_cannot_answer_about_the_trunk_is_not_no_trunk() -> None:
+    """★ {} means "AMI answered: there is no outbound registration". An ERROR is
+    Asterisk saying it cannot answer — the action is not registered yet in the
+    seconds after a restart, the module is not running, it is shutting down. The
+    trunk watchdog publishes 'unknown' for {}, so reading a refusal as {} blanked
+    the outside line on every restart."""
+    for msg in ("Invalid/unknown command: PJSIPShowRegistrationsOutbound",
+                "Asterisk is shutting down", "Permission denied"):
+        fake = _ScriptedAMISocket(lambda ids, m=msg: [
+            f"Response: Error\r\nActionID: {ids[0]}\r\nMessage: {m}\r\n\r\n"])
+        check(f"trunk: {msg[:24]!r} -> None (could not answer)",
+              _with_socket(fake, ami.get_registrations_or_none) is None
+              and fake.timeouts == 0)
+    # ...while a genuine empty list stays {}: listack, no events, Complete.
+    fake = _ScriptedAMISocket(lambda ids: [
+        f"Response: Success\r\nActionID: {ids[0]}\r\nEventList: start\r\nMessage: follows\r\n\r\n",
+        f"Event: OutboundRegistrationDetailComplete\r\nActionID: {ids[0]}\r\n"
+        f"EventList: Complete\r\nListItems: 0\r\nRegistered: 0\r\nNotRegistered: 0\r\n\r\n"])
+    check("trunk: a real empty list is {} (no trunk configured)",
+          _with_socket(fake, ami.get_registrations_or_none) == {})
+
+
+def test_the_single_list_reads_keep_their_own_timeout() -> None:
+    """Both go through the batch reader now; the 4 s budget is the scheduler's and
+    the watchdog's, not the 2.5 s status-poll one."""
+    seen = []
+    real = ami._ami_actions
+    ami._ami_actions = lambda actions, timeout=2.5: seen.append((actions, timeout)) or []
+    try:
+        ami.get_endpoints()
+        ami.get_registrations_or_none()
+    finally:
+        ami._ami_actions = real
+    check("timeouts: one action each, both at 4.0 s",
+          [t for _a, t in seen] == [4.0, 4.0] and all(len(a) == 1 for a, _t in seen))
+    check("timeouts: the endpoints and registrations actions",
+          [a[0][0] for a, _t in seen]
+          == ["Action: PJSIPShowEndpoints", "Action: PJSIPShowRegistrationsOutbound"])
+
+
+def test_every_login_turns_unsolicited_events_off() -> None:
+    fake = _ScriptedAMISocket(lambda ids: [
+        f"Response: Success\r\nActionID: {ids[0]}\r\nVariable: DEVICE_STATE(PJSIP/19)\r\nValue: NOT_INUSE\r\n\r\n"])
+    _with_socket(fake, lambda: ami.get_device_state("19"))
+    check("events off: single-response login", b"Events: off" in fake.sent)
+    fake = _ScriptedAMISocket(lambda ids: [
+        f"Response: Error\r\nActionID: {ids[0]}\r\nMessage: No endpoints found\n\r\n\r\n"])
+    _with_socket(fake, ami.get_endpoints)
+    check("events off: list-batch login", b"Events: off" in fake.sent)
+    fake = _ScriptedAMISocket(lambda ids: [
+        f"Response: Success\r\nActionID: {ids[0]}\r\nVariable: CHANNEL(audioreadformat)\r\nValue: ulaw\r\n\r\n"])
+    out = _with_socket(fake, lambda: ami.codecs_for_channels([{"channel": "PJSIP/11-1"}]))
+    check("events off: codec-batch login", b"Events: off" in fake.sent and out == {"PJSIP/11-1": "ulaw"})
+
+
+def test_a_list_action_cannot_go_through_the_single_response_reader() -> None:
+    calls = []
+    orig = ami.socket.create_connection
+    ami.socket.create_connection = lambda *a, **k: calls.append(a)
+    try:
+        raised = False
+        try:
+            ami._ami_command(["Action: PJSIPShowContacts"])
+        except ValueError:
+            raised = True
+    finally:
+        ami.socket.create_connection = orig
+    check("single-response only: list mode is refused", raised)
+    check("single-response only: before any connection", calls == [])

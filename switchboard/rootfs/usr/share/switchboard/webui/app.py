@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import threading
 import time
@@ -465,7 +469,14 @@ def _scope_allowed(scope) -> bool:
         #     name-validated announcement WAV (see serve_announcement).
         #   * /phonebook.xml — the WP826 cordless fetching its Remote Phonebook
         #     (it can't ride Ingress); read-only, low-sensitivity.
-        if method == "GET" and (path.startswith("/announce/") or path == "/phonebook.xml"):
+        #
+        # v0.106.0: only the SPEAKER clips (`a<digits>.wav`, written by the
+        # switchboard-announce AGI for HA media players). The handset clips
+        # (`ann-<ext>-<32hex>.wav`) are played by Asterisk straight from disk and
+        # never fetched over the LAN — and their names are written into the
+        # shared-folder ledger, so exempting them let anything that could read
+        # /share download what was said.
+        if method == "GET" and (_LAN_ANNOUNCE_PATH.fullmatch(path) or path == "/phonebook.xml"):
             return True
         # The HA media_player custom-component triggers announcements over the
         # LAN from the Core container — allow POST /api/announce ONLY when it
@@ -478,6 +489,9 @@ def _scope_allowed(scope) -> bool:
                 return True
 
     return _client_allowed(host)
+
+
+_LAN_ANNOUNCE_PATH = re.compile(r"/announce/a[0-9]{1,24}\.wav")
 
 
 class RestrictToIngress:
@@ -564,10 +578,136 @@ ANNOUNCE_GUARD_UNJUDGED = getattr(_delivery, "ANNOUNCE_GUARD_UNJUDGED",
                                   "announce-guard-unjudged")
 ANNOUNCE_SKIPPED_BUSY = getattr(_delivery, "ANNOUNCE_SKIPPED_BUSY", "skipped-busy")
 ANNOUNCE_UNREACHABLE = getattr(_delivery, "ANNOUNCE_UNREACHABLE", "unreachable")
-ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
+ANNOUNCE_DUPLICATE_SUPPRESSED = getattr(_delivery, "ANNOUNCE_DUPLICATE_SUPPRESSED",
+                                        "duplicate-suppressed")
+ANNOUNCE_DUPLICATE_PENDING = getattr(_delivery, "ANNOUNCE_DUPLICATE_PENDING",
+                                     "duplicate-pending")
+# One window for both halves of the duplicate check (see delivery.content_verdict):
+# taken from `delivery` so the scheduler's replay rule and this handler can never
+# disagree about it. The literal is the dev-box fallback.
+ANNOUNCE_DEDUP_WINDOW_S = float(
+    getattr(_delivery, "ANNOUNCE_DEDUP_WINDOW_S", None)
+    if _delivery is not None and hasattr(_delivery, "ANNOUNCE_DEDUP_WINDOW_S")
+    else (os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300))
 # ext -> (digest, monotonic seconds). Process-local by design: a restart should
-# not inherit a suppression decision made before it.
+# not inherit a suppression decision made before it. The ledger half is what
+# survives one.
 _ANNOUNCE_LAST: dict = {}
+
+# ★ THE CONTENT TAG (v0.106.0). Rows in the shared-folder ledger name WHAT was
+# said by an HMAC of the rendered audio's sha256, keyed with a secret kept in the
+# add-on's own /data — never /share, which other add-ons can read. espeak-ng is
+# deterministic, so a plain hash on a shared row would let any reader of /share
+# confirm a guessed sentence ("front door unlocked"); the keyed tag only lets this
+# add-on recognise its own repeats. Only this process computes tags; the scheduler
+# only compares them.
+ANNOUNCE_TAG_KEY_PATH = os.environ.get("SWITCHBOARD_ANNOUNCE_TAG_KEY",
+                                       "/data/announce-tag.key")
+_TAG_KEY_LEN = 32
+_TAG_KEY_LOCK = threading.Lock()
+_TAG_KEY: list = [b""]          # cached on success only; a failure is retried
+
+
+def _read_tag_key(path: str) -> bytes:
+    """The key at `path`, or b"" when there is none of the right shape. Raises
+    OSError when the path is there but must not be trusted (a link, a FIFO)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return b""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path}: not a regular file")
+        if st.st_size != _TAG_KEY_LEN:
+            return b""
+        key = os.read(fd, _TAG_KEY_LEN)
+        return key if len(key) == _TAG_KEY_LEN else b""
+    finally:
+        os.close(fd)
+
+
+def _announce_tag_key() -> bytes:
+    """The content-tag key, created on first use (32 random bytes, 0600, written
+    to a temp name and renamed into place). b"" when it cannot be had — then no
+    row carries a tag and identical announcements are matched in memory only,
+    exactly as before v0.106.0."""
+    with _TAG_KEY_LOCK:
+        if _TAG_KEY[0]:
+            return _TAG_KEY[0]
+        path = ANNOUNCE_TAG_KEY_PATH
+        try:
+            key = _read_tag_key(path)
+            if not key:
+                key = secrets.token_bytes(_TAG_KEY_LEN)
+                tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                renamed = False
+                try:
+                    try:
+                        if os.write(fd, key) != _TAG_KEY_LEN:
+                            raise OSError(f"{tmp}: short write")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    os.replace(tmp, path)
+                    renamed = True
+                finally:
+                    if not renamed:     # never leave a half-made key behind in /data
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
+        except OSError as exc:
+            print(f"[switchboard-webui] announce content key unavailable ({exc}); "
+                  "identical announcements are matched in memory only", flush=True)
+            return b""
+        _TAG_KEY[0] = key
+        return key
+
+
+def _content_tag(digest: str) -> str:
+    """The 12-hex content tag for a rendered clip's sha256, or "" without one."""
+    if not digest:
+        return ""
+    key = _announce_tag_key()
+    if not key:
+        return ""
+    return hmac.new(key, b"switchboard-announce-content-v1\0" + digest.encode("ascii"),
+                    hashlib.sha256).hexdigest()[:12]
+
+
+def _content_verdict(ext: str, tag: str):
+    """The ledger half of the duplicate check: (answered, verdict).
+
+    `answered` is False when the ledger could not be asked — no tag, no module,
+    the window turned off, an unreadable file, a failure — and then the in-memory
+    window decides, exactly as it did before v0.106.0. Otherwise `verdict` is
+    delivery.content_verdict's: ("heard", row), ("pending", row) or None."""
+    if _delivery is None or not tag or ANNOUNCE_DEDUP_WINDOW_S <= 0:
+        return False, None
+    try:
+        now = time.time()
+        since = now - ANNOUNCE_DEDUP_WINDOW_S
+        recs = _delivery.read_content_tail(since - _delivery.CONTENT_ASK_REACH)
+        if recs is None:
+            print(f"[switchboard-webui] announce {ext}: the delivery ledger could not "
+                  "be read for the duplicate check; deciding in memory", flush=True)
+            return False, None
+        # ★ NO ROWS IS NO EVIDENCE. An absent, emptied or unwritable ledger reads
+        # exactly like a room that has never been announced to — and answering
+        # "not a duplicate" from that would silently switch the in-memory window
+        # off as well, which is the only half left when the ledger is not being
+        # written. Unless this room's own history is in there, the memory half
+        # decides.
+        if not any(r.get("kind") == "announce" and str(r.get("ext") or "") == ext
+                   for r in recs):
+            return False, None
+        return True, _delivery.content_verdict(ext, tag, since, recs, now=now)
+    except Exception as exc:  # noqa: BLE001 — a check that fails must not refuse
+        print(f"[switchboard-webui] announce {ext}: duplicate check failed ({exc}); "
+              "deciding in memory", flush=True)
+        return False, None
 
 
 def _announce_seconds(path: str) -> float | None:
@@ -773,12 +913,7 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     # render gets a fresh uuid, so three identical announcements look like three
     # different ones.
     digest = _announce_digest(path)
-    if digest and _is_duplicate_announce(ext, digest):
-        print(f"[switchboard-webui] announce {ext} suppressed: identical payload "
-              f"within {ANNOUNCE_DEDUP_WINDOW_S}s", flush=True)
-        _record_delivery(ext, "announce", "duplicate-suppressed",
-                         digest=digest[:12], seconds=round(secs or 0, 1))
-        return JSONResponse({"ok": True, "skipped": "duplicate"})
+    tag = await asyncio.to_thread(_content_tag, digest)
 
     # Playback wants the path WITHOUT the extension (it resolves "<path>.wav").
     sound = path[:-4] if path.endswith(".wav") else path
@@ -800,10 +935,54 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     # raises it, so its producers do not re-send on either; the replay is the
     # second attempt.
     state = await asyncio.to_thread(get_device_state, ext)
+    # ★ THE DUPLICATE CHECK, FROM THE LEDGER (v0.106.0). Until this release the
+    # only check was the in-memory window, armed by an Originate from THIS
+    # process whose pre-flight judged. Past it the same words reached a room
+    # twice — the first copy was the scheduler's replay, went out while the state
+    # read could not judge, or played before a web-UI restart — and inside it the
+    # window said "duplicate" even when the room had since been asked for
+    # something DIFFERENT, or when the first copy never played at all.
+    #
+    # So whenever the ledger can answer, the LEDGER decides: the same content
+    # reached this room inside the window with nothing different said since
+    # ("heard"), or the same content is still on its way ("pending" — in flight,
+    # or waiting for the retry). Both are answered "duplicate" and recorded with
+    # the clip for the join, and NEITHER row is an ask: the copy the room is
+    # already owed keeps its place in the retry, its age and its observations,
+    # and a repeat never retires anything of its own accord. See
+    # delivery.ANNOUNCE_DUPLICATE_PENDING. The in-memory window decides only
+    # when the ledger cannot be asked.
+    #
+    # Placed AFTER the state read, so a delivery that lands while AMI is being
+    # asked can only appear; BEFORE the guards, so a duplicate is answered
+    # "duplicate" whatever the handset is doing. See delivery.content_verdict.
+    answered, verdict = await asyncio.to_thread(_content_verdict, ext, tag)
+    if answered and verdict is not None:
+        kind, row = verdict
+        heard = kind == "heard"
+        print(f"[switchboard-webui] announce {ext} suppressed: identical audio "
+              f"{'reached this room at' if heard else 'is already on its way,'} "
+              f"{row.get('ts')} ({row.get('sound')})", flush=True)
+        _record_delivery(ext, "announce",
+                         ANNOUNCE_DUPLICATE_SUPPRESSED if heard else ANNOUNCE_DUPLICATE_PENDING,
+                         sound=os.path.basename(sound), digest=tag,
+                         seconds=round(secs or 0, 1),
+                         basis="delivered" if heard else "pending",
+                         matched=row.get("sound"),
+                         **({"delivered_at": row.get("ts")} if heard
+                            else {"asked_at": row.get("ts")}))
+        return JSONResponse({"ok": True, "skipped": "duplicate"})
+    if not answered and digest and _is_duplicate_announce(ext, digest):
+        print(f"[switchboard-webui] announce {ext} suppressed: identical payload "
+              f"within {ANNOUNCE_DEDUP_WINDOW_S}s", flush=True)
+        _record_delivery(ext, "announce", ANNOUNCE_DUPLICATE_SUPPRESSED, basis="memory",
+                         digest=tag or None, seconds=round(secs or 0, 1))
+        return JSONResponse({"ok": True, "skipped": "duplicate"})
     if device_busy(state):
         print(f"[switchboard-webui] announce {ext} skipped: device {state}", flush=True)
         _record_delivery(ext, "announce", ANNOUNCE_SKIPPED_BUSY,
-                         sound=os.path.basename(sound), device_state=state)
+                         sound=os.path.basename(sound), device_state=state,
+                         digest=tag or None)
         return JSONResponse({"ok": True, "skipped": "busy", "device_state": state})
     # Pre-flight the contact. An Originate to an endpoint with no contact cannot
     # create a channel — Asterisk logs `Could not create dialog to invalid URI`
@@ -815,7 +994,8 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         print(f"[switchboard-webui] announce {ext} skipped: device {state} "
               "(no contact — the handset is not registered)", flush=True)
         _record_delivery(ext, "announce", ANNOUNCE_UNREACHABLE,
-                         sound=os.path.basename(sound), device_state=state)
+                         sound=os.path.basename(sound), device_state=state,
+                         digest=tag or None)
         return JSONResponse({"ok": False, "skipped": "unreachable",
                              "device_state": state}, status_code=503)
     # ★ AND WHEN THE PRE-FLIGHT COULD NOT ANSWER AT ALL (2026-09-15).
@@ -869,7 +1049,7 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         # `ring-queued` means on the wake-up side, and deliberately named to
         # match, so one join covers both paths.
         _record_delivery(ext, "announce", "originate-queued",
-                         sound=os.path.basename(sound))
+                         sound=os.path.basename(sound), digest=tag or None)
         # ...and only NOW does the suppression window start. Every path above
         # this one — too-long, busy, unreachable and either flavour of
         # announce-originate-failed — leaves it untouched, so a caller that

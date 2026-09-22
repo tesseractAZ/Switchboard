@@ -78,8 +78,13 @@ always true and the test collapsed to "did the client send a header it chose to
 send".
 
 Two narrow, read-only GET paths are exempt so "dumb" LAN devices can reach them: a
-name-validated announcement WAV (`/announce/<name>.wav`) and the cordless's remote
+speaker announcement WAV for a Home Assistant media player (`/announce/a<digits>.wav`,
+the only name form the speaker-announce script writes) and the cordless's remote
 phonebook (`/phonebook.xml`, which exposes only the internal extension directory).
+The handset announcement clips (`ann-<ext>-<hex>.wav`) are NOT exempt: Asterisk
+plays them from disk, and their names are written to the shared-folder ledger, so
+exempting them (as before v0.106.0) let anything that could read `/share` fetch the
+audio of what was said.
 `POST /api/announce/*` is exempt **only** when it carries a valid announce token
 (see [below](#5-the-announce-endpoint)).
 
@@ -296,7 +301,15 @@ control.
     extension, which is how an outside number arrives, keeps only its last four
     digits and is marked `ext_redacted`.
   - `delivery-outcomes.jsonl` — every wake-up and announcement outcome: time,
-    extension, the wake-up time (`hhmm`) and the announcement's sound name.
+    extension, the wake-up time (`hhmm`) and the announcement's sound name. Since
+    v0.106.0 announcement rows also carry `digest`, a 12-hex **keyed** tag of the
+    audio (an HMAC under a random key kept in `/data/announce-tag.key`, readable
+    by the add-on only), so the add-on can recognise its own repeated
+    announcements without the shared folder revealing what was said: a plain
+    hash of predictable speech would let a reader confirm a guessed sentence.
+    The web UI now READS this file before it announces; it opens it without
+    following links, reads at most the newest 256 KiB, and treats a file it
+    cannot read, or one full of lines that do not parse, as no answer.
   - `heartbeat.jsonl` — one row per link-health cycle: how many phones were
     reachable, which extensions were down or changed state, round-trip times,
     and the trunk's registration state.
