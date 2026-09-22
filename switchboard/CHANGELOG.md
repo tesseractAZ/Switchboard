@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.105.2
+
+**The handset check before an announcement now actually reads the handset.**
+
+Before it places an announcement, the add-on asks Asterisk whether that phone is
+in a call or has no contact at all. The answer came back empty on 28 of the last
+29 announcements, so the check judged nothing: each one was recorded
+`announce-guard-unjudged` and sent regardless. The fault was in how the add-on
+reads Asterisk's replies. Asterisk writes this reply in two pieces a few
+microseconds apart, and the reader stopped after the first piece — the one that
+says "success" — before the piece carrying the answer arrived. It now waits for
+the whole reply. The per-call codec on the dashboard is read the same way and
+gets the same repair.
+
+With the check working, **a refused announcement is now sent again**, like any
+other whose audio never played (v0.105.0):
+
+- `unreachable` — the phone has no contact, as the cordless does for the 30-45
+  seconds after every add-on restart. The call is no longer placed into the
+  void; the clip is replayed once the phone reports itself registered and idle
+  twice in a row.
+- `skipped-busy` — the phone is in a call or ringing. The clip is replayed once
+  the line is free, rather than ringing through as call waiting.
+
+The same limits apply: two attempts, never started more than 150 seconds after
+the original send, and only the newest announcement to a room. Both rows now
+carry the clip name, which is what lets the retry find them. The response your
+automation receives is unchanged.
+
+A refused announcement that is never replayed gets no `announce-undelivered`
+verdict — it was never handed to Asterisk — and its history ends with the
+retry's `announce-retry-skipped` row. Once it has been replayed it is judged
+like any other announcement, so a replay that rings out unanswered still ends in
+`announce-undelivered`.
+
 ## 0.105.1
 
 **A wake-up can now be cancelled from the room card where you set it.**

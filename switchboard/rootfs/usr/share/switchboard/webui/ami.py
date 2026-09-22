@@ -93,6 +93,29 @@ def parse_ami_blocks(data: bytes) -> list[dict]:
     return blocks
 
 
+def terminated_blocks(data: bytes) -> list[dict]:
+    """Only the blocks whose blank-line terminator has ARRIVED — for stop tests.
+
+    ★ THE REPLY THAT ARRIVES IN TWO WRITES (2026-09-22). Asterisk does not send
+    one AMI reply in one write. Getvar's handler calls ``astman_start_ack()``,
+    which writes ``Response: Success`` + ``ActionID:`` with NO terminator, then
+    appends ``Variable:`` / ``Value:`` and the blank line in a second write; on
+    loopback the two land in separate ``recv`` calls about 10 µs apart.
+    :func:`parse_ami_blocks` parses the unterminated tail as a block like any
+    other, so a read loop that stopped on "our response has arrived" stopped
+    between those writes, logged off, and dropped the Value. DEVICE_STATE read
+    "" on 28 of 29 announcements, and the pre-send busy/unreachable guard,
+    failing open on "", judged nothing.
+
+    A block counts here only once the ``\\r\\n\\r\\n`` that ends it is in the
+    buffer. Use this to decide WHEN to stop reading; the final parse of a
+    finished read still uses :func:`parse_ami_blocks`, so a read that ends on
+    the socket timeout keeps everything it did receive. Pure — unit-tested.
+    """
+    end = data.rfind(b"\r\n\r\n")
+    return parse_ami_blocks(data[:end + 4]) if end >= 0 else []
+
+
 def stream_complete(data: bytes) -> bool:
     """True once an AMI list action's terminator is present.
 
@@ -121,7 +144,7 @@ def actions_complete(data: bytes, action_ids: set[str]) -> bool:
     unsolicited event for some *other* ActionID can't either.
     """
     seen: set[str] = set()
-    for b in parse_ami_blocks(data):
+    for b in terminated_blocks(data):
         aid = b.get("actionid", "")
         if aid in action_ids and b.get("event", "").lower().endswith("complete"):
             seen.add(aid)
@@ -135,8 +158,10 @@ def actions_responded(data: bytes, action_ids: set[str]) -> bool:
     those return one ``Response:`` block tagged with the ActionID and emit NO
     ``...Complete`` event, so we terminate the multiplexed read on responses
     instead. Used to batch all the per-channel codec Getvars over one login.
+    Terminated blocks only: a Getvar's ``Response:`` header arrives a write
+    ahead of its ``Value:`` (see :func:`terminated_blocks`).
     """
-    seen = {b.get("actionid", "") for b in parse_ami_blocks(data) if "response" in b}
+    seen = {b.get("actionid", "") for b in terminated_blocks(data) if "response" in b}
     return action_ids <= seen
 
 
@@ -413,10 +438,13 @@ def _ami_command(
             if len(data) > 1_000_000:
                 break
             if single_response:
-                # Stop once our action's own response (matched by ActionID) lands.
+                # Stop once our action's own response (matched by ActionID) has
+                # landed WHOLE. A Getvar's header is written ahead of its Value,
+                # and stopping on the header alone lost the Value (see
+                # terminated_blocks).
                 if any(
                     b.get("actionid") == action_id and "response" in b
-                    for b in parse_ami_blocks(bytes(data))
+                    for b in terminated_blocks(bytes(data))
                 ):
                     break
             # Stop at the list terminator, and only log off AFTER — logging off

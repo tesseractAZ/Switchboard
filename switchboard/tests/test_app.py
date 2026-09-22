@@ -825,6 +825,43 @@ def test_the_outcome_names_are_the_shared_ones() -> None:
           app.ANNOUNCE_ORIGINATE_FAILED == app._delivery.ANNOUNCE_ORIGINATE_FAILED)
     check("names: the unjudged guard is delivery's constant",
           app.ANNOUNCE_GUARD_UNJUDGED == app._delivery.ANNOUNCE_GUARD_UNJUDGED)
+    check("names: the busy refusal is delivery's constant",
+          app.ANNOUNCE_SKIPPED_BUSY == app._delivery.ANNOUNCE_SKIPPED_BUSY)
+    check("names: the unreachable refusal is delivery's constant",
+          app.ANNOUNCE_UNREACHABLE == app._delivery.ANNOUNCE_UNREACHABLE)
+    check("names: both refusals are the retry's refusal set",
+          set(app._delivery.ANNOUNCE_GUARD_REFUSED)
+          == {app.ANNOUNCE_SKIPPED_BUSY, app.ANNOUNCE_UNREACHABLE})
+
+
+def test_a_guard_refusal_carries_its_clip(tmp_path) -> None:
+    """A refused announcement never played, so the scheduler's retry replays it —
+    and the retry can only find a clip whose row NAMES it. Both refusals, driven
+    through the real handler with the real device-state classification, must
+    write the clip exactly as the Originate would have been given it, and must
+    still not originate. (Before v0.105.2 both rows carried no clip, which was
+    harmless only because the state read that feeds them came back "".)"""
+    import re as _re
+    for state, outcome, status in (("INUSE", "skipped-busy", 200),
+                                   ("UNAVAILABLE", "unreachable", 503)):
+        out = tmp_path / f"refusal-{outcome}.jsonl"
+        payload = b"\0" * 44 + b"\1" * (16000 * 5)
+        app._ANNOUNCE_LAST.clear()
+        try:
+            resp, originated = _drive_announce(tmp_path, payload=payload, out=out,
+                                               state=state, real_state_guards=True)
+        finally:
+            app._ANNOUNCE_LAST.clear()
+        rows = _announce_rows(out)
+        check(f"refusal {outcome}: no Originate", originated == [])
+        check(f"refusal {outcome}: status {status}",
+              getattr(resp, "status_code", None) == status)
+        check(f"refusal {outcome}: one row, the refusal",
+              len(rows) == 1 and rows[0]["outcome"] == outcome)
+        check(f"refusal {outcome}: the row names the clip the Originate would get",
+              bool(_re.fullmatch(r"ann-19-[0-9a-f]{32}", rows[0].get("sound") or "")))
+        check(f"refusal {outcome}: the device state is kept",
+              rows[0].get("device_state") == state)
 
 
 def test_an_originate_that_raises_is_recorded_against_its_clip(tmp_path) -> None:
@@ -1033,10 +1070,15 @@ def test_the_suppression_window_starts_only_where_something_played() -> None:
           calls and calls[0] > queued)
 
     # And every refusal must return before reaching it.
-    for outcome in ("too-long", "duplicate-suppressed", "skipped-busy",
-                    "unreachable"):
+    for outcome in ("too-long", "duplicate-suppressed"):
         pos = src.index(f'"announce", "{outcome}"')
         check(f"wiring: the {outcome} path precedes the window start",
+              pos < calls[0])
+    # The two guard refusals are written through delivery's constants (the retry
+    # joins on them), so they are matched by the constant's name.
+    for const in ("ANNOUNCE_SKIPPED_BUSY", "ANNOUNCE_UNREACHABLE"):
+        pos = src.index(f'"announce", {const}')
+        check(f"wiring: the {const} path precedes the window start",
               pos < calls[0])
     # The two originate failures are written through the shared constant rather
     # than a literal (the name has to be spelled identically by the programs that
