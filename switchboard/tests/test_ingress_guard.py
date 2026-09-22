@@ -93,9 +93,22 @@ def test_lifespan_passes_through():
 # The LAN exemptions are HTTP-only, and that ordering is load-bearing.
 # --------------------------------------------------------------------------- #
 def test_the_lan_exemptions_still_work_over_http():
-    """Two dumb devices genuinely need these and cannot ride Ingress."""
+    """Two dumb devices genuinely need these and cannot ride Ingress: the WP826
+    fetching its phonebook, and an HA media player fetching a SPEAKER clip
+    (`a<digits>.wav`, written by the switchboard-announce AGI)."""
     assert app._scope_allowed(_http("192.168.1.50", "/phonebook.xml")) is True
-    assert app._scope_allowed(_http("192.168.1.50", "/announce/x.wav")) is True
+    assert app._scope_allowed(_http("192.168.1.50", "/announce/a1234567890.wav")) is True
+
+
+def test_handset_clips_are_not_fetchable_from_the_lan():
+    """v0.106.0 — the handset clips (`ann-<ext>-<32hex>.wav`) are played by
+    Asterisk from disk and never fetched over the LAN, and their names are in the
+    shared-folder ledger: exempting them let anything that could read /share
+    download what was said. Only the speaker-clip form is exempt."""
+    for p in ("/announce/ann-19-" + "0123456789abcdef" * 2 + ".wav",
+              "/announce/x.wav", "/announce/a12.wav/extra", "/announce/a.wav",
+              "/announce/A123.wav", "/announce/a123.WAV"):
+        assert app._scope_allowed(_http("192.168.1.50", p)) is False, p
 
 
 def test_the_exemptions_do_not_leak_onto_websockets():

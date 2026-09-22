@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import stat
 import time
 
@@ -149,7 +150,9 @@ ANNOUNCE_GUARD_UNJUDGED = "announce-guard-unjudged"
 # does not survive the process cannot count.)
 ANNOUNCE_RETRY_ATTEMPTED = "announce-retry-attempted"
 # ...and why the retry gave up, exactly once per clip: reason=too-old |
-# budget-exhausted | ext-superseded | clip-gone. TRANSIENT deferrals (the handset
+# budget-exhausted | ext-superseded | clip-gone | content-delivered (v0.106.0: the
+# same content reached that room since it was asked for, so replaying it would say
+# it twice — see content_verdict). TRANSIENT deferrals (the handset
 # is not idle yet, AMI could not be read, only one clean observation so far) are
 # LOGGED and NOT recorded — a row every 20 s would trim the history this ledger
 # exists to keep. Terminal for the RETRY only, and deliberately NOT in
@@ -297,6 +300,44 @@ ANNOUNCE_RETRY_CLEAN_TICKS = int(os.environ.get("ANNOUNCE_RETRY_CLEAN_TICKS", "2
 # In household terms it is 2.5 minutes — the same moment in a house. The owner's
 # "20 minutes late is worse than never" is eight times further away.
 ANNOUNCE_RETRY_MAX_AGE = float(os.environ.get("ANNOUNCE_RETRY_MAX_AGE", "150") or 150)
+
+# ★ THE SAME WORDS TWICE (v0.106.0). Identical content repeated inside this window
+# plays once per room. app.py's in-memory window is the fast half; content_verdict()
+# below is the half that survives a web-UI restart and covers the scheduler's own
+# replays, which never pass through app.py. One number for both, read by both
+# processes from the same environment; <= 0 turns the ledger half off in both.
+ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
+# The two answers app.py gives an identical announcement (HTTP: "duplicate").
+# SUPPRESSED: the same content already REACHED the room — nothing more to say.
+# PENDING: the same content is on its way (in flight, or waiting for the retry),
+# so this copy is not sent; the one it is waiting for is what the room hears.
+#
+# ★ NEITHER IS AN ASK. Both are RECORDS, never retry candidates and never
+# superseders: a repeat must not displace what the room is already owed. Making
+# a pending row an ask locked out the very producer this release serves — an
+# alert re-sent every 30 s minted a fresh candidate each time, each one
+# superseding the last and resetting the two clean observations a replay needs,
+# so a handset that was busy or unregistered heard NOTHING, indefinitely. Making
+# a suppressed row one retired a DIFFERENT message that was asked for after the
+# audio it stands for, and never played. Both copies are answered from what the
+# room heard; the clip the answer refers to is already in L6 at its own queue
+# time, which is the only ranking that means anything.
+ANNOUNCE_DUPLICATE_SUPPRESSED = "duplicate-suppressed"
+ANNOUNCE_DUPLICATE_PENDING = "duplicate-pending"
+# The rows that say "this room was ASKED to hear this clip" and that the retry
+# may replay. The first one per clip carries the content tag.
+ANNOUNCE_ASKED = (ANNOUNCE_QUEUED,) + ANNOUNCE_GUARD_REFUSED
+# The rows after which a clip that never played is no longer the retry's to
+# replay. NOT proof that it cannot still be heard: the retry may retire a clip
+# 20 s after an attempt whose call is still ringing or playing, so a clip is
+# only GONE once its newest hand-off to Asterisk is also a horizon old (see
+# content_verdict).
+ANNOUNCE_CONTENT_GONE = (ANNOUNCE_RETRY_SKIPPED, ANNOUNCE_UNDELIVERED, ANNOUNCE_UNSETTLED)
+# A content tag: the first 12 hex of an HMAC the web UI keys with a secret kept in
+# /data (app.py _content_tag). Never a plain hash of the audio — espeak-ng is
+# deterministic, so a plain hash on a shared-folder row would let any reader of
+# /share confirm a guessed sentence.
+_CONTENT_TAG_RE = re.compile(r"[0-9a-f]{12}")
 
 
 def _open_no_follow(path: str, flags: int) -> int:
@@ -826,8 +867,9 @@ def retryable_announcements(now: float | None = None,
         key = clip_key(r["sound"])
         outcome = r.get("outcome")
         # A guard refusal is this clip's queue row: the announcement was asked
-        # for then, and no audio followed (see ANNOUNCE_GUARD_REFUSED).
-        if outcome == ANNOUNCE_QUEUED or outcome in ANNOUNCE_GUARD_REFUSED:
+        # for then, and no audio followed (see ANNOUNCE_GUARD_REFUSED). The two
+        # duplicate answers are not asks at all — see their constants.
+        if outcome in ANNOUNCE_ASKED:
             prev = queued.get(key)
             if prev is None or r.get("_ts", 0.0) >= prev.get("_ts", 0.0):
                 queued[key] = r
@@ -872,7 +914,8 @@ def retryable_announcements(now: float | None = None,
             reason = None
         out.append({"sound": r["sound"], "ext": ext, "queued": r.get("ts"),
                     "queued_ts": queued_ts, "attempts": tried,
-                    "stale_reason": reason})
+                    "stale_reason": reason,
+                    "digest": content_key(r.get("digest")) or None})
     out.sort(key=lambda c: c["queued_ts"])
     return out
 
@@ -928,3 +971,199 @@ def is_writable() -> bool:
         return os.access(d, os.W_OK)
     except OSError:
         return False
+
+
+def content_key(tag) -> str:
+    """`tag` if it is a well-formed content tag, else "" — so a malformed or
+    forged value reads as "unknown content", which is never anybody's duplicate."""
+    return tag if isinstance(tag, str) and _CONTENT_TAG_RE.fullmatch(tag) else ""
+
+
+# The newest bytes read_content_tail looks at, and how much garbage it tolerates
+# in them. An hour of real announce traffic is a few kilobytes; the caps exist
+# for a file something ELSE has written.
+CONTENT_TAIL_BYTES = 256 * 1024
+CONTENT_TAIL_MAX_BAD = 64
+
+
+def read_content_tail(since: float, max_bytes: int | None = None):
+    """The ledger rows at or after `since`, oldest first — or None when the ledger
+    cannot be read SAFELY. [] means it is absent.
+
+    The strict twin of _read_records, for the one reader on a REQUEST path: the web
+    UI now consults this group-writable file before it announces. Through the fd
+    only (no symlink, no FIFO — _open_no_follow), never more than the newest
+    CONTENT_TAIL_BYTES, and a tail with more than CONTENT_TAIL_MAX_BAD lines that
+    do not parse is refused rather than ground through — so a planted or overgrown
+    file costs milliseconds, not the second a megabyte of garbage would. The caller
+    decides what "cannot read" means; for the web UI it is "decide as before", for
+    the retry it is "not this tick".
+    """
+    max_bytes = CONTENT_TAIL_BYTES if max_bytes is None else int(max_bytes)
+    try:
+        fd = _open_no_follow(OUTCOME_PATH, os.O_RDONLY)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            start = max(0, size - max_bytes)
+            fh.seek(start)
+            raw = fh.read(max_bytes)
+    except OSError:
+        return None
+    if start:
+        nl = raw.find(b"\n")
+        raw = raw[nl + 1:] if nl != -1 else b""
+    out, bad = [], 0
+    for line in reversed(raw.decode("utf-8", errors="replace").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            rec["_ts"] = datetime.datetime.fromisoformat(rec["ts"]).timestamp()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            bad += 1
+            if bad > CONTENT_TAIL_MAX_BAD:
+                return None
+            continue
+        if rec["_ts"] < since:
+            break
+        out.append(rec)
+    out.reverse()
+    return out
+
+
+# How far before the window's start a clip may have been ASKED for and still be
+# heard inside it: the retry may start a replay up to ANNOUNCE_RETRY_MAX_AGE after
+# the ask, and the call may then ring and play for up to ANNOUNCE_HORIZON.
+CONTENT_ASK_REACH = ANNOUNCE_RETRY_MAX_AGE + ANNOUNCE_HORIZON
+
+
+def content_verdict(ext, tag, since, recs, now=None, own=None):
+    """What the ledger says about announcing content `tag` to `ext` now. Pure.
+
+    Returns ("heard", delivered_row), ("pending", ask_row) or None.
+
+    ★ WHY IT EXISTS (v0.106.0). An identical announcement was answered "duplicate"
+    only by app.py's in-memory window, which is armed by a web-UI Originate and
+    knows nothing else. Past it, the same words reached a room twice — the first
+    copy was the scheduler's REPLAY (another process), went out while the state
+    read could not judge, or played before a web-UI restart — and inside it, the
+    window answered "duplicate" even after the room had since been asked for
+    something DIFFERENT, or when the first copy never played at all.
+
+    Every earlier ask to this room is one of:
+      HEARD     it has an audio-delivered row;
+      IN FLIGHT handed to Asterisk (originate-queued / retry-attempted) less than
+                ANNOUNCE_HORIZON ago, with no verdict — it may still ring, play,
+                or have just played with its delivered row not yet written. A
+                retirement is NOT enough to end this: the retry may retire a clip
+                20 s after an attempt that is still playing;
+      WAITING   none of those, but still the retry's to replay (no
+                ANNOUNCE_CONTENT_GONE row, asked no more than
+                ANNOUNCE_RETRY_MAX_AGE ago);
+      GONE      none of the above: it can never be heard, whichever process
+                start orphaned it.
+    Walking newest first:
+      same content, HEARD inside [since, now+1]      -> ("heard", that delivery)
+      same content, IN FLIGHT or WAITING, asked      -> note it as pending and keep
+        inside the window                               looking
+      same content, anything else                    -> keep looking
+      different content, HEARD or IN FLIGHT          -> stop: the room has been, or
+                                                        is being, told something
+                                                        else since
+      different content, WAITING or GONE             -> keep looking: whatever
+                                                        this announcement becomes,
+                                                        its row is the room's
+                                                        newest ask and supersedes
+                                                        a waiting one (L6)
+    and at a stop or the end, ("pending", noted) or None. So "door open, door
+    closed, door open" stays three announcements, an identical announcement whose
+    first copy never played is still sent, and one that follows a copy still on
+    its way waits for it rather than doubling it.
+
+    `own` (a clip name) is left out of the walk: the retry asks about a candidate
+    that is itself one of these rows. A delivery counts only for an ask to the
+    SAME extension, after its ask row. An untagged or malformed ask is
+    "different", so a gap in the evidence stops the walk, which falls toward
+    playing.
+    """
+    key = content_key(tag)
+    ext = str(ext or "")
+    if not key or not ext or not recs:
+        return None
+    now = time.time() if now is None else float(now)
+    lo, hi = float(int(since)), now + 1.0      # record() stamps whole seconds
+    own_key = clip_key(own) if own else ""
+    asks, tags, ask_row = [], {}, {}
+    heard, played, gone, judged, handoff = {}, set(), set(), set(), {}
+    for r in recs:
+        if not isinstance(r, dict) or r.get("kind") != "announce":
+            continue
+        if str(r.get("ext") or "") != ext:
+            continue
+        ck = clip_key(r.get("sound"))
+        if not ck or ck == own_key:
+            continue
+        outcome = r.get("outcome")
+        ts = r.get("_ts")
+        ts = float(ts) if isinstance(ts, (int, float)) else None
+        if outcome in ANNOUNCE_ASKED:
+            if ck not in tags:                  # the first ask row per clip is its tag
+                tags[ck] = content_key(r.get("digest"))
+                ask_row[ck] = r
+                asks.append(ck)
+            if outcome == ANNOUNCE_QUEUED and ts is not None:
+                handoff[ck] = max(handoff.get(ck, ts), ts)
+        elif ck not in tags:
+            continue                            # anything else counts only after its ask
+        elif outcome == AUDIO_DELIVERED:
+            played.add(ck)
+            if ts is not None and lo <= ts <= hi:
+                heard[ck] = r
+        elif outcome == ANNOUNCE_RETRY_ATTEMPTED:
+            if ts is not None:
+                handoff[ck] = max(handoff.get(ck, ts), ts)
+        elif outcome in ANNOUNCE_CONTENT_GONE:
+            gone.add(ck)
+            if outcome != ANNOUNCE_RETRY_SKIPPED:
+                judged.add(ck)
+
+    def in_flight(ck):
+        return (ck in handoff and ck not in played and ck not in judged
+                and now - handoff[ck] < ANNOUNCE_HORIZON)
+
+    newest_ask = asks[-1] if asks else None
+
+    def waiting(ck):
+        # ...and still the room's newest ask. The retry sends only that one (L6),
+        # so holding a repeat back behind an older, superseded copy would wait
+        # for a replay nobody is going to make.
+        asked = ask_row[ck].get("_ts")
+        return (ck is newest_ask and ck not in played and ck not in gone
+                and isinstance(asked, (int, float))
+                and now - asked <= ANNOUNCE_RETRY_MAX_AGE)
+
+    # ★ "ON ITS WAY" MEANS SOMETHING WILL SEND IT. With the retry switched off
+    # (announce_retry_attempts: 0) nothing will: no replay is coming, and a copy
+    # in flight that fails is simply lost. Then a repeat is the only way the room
+    # ever hears it, so it is not held back as a duplicate.
+    replay_possible = ANNOUNCE_RETRY_MAX_ATTEMPTS > 0
+    pending = None
+    for ck in reversed(asks):
+        if tags[ck] == key:
+            if ck in heard:
+                return ("heard", heard[ck])
+            asked = ask_row[ck].get("_ts")
+            if (pending is None and replay_possible
+                    and (in_flight(ck) or waiting(ck))
+                    and isinstance(asked, (int, float)) and asked >= lo):
+                pending = ask_row[ck]
+            continue
+        if ck in played or in_flight(ck):
+            break
+    return ("pending", pending) if pending is not None else None

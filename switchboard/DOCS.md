@@ -776,9 +776,65 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
 
   It is a rate limit, not a lock: identical content repeated on a timer plays
   once per window, rather than once and then never again.
+
+  Since v0.106.0 the check **reads the ledger** below whenever it can, and the
+  in-memory window decides only when it cannot. The window alone knew one thing,
+  that this web UI had sent the same audio, and that was wrong in both
+  directions. Past it, the same words reached a room twice: the first copy was
+  an automatic replay (§6, which runs in another process), went out while
+  Asterisk could not report the handset's state (the window is deliberately not
+  started then), or played before a restart. Inside it, the window said
+  "duplicate" even after the room had since been asked for something else, or
+  when the first copy never played at all.
+
+  The ledger sorts every earlier announcement to that phone into **heard**
+  (its audio arrived), **in flight** (handed to Asterisk within the last
+  3 minutes, no verdict yet, so it may still ring or play), **waiting** (the
+  retry below may still send it), or **gone**. An announcement is a duplicate
+  when the same audio was **heard** inside the window with nothing different
+  heard or in flight since. It is also a duplicate while the same audio is
+  still **in flight or waiting**. "Door open, door closed, door open" is
+  therefore three announcements. An identical announcement whose first copy is
+  gone unheard is sent at once.
+
+  Both cases answer the caller `{"ok": true, "skipped": "duplicate"}` and record
+  the clip:
+  - `duplicate-suppressed` (`basis: delivered`) names the delivery it matched
+    (`matched`, `delivered_at`) and is never replayed.
+  - `duplicate-pending` (`basis: pending`) names the copy it is waiting for
+    (`matched`, `asked_at`). It is a record, not a second announcement: the copy
+    already queued is the one the room hears, keeping its place in the retry and
+    the idle observations it has gathered. If that copy can never play, the next
+    repeat finds it gone and is announced normally.
+
+  A repeat is only held back when something really will send it. With
+  `announce_retry_attempts` at `0` there is no retry, so repeats are never held
+  back — they are the only way the room hears anything.
+
+  The `duplicate-suppressed` row counts as the newest thing that phone was asked
+  to hear, so a stale, different announcement still waiting for the retry is not
+  played after it — counted from the **delivery** it stands for, not from when
+  the repeat arrived, so a different message asked after that audio still plays.
+
+  When the ledger cannot be read, or holds no history for that room at all, the
+  in-memory window decides as before, and its row says `basis: memory`.
+
+  The ledger check runs after the handset's state is read and before the busy
+  and registration checks. A duplicate is therefore answered as a duplicate
+  whatever the handset is doing, and a copy whose audio finishes while the state
+  is being read is caught.
+
+  Rows name the content by a **keyed tag** (`digest`, 12 hex characters), never
+  by a plain hash of the audio. The spoken text is predictable, so a plain hash
+  in a shared folder would let anything that can read `/share` confirm a guessed
+  sentence. The key is created on first use and kept in the add-on's private
+  `/data` folder. If it cannot be created, no row carries a tag and duplicates
+  are recognised in memory only. The clips themselves are no longer served to
+  the LAN: only the separate speaker announcements that Home Assistant media
+  players fetch are.
 - **Every outcome is recorded**, in `/share/switchboard/delivery-outcomes.jsonl`:
   `originate-queued` when the call was placed, and `too-long`,
-  `duplicate-suppressed`, `skipped-busy`, `unreachable` or
+  `duplicate-suppressed`, `duplicate-pending`, `skipped-busy`, `unreachable` or
   `announce-originate-failed` when it was not. An announcement that never became
   a call has no call-quality record, so this ledger is the only place it appears.
 
@@ -908,8 +964,12 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   written, because an attempt that cannot be counted cannot be limited. When the
   retry gives up it records `announce-retry-skipped` once, saying why: `too-old`,
   `budget-exhausted`, `ext-superseded` (a newer announcement was sent to the same
-  room, so only that one is replayed — never two at once to one phone) or
-  `clip-gone`. Neither row is a verdict — the reconciler above still files
+  room, so only that one is replayed — never two at once to one phone),
+  `clip-gone`, or `content-delivered` (v0.106.0: the same audio reached that
+  room under another announcement's name, within the duplicate window around
+  this one's request and with nothing different heard since, so replaying it
+  would say it twice; the row names the clip that was heard as `matched`). None
+  of these rows is a verdict — the reconciler above still files
   `announce-undelivered` or `announce-unsettled` for the announcement itself, now
   carrying how many retries it had.
 

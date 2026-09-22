@@ -541,7 +541,7 @@ def _retry_max_attempts() -> int:
 
 
 def _retire_announcement(cand: dict, reason: str, seen: dict | None,
-                         now: float) -> None:
+                         now: float, **evidence) -> None:
     """File the ONE terminal retry row for an announcement past helping.
 
     Only for a reason that cannot change: too old, out of attempts, superseded by
@@ -566,7 +566,7 @@ def _retire_announcement(cand: dict, reason: str, seen: dict | None,
                          attempts=cand["attempts"], queued=cand.get("queued"),
                          age_s=int(now - cand["queued_ts"]),
                          device_state=seen.get("state") or None,
-                         defers=seen.get("defers") or None)
+                         defers=seen.get("defers") or None, **evidence)
     except Exception as exc:  # noqa: BLE001
         log(f"could not record the skipped retry of {cand['sound']}: {exc}")
 
@@ -606,7 +606,9 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
          Originate, so a second candidate for the same handset would be cleared
          by a read taken before our own call to it existed;
       4. the ledger again, narrowly, AFTER the state read, so a delivered row
-         landing mid-decision can only appear, never be missed;
+         landing mid-decision can only appear, never be missed — twice: this
+         clip's own verdict, then whether the same CONTENT reached the room
+         under another clip's name (delivery.content_verdict, v0.106.0);
       5. the attempt row BEFORE the Originate, and the Originate only if that row
          was actually written — an attempt that cannot be counted cannot be
          bounded.
@@ -723,6 +725,48 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
         except Exception as exc:  # noqa: BLE001
             log(f"could not re-check {cand['sound']} before replaying it: {exc}")
             continue
+        # ★ ...AND THE SAME WORDS, NOT ONLY THE SAME CLIP (v0.106.0). An identical
+        # announcement asked for while this one was waiting — refused as busy
+        # behind the very copy that then played, or played outright after a
+        # restart — is a different clip with the same content, and the check
+        # above cannot see it. Replaying this one would say it twice.
+        #
+        # Read AFTER the state read like the check above, so a delivery that
+        # lands mid-decision can only appear. Deliberately NOT bounded by the
+        # process start: evidence that the room HEARD it is positive, and using
+        # it can only retire a replay, never cause one. A ledger that cannot be
+        # read here is a deferral — the same direction as the check above; if it
+        # persists the clip ages out as too-old.
+        window = float(getattr(_delivery, "ANNOUNCE_DEDUP_WINDOW_S", 0.0) or 0.0)
+        if cand.get("digest") and window > 0:
+            try:
+                since = cand["queued_ts"] - window
+                tail = _delivery.read_content_tail(since - _delivery.CONTENT_ASK_REACH)
+                if not tail:
+                    log(f"could not read the delivery ledger to compare "
+                        f"{cand['sound']} with what reached ext {cand['ext']} — "
+                        f"not replaying it this tick")
+                    continue
+                verdict = _delivery.content_verdict(cand["ext"], cand["digest"], since,
+                                                    tail, now=now, own=cand["sound"])
+            except Exception as exc:  # noqa: BLE001
+                log(f"could not compare {cand['sound']}'s content before "
+                    f"replaying it: {exc}")
+                continue
+            # Only "heard" retires. "pending" — another copy still on its way —
+            # is no reason to hold THIS one: the handset has just read idle twice,
+            # which is stronger evidence that nothing is playing than a hand-off
+            # timestamp, and a copy that ended unheard is exactly what the retry
+            # exists to replace.
+            hit = verdict[1] if verdict and verdict[0] == "heard" else None
+            if hit is not None:
+                log(f"identical content reached ext {cand['ext']} as "
+                    f"{hit.get('sound')} at {hit.get('ts')}")
+                _retire_announcement(cand, "content-delivered",
+                                     _retry_seen.pop(key, None), now,
+                                     matched=hit.get("sound"),
+                                     delivered_at=hit.get("ts"))
+                continue
         attempt = cand["attempts"] + 1
         try:
             wrote = _delivery.record(
@@ -915,6 +959,13 @@ def _log_retry_bounds() -> None:
     log(f"announce retry: up to {attempts} attempt(s), no sooner than "
         f"{int(min_age)}s after the originate, {clean} clean endpoint "
         f"observation(s) required, never started later than {int(max_age)}s")
+    window = float(getattr(_delivery, "ANNOUNCE_DEDUP_WINDOW_S", 0.0) or 0.0)
+    if window > 0:
+        log(f"announce retry: a replay is retired when identical content reached "
+            f"the room within {int(window)}s of its request")
+    else:
+        log("announce retry: the identical-content rule is OFF "
+            "(ANNOUNCE_DEDUP_WINDOW_S=0)")
     if min_age + clean * POLL >= max_age:
         log(f"WARNING: announce retry is INERT at poll {POLL}s — "
             f"{int(min_age)}s + {clean} x {POLL}s >= {int(max_age)}s, so no "

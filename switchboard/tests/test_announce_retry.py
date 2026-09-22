@@ -202,6 +202,10 @@ class _Bench:
         self.row(self.delivery.ANNOUNCE_RETRY_ATTEMPTED, sound=sound, ext=ext,
                  ago=ago, attempt=attempt)
 
+    def iso(self, ago=0.0):
+        return datetime.datetime.fromtimestamp(
+            NOW - ago, datetime.timezone.utc).isoformat(timespec="seconds")
+
     def rows(self):
         try:
             return [json.loads(l) for l in
@@ -1270,6 +1274,21 @@ def test_the_off_switch_actually_reaches_the_scheduler():
     # that turns nothing, with every test green.
     assert ('os.environ.get("ANNOUNCE_RETRY_MAX_ATTEMPTS"'
             in (WEBUI / "delivery.py").read_text())
+    # ★ v0.106.0 — and the WEB UI needs it too, because its duplicate check asks
+    # whether a replay is still coming before it holds back an identical
+    # announcement. Unbridged there, `delivery` reads the built-in default and
+    # the web UI holds back repeats that no retry will ever send — the option
+    # would be half-off: the retry stopped, the repeats still suppressed.
+    webui_run = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+                 / "webui" / "run").read_text()
+    w = re.search(r'^([A-Z_][A-Z0-9_]*)="\$\(switchboard-opt\s+'
+                  r'announce_retry_attempts\s*\)"', webui_run, re.M)
+    assert w, "the web UI's run script never reads announce_retry_attempts"
+    assert re.search(rf'^export\s+ANNOUNCE_RETRY_MAX_ATTEMPTS='
+                     rf'"\$\{{{w.group(1)}:-2\}}"', webui_run, re.M), webui_run
+    # ...and it must be exported BEFORE the exec that replaces the shell.
+    assert (webui_run.index("export ANNOUNCE_RETRY_MAX_ATTEMPTS=")
+            < webui_run.index("exec python3 -m uvicorn")), webui_run
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
     assert cfg["options"]["announce_retry_attempts"] == 2
     # 0 must be INSIDE the range, or the documented off switch cannot be set.
@@ -1543,3 +1562,450 @@ def test_a_replayed_refusal_that_played_is_not_judged(tmp_path):
     b.delivered(ago=280)
     _reconcile(b)
     assert "announce-undelivered" not in b.outcomes(), b.outcomes()
+
+
+# --------------------------------------------------------------------------- #
+# ★ THE SAME WORDS, NOT ONLY THE SAME CLIP (v0.106.0).
+#
+# A replay is retired `content-delivered` when an announcement with the SAME
+# content tag reached the SAME room inside ANNOUNCE_DEDUP_WINDOW_S of the
+# candidate's request, with nothing different asked of that room since that
+# played or can still play (delivery.content_verdict). The shape it closes: the
+# first copy is itself a replay, an identical re-send arrives while it plays, is
+# refused as busy, and would otherwise be replayed straight after it.
+# --------------------------------------------------------------------------- #
+TAG, OTHER = "a" * 12, "b" * 12
+CA, CB, CC = "ann-19-" + "1" * 32, "ann-19-" + "2" * 32, "ann-19-" + "3" * 32
+
+
+def _skipped(b):
+    return [(r["sound"], r["reason"]) for r in b.rows()
+            if r["outcome"] == "announce-retry-skipped"]
+
+
+def _refused_copy(b, sound=CB, ago=45, tag=TAG, outcome="skipped-busy"):
+    b.row(outcome, sound=sound, ago=ago, digest=tag)
+    _write_clip(b.clips, sound)
+
+
+def test_an_identical_copy_refused_behind_a_replay_is_not_replayed_after_it(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("unreachable", sound=CA, ago=90, digest=TAG)     # the first copy: refused...
+    b.attempted(sound=CA, ago=50)                          # ...then replayed
+    _refused_copy(b)                                       # identical copy, busy behind it
+    b.delivered(sound=CA, ago=40)                          # the replay played
+    b.ticks(5)
+    assert b.originated == [], b.originated
+    assert _skipped(b).count((CB, "content-delivered")) == 1, _skipped(b)
+    row = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"][0]
+    assert row["matched"] == CA and row.get("delivered_at"), row
+
+
+def test_the_filter_mangled_delivery_still_counts_as_heard(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=LIVE_QUEUED, ago=90, digest=TAG)
+    _refused_copy(b)
+    b.delivered(sound=LIVE_ARRIVED, ago=40)
+    b.ticks(3)
+    assert b.originated == []
+
+
+def test_an_identical_copy_whose_first_never_played_IS_replayed(tmp_path):
+    """The first copy rang out: the words never reached the room, so the rule
+    that an unplayed announcement is retried wins."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=90, digest=TAG)
+    _refused_copy(b)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CB]
+
+
+def test_something_different_heard_since_means_it_is_said_again(tmp_path):
+    """Door open (heard), door closed (heard), door open (refused): the room was
+    last told something else, so the third is replayed."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=140, digest=TAG)
+    b.delivered(sound=CA, ago=130)
+    b.row("originate-queued", sound=CC, ago=60, digest=OTHER)
+    _refused_copy(b)
+    b.delivered(sound=CC, ago=40)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CB], (b.originated, _skipped(b))
+
+
+def test_a_different_ask_that_can_no_longer_play_is_transparent(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=100, digest=TAG)
+    _refused_copy(b, sound=CC, ago=97, tag=OTHER)
+    _refused_copy(b, sound=CB, ago=95)
+    b.delivered(sound=CA, ago=90)
+    b.ticks(4)
+    assert b.originated == [], (b.originated, _skipped(b))
+    assert (CC, "ext-superseded") in _skipped(b) and (CB, "content-delivered") in _skipped(b)
+
+
+def test_a_superseded_clip_that_then_played_still_counts_as_heard(tmp_path):
+    """C (different) was mid-replay when B superseded it, and then C's audio
+    arrived: the room last heard C, so B must still be replayed."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=140, digest=TAG)
+    b.delivered(sound=CA, ago=135)
+    b.row("unreachable", sound=CC, ago=100, digest=OTHER)
+    b.attempted(sound=CC, ago=60)
+    _refused_copy(b, ago=55)
+    b.row("announce-retry-skipped", sound=CC, ago=30, reason="ext-superseded")
+    b.delivered(sound=CC, ago=25)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CB], (b.originated, _skipped(b))
+
+
+def test_the_same_content_in_another_room_is_not_a_duplicate(tmp_path):
+    b = _Bench(tmp_path, exts=("19", "16"))
+    a16 = "ann-16-" + "1" * 32
+    b.row("originate-queued", sound=a16, ext="16", ago=90, digest=TAG)
+    b.delivered(sound=a16, ext="16", ago=80)
+    _refused_copy(b)
+    b.ticks(3)
+    assert [e for e, _s in b.originated] == ["19"]
+
+
+def test_the_window_bounds_it_both_ways(tmp_path):
+    W = 300
+    for gap, replay in ((W + 2, True), (W - 2, False)):
+        b = _Bench(tmp_path / str(gap))
+        b.sched._STARTED = NOW - 2000
+        b.row("originate-queued", sound=CA, ago=45 + gap + 10, digest=TAG)
+        b.delivered(sound=CA, ago=45 + gap)
+        _refused_copy(b)
+        b.ticks(3)
+        assert (len(b.originated) == 1) is replay, (gap, b.originated, _skipped(b))
+
+
+def test_evidence_from_before_the_process_started_still_retires(tmp_path):
+    """Positive evidence that the room HEARD it may only retire a replay, so it
+    is not bounded by the restart boundary the candidate scan uses."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=NOW - (b.sched._STARTED - 20), digest=TAG)
+    _refused_copy(b)
+    b.delivered(sound=CA, ago=40)
+    b.ticks(3)
+    assert b.originated == [] and (CB, "content-delivered") in _skipped(b)
+
+
+def test_a_delivery_landing_mid_decision_retires_the_replay(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=60, digest=TAG)
+    _refused_copy(b)
+    b.tick(NOW)
+    b.on_read = lambda: b.delivered(sound=CA, ago=0)       # lands during the AMI read
+    b.tick(NOW + POLL)
+    b.on_read = None
+    b.ticks(4, first=NOW + 2 * POLL)
+    assert b.originated == [] and _skipped(b).count((CB, "content-delivered")) == 1
+
+
+def test_a_partial_playback_counts_as_heard(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=60, digest=TAG)
+    _refused_copy(b)
+    cq = _sink_leg(b, CA, txcount=75, stage="playing", billsec=2)
+    assert cq.DELIVERED_MIN_TXCOUNT == 50
+    b.ticks(3)
+    assert b.originated == []
+
+
+def test_a_missing_or_malformed_tag_is_never_a_duplicate(tmp_path):
+    for d in (None, "", "a" * 11, "A" * 12, "g" * 12):
+        b = _Bench(tmp_path / str(d))
+        b.row("originate-queued", sound=CA, ago=60, digest=d)
+        _refused_copy(b, tag=d)
+        b.delivered(sound=CA, ago=40)
+        b.ticks(3)
+        assert len(b.originated) == 1, d
+
+
+def test_a_delivery_stamped_in_the_future_is_ignored(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=60, digest=TAG)
+    _refused_copy(b)
+    b.row("audio-delivered", sound=CA, ago=-3600, stage="complete", txcount=700)
+    b.ticks(3)
+    assert len(b.originated) == 1
+
+
+def test_a_zero_window_turns_the_content_rule_off(tmp_path):
+    b = _Bench(tmp_path)
+    b.delivery.ANNOUNCE_DEDUP_WINDOW_S = 0
+    b.row("originate-queued", sound=CA, ago=60, digest=TAG)
+    _refused_copy(b)
+    b.delivered(sound=CA, ago=40)
+    b.ticks(3)
+    assert len(b.originated) == 1
+
+
+def test_an_unreadable_ledger_defers_the_replay(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=60, digest=TAG)
+    _refused_copy(b)
+    b.delivery.read_content_tail = lambda since: None
+    b.ticks(3)
+    assert b.originated == [] and "announce-retry-attempted" not in b.outcomes()
+    assert any("could not read the delivery ledger" in m for m in b.sched.LOGGED)
+
+
+def test_a_content_retirement_is_not_a_verdict(tmp_path):
+    """content-delivered retires the REPLAY; B's own call still gets its verdict."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=400, digest=TAG)
+    b.delivered(sound=CA, ago=390)
+    b.row("originate-queued", sound=CB, ago=200, digest=TAG)
+    _write_clip(b.clips, CB)
+    b.row("announce-retry-skipped", sound=CB, ago=150, reason="content-delivered")
+    _reconcile(b)
+    assert [r["sound"] for r in b.rows() if r["outcome"] == "announce-undelivered"] == [CB]
+
+
+def test_candidates_carry_their_content_tag(tmp_path):
+    b = _Bench(tmp_path)
+    _refused_copy(b)
+    cands = b.delivery.retryable_announcements(NOW, not_before=b.sched._STARTED)
+    assert [c["digest"] for c in cands] == [TAG]
+
+
+def test_the_startup_line_names_the_content_rule(tmp_path):
+    b = _Bench(tmp_path)
+    b.sched._log_retry_bounds()
+    assert any("identical content reached the room within 300s" in m for m in b.sched.LOGGED)
+
+
+# --------------------------------------------------------------------------- #
+# ★ WHAT THE LEDGER SAYS ABOUT SAYING IT AGAIN — delivery.content_verdict, the
+# pure half, driven directly. Every earlier ask to a room is HEARD, IN FLIGHT,
+# WAITING or GONE, and only "heard" or "in flight" DIFFERENT content stops the
+# walk. The classification is the whole rule, so it is pinned here row by row.
+# --------------------------------------------------------------------------- #
+def _rec(D, outcome, sound, ago, ext="19", **extra):
+    r = {"ts": "-", "ext": ext, "kind": "announce", "outcome": outcome,
+         "sound": sound, "_ts": NOW - ago}
+    r.update(extra)
+    return r
+
+
+def _verdict(D, *rows, tag=TAG, window=300.0, ext="19", own=None):
+    return D.content_verdict(ext, tag, NOW - window, list(rows), now=NOW, own=own)
+
+
+def test_the_walk_classifies_an_earlier_ask(tmp_path):
+    D = _Bench(tmp_path).delivery
+    horizon, max_age = D.ANNOUNCE_HORIZON, D.ANNOUNCE_RETRY_MAX_AGE
+    heard = _rec(D, "audio-delivered", CA, 30)
+    ask_a = _rec(D, "originate-queued", CA, 60, digest=TAG)
+    # HEARD: the same content arrived inside the window.
+    assert _verdict(D, ask_a, heard)[0] == "heard"
+    # IN FLIGHT: handed over moments ago, no verdict yet — the same content is on
+    # its way, so this one waits for it rather than doubling it.
+    assert _verdict(D, ask_a)[0] == "pending"
+    # GONE: handed over longer ago than the horizon and never heard.
+    assert _verdict(D, _rec(D, "originate-queued", CA, horizon + 30, digest=TAG)) is None
+    # WAITING: refused and still the retry's to send.
+    assert _verdict(D, _rec(D, "skipped-busy", CA, 30, digest=TAG))[0] == "pending"
+    # ...but not once it is older than the retry could ever start it.
+    assert _verdict(D, _rec(D, "skipped-busy", CA, max_age + 30, digest=TAG)) is None
+    # ...nor once the retry has retired it AND its last hand-off is a horizon old.
+    retired = [_rec(D, "unreachable", CA, horizon + 60, digest=TAG),
+               _rec(D, "announce-retry-attempted", CA, horizon + 40),
+               _rec(D, "announce-retry-skipped", CA, horizon + 20, reason="too-old")]
+    assert _verdict(D, *retired) is None
+
+
+def test_a_retired_replay_that_is_still_playing_is_not_gone(tmp_path):
+    """★ The retry may retire a clip 20 s after an attempt whose call is still
+    ringing or playing. Treating that as "can no longer play" let a DIFFERENT
+    message become transparent, so an identical copy of an older announcement was
+    called a duplicate and the room was left on the stale message."""
+    D = _Bench(tmp_path).delivery
+    heard_a = [_rec(D, "originate-queued", CA, 200, digest=TAG),
+               _rec(D, "audio-delivered", CA, 190)]
+    playing_c = [_rec(D, "unreachable", CC, 170, digest=OTHER),
+                 _rec(D, "announce-retry-attempted", CC, 20),
+                 _rec(D, "announce-retry-skipped", CC, 1, reason="too-old")]
+    assert _verdict(D, *heard_a, *playing_c) is None, "suppressed behind a playing clip"
+    # Once that attempt is a horizon old with nothing delivered, it really is gone.
+    old_c = [_rec(D, "unreachable", CC, 500, digest=OTHER),
+             _rec(D, "announce-retry-attempted", CC, D.ANNOUNCE_HORIZON + 30),
+             _rec(D, "announce-retry-skipped", CC, D.ANNOUNCE_HORIZON + 10, reason="too-old")]
+    assert _verdict(D, *heard_a, *old_c)[0] == "heard"
+
+
+def test_a_judged_different_ask_is_transparent_even_when_recent(tmp_path):
+    """A verdict — undelivered or unsettled — is the reconciler saying the audio
+    never arrived and never will, so it stops being a barrier at once."""
+    D = _Bench(tmp_path).delivery
+    heard_a = [_rec(D, "originate-queued", CA, 200, digest=TAG),
+               _rec(D, "audio-delivered", CA, 190)]
+    for verdict_row in ("announce-undelivered", "announce-unsettled"):
+        rows = [*heard_a,
+                _rec(D, "originate-queued", CC, 100, digest=OTHER),
+                _rec(D, verdict_row, CC, 2)]
+        assert _verdict(D, *rows)[0] == "heard", verdict_row
+    # Without the verdict the same in-flight clip is still a barrier.
+    assert _verdict(D, *heard_a, _rec(D, "originate-queued", CC, 100, digest=OTHER)) is None
+
+
+def test_an_orphaned_different_ask_stops_being_a_barrier(tmp_path):
+    """A restart leaves clips nobody will ever judge or replay (the retry and the
+    reconciler both ignore what predates them). Past the horizon and the retry's
+    age cap they cannot be heard, so they must not block a duplicate forever."""
+    D = _Bench(tmp_path).delivery
+    rows = [_rec(D, "originate-queued", CA, 200, digest=TAG),
+            _rec(D, "audio-delivered", CA, 190),
+            _rec(D, "unreachable", CC, 400, digest=OTHER)]     # orphaned, never judged
+    assert _verdict(D, *rows)[0] == "heard"
+
+
+def test_a_different_ask_still_waiting_for_the_retry_is_transparent(tmp_path):
+    """It has not been heard and this announcement's own row will supersede it,
+    so it does not stop the room being told what it already heard."""
+    D = _Bench(tmp_path).delivery
+    rows = [_rec(D, "originate-queued", CA, 200, digest=TAG),
+            _rec(D, "audio-delivered", CA, 190),
+            _rec(D, "skipped-busy", CC, 30, digest=OTHER)]     # waiting, never handed over
+    assert _verdict(D, *rows)[0] == "heard"
+
+
+def test_a_delivery_counts_only_after_its_own_ask(tmp_path):
+    D = _Bench(tmp_path).delivery
+    stray = _rec(D, "audio-delivered", CA, 30)                  # no ask row at all
+    assert _verdict(D, stray) is None
+    assert _verdict(D, stray, _rec(D, "originate-queued", CA, 10, digest=TAG))[0] == "pending"
+
+
+def test_the_candidates_own_rows_are_left_out(tmp_path):
+    D = _Bench(tmp_path).delivery
+    own = [_rec(D, "skipped-busy", CB, 45, digest=TAG)]
+    assert _verdict(D, *own, own=CB) is None
+    assert _verdict(D, *own)[0] == "pending"
+
+
+def test_a_pending_copy_never_displaces_the_one_it_waits_for(tmp_path):
+    """★ THE LOCKOUT THIS RULE ALMOST SHIPPED WITH. A pending duplicate is a
+    RECORD, not a candidate. When it was one, every identical repeat minted a
+    fresh candidate that superseded the last and reset the two clean
+    observations a replay needs — so an alert re-sent every 30 s to a busy or
+    unregistered handset played NOTHING, for as long as the producer kept
+    repeating. The copy the room is owed keeps its place, and it is the one that
+    plays."""
+    b = _Bench(tmp_path)
+    b.row("skipped-busy", sound=CA, ago=90, digest=TAG)       # the copy the room is owed
+    _write_clip(b.clips, CA)
+    b.row("duplicate-pending", sound=CB, ago=45, digest=TAG, matched=CA)
+    _write_clip(b.clips, CB)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CA], (b.originated, _skipped(b))
+    assert _skipped(b) == [], "a pending record was treated as an ask"
+
+
+def test_a_producer_repeating_every_30s_is_still_heard(tmp_path):
+    """The same thing end to end, on the live shape: the first copy is refused
+    while the handset is busy, the producer repeats every 30 s, and the handset
+    frees up. The room must hear it — once."""
+    b = _Bench(tmp_path, state="In use")
+    b.row("skipped-busy", sound=CA, ago=0, digest=TAG)
+    _write_clip(b.clips, CA)
+    # A replay that connects plays the clip, so callqos writes its delivery.
+    def _played(ext, sound):
+        b.row(b.delivery.AUDIO_DELIVERED, sound=sound.rsplit("/", 1)[-1], ago=0,
+              stage="complete", txcount=700)
+        return True
+    b.originate = _played
+    seq, repeat = [], 0
+    for step in range(1, 10):                      # 20 s ticks, repeats every 30 s
+        t = step * POLL
+        while repeat + 30 <= t:                    # what app.py writes for a repeat
+            repeat += 30
+            _CLOCK[0] = NOW + repeat
+            b.row("duplicate-pending", sound=f"ann-19-{repeat:032d}", ago=-repeat,
+                  digest=TAG, matched=CA)
+        if t >= 60:
+            b.state = "Not in use"                 # the call ends
+        b.tick(NOW + t)
+        seq.append(len(b.originated))
+    assert b.originated and [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CA], (seq, _skipped(b))
+    assert len(b.originated) == 1, "replayed more than once"
+
+
+def test_a_pending_copy_is_not_replayed_after_the_first_arrives(tmp_path):
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=90, digest=TAG)
+    b.row("duplicate-pending", sound=CB, ago=45, digest=TAG, matched=CA)
+    _write_clip(b.clips, CB)
+    b.delivered(sound=CA, ago=40)
+    b.ticks(4)
+    assert b.originated == [] and _skipped(b) == [], _skipped(b)
+
+
+def test_with_the_retry_off_a_repeat_is_never_held_back(tmp_path):
+    """"On its way" assumes something will send it. With announce_retry_attempts
+    at 0 nothing will, so a repeat is the room's only chance and must not be
+    answered as a duplicate."""
+    D = _Bench(tmp_path).delivery
+    waiting = [_rec(D, "skipped-busy", CA, 30, digest=TAG)]
+    assert _verdict(D, *waiting)[0] == "pending"
+    saved = D.ANNOUNCE_RETRY_MAX_ATTEMPTS
+    try:
+        D.ANNOUNCE_RETRY_MAX_ATTEMPTS = 0
+        assert _verdict(D, *waiting) is None
+        # ...but content the room HEARD is still a duplicate, retry or no retry.
+        heard = [_rec(D, "originate-queued", CA, 60, digest=TAG),
+                 _rec(D, "audio-delivered", CA, 30)]
+        assert _verdict(D, *heard)[0] == "heard"
+    finally:
+        D.ANNOUNCE_RETRY_MAX_ATTEMPTS = saved
+
+
+def test_a_repeat_never_retires_a_message_asked_after_the_audio(tmp_path):
+    """The room heard X, was then asked for Y (still waiting), and X is repeated.
+    Y is NEWER than that audio and has never played, so the repeat must not take
+    its place: only the clip a duplicate refers to ranks, at its own queue time."""
+    b = _Bench(tmp_path)
+    b.row("originate-queued", sound=CA, ago=200, digest=TAG)
+    b.delivered(sound=CA, ago=190)
+    b.row("skipped-busy", sound=CC, ago=100, digest=OTHER)     # asked AFTER that audio
+    _write_clip(b.clips, CC)
+    b.row("duplicate-suppressed", sound=CB, ago=45, digest=TAG, basis="delivered",
+          matched=CA, delivered_at=b.iso(190))
+    _write_clip(b.clips, CB)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [CC], (b.originated, _skipped(b))
+    assert _skipped(b) == [], _skipped(b)
+
+
+def test_a_suppressed_duplicate_is_a_record_and_nothing_more(tmp_path):
+    """It is never replayed — the room heard that content — and it retires
+    nothing. The clip it refers to is already in L6 at its own queue time, which
+    is what supersedes an OLDER waiting message."""
+    b = _Bench(tmp_path)
+    b.row("skipped-busy", sound=CC, ago=200, digest=OTHER)     # asked BEFORE the audio
+    _write_clip(b.clips, CC)
+    b.row("originate-queued", sound=CA, ago=150, digest=TAG)
+    b.delivered(sound=CA, ago=140)
+    b.row("duplicate-suppressed", sound=CB, ago=45, digest=TAG, basis="delivered",
+          matched=CA, delivered_at=b.iso(140))
+    _write_clip(b.clips, CB)
+    b.ticks(4)
+    assert b.originated == [], b.originated
+    assert (CC, "ext-superseded") in _skipped(b), _skipped(b)
+    assert not any(s == CB for s, _r in _skipped(b)), "the suppressed record was replayed"
+
+
+def test_a_repeat_is_not_held_behind_a_copy_the_retry_has_ruled_out(tmp_path):
+    """"On its way" has to agree with L6: only the room's NEWEST ask is ever
+    replayed, so a repeat must not wait behind an older copy that a different
+    message has already superseded — nobody is going to send that one."""
+    D = _Bench(tmp_path).delivery
+    x_alone = [_rec(D, "skipped-busy", CA, 30, digest=TAG)]
+    assert _verdict(D, *x_alone)[0] == "pending"
+    superseded = x_alone + [_rec(D, "skipped-busy", CC, 20, digest=OTHER)]
+    assert _verdict(D, *superseded) is None, "held behind a superseded copy"
+
+

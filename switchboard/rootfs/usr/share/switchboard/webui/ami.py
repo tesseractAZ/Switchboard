@@ -116,24 +116,9 @@ def terminated_blocks(data: bytes) -> list[dict]:
     return parse_ami_blocks(data[:end + 4]) if end >= 0 else []
 
 
-def stream_complete(data: bytes) -> bool:
-    """True once an AMI list action's terminator is present.
-
-    Each list action (PJSIPShow* / CoreShowChannels) ends with a real
-    ``Event: <X>Complete`` line. We match that LINE, not a bare ``Complete``
-    substring anywhere in the buffer: field values are attacker-influenced (an
-    inbound trunk ``CallerIDName`` or a phone's ``UserAgent`` could contain
-    "Complete") and a substring match would truncate the stream early.
-    """
-    for ln in data.decode(errors="replace").split("\r\n"):
-        if ln[:7].lower() == "event: " and ln.lower().endswith("complete"):
-            return True
-    return False
-
-
 def actions_complete(data: bytes, action_ids: set[str]) -> bool:
-    """True once every action in ``action_ids`` has emitted its own
-    ``...Complete`` event.
+    """True once every action in ``action_ids`` has FINISHED: it has emitted its
+    own ``...Complete`` event, or its first reply was an error.
 
     Used to read several list actions over ONE connection: each action is tagged
     with an ActionID and Asterisk echoes it on that action's events (including the
@@ -142,13 +127,40 @@ def actions_complete(data: bytes, action_ids: set[str]) -> bool:
     than the event name so attacker-influenced field values (a ``UserAgent`` or
     ``CallerIDName`` containing "complete") can never end the read early, and an
     unsolicited event for some *other* ActionID can't either.
+
+    ★ AN EMPTY LIST IS AN ERROR, NOT A LIST (2026-09-22). Asterisk 20.11.1 does
+    not answer an empty PJSIPShowContacts with a listack and a zero-item
+    ContactListComplete; it answers ``Response: Error`` / ``Message: No Contacts
+    found`` and writes nothing more for that ActionID (pjsip_options.c
+    ami_show_contacts, ``return 0`` straight after astman_send_error).
+    PJSIPShowEndpoints does the same with no endpoints (pjsip_configuration.c
+    ami_show_endpoints), and so does every dispatcher refusal — permission
+    denied, unknown action, shutting down (manager.c process_message). Waiting
+    for a Complete that is never coming held every status poll for its full
+    timeout whenever no phone was registered — and a registered phone is the
+    only kind of contact that counts: the trunk's static contact is never in the
+    contact store. So an error that is the action's FIRST response finishes it.
+
+    Only the FIRST ``Response:`` per ActionID decides. Asterisk can also write an
+    error MID-list, after the ``Response: Success`` listack (an out-of-memory
+    ``Unable create event for ContactList`` from ast_sip_create_ami_event), and
+    the ``...Complete`` still follows it, so that one must not end the read.
+    Untagged blocks (the login reply) and foreign ActionIDs never count.
     """
-    seen: set[str] = set()
+    first: dict[str, str] = {}
+    done: set[str] = set()
     for b in terminated_blocks(data):
         aid = b.get("actionid", "")
-        if aid in action_ids and b.get("event", "").lower().endswith("complete"):
-            seen.add(aid)
-    return action_ids <= seen
+        if aid not in action_ids:
+            continue
+        if "event" in b:
+            if b["event"].lower().endswith("complete"):
+                done.add(aid)
+        elif "response" in b and aid not in first:
+            first[aid] = b["response"].lower()
+            if first[aid] == "error":
+                done.add(aid)
+    return action_ids <= done
 
 
 def actions_responded(data: bytes, action_ids: set[str]) -> bool:
@@ -392,22 +404,29 @@ def _ami_command(
     single_response: bool = False,
     action_id: str = "",
 ) -> list[dict]:
-    """Run one AMI action and return the list of event/response blocks.
+    """Run one SINGLE-RESPONSE AMI action and return the parsed blocks.
 
-    List actions (PJSIPShow* / CoreShowChannels) stream events terminated by a
-    "...Complete" event — read until that. Single-response actions (Originate /
-    Hangup) have no Complete event, so they tag the action with an ActionID and
-    stop as soon as that action's own response block arrives (instead of waiting
-    out the full socket timeout). Callers that need to attribute the response
-    pass their own ``action_id``.
+    Single-response actions (Originate, Hangup, Getvar, ...) have no Complete
+    event, so the action is tagged with an ActionID and the read stops as soon as
+    that action's own response block has arrived whole (instead of waiting out
+    the full socket timeout). Callers that need to attribute the response pass
+    their own ``action_id``.
+
+    LIST actions go through :func:`_ami_actions` — even one on its own. This
+    function used to read an untagged list until any ``Event: ...Complete`` line
+    appeared, which waited out its full timeout whenever Asterisk answered the
+    list with an error instead (see :func:`actions_complete`), and could be ended
+    early by an unrelated Complete event. ``single_response=False`` is a
+    programming error and raises before any connection is made.
     """
+    if not single_response:
+        raise ValueError("list actions go through _ami_actions")
     if not AMI_SECRET:
         raise AMIError("AMI secret not configured")
 
-    if single_response:
-        if not action_id:
-            action_id = _next_action_id()
-        action_lines = list(action_lines) + [f"ActionID: {action_id}"]
+    if not action_id:
+        action_id = _next_action_id()
+    action_lines = list(action_lines) + [f"ActionID: {action_id}"]
 
     with socket.create_connection((AMI_HOST, AMI_PORT), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -421,7 +440,8 @@ def _ami_command(
         except socket.timeout:
             pass
 
-        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
+        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
+              "Events: off"])
         send(action_lines)
 
         data = bytearray(buf)
@@ -437,20 +457,13 @@ def _ami_command(
             # tiny, but never buffer without an upper bound.
             if len(data) > 1_000_000:
                 break
-            if single_response:
-                # Stop once our action's own response (matched by ActionID) has
-                # landed WHOLE. A Getvar's header is written ahead of its Value,
-                # and stopping on the header alone lost the Value (see
-                # terminated_blocks).
-                if any(
-                    b.get("actionid") == action_id and "response" in b
-                    for b in terminated_blocks(bytes(data))
-                ):
-                    break
-            # Stop at the list terminator, and only log off AFTER — logging off
-            # before the stream finishes makes Asterisk close the socket and
-            # truncate the events (the original "all Unregistered" bug).
-            elif stream_complete(bytes(data)):
+            # Stop once our action's own response (matched by ActionID) has
+            # landed WHOLE. A Getvar's header is written ahead of its Value, and
+            # stopping on the header alone lost the Value (see terminated_blocks).
+            if any(
+                b.get("actionid") == action_id and "response" in b
+                for b in terminated_blocks(bytes(data))
+            ):
                 break
         try:
             send(["Action: Logoff"])
@@ -475,18 +488,18 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
     status poll — endpoints + contacts + channels — from three AMI sessions down
     to one, which is the dominant source of the manager logon/logoff churn.
 
-    Mirrors :func:`_ami_command`'s read discipline (read until the real
-    terminator, then log off — never before, or Asterisk truncates the stream).
-    Raises :class:`AMIError` on a missing secret or an auth failure; lets socket
-    errors propagate so callers can fall back to an "AMI down" state.
+    Read until every action has FINISHED — its Complete event, or an error as
+    its first reply — then log off; never before, or Asterisk truncates the
+    stream. Raises :class:`AMIError` on a missing secret or an auth failure; lets
+    socket errors propagate so callers can fall back to an "AMI down" state.
 
     The default ``timeout`` is deliberately kept *below* the console's
-    ``POLL_SECONDS`` cadence: the normal read completes in milliseconds on
-    loopback, and on the (spec-says-can't-happen) case where Asterisk failed to
-    echo an ActionID on the terminating event, a single stalled poll then falls
-    through to the timeout WITHOUT outrunning the poll interval and backing the
-    poller up. The parsed buffer is still correct in that case — the failure mode
-    is a little latency, never wrong data.
+    ``POLL_SECONDS`` cadence, so a read that does stall falls through to it
+    WITHOUT outrunning the poll interval and backing the poller up. Until
+    v0.106.0 that was not a rare case: an empty contact list is answered with an
+    error and no Complete, so every poll with no phone registered waited the
+    whole timeout (see :func:`actions_complete`). The parsed buffer is correct
+    either way — the failure mode is latency, never wrong data.
     """
     if not AMI_SECRET:
         raise AMIError("AMI secret not configured")
@@ -510,7 +523,8 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
         except socket.timeout:
             pass
 
-        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
+        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
+              "Events: off"])
         for action_lines in tagged:
             send(action_lines)
 
@@ -1049,7 +1063,7 @@ def peer_channels_by_ext(channels: list[dict], rooms_by_ext: dict | None = None)
 
 def get_endpoints() -> list[dict]:
     try:
-        blocks = _ami_command(["Action: PJSIPShowEndpoints"])
+        blocks = _ami_actions([["Action: PJSIPShowEndpoints"]], timeout=4.0)
     except (OSError, AMIError) as exc:
         raise AMIError(str(exc)) from exc
     return endpoints_from_blocks(blocks)
@@ -1093,10 +1107,20 @@ def get_registrations_or_none() -> dict[str, dict] | None:
     The trunk watchdog blanked sensor.switchboard_trunk_health to "unknown" on
     every AMI-down cycle because it could not make that distinction — its skip
     guard was unreachable, since the failure path returned the same empty dict a
-    healthy no-trunk system returns."""
+    healthy no-trunk system returns.
+
+    An ERROR reply is also "could not answer" (v0.106.0). For this action an
+    empty list is always a listack plus a zero-item Complete; Asterisk answers
+    with an error only when it cannot answer at all — the action is not
+    registered yet in the seconds after a restart, the module is not running,
+    Asterisk is shutting down. Reading that as {} published the trunk as
+    "unknown" during every add-on restart."""
     try:
-        blocks = _ami_command(["Action: PJSIPShowRegistrationsOutbound"])
+        blocks = _ami_actions([["Action: PJSIPShowRegistrationsOutbound"]], timeout=4.0)
     except (OSError, AMIError):
+        return None
+    if any(b.get("actionid") and (b.get("response") or "").lower() == "error"
+           for b in blocks):
         return None
     return registrations_from_blocks(blocks)
 
@@ -1120,14 +1144,19 @@ def send_register(reg_name: str = "trunk-reg") -> bool:
     AMI privilege."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", reg_name or ""):
         return False  # our own section ids only
+    action_id = _next_action_id()
     try:
         blocks = _ami_command(
             ["Action: PJSIPRegister", f"Registration: {reg_name}"],
             single_response=True,
+            action_id=action_id,
         )
     except (OSError, AMIError):
         return False
-    return any((b.get("response") or "").lower() == "success" for b in blocks)
+    # OUR reply, by ActionID. The login's own untagged "Response: Success" is in
+    # the same buffer, and counting it reported a refused kick as a sent one.
+    return any(b.get("actionid") == action_id
+               and (b.get("response") or "").lower() == "success" for b in blocks)
 
 
 def get_status_bundle() -> tuple[list[dict], dict[str, dict], list[dict]]:
@@ -1219,7 +1248,8 @@ def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
                 buf += sock.recv(4096)
             except socket.timeout:
                 pass
-            send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}"])
+            send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
+              "Events: off"])
             for aid, name in items:
                 send(["Action: Getvar", f"Channel: {name}",
                       "Variable: CHANNEL(audioreadformat)", f"ActionID: {aid}"])

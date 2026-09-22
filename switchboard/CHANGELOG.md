@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.106.0
+
+**The same announcement no longer plays twice in a row, and the dashboard no
+longer stalls when no phone is registered.**
+
+### Identical announcements are judged by what the room actually heard
+
+An announcement was answered "duplicate" only by a record in the web UI's
+memory, made when the web UI itself placed an identical call. That was wrong in
+both directions:
+- **Twice:** the same words reached a room twice when the first copy was an
+  automatic replay (v0.105.0), went out while Asterisk could not report the
+  phone's state, or played before an add-on restart.
+- **Never:** "duplicate" was also answered after the room had since been asked
+  for something different, or when the first copy never played at all.
+
+The decision now comes from the delivery ledger whenever it can be read.
+- **Already heard:** the same audio reached that phone within the last five
+  minutes, with nothing different heard or still playing since. It is answered
+  as a duplicate (`duplicate-suppressed`).
+- **Still on its way:** the same audio is in flight, or waiting for the
+  automatic retry to send it. The repeat is answered as a duplicate and
+  recorded `duplicate-pending`; the copy already queued is the one the room
+  hears, and it keeps its place in the retry rather than being displaced by
+  each repeat. A repeat is held back only when something really will send it —
+  with `announce_retry_attempts` at `0` nothing will, so repeats always go out.
+
+"Door open, door closed, door open" is three announcements. An identical
+announcement whose first copy can never play is sent at once. A stale, different
+announcement waiting for the retry is not played after the room was told newer
+content. The automatic retry uses the same ledger and retires a waiting replay
+as `content-delivered` instead of saying it twice. The response to the caller is
+unchanged: `{"ok": true, "skipped": "duplicate"}`.
+
+Ledger rows name the content by a **keyed tag**, never by a plain hash of the
+audio, because a plain hash in the shared folder would let anything reading it
+confirm a guessed sentence. The key is created on first use and kept in the
+add-on's private data folder. The phone announcement clips themselves are no
+longer served to the LAN. Their names are in the shared ledger, so anything
+that could read it could download what was said. Only the speaker
+announcements that Home Assistant media players fetch are still served.
+
+### No registered phone no longer means a 2.5-second status poll
+
+When no phone is registered, Asterisk answers the contact list with an error
+("No Contacts found") instead of an empty list, and sends nothing more. The
+status read waited for an end-of-list marker that never came, so every
+dashboard, console and link-monitor poll took its full 2.5-second timeout,
+exactly when a whole-house outage made the dashboard most useful. The same
+happened to the 4-second endpoint read when there are no endpoints at all (no
+rooms and no trunk). An error
+that is a request's first reply now ends that request, while an error in the
+middle of a list still waits for the list to finish, as Asterisk requires.
+
+- Every list read is now tagged and read the same way. The older reader, which
+  stopped at the first "list complete" line of any kind, is removed.
+- The add-on's AMI sessions now log in with `Events: off`. None of them reads
+  unsolicited events, which only added bytes to every read.
+- The trunk watchdog no longer reads "Asterisk could not answer" as "no trunk
+  configured". In the seconds after a restart, before the registration module
+  is up, that published the outside line as `unknown`.
+- A registration kick that Asterisk refuses is no longer reported as sent.
+
 ## 0.105.2
 
 **The handset check before an announcement now actually reads the handset.**

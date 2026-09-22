@@ -29,6 +29,10 @@ os.environ.setdefault("SWITCHBOARD_MWI", os.path.join(_STATE_DIR, "mwi.json"))
 # otherwise try to create /share/switchboard on the test machine.
 os.environ.setdefault("SWITCHBOARD_DELIVERY_OUTCOME",
                       os.path.join(_STATE_DIR, "delivery-outcomes.jsonl"))
+# The announce content-tag key (v0.106.0) is created on first use under /data in
+# the add-on; on a test machine it must land in the temp state dir instead.
+os.environ.setdefault("SWITCHBOARD_ANNOUNCE_TAG_KEY",
+                      os.path.join(_STATE_DIR, "announce-tag.key"))
 
 
 # --------------------------------------------------------------------------- #
