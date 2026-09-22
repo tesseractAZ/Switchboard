@@ -804,6 +804,23 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   re-registered; Asterisk logged one error line, the clip never played, and
   nothing recorded that the check had been skipped. It is **not** a refusal: the
   announcement still goes out and is still judged normally afterwards.
+
+  Until v0.105.2 the question came back unanswered almost every time — on 28 of
+  29 announcements — because Asterisk writes that reply in two pieces a few
+  microseconds apart and the add-on stopped reading after the first. So the
+  `busy` and `unreachable` refusals above almost never happened, and nearly every
+  announcement carried an `announce-guard-unjudged` row. The reader now waits for
+  the whole reply, and that row is back to meaning what it says: Asterisk really
+  was not answering.
+- **...and a refusal is sent again** (v0.105.2). `skipped-busy` and `unreachable`
+  are announcements whose audio never played, so both now carry the clip name
+  and are replayed by the retry described below — `unreachable` once the phone
+  has contact again, `skipped-busy` once the line is free — under the same limits
+  as any other replay. The response to the caller is unchanged. A refusal that
+  is never replayed gets no `announce-undelivered` verdict, because it was never
+  handed to Asterisk; its history ends with the retry's own
+  `announce-retry-skipped` row. Once it has been replayed it has been handed
+  over, and from then on it is judged like any other announcement.
 - **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
   accepted the request. The handset's hangup now records `audio-delivered` once at
   least a second of the clip has actually played, and anything still unaccounted

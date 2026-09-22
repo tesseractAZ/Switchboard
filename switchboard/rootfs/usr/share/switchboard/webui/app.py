@@ -562,6 +562,8 @@ ANNOUNCE_ORIGINATE_FAILED = getattr(_delivery, "ANNOUNCE_ORIGINATE_FAILED",
                                     "announce-originate-failed")
 ANNOUNCE_GUARD_UNJUDGED = getattr(_delivery, "ANNOUNCE_GUARD_UNJUDGED",
                                   "announce-guard-unjudged")
+ANNOUNCE_SKIPPED_BUSY = getattr(_delivery, "ANNOUNCE_SKIPPED_BUSY", "skipped-busy")
+ANNOUNCE_UNREACHABLE = getattr(_delivery, "ANNOUNCE_UNREACHABLE", "unreachable")
 ANNOUNCE_DEDUP_WINDOW_S = float(os.environ.get("ANNOUNCE_DEDUP_WINDOW_S", "300") or 300)
 # ext -> (digest, monotonic seconds). Process-local by design: a restart should
 # not inherit a suppression decision made before it.
@@ -789,10 +791,19 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     # the line frees up). An unreadable state ("") is NOT busy — the guard fails
     # open rather than ever silencing an alarm. Announce-path only: normal
     # inbound/outbound calls to the ext are unaffected.
+    #
+    # Both refusals below carry the clip (v0.105.2): no audio played, so the
+    # scheduler's retry replays it once the handset reads idle. See
+    # delivery.ANNOUNCE_GUARD_REFUSED. The responses are unchanged — busy
+    # answers "handled", unreachable answers 503 — and the Home Assistant media
+    # player that carries almost every announcement logs a non-200 and never
+    # raises it, so its producers do not re-send on either; the replay is the
+    # second attempt.
     state = await asyncio.to_thread(get_device_state, ext)
     if device_busy(state):
         print(f"[switchboard-webui] announce {ext} skipped: device {state}", flush=True)
-        _record_delivery(ext, "announce", "skipped-busy", device_state=state)
+        _record_delivery(ext, "announce", ANNOUNCE_SKIPPED_BUSY,
+                         sound=os.path.basename(sound), device_state=state)
         return JSONResponse({"ok": True, "skipped": "busy", "device_state": state})
     # Pre-flight the contact. An Originate to an endpoint with no contact cannot
     # create a channel — Asterisk logs `Could not create dialog to invalid URI`
@@ -803,7 +814,8 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     if device_unreachable(state):
         print(f"[switchboard-webui] announce {ext} skipped: device {state} "
               "(no contact — the handset is not registered)", flush=True)
-        _record_delivery(ext, "announce", "unreachable", device_state=state)
+        _record_delivery(ext, "announce", ANNOUNCE_UNREACHABLE,
+                         sound=os.path.basename(sound), device_state=state)
         return JSONResponse({"ok": False, "skipped": "unreachable",
                              "device_state": state}, status_code=503)
     # ★ AND WHEN THE PRE-FLIGHT COULD NOT ANSWER AT ALL (2026-09-15).

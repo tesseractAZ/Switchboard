@@ -61,6 +61,26 @@ ANNOUNCE_UNSETTLED = "announce-unsettled"
 # ANNOUNCE_GUARD_UNJUDGED and both retry outcomes below are outside it.
 ANNOUNCE_TERMINAL = (AUDIO_DELIVERED, ANNOUNCE_UNDELIVERED, ANNOUNCE_UNSETTLED)
 
+# ★ THE PRE-SEND GUARD'S TWO REFUSALS (2026-09-22). app.py reads the handset's
+# device state before it originates, and skips the call when that state is busy
+# (a second INVITE rings as call waiting instead of auto-answering) or has no
+# contact (Asterisk cannot even create the dialog). Until v0.105.2 that read came
+# back "" on 28 of 29 announcements — the AMI reader stopped between Asterisk's
+# two writes of the Getvar reply — so neither refusal ever fired, and every
+# announcement went to Originate, where the retry below could see it.
+#
+# With the read repaired both refusals are live, and each is an announcement
+# whose audio never played. They carry the clip and stand where
+# `originate-queued` stands for the retry: the scheduler replays the clip once
+# the handset reads idle twice, under the same budget, age and one-per-room
+# rules. Without that, repairing the guard would have turned "originated,
+# failed, replayed" into "refused, never replayed" — for the cordless, the
+# 30-45 s after every add-on restart before it re-registers. Neither is a
+# verdict about audio, so neither is in ANNOUNCE_TERMINAL.
+ANNOUNCE_SKIPPED_BUSY = "skipped-busy"
+ANNOUNCE_UNREACHABLE = "unreachable"
+ANNOUNCE_GUARD_REFUSED = (ANNOUNCE_SKIPPED_BUSY, ANNOUNCE_UNREACHABLE)
+
 # ★ THE ORIGINATE THAT NEVER BECAME A CALL (2026-09-15).
 #
 # The announce path used to write two bare literals here, `originate-error` when
@@ -700,13 +720,22 @@ def unresolved_announcements(now: float | None = None, horizon: float | None = N
     attempts = _retry_attempts(recs)
     out = []
     for r in recs:
-        if not (r.get("kind") == "announce" and r.get("outcome") == ANNOUNCE_QUEUED
-                and r.get("sound")):
+        outcome = r.get("outcome")
+        if not (r.get("kind") == "announce" and r.get("sound")
+                and (outcome == ANNOUNCE_QUEUED or outcome in ANNOUNCE_GUARD_REFUSED)):
             continue
         key = clip_key(r["sound"])
         if key in resolved:
             continue
         tried, last_attempt = attempts.get(key, (0, 0.0))
+        # ★ v0.105.2 — A REFUSAL IS JUDGED ONLY ONCE IT HAS BEEN REPLAYED. The
+        # pre-send guard never handed the clip to Asterisk, so on its own there
+        # is no call to reach a verdict about, and the retry's rows are its
+        # whole record. A replay DID hand it over; from the first attempt on it
+        # is judged exactly like a queued clip, so a replay that rang out ends
+        # in `announce-undelivered` rather than in no verdict at all.
+        if outcome != ANNOUNCE_QUEUED and not tried:
+            continue
         if now - max(r["_ts"], last_attempt) < horizon:
             continue
         rec = dict(r)          # a copy: the caller's shared list is not ours to mark
@@ -734,11 +763,14 @@ def retryable_announcements(now: float | None = None,
 
     Every condition below is a LEDGER fact, and all of them must hold:
 
-    L1  a newest `originate-queued` row with a non-empty `sound`, at or after
-        `not_before`. Inherited unchanged from unresolved_announcements: a window
-        this process was not running for is unknowable, and is never replayed.
-        (Live reason, not theory: the 47 announce QoS legs before 2026-09-11
-        carry `sound: None`, so no delivered row could ever exist for them.)
+    L1  a newest `originate-queued` row — or a pre-send guard refusal,
+        ANNOUNCE_GUARD_REFUSED, which is the same fact reached one step earlier —
+        with a non-empty `sound`, at or after `not_before`. Inherited unchanged
+        from unresolved_announcements: a window this process was not running for
+        is unknowable, and is never replayed. (Live reason, not theory: the 47
+        announce QoS legs before 2026-09-11 carry `sound: None`, so no delivered
+        row could ever exist for them. Refusal rows written before v0.105.2
+        carry no `sound` either, and stay outside for the same reason.)
     L2  no row for that clip in ANNOUNCE_TERMINAL — which is what makes "an
         announcement whose audio DID play is never replayed" true at any age, in
         any order, including a delivered row that lands AFTER an attempt row —
@@ -793,7 +825,9 @@ def retryable_announcements(now: float | None = None,
             continue
         key = clip_key(r["sound"])
         outcome = r.get("outcome")
-        if outcome == ANNOUNCE_QUEUED:
+        # A guard refusal is this clip's queue row: the announcement was asked
+        # for then, and no audio followed (see ANNOUNCE_GUARD_REFUSED).
+        if outcome == ANNOUNCE_QUEUED or outcome in ANNOUNCE_GUARD_REFUSED:
             prev = queued.get(key)
             if prev is None or r.get("_ts", 0.0) >= prev.get("_ts", 0.0):
                 queued[key] = r

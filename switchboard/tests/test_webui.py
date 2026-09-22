@@ -333,6 +333,10 @@ def test_actions_complete() -> None:
         "Event: CoreShowChannelsComplete\r\nActionID: Z\r\n\r\n"
     ).encode()
     check("multi-term: foreign ActionID Complete is ignored", ami.actions_complete(foreign, ids) is False)
+    # C's Complete event has begun to arrive but is not terminated yet.
+    torn = partial + b"Event: CoreShowChannelsComplete\r\nActionID: C\r\n"
+    check("multi-term: an unterminated Complete does not end the read",
+          ami.actions_complete(torn, ids) is False)
 
 
 def test_status_bundle_parse() -> None:
@@ -577,6 +581,101 @@ def test_actions_responded() -> None:
     check("responded: not done until all respond", ami.actions_responded(part, ids) is False)
     full = part + b"Response: Success\r\nActionID: B\r\nValue: g722\r\n\r\n"
     check("responded: done when every action responded", ami.actions_responded(full, ids) is True)
+    # B's header has arrived and its Value has not: Asterisk writes them apart.
+    header_only = part + b"Response: Success\r\nActionID: B\r\n"
+    check("responded: a header without its terminator is not a response",
+          ami.actions_responded(header_only, ids) is False)
+
+
+# The live framing of a channel-less Getvar reply, captured 2026-09-22 on the
+# production PBX: the ack header and the Variable/Value arrive in separate recv
+# calls ~10 µs apart, because astman_start_ack() writes the header unterminated.
+_LIVE_GETVAR_WRITES = (
+    b"Response: Success\r\nActionID: {aid}\r\n",
+    b"Variable: {var}\r\nValue: {val}\r\n\r\n",
+)
+
+
+def test_terminated_blocks() -> None:
+    # Only blocks whose blank-line terminator has arrived count. The unterminated
+    # tail is exactly the Getvar header that used to end the read early.
+    head = b"Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+    partial = head + b"Response: Success\r\nActionID: X\r\n"
+    blocks = ami.terminated_blocks(partial)
+    check("terminated: the complete login ack counts", len(blocks) == 1)
+    check("terminated: the unterminated header does not",
+          all(b.get("actionid") != "X" for b in blocks))
+    check("terminated: parse_ami_blocks DOES see the tail (why this exists)",
+          any(b.get("actionid") == "X" for b in ami.parse_ami_blocks(partial)))
+    whole = partial + b"Variable: DEVICE_STATE(PJSIP/19)\r\nValue: NOT_INUSE\r\n\r\n"
+    got = [b for b in ami.terminated_blocks(whole) if b.get("actionid") == "X"]
+    check("terminated: header and Value form ONE block once terminated",
+          len(got) == 1 and got[0].get("value") == "NOT_INUSE")
+    check("terminated: nothing terminated -> []",
+          ami.terminated_blocks(b"Response: Success\r\nActionID: X\r\n") == [])
+    check("terminated: empty -> []", ami.terminated_blocks(b"") == [])
+
+
+class _FakeSplitGetvarSocket:
+    """An AMI peer that writes a Getvar reply the way Asterisk does: the header
+    in one recv, the Variable/Value in the NEXT one, then silence."""
+
+    def __init__(self, var: str, value: str) -> None:
+        self.var, self.value, self.sent, self._n, self._q = var, value, b"", 0, []
+
+    def settimeout(self, _t) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def recv(self, _n: int) -> bytes:
+        self._n += 1
+        if self._n == 1:
+            return b"Asterisk Call Manager/9.0.0\r\n"
+        if self._n == 2:
+            import re
+            aid = (re.findall(r"ActionID: (\S+)", self.sent.decode()) or [""])[0]
+            fields = {"aid": aid, "var": self.var, "val": self.value}
+            self._q = [w.decode().format(**fields).encode() for w in _LIVE_GETVAR_WRITES]
+            return (b"Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
+                    + self._q.pop(0))
+        if self._q:
+            return self._q.pop(0)
+        import socket as _s
+        raise _s.timeout()
+
+
+def test_a_getvar_reply_written_in_two_parts_is_read_whole() -> None:
+    # ★ The 2026-09-22 defect: the read stopped on the header and DEVICE_STATE
+    # came back "" on 28 of 29 announcements, so the pre-send guard never judged.
+    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
+    ami.AMI_SECRET = "test-secret"
+    try:
+        ami.socket.create_connection = lambda *a, **k: _FakeSplitGetvarSocket(
+            "DEVICE_STATE(PJSIP/19)", "NOT_INUSE")
+        check("split: DEVICE_STATE Value survives the two-write reply",
+              ami.get_device_state("19") == "NOT_INUSE")
+        ami.socket.create_connection = lambda *a, **k: _FakeSplitGetvarSocket(
+            "DEVICE_STATE(PJSIP/20)", "UNAVAILABLE")
+        check("split: an offline handset reads UNAVAILABLE, not ''",
+              ami.get_device_state("20") == "UNAVAILABLE")
+        ami.socket.create_connection = lambda *a, **k: _FakeSplitGetvarSocket(
+            "CHANNEL(audioreadformat)", "ulaw")
+        check("split: the channel codec Getvar survives it too",
+              ami.get_channel_codec("PJSIP/11-1") == "ulaw")
+    finally:
+        ami.socket.create_connection = orig_conn
+        ami.AMI_SECRET = orig_secret
 
 
 class _FakeCodecBatchSocket:

@@ -1389,3 +1389,157 @@ def test_the_retry_never_pushes(tmp_path):
     assert len(b.originated) == 1 and pushed == []
     body = _retry_code()
     assert "ha_client" not in body and "notify" not in body
+
+
+# --------------------------------------------------------------------------- #
+# ★ THE PRE-SEND GUARD'S REFUSALS ARE REPLAYED TOO (v0.105.2).
+#
+# Until v0.105.2 app.py's device-state read came back "" on 28 of 29
+# announcements — the AMI reader stopped between Asterisk's two writes of the
+# Getvar reply — so neither refusal ever fired and every announcement reached
+# Originate, where this retry could see it. Repairing the read makes both
+# refusals live. Each is an announcement whose audio never played, so each must
+# be replayed under exactly the rules above, or the repair would have turned
+# "originated, failed, replayed" into "refused, never replayed".
+# --------------------------------------------------------------------------- #
+def _refuse(b, outcome, sound=SOUND, ext="19", ago=60.0, clip=True, state=None):
+    b.row(outcome, sound=sound, ext=ext, ago=ago, device_state=state)
+    if clip and sound:
+        _write_clip(b.clips, sound)
+
+
+def test_both_refusals_are_the_retry_population(tmp_path):
+    b = _Bench(tmp_path)
+    assert set(b.delivery.ANNOUNCE_GUARD_REFUSED) == {"skipped-busy", "unreachable"}
+    # ...and neither is a verdict about audio, or it would retire its own clip.
+    assert not set(b.delivery.ANNOUNCE_GUARD_REFUSED) & set(b.delivery.ANNOUNCE_TERMINAL)
+
+
+def test_an_unreachable_refusal_is_replayed_when_the_handset_returns(tmp_path):
+    """The restart window, as it now plays out: ext 19 has no contact for the
+    30-45 s after an add-on restart, the repaired guard REFUSES the announcement
+    instead of originating into the void, and the replay is what delivers it."""
+    b = _Bench(tmp_path, state="Unavailable")
+    b.sched._STARTED = NOW - 6.5
+    _refuse(b, "unreachable", ago=0, state="UNAVAILABLE")
+    b.tick(NOW + 13.5)
+    assert b.originated == [], "replayed before the minimum age"
+    b.tick(NOW + 33.5)
+    assert b.originated == [], "replayed to a handset with no contact"
+    b.state = "Not in use"
+    b.tick(NOW + 53.5)
+    assert b.originated == [], "replayed on one observation"
+    b.tick(NOW + 73.5)
+    assert [e for e, _s in b.originated] == ["19"], b.originated
+    att = [r for r in b.rows() if r["outcome"] == "announce-retry-attempted"]
+    assert len(att) == 1 and att[0]["sound"] == SOUND, att
+
+
+def test_a_busy_refusal_is_replayed_once_the_line_is_free(tmp_path):
+    b = _Bench(tmp_path, state="In use")
+    _refuse(b, "skipped-busy", ago=40, state="INUSE")
+    b.ticks(3)
+    assert b.originated == [], "replayed on top of a call"
+    b.state = "Not in use"
+    b.ticks(2, first=NOW + 3 * POLL)
+    assert [e for e, _s in b.originated] == ["19"], b.originated
+
+
+def test_a_refusal_row_without_a_clip_is_never_a_candidate(tmp_path):
+    """The rows written before v0.105.2 carry no clip: unjoinable, so never
+    replayed and never retired — the same rule as a queue row without one."""
+    b = _Bench(tmp_path)
+    for outcome in ("skipped-busy", "unreachable"):
+        _refuse(b, outcome, sound=None, ago=40)
+    b.ticks(4)
+    assert b.originated == []
+    assert "announce-retry-skipped" not in b.outcomes(), b.outcomes()
+
+
+def test_a_refused_clip_that_played_is_never_replayed(tmp_path):
+    b = _Bench(tmp_path)
+    _refuse(b, "skipped-busy", ago=90)
+    b.delivered(ago=30)
+    b.ticks(3)
+    assert b.originated == []
+
+
+def test_a_newer_refusal_supersedes_an_older_queue_to_the_same_room(tmp_path):
+    """One live clip per room, whichever row made it a candidate: the newest ASK
+    is the message the house is owed."""
+    b = _Bench(tmp_path)
+    older, newer = "ann-19-" + "a" * 32, "ann-19-" + "b" * 32
+    b.queue(sound=older, ago=90)
+    _refuse(b, "skipped-busy", sound=newer, ago=45)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [newer], b.originated
+    skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
+    assert [(r["sound"], r["reason"]) for r in skipped] == [(older, "ext-superseded")]
+
+
+def test_a_newer_queue_supersedes_an_older_refusal(tmp_path):
+    b = _Bench(tmp_path)
+    older, newer = "ann-19-" + "a" * 32, "ann-19-" + "b" * 32
+    _refuse(b, "unreachable", sound=older, ago=90)
+    b.queue(sound=newer, ago=45)
+    b.ticks(3)
+    assert [s.rsplit("/", 1)[-1] for _e, s in b.originated] == [newer], b.originated
+    skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
+    assert [(r["sound"], r["reason"]) for r in skipped] == [(older, "ext-superseded")]
+
+
+def test_a_refusal_the_handset_never_recovers_from_is_retired_once(tmp_path):
+    """ext 20 never registers, by design: a refusal to it defers, then ages out
+    with ONE retirement row, and never originates."""
+    b = _Bench(tmp_path, state="Unavailable", exts=("20",))
+    snd = "ann-20-" + HEX
+    _refuse(b, "unreachable", sound=snd, ext="20", ago=30)
+    cap = b.delivery.ANNOUNCE_RETRY_MAX_AGE
+    b.ticks(int(cap // POLL) + 4)
+    assert b.originated == []
+    skipped = [r for r in b.rows() if r["outcome"] == "announce-retry-skipped"]
+    assert [(r["sound"], r["reason"]) for r in skipped] == [(snd, "too-old")], skipped
+
+
+def _reconcile(b, at=NOW):
+    b.sched._reconcile_announcements(at, b.delivery.announce_records(
+        at, not_before=b.sched._STARTED))
+
+
+def test_a_refusal_that_was_never_replayed_gets_no_verdict(tmp_path):
+    """The pre-send guard never handed the clip to Asterisk, so there is no call
+    to reach a verdict about: the retry's own rows are its whole record."""
+    b = _Bench(tmp_path)
+    _refuse(b, "unreachable", ago=400)
+    _reconcile(b)
+    assert "announce-undelivered" not in b.outcomes(), b.outcomes()
+    assert "announce-unsettled" not in b.outcomes(), b.outcomes()
+
+
+def test_a_replayed_refusal_that_never_played_is_judged(tmp_path):
+    """The REPLAY did hand it to Asterisk. From the first attempt on, a refused
+    clip is judged exactly like a queued one — horizon from the newest attempt —
+    so a replay that rang out ends in a verdict carrying its retries, not in
+    silence."""
+    b = _Bench(tmp_path)
+    _refuse(b, "skipped-busy", ago=400)
+    b.attempted(ago=60)
+    _reconcile(b)
+    assert "announce-undelivered" not in b.outcomes(), \
+        "judged a replay that could still be ringing"
+    b.attempted(ago=300, attempt=2)
+    _reconcile(b, at=NOW + 300)
+    verdicts = [r for r in b.rows() if r["outcome"] == "announce-undelivered"]
+    assert len(verdicts) == 1, b.outcomes()
+    assert verdicts[0]["sound"] == SOUND and verdicts[0].get("retries") == 2, verdicts
+    _reconcile(b, at=NOW + 320)
+    assert b.outcomes().count("announce-undelivered") == 1, "re-filed on the next tick"
+
+
+def test_a_replayed_refusal_that_played_is_not_judged(tmp_path):
+    b = _Bench(tmp_path)
+    _refuse(b, "unreachable", ago=400)
+    b.attempted(ago=300)
+    b.delivered(ago=280)
+    _reconcile(b)
+    assert "announce-undelivered" not in b.outcomes(), b.outcomes()
