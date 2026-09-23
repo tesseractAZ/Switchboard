@@ -26,6 +26,7 @@ visually consistent.
 from __future__ import annotations
 
 import argparse
+import ast
 import html as H
 import importlib.machinery
 import json
@@ -114,10 +115,16 @@ def shoot(chrome: str, url: str, out: Path, width: int, height: int) -> None:
 # --------------------------------------------------------------------------- #
 def build_dashboard_html(repo_root: Path) -> str:
     app = (repo_root / "switchboard/rootfs/usr/share/switchboard/webui/app.py").read_text()
-    m = re.search(r'INDEX_HTML = """(.*?)^"""', app, re.S | re.M)
+    m = re.search(r'^INDEX_HTML = ("""(?:.*?)^""")', app, re.S | re.M)
     if not m:
         sys.exit("error: could not extract INDEX_HTML from webui/app.py")
-    html = m.group(1)
+    # EVALUATE the literal rather than copying its source text. INDEX_HTML is an
+    # ordinary (non-raw) Python string, so Python processes its escapes before the
+    # browser ever sees the page: the source's `\\d` is served as `\d`. Copying
+    # the text verbatim served `\\d` instead — a JS regex that matches nothing —
+    # so no room card ever showed its pending wake-up (or the Cancel beside it) in
+    # a documentation screenshot, and the real page and the pictured one differed.
+    html = ast.literal_eval(m.group(1))
 
     status = {"ami_ok": True, "rooms": ROOMS, "calls": CALLS, "wakeups": WAKEUPS,
               "trunk": TRUNK, "stt": "up"}

@@ -1623,7 +1623,7 @@ INDEX_HTML = """<!doctype html>
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mwibadge { font-size: .9rem; line-height: 1; margin-left: .35rem; }
   .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
-  .wakerow { display: flex; gap: .35rem; margin-top: .45rem; align-items: center; }
+  .wakerow { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; align-items: center; }
   .wakerow .wklab { font-size: .9rem; flex: 0 0 auto; opacity: .8; }
   /* ★ The time field must not be shrunk below the width of a time.
      It had `flex: 1 1 auto; min-width: 0` while the Set button beside it
@@ -1640,6 +1640,13 @@ INDEX_HTML = """<!doctype html>
              border: 1px solid var(--bd, #d4d7dd);
              background: var(--card, #fff); color: inherit; }
   .wakerow .ringbtn { flex: 1 1 auto; width: auto; margin-top: 0; min-width: 3rem; }
+  /* ★ Cancel takes a line of its own. The clock, a time field that must not
+     shrink (above) and Set already fill a card at the grid's narrowest; a
+     fourth control on that line ran past the card's edge and read "Ca". The
+     row wraps as a fallback at any width, and Cancel always starts the next
+     line at full width, so a card with a pending wake-up looks the same at
+     every size instead of depending on which browser draws the wider field. */
+  .wakerow .wkcancel { flex: 1 0 100%; }
   /* Wake-up list: one clean "Room — time · when [Cancel]" row per pending call. */
   .wakelist { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
   .wakeitem { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;

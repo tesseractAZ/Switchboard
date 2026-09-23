@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.106.1
+
+**The Cancel button on a room card no longer runs off the card.**
+
+A room card with a pending wake-up shows the clock, the time field, Set and
+Cancel on one line. The time field is deliberately never squeezed, because a
+native time field that is too narrow clips its AM/PM instead of scrolling. So on
+a narrow card, or in a browser that draws a wider time field, the line was
+wider than the card and Cancel was cut off at the edge. Cancel now always has a
+full-width line of its own under the time and Set. At the dashboard's narrowest
+card width, where even Set did not fit, Set now moves under the time field
+instead of overflowing.
+
+The dashboard pictures in the documentation now show a room card with its
+pending wake-up and Cancel button. The script that renders them was copying the
+page's source text instead of the page Python actually serves, so a time check
+in the page never matched and no card ever showed a wake-up.
+
 ## 0.106.0
 
 **The same announcement no longer plays twice in a row, and the dashboard no

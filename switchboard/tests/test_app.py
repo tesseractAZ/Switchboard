@@ -1238,6 +1238,32 @@ def test_the_wakeup_time_field_cannot_be_squeezed_below_a_time() -> None:
         "squeezes the field again")
 
 
+def test_the_card_cancel_button_gets_a_line_of_its_own() -> None:
+    """★ Reported from live use: the room card's Cancel read "Ca", cut off at the
+    card's edge.
+
+    The clock, a time field that must not shrink (the test above) and Set
+    already fill a card at the grid's narrowest; a fourth control on that line
+    ran past the edge. Rendered at the grid's 215 px minimum, even Set spilled
+    over, by a pixel in Chrome and by more in Safari's wider field. The row must
+    wrap, and Cancel must always start its own line at full width, which has to
+    come AFTER the generic `.wakerow .ringbtn` rule: the two selectors are equally
+    specific, so source order decides, and the generic rule gives every button
+    `flex: 1 1 auto`."""
+    css = app.INDEX_HTML
+    row = css[css.index(".wakerow {"):]
+    row = row[:row.index("}") + 1]
+    assert "flex-wrap: wrap" in row, "the wake-up row cannot wrap, so it overflows the card"
+    generic = css.index(".wakerow .ringbtn {")
+    cancel = css.index(".wakerow .wkcancel {")
+    rule = css[cancel:css.index("}", cancel) + 1]
+    assert "100%" in rule and "flex:" in rule, (
+        "Cancel does not take a full line of its own, so it shares the row it "
+        "overflows")
+    assert cancel > generic, (
+        "the Cancel rule comes before `.wakerow .ringbtn` and is overridden by it")
+
+
 def test_a_dashboard_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path) -> None:
     """★ 2026-09-14, through the real handlers.
 
