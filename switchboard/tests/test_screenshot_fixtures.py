@@ -49,3 +49,30 @@ def test_the_console_screenshot_shows_a_polled_board_not_a_connecting_banner():
     assert "Connecting to the PBX" not in text, "console.png would show the never-polled banner"
     assert "unreachable" not in text.lower(), "console.png would show the PBX as unreachable"
     assert "Registered" in text, "the fixture's trunk state did not render"
+
+
+def test_the_dashboard_screenshot_serves_the_page_python_serves() -> None:
+    """★ INDEX_HTML is an ordinary (non-raw) Python string, so Python processes
+    its escapes before a browser sees the page: the source's `\\d` is served as
+    `\d`. The builder copied the SOURCE TEXT, so the pictured page carried
+    `\\d` — a JS regex matching nothing — and no room card in a published
+    screenshot ever showed its pending wake-up, or the Cancel beside it. The very
+    layout bug that button later had could not have shown up in a screenshot."""
+    saved_path, saved_mods = list(sys.path), dict(sys.modules)
+    saved_tz = os.environ.get("TZ")
+    try:
+        bs = SourceFileLoader("build_screenshots_dash",
+                              str(ROOT / "scripts/build-screenshots.py")).load_module()
+        html = bs.build_dashboard_html(ROOT)
+    finally:
+        sys.path[:] = saved_path
+        for k in set(sys.modules) - set(saved_mods):
+            del sys.modules[k]
+        sys.modules.update(saved_mods)
+        if saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved_tz
+        time.tzset()
+    assert r"/^\d{1,2}:\d{2}$/" in html, "the wake-up time regex is not served as Python serves it"
+    assert "\\\\d" not in html, "the page still carries source-text escapes"
