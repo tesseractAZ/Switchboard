@@ -695,6 +695,16 @@ the time as a 24-hour ("military") H-M-S readout, then a tone — looping until 
 hang up. The time is spoken in your configured timezone (`timezone`, or the Home
 Assistant timezone if blank).
 
+The tone sounds **on** the second just announced. Like a real speaking clock,
+it names a moment a few seconds ahead: the first whole second that the readout
+can finish before, worked out from the lengths of the recordings it is about to
+play. The tone waits for that second, and always follows "…seconds" by the same
+short beat. Any extra wait comes before the numbers instead. Each cycle writes
+one line to the add-on log with the second it named and how far from it the tone
+started, e.g. `[clock] 16:15:52 tone +2 ms`. Until v0.106.2 the tone followed a
+readout of the time the readout **began**, so it sounded 4.5–8.6 seconds late,
+by a different amount at each time of day.
+
 ---
 
 ## 6. Paging & announcements

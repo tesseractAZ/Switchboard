@@ -1477,8 +1477,13 @@ def render_extensions(opts: dict) -> str:
                 " same = n,Set(CHANNEL(language)=en)",
                 " same = n,Wait(1)",
                 " same = n(loop),Playback(switchboard/sw-at-sound-tone)",
+                # The AGI sounds the tone itself, ON the second it announced
+                # (v0.106.2) and sets SW_CLOCK_TONE when it has. The Playback
+                # below is only the fallback for an AGI that could not run, so
+                # the caller still hears a tone rather than silence.
+                " same = n,Set(SW_CLOCK_TONE=)",
                 " same = n,AGI(switchboard-clock.agi)",
-                " same = n,Playback(switchboard/sw-tone)",
+                " same = n,ExecIf($[\"${SW_CLOCK_TONE}\" != \"1\"]?Playback(switchboard/sw-tone))",
                 " same = n,Wait(2)",
                 " same = n,Goto(loop)",
                 " same = n,Hangup()",

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.106.2
+
+**The talking clock's tone now sounds on the second it announces.**
+
+The clock read the time, spoke it, and only then sounded the tone. So the tone
+marked the moment the readout **began**, as late as the readout was long: 4.5
+to 8.6 seconds with the shipped recordings, and a different amount at every time
+of day ("fifty-seven" takes longer to say than "ten").
+
+It now works like a real speaking clock. It names a moment a few seconds ahead,
+the first whole second that its own readout can finish before, worked out from
+the lengths of the recordings it is about to play. It sounds the tone exactly on
+that second. The tone always follows "…seconds" by the same short beat; any
+extra wait, which is longest around the top of the hour, comes before the
+numbers instead.
+
+Each cycle writes one line to the add-on log with the second it named and how
+far from it the tone started, e.g. `[clock] 16:15:52 tone +2 ms`. If the clock
+code ever fails to run, the dialplan still plays the tone, so a caller never
+hears silence where the tone should be.
+
 ## 0.106.1
 
 **The Cancel button on a room card no longer runs off the card.**

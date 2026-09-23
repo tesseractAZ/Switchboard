@@ -3,9 +3,10 @@
 ("military") H:M:S readout.
 
 Invoked once per cycle by the [clock] dialplan (dial 41). The dialplan plays the
-"at the sound of the tone, the time will be" preamble before this AGI and the
-tone after it, then loops back until the caller hangs up — so this AGI only has
-to speak the three time fields and get out of the way.
+"at the sound of the tone, the time will be" preamble before this AGI and loops
+back until the caller hangs up. This AGI names a moment a little in the future
+(clock_speak.plan), speaks it, waits for it, and sounds the tone ON it — the tone
+used to follow the readout, so it came as late as the readout was long.
 
 stdlib only, runs as the ``asterisk`` user, talks AGI over stdin/stdout. The
 field-to-speech logic lives in the pure, unit-tested ``clock_speak`` module; this
@@ -13,6 +14,7 @@ file is just the thin AGI I/O around it.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -40,20 +42,69 @@ def agi(command: str) -> str:
     return sys.stdin.readline().strip()
 
 
+# Where Asterisk looks for a prompt, in the order it looks, and the formats this
+# image ships (the core sounds are the µ-law set; the switchboard prompts are
+# rendered to µ-law too). Bytes per second, so a file's length is its size.
+SOUND_DIRS = ("/var/lib/asterisk/sounds/en", "/var/lib/asterisk/sounds")
+FORMATS = ((".ulaw", 8000), (".alaw", 8000), (".sln", 16000), (".gsm", 1650))
+# A prompt that cannot be found is assumed LONG: overestimating only lengthens the
+# pause before the tone, underestimating would make the tone late again.
+UNKNOWN_PROMPT_S = 1.5
+TONE = "switchboard/sw-tone"
+
+
+def duration_of(stem: str) -> float:
+    for base in SOUND_DIRS:
+        for ext, bytes_per_s in FORMATS:
+            try:
+                return os.path.getsize(f"{base}/{stem}{ext}") / bytes_per_s
+            except OSError:
+                continue
+    return UNKNOWN_PROMPT_S
+
+
+def play(action) -> bool:
+    """One readout command; False once the caller has gone."""
+    if action[0] == "stream":
+        resp = agi(f'STREAM FILE {action[1]} ""')
+    else:  # ("num", n)
+        resp = agi(f'SAY NUMBER {action[1]} ""')
+    # Caller hung up mid-readout: Asterisk closes stdin (empty response) or a
+    # command returns result=-1. Stop rather than spin on a dead channel.
+    return bool(resp) and "result=-1" not in resp
+
+
 def main() -> None:
     read_env()
     if clock_speak is None:
         return
-    now = time.localtime()  # system-local tz, same source SayUnixTime uses
-    for action in clock_speak.time_actions(now.tm_hour, now.tm_min, now.tm_sec):
-        if action[0] == "stream":
-            resp = agi(f'STREAM FILE {action[1]} ""')
-        else:  # ("num", n)
-            resp = agi(f'SAY NUMBER {action[1]} ""')
-        # Caller hung up mid-readout: Asterisk closes stdin (empty response) or a
-        # command returns result=-1. Stop rather than spin on a dead channel.
-        if not resp or "result=-1" in resp:
+    # The same wall clock the readout is taken from (system-local tz, as
+    # SayUnixTime uses), read once, with its fraction of a second.
+    now = time.time()
+    target, actions = clock_speak.plan(now, duration_of)
+    # The slack goes BEFORE the numbers, so the tone always follows "…seconds"
+    # by the same short beat (clock_speak.lead_pause_s).
+    time.sleep(min(clock_speak.lead_pause_s(now, target, actions, duration_of), 5.0))
+    for action in actions:
+        if not play(action):
             return
+    # Tell the dialplan the tone is ours BEFORE waiting, so this round trip
+    # cannot delay it.
+    resp = agi("SET VARIABLE SW_CLOCK_TONE 1")
+    if not resp or "result=-1" in resp:
+        return
+    wait = target - time.time()
+    if wait > 0:
+        time.sleep(min(wait, 5.0))
+    late_ms = int(round((time.time() - target) * 1000))
+    if not play(("stream", TONE)):
+        return
+    # One line per cycle, into the add-on log: the second the clock named and how
+    # far from it the tone started. It is the only measurement of this that
+    # exists anywhere — the call ledger records a clock call, not its accuracy.
+    sys.stderr.write(f"[clock] {time.strftime('%H:%M:%S', time.localtime(target))} "
+                     f"tone {late_ms:+d} ms"
+                     f"{' — the readout overran its plan' if late_ms > 250 else ''}\n")
 
 
 if __name__ == "__main__":
