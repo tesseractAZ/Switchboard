@@ -746,6 +746,16 @@ def test_talking_clock() -> None:
           "Playback(switchboard/sw-at-sound-tone)" in clk
           and "AGI(switchboard-clock.agi)" in clk
           and "Playback(switchboard/sw-tone)" in clk)
+    # v0.106.2 — the AGI sounds the tone ON the second it announced. A second,
+    # unconditional Playback after it would sound the tone twice, the first time
+    # correctly and the second up to a few seconds late.
+    lines = clk.splitlines()
+    tone = [l for l in lines if "Playback(switchboard/sw-tone)" in l]
+    check("clock: the dialplan tone is only the fallback for an AGI that did not sound it",
+          len(tone) == 1 and 'ExecIf($["${SW_CLOCK_TONE}" != "1"]?' in tone[0])
+    agi_at = next(i for i, l in enumerate(lines) if "AGI(switchboard-clock.agi)" in l)
+    check("clock: the flag is cleared every cycle, before the AGI",
+          lines[agi_at - 1].strip() == "same = n,Set(SW_CLOCK_TONE=)")
     check("clock: loops until hangup (labelled loop + Goto back to it)",
           "n(loop),Playback(switchboard/sw-at-sound-tone)" in clk
           and "Goto(loop)" in clk)
