@@ -33,6 +33,14 @@ export SWITCHBOARD_OPTIONS="/run/switchboard/options-effective.json"
 # itself; without it here the web UI would read the built-in default and hold
 # back repeats no retry would ever send (an option is inert until it is bridged).
 ARA="$(switchboard-opt announce_retry_attempts)"
+# The retry runs inside the wake-up scheduler, and that service idles when
+# wake-up calls are off — so then no replay is EVER coming, whatever the attempt
+# count says, and holding a repeat back for one would drop it. Same gate, same
+# form as the scheduler's own (an explicit "false"; enable gates stay on bashio),
+# so the two can never disagree about whether the retry is running.
+if [ "$(bashio::config 'wakeup_enabled')" = "false" ]; then
+    ARA=0
+fi
 export ANNOUNCE_RETRY_MAX_ATTEMPTS="${ARA:-2}"
 
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8099 --no-access-log \

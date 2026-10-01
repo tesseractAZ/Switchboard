@@ -55,9 +55,11 @@ no media at all.
 carried no RTP might have been answered and played silence, or might simply have
 rung out — and only the first is a fault. Filing both together made the bucket
 too noisy to alert on, so the one case worth paging on never did. Rows written
-from 0.96.0 use `no-media` only for an ANSWERED leg with no audio (which now
-notifies), and `not-answered`, `abandoned` and `unreachable` for the rest. The
-two rows counted above predate that split.
+from 0.96.0 use `no-media` for an ANSWERED leg with no audio, which now
+notifies. An unanswered leg whose hangup cause matches none of the other three
+verdicts also lands in `no-media`, without notifying. `not-answered`,
+`abandoned` and `unreachable` cover the rest. The two rows counted above predate
+that split.
 
 This distribution is not evidence that the scoring works. For most of this window
 the round-trip detector could not fire at all (§5), so a run of `excellent` is
@@ -180,7 +182,7 @@ restart carrying the flag.
 The one fleet outage this system is known to have had — all eight ports for 119
 seconds on 2026-09-01 at 01:00 MST — falls **inside** this file's window, at
 08:00 UTC. It is absent because it fell entirely between two five-minute samples:
-the cycles at 07:03 and 08:03 UTC both read `reachable: 9, total: 10`. That is
+the cycles at 07:58:47 and 08:03:47 UTC both read `reachable: 9, total: 10`. That is
 the defect 0.79.0 was written for, preserved here as the clearest evidence that a
 point sampler cannot see it.
 
@@ -230,6 +232,17 @@ wake-up rows are unprompted.
 `unreachable`) — 10 legs have been recorded since that release and none was a
 no-media leg; and the `announce-menu` QoS tag split out in 0.99.0, which needs
 somebody to dial the announce code.
+
+**Shipped after these counts were cut**, accruing from the release named and not
+counted here: the wake-up `set`, `cancelled` and `snoozed` rows (0.101.0);
+`announce-originate-failed`, which replaces the announce path's
+`originate-refused` / `originate-error` rows, and `announce-guard-unjudged`
+(0.104.0); `announce-retry-attempted` and `announce-retry-skipped` (0.105.0); and
+`duplicate-pending` (0.106.0), when `duplicate-suppressed` (written since 0.62.0)
+also began to be decided from the ledger. From 0.105.2 a pre-send
+guard refusal (`unreachable`, `skipped-busy`) carries its clip and is replayed by
+the automatic retry under the same limits, rather than ending that
+announcement's history.
 
 ---
 
@@ -287,11 +300,12 @@ without a configuration change.
 | | Why | Cost |
 | --- | --- | ---: |
 | u-law → slin | `RECORD` for speech recognition needs raw samples | 9,000 µs/s |
-| slin → u-law | every prompt playback, until 0.82.0 | 9,000 µs/s |
+| slin → u-law | every playback of a shipped prompt until 0.82.0; every playback of synthesized speech (handset announcements, assistant and automation replies) still | 9,000 µs/s |
 
-The second was avoidable and is now gone. All 28 shipped prompts were 8 kHz
-16-bit PCM with no u-law copy, so Asterisk converted each one in real time on
-every playback — including all eight legs of a house-wide page, simultaneously.
+For the 28 shipped prompts the second conversion was avoidable and is now gone.
+All 28 were 8 kHz 16-bit PCM with no u-law copy, so Asterisk converted each one
+in real time on every playback — including all eight legs of a house-wide page,
+simultaneously.
 0.82.0 ships a `.ulaw` sibling for each; Asterisk selects the file matching the
 channel, so the conversion simply stops happening. Observed directly on
 2026-09-06, in the log line for an emergency notice — `Playing
@@ -299,6 +313,10 @@ channel, so the conversion simply stops happening. Observed directly on
 the PCM master — on a wired FXS port (`PJSIP/12`) and again on the WiFi cordless
 (`PJSIP/19`), which are the two handset families on this system and reach
 Asterisk by different paths.
+
+For synthesized speech it remains. The speech engine (`switchboard-tts`) and the
+handset-announcement renderer write 8 kHz 16-bit PCM `.wav` with no u-law copy,
+so Asterisk converts each clip as it plays.
 
 **The ledger under-reports this, and that is worth knowing before trusting it.**
 `read_format` is sampled once, in the hangup extension. 23 of 246 legacy legs
@@ -323,15 +341,17 @@ quiet because the system is healthy or because they cannot fire.
 | Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
 | Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
-| Poor-call alert | 11 legs | Working. |
-| Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0. |
+| Poor-call alert | 11 legs | Fired, but not on every leg it should have. Until 0.104.0 a wake-up, page or announcement leg whose clip played could cross the MES, loss or round-trip threshold and raise nothing; a later pass over 50 days of the ledger found 5 such legs. From 0.104.0 those legs alert like any other. A truncated page or announcement still raises nothing; a truncated wake-up raises its own `undelivered` alert. |
+| Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0: it now alerts on `rtt_mean_ms` above 250 ms or `rtt_max_ms` above 500 ms, and applies the 400 ms test to `rtt_ms` only when neither is recorded. |
 | Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
 | Wake-up undelivered | 5 legs | **Fired, and was wrong all five times.** Every notifying row in the QoS ledger falls on 2026-09-08/09 and each was a delivered wake-up scored `undelivered` because the scorer's terminal-stage list had drifted from the dialplan. Fixed in 0.97.0; **zero notifying rows since**, against 2 wake-ups delivered on 2026-09-11 that both scored `excellent`. A detector's first firing being a false positive is the argument for this table. |
 | Announce undelivered | 3 | New in 0.98.0. 2 of 3 were false positives from defects fixed the same night; the third was genuine (a restart). See §3. |
 | Announce settling window | 1 | New in 0.100.2. **Verified by induced failure** rather than by waiting: an announcement queued 10 s after a deliberate restart, dialog refused, recorded `announce-unsettled`. The only detector here whose first firing was arranged on purpose. |
 | No-media split (4 verdicts) | 0 | Shipped 0.96.0. 10 legs recorded since and none was a no-media leg, so all four verdicts are unexercised — accruing, not proven. |
+| Wake-up snoozed from the ringing phone | — | Not counted here. From 0.101.0 a set or cancel dialled on the ringing room's own phone records `snoozed` in place of a re-ring and a critical alert; before it, a snooze was escalated as an unanswered wake-up. A change from the dashboard or console does not count. Accruing from 0.101.0. |
+| Cordless degraded (handset's own score) | — | Not counted here. From 0.102.0 a low handset score marks the cordless degraded only when the PBX's record of the same call corroborates it (transmit loss of at least 1 %, or transmit MES below 78); otherwise the sensor stays `ok` and flags the score `last_mos_uncorroborated`. Every low score is captured once to the root-only `/data/state/cordless-mos.jsonl` (512 KB cap). Accruing from 0.102.0. |
 
-**Five of eleven have never fired.** One is genuinely quiet, two have not been
+**Of the eleven detectors counted at 0.100.3, five have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
 incapable of firing and is now fixed. Two more were verified by hand across
 three calls on 2026-09-06 — the emergency notice and the unanswered-leg gate —
@@ -354,7 +374,7 @@ detector that cannot fire and a healthy system produce identical silence.
 
 | | | Source |
 | --- | --- | --- |
-| Tests | **643**, ~7 s | `pytest`, below |
+| Tests | **960** at 0.106.3, ~18 s | `pytest`, below |
 | Mutants applied, 0.77.0–0.80.0 | 64 | release commits |
 | Killed | 64 | release commits |
 | Survived their first run | 10 | release commits |

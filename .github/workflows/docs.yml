@@ -47,6 +47,24 @@ jobs:
           command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
           pandoc --version | head -1
 
+      # The manual embeds switchboard/docs/img/*.png. On a release this job builds
+      # the TAG, while screenshots-refresh re-renders those images and commits
+      # them to main only afterwards — so the committed images in the tag are the
+      # PREVIOUS release's, and every release that changed the UI shipped a manual
+      # picturing the old one. Render them here, from this checkout's own UI
+      # source, before the manual is built (the commit back to main is unchanged).
+      - name: Ensure a Chrome/Chromium binary
+        run: |
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+          (google-chrome --version || chromium-browser --version) 2>/dev/null | head -1
+
+      - name: Render the screenshots this manual embeds
+        run: |
+          python3 scripts/build-screenshots.py
+          test -s switchboard/docs/img/dashboard.png
+          test -s switchboard/docs/img/console.png
+
       - name: Build .docx
         run: |
           python3 scripts/build-docs-docx.py \

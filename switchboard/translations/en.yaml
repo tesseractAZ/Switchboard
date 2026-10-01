@@ -33,13 +33,13 @@ configuration:
     description: Send a Home Assistant notification when a call's audio quality is poor (low MOS, high packet loss, or one-way audio). The measurements are always recorded to sensors; this only controls the pop-up alert.
   link_health_enabled:
     name: Link-Health Monitor
-    description: Continuously poll every phone's registration + round-trip latency (RTT) between calls and publish it to sensors, so a degrading link (especially the Wi-Fi cordless) shows on a graph before a call drops.
+    description: Continuously poll every phone's registration and round-trip latency (RTT) between calls and publish them to sensors, so a degrading link (especially the Wi-Fi cordless) shows on a graph before a call drops. This poller also runs the outside-line watchdog (trunk sensor, automatic re-register and its alert), feeds gateway health, and supplies the cordless's current IP for auto-follow. Turning it off silences all of those, with no alert. Only the scrub of the readable log copy keeps running.
   link_health_interval:
     name: Link-Health Poll Interval (seconds)
     description: How often the link-health monitor checks every phone. 300 s (5 min) is a good balance; lower for faster detection at the cost of a little more traffic. Range 30–86400.
   link_health_alerts:
     name: Fleet-Outage Alerts
-    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. Independent of the per-call alerts above.
+    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. This includes a mass drop that recovered between polls. It also controls the outside line's 'down' and 'recovered' notifications. Independent of the per-call alerts above.
   device_health_enabled:
     name: Device-Health Monitor
     description: Watch the two "smart" devices Asterisk can't see inside — the WP826 cordless (battery, Wi-Fi signal, per-call MOS) and the GXW gateway's port health — and alert when a single critical device degrades. Needs Cordless Admin Password below for the deep checks.
@@ -63,7 +63,7 @@ configuration:
     description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the admin password, which stops a device on your LAN impersonating the cordless to capture it. Get the value with: WP826_HOST=<the cordless's IP> node tools/wp826.mjs fingerprint (without WP826_HOST the tool fingerprints its built-in default address, not your handset). Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
   gateway_ports:
     name: Gateway Port Extensions
-    description: Comma-separated extensions served by the GXW FXS gateway (the 8 wired ports), used to derive gateway health. Default 11–18 matches the standard wiring; edit if you re-mapped ports.
+    description: Comma-separated extensions of the rooms wired to the GXW gateway's FXS ports, used to derive gateway health. The default 11–18 is only an example; list your own wired room extensions.
   cordless_battery_crit_pct:
     name: Cordless Battery — Critical %
     description: Battery level (while discharging) at which the cordless is flagged CRITICAL — the alarm/announce endpoint is about to die. Default 15%. Range 1–100.
@@ -88,32 +88,39 @@ configuration:
     name: Announce Retry Attempts
     description: >-
       How many times an announcement whose audio never played is sent again,
-      once the phone reports itself registered and idle (never later than 150
-      seconds after the original, and never if the announcement did play). 0
-      turns retries off entirely and leaves only the delivery record.
+      once the phone reports itself registered and idle. Only the newest
+      announcement to a room is replayed, a retry never starts later than 150
+      seconds after the original, and an announcement that did play is never
+      replayed. While a copy is still on its way or waiting for that retry, an
+      identical repeat is answered as a duplicate rather than sent. At 0 nothing
+      will replay it, so such a repeat is sent; a repeat of audio the room has
+      just heard is still answered as a duplicate. 0 turns retries off entirely
+      and leaves only the delivery record. The retry runs in the wake-up
+      scheduler, so it does not run while Wake-Up Calls is turned off, and then
+      repeats are not held back either.
   announce_token:
     name: Announce API Token
-    description: Optional shared secret required on the add-on's /api/announce HTTP endpoint (used by Home Assistant / another add-on to speak alerts on the cordless). Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.
+    description: Optional shared secret for the add-on's POST /api/announce/<ext> endpoint, which Home Assistant or another add-on uses to speak an alert onto any room handset, including the cordless. LAN callers send it in the X-Announce-Token header. Leave blank to DISABLE LAN announcements entirely (the endpoint stays Supervisor-only); set a token to allow LAN callers that present it. Masked on entry.
 
   # ── Operator console (telnet + web terminal) ─────────────────────────
   console_enabled:
     name: Operator Console (telnet)
-    description: A text operator console over telnet that can ring, connect and hang up phones. UNAUTHENTICATED — keep it on a trusted LAN, or bind it to 127.0.0.1 (below) to restrict it, or turn it off.
+    description: "The keyboard-driven operator console (ring, connect, hang up, transfer, page). It listens on the Home Assistant host only by default (bind 127.0.0.1). The console in the Switchboard sidebar and the web terminal both connect to it, so turning this off also leaves the sidebar console showing 'unavailable' and idles the web terminal. The telnet listener has no login: if its bind is moved onto the LAN, keep that network trusted."
   console_port:
     name: Operator Console Port
-    description: TCP port for the telnet operator console. Default 2300.
+    description: TCP port for the telnet operator console. Default 2300. The web terminal follows this port, but the console in the Switchboard sidebar always connects to 2300, so changing it leaves the sidebar console showing 'unavailable'.
   console_bind:
     name: Operator Console Bind Address
-    description: Interface the console listens on. '0.0.0.0' = all interfaces (LAN-reachable); set '127.0.0.1' to restrict it to the host only.
+    description: Interface the console listens on. Default '127.0.0.1' (the Home Assistant host only), which is all the sidebar console needs. '0.0.0.0' puts the console on every interface, so it is reachable from the LAN with no login. A single LAN address excludes 127.0.0.1 and leaves both the sidebar console and the web terminal unavailable.
   console_web_enabled:
     name: Console Web Terminal
-    description: A browser-based version of the operator console (same ring/connect/hang-up powers). Open on the LAN unless Console Web Terminal Users are configured (then it requires a sign-in) — turn off if you don't need the web terminal.
+    description: A standalone browser version of the operator console on its own port, with the same powers as the console. It is separate from the console in the Switchboard sidebar, which turning this off does not affect. It listens on the Home Assistant host only by default. If its bind is moved onto the LAN, it has no login unless Console Web Terminal Users are configured.
   console_web_port:
     name: Console Web Terminal Port
     description: TCP port for the web terminal. Default 8100.
   console_web_bind:
     name: Console Web Terminal Bind Address
-    description: Interface the web terminal listens on. Blank = follow the telnet console's bind address (so restricting that to 127.0.0.1 also restricts the web terminal); set a value only to override it.
+    description: Interface the web terminal listens on. Defaults to 127.0.0.1 (this machine only); blank follows the telnet console's bind address. Set 0.0.0.0 to reach it from the LAN, and configure Console Web Terminal Users first, or anyone on the LAN gets a terminal with no login.
   console_users:
     name: Console Web Terminal Users
     description: "Sign-in accounts for the web terminal. Each entry has 'username' and 'password' (shown masked). Leave the list EMPTY to keep the web terminal open (no login) — its historical behavior. When any user is configured, both the page and the terminal connection require a sign-in; too many wrong attempts from one address are throttled for a few minutes."
@@ -130,7 +137,7 @@ configuration:
     description: Dial this to hear the time. 2–6 digits; must not clash with a room or another feature code. Default 41.
   wakeup_enabled:
     name: Wake-Up Calls
-    description: Enable scheduled wake-up calls — set one at the extension below (or via the operator) and the phone rings at the chosen time.
+    description: Enable scheduled wake-up calls — set one at the extension below (or via the operator) and the phone rings at the chosen time. The same service files the announcement delivery verdicts and runs the announcement retry, so turning this off stops those too.
   wakeup_ext:
     name: Wake-Up Extension
     description: Dial this to set/cancel a wake-up call. 2–6 digits. Default 42.
@@ -237,4 +244,4 @@ configuration:
     description: The phones/handsets on the system. Each room has an 'ext' (2–6 digit extension), a 'name' (shown in the directory / operator), and a 'secret' (its SIP password — change from the defaults). Add one entry per handset.
   trunk:
     name: Outside Line (SIP Trunk)
-    description: Connects the PBX to a SIP provider for real inbound/outbound phone calls. Sub-fields — enabled; provider_host + port; username + secret (provider credentials); from_user / from_domain / outbound_caller_id (outbound identity); inbound_ext (which extension(s) an inbound outside call rings — a single extension or a comma-separated list, e.g. 19,20); dial_prefix (digit to reach an outside line, e.g. 9); direct_dial (turn ON to dial numbers with NO outside-line prefix — dial 1 + the 10-digit US/Canada number, like a cell phone; extensions and feature codes still ring internally; a leading 1 is required so feature codes and 2-digit extensions dial without delay; overrides dial_prefix); registns. Leave disabled for room-to-room only.
+    description: "Connects the PBX to a SIP provider for real inbound/outbound phone calls. Sub-fields — enabled; provider_host + port; username + secret (provider credentials); from_user / from_domain / outbound_caller_id (outbound identity); inbound_ext (which extension(s) an inbound outside call rings — a single extension or a comma-separated list, e.g. 19,20); dial_prefix (digit to reach an outside line, e.g. 9); direct_dial (turn ON to dial numbers with NO outside-line prefix: dial 1 + the 10-digit US/Canada number, like a cell phone. Extensions and feature codes still ring internally. The leading 1 is required so the operator, most feature codes, and extensions that cannot begin 1 + an area code dial without delay. Extensions beginning 12–19, and a feature code that begins a longer one (41 while 411 is in use), still wait for the gateway's digit timeout or a #. Overrides dial_prefix); registns (register with the provider; most trunks need this). Leave disabled for room-to-room only."

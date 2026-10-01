@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.106.3
+
+**With wake-up calls turned off, a repeated announcement is no longer held back
+for a replay that cannot happen.**
+
+The automatic announcement retry runs inside the wake-up scheduler, and that
+service idles when wake-up calls are off. The web UI did not know that. If an
+announcement never played, it still answered an identical repeat "duplicate,
+already on its way", waiting for a replay that would never come, for up to about
+three minutes. The web UI now reads the same switch the scheduler does, and with
+wake-up calls off it treats the retry as off.
+
+**The documentation was brought up to date with the code.** An audit of the
+README, the manual (DOCS.md), PERFORMANCE.md, SECURITY.md and the configuration
+help text found statements that had fallen behind recent releases, all now
+corrected. Among them:
+- The web UI port has three narrow LAN exceptions: speaker announcement clips,
+  the cordless phonebook, and the token-gated announce API. It does not refuse
+  every non-Supervisor connection.
+- The talking clock code `41` waits for the dialling timeout, because it is also
+  the start of directory assistance `411`.
+- Call-quality alerts now cover wake-up, page and announcement calls too.
+- The console bind defaults and what they affect.
+- The announcement responses, retry limits and duplicate rules.
+- Which services read and write the shared ledgers.
+- Test counts, and several dates and version numbers.
+
+**The release manual now shows the released interface.** The manual attached to
+each release used to be built before that release's screenshots were rendered,
+so it pictured the previous version's interface. The documentation build now
+renders the screenshots itself before building the manual.
+
 ## 0.106.2
 
 **The talking clock's tone now sounds on the second it announces.**
