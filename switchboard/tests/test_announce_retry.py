@@ -1289,6 +1289,7 @@ def test_the_off_switch_actually_reaches_the_scheduler():
     # ...and it must be exported BEFORE the exec that replaces the shell.
     assert (webui_run.index("export ANNOUNCE_RETRY_MAX_ATTEMPTS=")
             < webui_run.index("exec python3 -m uvicorn")), webui_run
+
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
     assert cfg["options"]["announce_retry_attempts"] == 2
     # 0 must be INSIDE the range, or the documented off switch cannot be set.
@@ -1323,6 +1324,30 @@ def test_one_ledger_read_per_tick_and_no_ami_when_nothing_is_wrong(tmp_path):
         b.delivery._read_records = real
     assert len(reads) == 1, f"{len(reads)} ledger reads in one tick"
     assert b.endpoint_reads == 0
+
+
+def test_with_wakeups_off_the_web_ui_expects_no_replay(tmp_path):
+    """★ The retry lives in the wake-up scheduler, which idles when wake-up calls
+    are off. The web UI must then read the attempt count as 0 — or it holds an
+    identical repeat back as "pending" for a replay that can never run, and the
+    repeat is lost. Runs the run script's own lines under bash with the two option
+    readers stubbed, for every combination that matters."""
+    import subprocess
+    run = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "webui" / "run").read_text()
+    start = run.index('ARA="$(switchboard-opt announce_retry_attempts)"')
+    end = run.index("\n", run.index("export ANNOUNCE_RETRY_MAX_ATTEMPTS=")) + 1
+    block = run[start:end]
+    sched = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "wakeup-scheduler" / "run").read_text()
+    # The two services must test the option the same way.
+    assert "if [ \"$(bashio::config 'wakeup_enabled')\" = \"false\" ]" in sched
+    assert "if [ \"$(bashio::config 'wakeup_enabled')\" = \"false\" ]" in block
+    for attempts, wake, want in (("2", "true", "2"), ("3", "", "3"), ("", "true", "2"),
+                                 ("2", "false", "0"), ("0", "true", "0")):
+        script = (f"switchboard-opt() {{ printf '%s' '{attempts}'; }}\n"
+                  f"bashio::config() {{ printf '%s' '{wake}'; }}\n"
+                  + block + 'printf "%s" "$ANNOUNCE_RETRY_MAX_ATTEMPTS"\n')
+        got = subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+        assert got == want, (attempts, wake, got)
 
 
 def test_the_shared_read_and_the_file_read_agree(tmp_path):

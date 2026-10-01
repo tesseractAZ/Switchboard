@@ -76,7 +76,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `rooms` | 2 placeholders | A list; one entry per handset. Each has `ext` (2–6 digits, unique), `name` (shown in the directory/operator/dashboard), and `secret` (the SIP password — **change it from the default**). The shipped defaults are `101 Kitchen` / `102 Living Room` with `change-me-…` secrets. |
+| `rooms` | 2 placeholders | A list; one entry per handset. Each has `ext` (2–6 digits, unique), `name` (shown in the directory/operator/dashboard), and `secret` (the SIP password — **change it from the default**). The shipped defaults are `101 Kitchen` / `102 Living Room` with `change-me-…` secrets. An entry is skipped at start, with a log line, when its `ext` is all zeros or repeats an earlier entry, or when its `secret` is empty, contains `;` or control characters, or has leading/trailing whitespace (Asterisk would truncate it). A skipped room does not register. |
 
 ### Voice operator & speech
 
@@ -90,7 +90,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `call_quality_alerts` | `true` | Notify when a **conversation's** audio is poor (low MOS, high loss, one-way). Every leg is measured and written to the ledger regardless; machine-initiated legs (wake-up delivery, paging, announcements) are recorded but do not alert — except an *undelivered* wake-up, which does (v0.78.0). See §11. |
+| `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, high loss, high round-trip time, one-way audio). Every leg is measured and written to the ledger. Legs the PBX originates to play something at a phone (wake-up delivery, paging, announcements) skip the one-way-audio check and never update the last-call sensor, but a poor connection under one of them alerts like any other leg (v0.104.0). A clip that was cut short stays quiet, except an *undelivered* wake-up, which alerts (v0.78.0). See §11. |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
 | `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
@@ -102,7 +102,7 @@ its default is fine.
 | `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
 | `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
 | `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
-| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage). |
+| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage), including a mass drop that healed between polls, and when the outside line stops or resumes registering. |
 | `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
 | `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 
@@ -110,10 +110,10 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `announce_enabled` | `true` | The announce feature on dial `46`. |
+| `announce_enabled` | `true` | The announce feature on dial `46` (phone → Home Assistant speakers). It does not affect `POST /api/announce` (Home Assistant → handset, §6), which `announce_token` governs. |
 | `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
 | `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. **Required for the feature to work:** while this list is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up. |
-| `announce_retry_attempts` | `2` | How many times an announcement whose audio never played is **sent again** (§6 below), once the phone reports itself registered and idle. Range 0–3; `0` turns retries off and leaves only the record. An announcement that did play is never replayed, whatever this is set to. |
+| `announce_retry_attempts` | `2` | How many times a handset announcement (`POST /api/announce`) whose audio never played is **sent again** (§6 below), once the phone reports itself registered and idle. Range 0–3; `0` turns retries off and leaves only the record. An announcement that did play is never replayed, whatever this is set to. |
 | `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
 
 ### Operator console
@@ -135,7 +135,7 @@ its default is fine.
 | `clock_enabled` / `clock_ext` | `true` / `41` | The talking clock and its dial code (2–6 digits). |
 | `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
 | `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
-| `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. |
+| `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry (§6), which run in the same scheduler, and identical repeats are then not held back. |
 | `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
 | `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
@@ -167,16 +167,16 @@ system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
 | Sub-field | Default | Notes |
 |-----------|---------|-------|
 | `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
-| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes (2–3 digits) still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps feature codes (41–46) and extension 20 dialing instantly on analog phones — without it, they look like the start of a phone number. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
+| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see §7.4. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
 | `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
 | `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
 | `from_user` | `""` | Outbound `From` user (defaults to `username`). |
-| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings. Blank rings the default group. **Fails open on a typo:** an extension that is not a configured room is ignored (logged at start) and the call rings the whole house instead — check the start-up log after changing it. |
+| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings: one extension or a comma-separated list. Blank rings every room. An entry that is not a configured room is dropped (logged at start) and the call rings the remaining entries. **Fails open:** when no entry is valid, the call rings the whole house. Check the start-up log after changing it. |
 | `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
 | `port` | `5060` | Provider SIP port. |
 | `provider_host` | `""` | Your SIP provider's host, e.g. `losangeles.voip.ms`. |
 | `registns` | `true` | Register to the provider (most trunks need this). |
-| `secret` | `""` | Trunk auth password. Must not contain `;` or leading/trailing whitespace (Asterisk would truncate it). |
+| `secret` | `""` | Trunk auth password. Must not contain `;`, control characters or leading/trailing whitespace (Asterisk would truncate it). Such a secret skips the whole trunk at start, with a log line. |
 | `username` | `""` | Trunk auth username / sub-account. |
 
 ---
@@ -221,7 +221,7 @@ from the **saved** options even when the overlay names them:
 
 - `console_enabled`, `console_web_enabled` (telnet console, web terminal),
 - `link_health_enabled`, `device_health_enabled` (the two pollers),
-- `wakeup_enabled` (the wake-up scheduler),
+- `wakeup_enabled` (the wake-up scheduler, and the web UI's retry gate),
 - `stt_resident` and the seven speech-feature flags the resident recognizer gates
   its RAM on (`operator.enabled`, `wakeup_enabled`, `automation_enabled`,
   `status_enabled`, `announce_enabled`, `directory_enabled`,
@@ -590,7 +590,7 @@ those two, not on the pickup:
    — picked up but silent, rung twice, or rung once with the second attempt
    skipped — rather than asserting a second ring it cannot confirm.
 
-**Every way it can fail now raises that alert** (v0.100.0). There are four, and
+**Every way an attempted wake-up can fail now raises that alert** (v0.100.0). There are four, and
 until then only the last one did; the other three wrote a line to the ledger and
 stopped, which is not what wakes anyone at six in the morning:
 
@@ -605,6 +605,15 @@ A network blip while placing the call is deliberately **not** one of these: it i
 recorded `originate-error`, the wake-up stays due, and the next tick tries again.
 Treating an unreachable PBX as a failed alarm would cry wolf and then ring the
 phone anyway.
+
+A wake-up that is never placed within its 10-minute grace window falls outside
+this table. The room may read busy, offline or unknown on every pass
+(`deferred`; an Asterisk that cannot be reached at all is recorded this way, with
+`device_state: unknown`), or the originate itself may raise on every pass
+(`originate-error`). Either way, the
+wake-up is dropped as missed with a Home Assistant persistent notification (see
+above), not the critical push. No closing row is written, so its ledger history
+ends with the last `deferred` or `originate-error` row.
 
 The second ring comes first on purpose: the phone is the loudest thing in the
 room and it is the device that was supposed to wake you. The push is the fallback
@@ -660,7 +669,7 @@ wake-up during the ring. Each set and cancel is a row of its own, `set` or
 `cancelled`, with its `source`.
 
 A room holds **one** pending wake-up, so setting a second one replaces the
-first. Since v0.103.1 the `set` row for a replacement also names the time it
+first. Since v0.104.0 the `set` row for a replacement also names the time it
 displaced, as `replaced_hhmm` and `replaced_target_epoch` — one row, not two,
 and a first-ever set is unchanged. Before that a replacement left no trace at
 all: on 2026-09-15 a 06:20 wake-up set at 13:10:35Z was replaced at 13:15:09Z by
@@ -669,8 +678,8 @@ cancel — which is also exactly what a wake-up the system had lost would look
 like. One more is worth knowing:
 `unjudgeable` means the ledger itself could not be written, so the scheduler
 refused to guess whether anyone answered rather than escalate on a broken
-instrument. Reading that file end to end tells you what happened to a wake-up
-without needing the call log.
+instrument. Apart from a missed wake-up, reading that file end to end tells you
+what happened to a wake-up without needing the call log.
 
 **Smart extras** (during the wake-up call):
 
@@ -685,8 +694,11 @@ without needing the call log.
 - **Weather** (`wakeup_weather`, on by default) — speaks a short local forecast.
 - **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
 
-You can also set and cancel wake-ups from the **dashboard** (the ⏰ box on each room
-card) and from the operator console (**W** to set, **X** to cancel — §10).
+You can also set wake-ups from the **dashboard** with the ⏰ time box and **Set** on
+each room card. A room with a pending wake-up shows a **Cancel** button on its own
+line on the card, and another in the Wake-up calls list; a cancel that fails says
+so. The operator console also sets and cancels them (**W** to set, **X** to
+cancel — §10).
 
 ### Talking clock — dial `41`
 
@@ -750,18 +762,33 @@ plays the clip.
 POST http://<ha-host>:8099/api/announce/<ext>
 Header: X-Announce-Token: <announce_token>
 Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
-        {"url":  "http://…/clip.wav"}    # a WAV to fetch and play
+        {"url":  "http://…/clip.wav"}    # audio to fetch and play (WAV; MP3 and other formats via ffmpeg)
 ```
 
 - The `<ext>` must be a configured room. It can only play a local clip to a known
   handset — never place an outside call.
+- **Limits and responses.** `text` is capped at 500 characters (HTTP 400). A
+  missing `text`/`url`, or a `url` that is not `http`/`https`, also returns HTTP
+  400. An extension that is not a configured room returns 404. A clip that cannot
+  be rendered, such as a `url` that cannot be fetched or decoded, returns 502
+  `render failed`. A rendered clip longer than 90 seconds is refused with HTTP 413
+  `{"ok": false, "skipped": "too-long", "seconds": N}` and recorded `too-long`. A
+  handset with no contact returns 503
+  `{"ok": false, "skipped": "unreachable", "device_state": …}`. Otherwise the
+  response is HTTP 200 `{"ok": true|false, "sound": "<clip name>"}`, with `ok`
+  saying whether Asterisk accepted the call (the busy and duplicate answers below
+  are also HTTP 200). A request refused before its clip is rendered leaves no
+  ledger row; only the HTTP status records it.
 - **Authentication:** over the LAN this requires the `X-Announce-Token` header to
   match your `announce_token` option. If `announce_token` is blank (the default),
   LAN announce is **disabled** and only the Home Assistant Supervisor can call it.
-- The `{url}` branch fetches `http`/`https` only, rejects loopback and link-local
-  hosts (a private-LAN URL — such as Home Assistant's own TTS — is allowed), does
-  not follow redirects, caps the body at 5 MB, and transcodes to 8 kHz for the
-  phone line.
+- The `{url}` branch fetches `http`/`https` only. It rejects loopback,
+  link-local, multicast, reserved and unspecified hosts; a private-LAN URL such
+  as Home Assistant's own TTS is allowed. It does not follow redirects and caps
+  the body at 5 MB. A WAV is decoded directly and other formats (such as the MP3
+  Home Assistant's TTS proxy serves) with ffmpeg, which the image installs on a
+  best-effort basis. The result is transcoded to 8 kHz for the phone line and
+  bracketed by the same chime as a `{text}` clip.
 - **Busy-guard:** when the target phone is already on (or being offered) a call —
   its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
   call is **not** placed. A second INVITE cannot auto-answer mid-call and would
@@ -772,13 +799,16 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   proceeds (the guard fails open, so a state-read hiccup never suppresses an
   alert). The guard applies only to this endpoint — ordinary inbound/outbound
   calling, paging, and wake-up calls are unaffected.
-- **Duplicate suppression:** the same audio sent to the same phone again within a
-  few minutes is not played twice. Every render gets a fresh filename, so the
+- **Duplicate suppression:** the same audio sent to the same phone again within
+  five minutes is not played twice. Every render gets a fresh filename, so the
   clip is compared by content rather than by name.
 
-  The window starts when an announcement is **actually played**, and nowhere
-  else. Until v0.85.0 it started when the request arrived — before the guards
-  above had run — so an announcement refused because the handset was not
+  A request alone never starts the window. The ledger check below measures it
+  from the earlier copy's `audio-delivered` row. The in-memory fallback starts it
+  when Asterisk accepts the call, and only if the handset's state was read first;
+  since v0.105.0 it does not start when that state could not be read. Until
+  v0.85.0 the window started when the request arrived — before the guards above
+  had run — so an announcement refused because the handset was not
   registered began a suppression window anyway, and each retry pushed that
   window forward. An announcement turned away once could never be delivered
   while the caller kept trying, which is the opposite of what a retry is for.
@@ -817,14 +847,18 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
     the idle observations it has gathered. If that copy can never play, the next
     repeat finds it gone and is announced normally.
 
-  A repeat is only held back when something really will send it. With
-  `announce_retry_attempts` at `0` there is no retry, so repeats are never held
-  back — they are the only way the room hears anything.
+  A repeat is only held back when something really will send it: the retry
+  must be on (`announce_retry_attempts` above `0`) and running, and it runs in the
+  wake-up scheduler, which idles while `wakeup_enabled` is off. If either is not
+  so, no replay is coming, so repeats are never held back — they are the only way
+  the room hears anything.
 
-  The `duplicate-suppressed` row counts as the newest thing that phone was asked
-  to hear, so a stale, different announcement still waiting for the retry is not
-  played after it — counted from the **delivery** it stands for, not from when
-  the repeat arrived, so a different message asked after that audio still plays.
+  Neither duplicate row is a request of its own: it is never replayed, and it
+  never displaces or retires another announcement. A stale, different
+  announcement still waiting for the retry is superseded by the original request
+  for the matched audio when that request is the newer one, ranked at the time
+  that request was made, not when the repeat arrived. A different message asked
+  for after that request still plays.
 
   When the ledger cannot be read, or holds no history for that room at all, the
   in-memory window decides as before, and its row says `basis: memory`.
@@ -846,12 +880,17 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   `originate-queued` when the call was placed, and `too-long`,
   `duplicate-suppressed`, `duplicate-pending`, `skipped-busy`, `unreachable` or
   `announce-originate-failed` when it was not. An announcement that never became
-  a call has no call-quality record, so this ledger is the only place it appears.
+  a call has no call-quality record, so once its clip has been rendered, this
+  ledger is the only place it appears.
 
-  `announce-originate-failed` carries the reason on the row — `ami-error` when
-  the request to Asterisk itself failed, `refused` when Asterisk answered and
-  declined it — and the name of the clip, so a failed send appears in the same
-  place in an announcement's history as a successful one. Until v0.103.1 those
+  `announce-originate-failed` carries the reason on the row, and the name of the
+  clip, so a failed send appears in the same place in an announcement's history
+  as a successful one. The reason is `refused` whenever Asterisk did not accept
+  the call. That currently includes a request that could not reach Asterisk at
+  all, because the Asterisk client reports a connection or login failure as a
+  refusal; the caller then receives HTTP 200 with
+  `{"ok": false, "sound": "<clip>"}`. The `ami-error` reason, answered with
+  HTTP 502, is written only when the request itself raises. Before v0.104.0 those
   two cases were written as `originate-error` and `originate-refused`, the same
   two names the wake-up call uses for its own failures and with no clip on
   either, so an announce failure could not be joined to the announcement it
@@ -863,7 +902,7 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   few seconds after a restart — the announcement goes out anyway, because a check
   that refuses to announce when it cannot ask would silence an alert.
 
-  Since v0.103.1 that also writes an `announce-guard-unjudged` row naming the
+  Since v0.104.0 that also writes an `announce-guard-unjudged` row naming the
   clip, so "the handset looked fine" and "nobody could tell" stop looking
   identical in the ledger. Live on 2026-09-15 at 01:42:12Z, 8.4 seconds after an
   add-on restart, an announcement went to the cordless before it had
@@ -885,7 +924,10 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   as any other replay. The response to the caller is unchanged. A refusal that
   is never replayed gets no `announce-undelivered` verdict, because it was never
   handed to Asterisk; its history ends with the retry's own
-  `announce-retry-skipped` row. Once it has been replayed it has been handed
+  `announce-retry-skipped` row, or with the refusal row itself when
+  `announce_retry_attempts` is `0`, `wakeup_enabled` is off, or the add-on
+  restarted before it could be
+  replayed. Once it has been replayed it has been handed
   over, and from then on it is judged like any other announcement.
 - **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
   accepted the request. The handset's hangup now records `audio-delivered` once at
@@ -903,7 +945,8 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   hyphens out of it, and an alert's delivery verdict should not depend on which
   punctuation survives that trip.
 
-  The deadline is **ring + clip cap + a minute, and never under 180 s**: an
+  The deadline is **ring + clip cap + a minute, and never under 180 s**, measured
+  from the newest send: the original, or the latest automatic replay (v0.105.0). An
   announcement may ring for 30 s and then speak for up to `90 s`, so a flat
   two-minute deadline would report a failure for announcements still playing.
   Nothing older than an hour is judged at all, so a scheduler that was stopped
@@ -948,15 +991,17 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   It is the *audio* that decides, not the reason it was missing — so **an
   announcement nobody answers is retried too**. A room phone that is registered
   and idle is a green light as soon as it stops ringing, which means one
-  unanswered announcement can ring that room up to three times inside the
-  150 seconds below. Set `announce_retry_attempts` to `1`, or to `0`, if that is
+  unanswered announcement can ring that room up to one more time than
+  `announce_retry_attempts` (three times by default) inside the 150 seconds
+  below. Set `announce_retry_attempts` to `1`, or to `0`, if that is
   not what you want in your house.
 
   **An announcement whose audio played is never replayed.** The confirming record
   carries the name of the clip (§6 above), and a clip that has one is excluded
   permanently, at any age, whichever order the records arrive in.
 
-  Bounded at **two attempts**, and **never started more than 150 seconds** after
+  Bounded at `announce_retry_attempts` attempts (default **two**, at most three),
+  and **never started more than 150 seconds** after
   the original send: an announcement is often time-sensitive, and dinner being
   ready is not worth saying twenty minutes late. Two attempts spaced a poll apart
   straddle the 30-45 seconds a cordless handset takes to come back after a
@@ -971,8 +1016,12 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   Each attempt is recorded as `announce-retry-attempted` with the clip, the
   attempt number and the handset state that cleared it; the row is written
   **before** the call is placed, and the call is abandoned if it could not be
-  written, because an attempt that cannot be counted cannot be limited. When the
-  retry gives up it records `announce-retry-skipped` once, saying why: `too-old`,
+  written, because an attempt that cannot be counted cannot be limited. A replay
+  that Asterisk does not accept is recorded `announce-originate-failed` with
+  `reason: retry-refused` and the attempt number. This includes an Asterisk that
+  could not be reached at all; `retry-ami-error` is written only when the request
+  itself raises. The attempt still counts against the limit, and the
+  announcement is still judged afterwards. When the retry gives up it records `announce-retry-skipped` once, saying why: `too-old`,
   `budget-exhausted`, `ext-superseded` (a newer announcement was sent to the same
   room, so only that one is replayed — never two at once to one phone),
   `clip-gone`, or `content-delivered` (v0.106.0: the same audio reached that
@@ -1049,7 +1098,7 @@ CONFIG> commit                # persist
 CONFIG> exit
 ```
 
-Useful P-codes (Profile 1 is shared by all eight FXS ports):
+Useful P-codes (Profile 1 is shared by every FXS port assigned to it in §7.2):
 
 | P-code | Setting | Reference value |
 |--------|---------|-----------------|
@@ -1078,7 +1127,7 @@ reference home's `11`–`20` extensions:
   (each is both a complete room *and* the start of an 11-digit number), so those
   extensions send only after the **No Key Entry Timeout** (`P85`) — or immediately
   if you press `#` (`P72` is enabled). Room 11, `20`, `0`, and feature codes
-  `42`–`46` are unambiguous and send instantly.
+  `42`–`47` are unambiguous and send instantly.
 - **`41` is the one feature code that is not instant.** With the talking clock on
   `41` and directory assistance on `411`, `41` is both a complete code and the
   first two digits of a longer one, so the gateway cannot know you are finished
@@ -1099,7 +1148,8 @@ For **pulse/rotary** phones, enable the **Pulse Dialing** option on that FXS por
 
 If you're not using direct dial, a simpler prefix-mode plan works:
 `{ 1x | 20 | 4[1-7] | 411 | 911 | 933 | 0 | 9911 | 9933 | 9xxxxxxxxxx }` (dial
-`9` for an outside line; `911` and `933` are accepted both bare and prefixed).
+`9` for an outside line; `911` and `933` are accepted both bare and prefixed, and
+both forms wait for `P85` because they also begin `9xxxxxxxxxx`).
 Here rooms `11`–`19` send instantly (nothing longer starts with `1`), but the
 `41`/`411` overlap above is unchanged — it comes from the feature codes
 themselves, not from direct dial.
@@ -1129,11 +1179,16 @@ cordless integrates in three extra ways:
   [`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md) — and it shows every room by
   name, on caller ID and in its own directory. It is rendered from your live
   `rooms` option on each fetch, so renaming a room needs no re-upload; rooms whose
-  `ext` fails validation are skipped and names are XML-escaped. This one URL is
-  **LAN-reachable and unauthenticated**: everything else on `:8099` is restricted
-  to the Home Assistant Supervisor, but the handset cannot ride Ingress, so this
-  read-only GET is exempted. It exposes room names and internal extensions only —
-  the same directory already printed on every handset — and no secrets.
+  `ext` fails validation are skipped and names are XML-escaped. This URL is
+  **LAN-reachable and unauthenticated**. The handset cannot ride Ingress, so this
+  read-only GET is exempt from the Supervisor-only guard on `:8099`. The guard
+  has two other exemptions: a Home Assistant media player fetching a speaker
+  announcement clip (`GET /announce/a<digits>.wav`), and
+  `POST /api/announce/{ext}` carrying a valid `X-Announce-Token`. Every other
+  request on the port is refused unless it comes from the Supervisor (see
+  [SECURITY.md](SECURITY.md)). The phonebook exposes room names and internal
+  extensions only — the same directory already printed on every handset — and no
+  secrets.
 - **Device-health monitoring** — set `cordless_ext` (its extension) and
   `cordless_password` and the add-on polls the phone's own API for battery, WiFi
   signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
@@ -1171,7 +1226,11 @@ spaces, upper case and a `sha256:` prefix are all accepted.
 
 A factory reset regenerates the certificate — re-run the
 `WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint` command above and
-re-pin after one, or the monitor will (correctly) stop authenticating. The
+re-pin after one, or the monitor will (correctly) stop authenticating:
+`sensor.switchboard_cordless_health` then reads `degraded`, with the reason that
+the cordless answers on the network but its admin API is unreadable (wrong
+`cordless_password`, or a `cordless_cert_sha256` mismatch), and its battery,
+Wi-Fi and call-score attributes are no longer published. The
 `WP826_HOST=` prefix is not optional: without it the tool falls back to a
 built-in default address and would fingerprint whatever answers there.
 
@@ -1197,7 +1256,8 @@ built-in default address and would fingerprint whatever answers there.
    Set `direct_dial: true` — then you dial **`1` + the 10-digit number** (like a
    cell), while your 2–3-digit extensions and feature codes still ring internally.
    The leading `1` is required (a bare 10-digit number won't dial out); that's what
-   keeps feature codes and extension 20 dialing instantly. `011` international and
+   keeps extension 20 and every feature code except `41` (which overlaps `411`,
+   §7.4) dialing instantly. `011` international and
    `1-900` premium stay blocked, and **911 is not routed** (no E911 — use a cell for
    emergencies). Don't try to disable the prefix by blanking `dial_prefix`; the
    options form reverts a cleared field to its default, so use the `direct_dial`
@@ -1286,7 +1346,8 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   **Home Assistant's own login is the only login** — there is no separate
   password to configure, forget, or leave switched off. The port does listen on
   your LAN — host networking gives it no choice — but every connection whose peer
-  is not the Supervisor is refused. It works in the HA mobile app.
+  is not the Supervisor is refused, apart from three narrow HTTP exceptions that never
+  reach the console (§8). It works in the HA mobile app.
 
   Two things worth knowing about it. The URL must end in a **slash**: the page
   loads its assets relatively, so `/console` alone resolves them one directory up
@@ -1336,7 +1397,8 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 >   the add-on, and a guard pins the connection to the Supervisor — for HTTP *and*
 >   for the terminal's WebSocket. The port does listen on your LAN — host
 >   networking gives it no choice — but every connection whose peer is not the
->   Supervisor is refused, and there is no second password to configure or leave
+>   Supervisor is refused, apart from three narrow HTTP exceptions that never
+>   reach the console (§8), and there is no second password to configure or leave
 >   switched off.
 > - **Telnet (2300) has no authentication and never has** — no login, no
 >   `console_users` equivalent; anyone who can reach the port drives the board.
@@ -1355,8 +1417,9 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 > Independently of any login, **both** browser front-ends cap concurrent sessions
 > at 5 and reclaim one after 15 minutes of browser idle; the sidebar console also
 > has a 12-hour absolute ceiling per session. The standalone terminal additionally
-> same-origin-gates its WebSocket upgrade, and its bind follows `console_bind`
-> unless `console_web_bind` overrides it. See [SECURITY.md](SECURITY.md).
+> same-origin-gates its WebSocket upgrade, and its bind is `console_web_bind`
+> (`127.0.0.1` by default), following `console_bind` only when that is blank. See
+> [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -1366,8 +1429,9 @@ Three monitors watch different things and publish Home Assistant
 sensors. Within each monitor the **alert** toggles only control the pop-up
 notifications — the sensors keep publishing either way.
 
-> **They are not independent.** The link-health poller is the only component
-> with AMI access, so three things it publishes are inputs to the others:
+> **They are not independent.** The link-health poller is the only one of these
+> three monitors with AMI access, so three things it publishes are inputs to the
+> others:
 > `sensor.switchboard_gateway_health` is *derived* from the link-health rollup,
 > the cordless's IP auto-follow reads `contact_ip` off the per-phone sensors,
 > and the trunk watchdog runs inside the same poller. Setting
@@ -1524,9 +1588,13 @@ Covers the two blind spots the above can't see:
   `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
   lost power or its uplink.
 
-Both use a 2-cycle hysteresis so a transient blip doesn't alert, and fire a
-recovery notice when they return to normal — again under that device's shared
-`notification_id`, so the recovery replaces the alert rather than removing it.
+Both use a 2-cycle hysteresis so a transient blip doesn't alert; a worsening from
+degraded to critical alerts again. Both post a recovery notice when they return
+to normal, again under that device's shared `notification_id`, so the recovery
+replaces the alert rather than removing it. For the cordless, "recovered" is
+reserved for a clear backed by a newer scored call. A clear with no newer call
+(typically because the poor call simply aged out of the 15-minute window) is
+titled "alert lapsed" instead, and says the state is unknown until the next call.
 
 **When a poor call counts.** The handset scores every call itself. Each score is
 matched to a call-quality ledger leg that hung up within 90 s of it: the
@@ -1548,7 +1616,8 @@ call the phone system simply could not score is *not* in this category: that is 
 measurement that came back empty, and it still matches and still reads
 `unmeasured`.
 
-A score below `mos_min` (3.4) degrades the sensor only when the same leg agrees in
+A score below `mos_min` (a fixed 3.4, not an add-on option) from a call that ended
+within the last 15 minutes degrades the sensor only when the same leg agrees in
 the ledger, in the direction the handset hears. That means at least 1 % transmit
 loss, or a transmit MES below 78. The ledger reads those from the handset's own
 receiver reports. A call made **to** the cordless is logged under the caller's
@@ -1582,27 +1651,38 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 |--------|-------------------|
 | `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
-| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but deliberately do not drive this sensor or raise an ordinary call-quality alert — nobody is on the line to act on one, and their one-directional shape would trip the one-way-audio detector by design. The exception is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
+| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but never drive this sensor. They are also exempt from the one-way-audio check, because their one-directional shape would trip it by design. Since v0.104.0 a poor line under one of them (low MES, loss or latency) raises an ordinary call-quality card like any other leg, while a clip that was merely cut short stays quiet. The exception to that silence is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
 | `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
-| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/…), published only when the trunk is enabled. Attributes count the watchdog's automatic re-register attempts. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
+| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/`Unregistered`/…). Published only when the trunk is enabled **and** registers (`registns: true`); a trunk that authenticates per-INVITE has nothing to watch. `unknown` means Asterisk answered but reported no registration object, which counts as down. A cycle in which Asterisk could not answer at all (for example in the seconds after a restart) publishes nothing, and the sensor keeps its last value. `auto_reregister_attempts` counts the re-registers Asterisk accepted (a refused one is not counted), and `next_reg_s` is the refresh countdown when one is running. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
 | `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant
-> restart until the next push — that's expected.
+> restart until the next push — that's expected. A pushed sensor never expires,
+> though: if the add-on stops while Home Assistant keeps running, every value
+> freezes at its last reading. `link_health`, `wired_link_health`,
+> `trunk_health`, `cordless_health` and `gateway_health` therefore carry
+> `measured_at` (when the value was measured) and `poll_interval_s` (the poller's
+> steady interval). Compare the two against the current time before trusting the
+> state. Gateway health does this itself: it publishes `unknown` when the
+> link-health rollup is missing or more than 2.5 poll intervals old (at least
+> 60 s).
 
 ---
 
 **Where to read them.** The full call-quality ledger is
 `/data/state/callqos.jsonl`, inside the add-on and not readable from outside.
-Three mirrors are written to the host-mounted `/share/switchboard/` so an audit
-can reach them without a shell: `callqos-outcomes.jsonl` (the same records, with
-any value longer than an extension truncated to its last four digits — v0.99.0
-widened that from *any all-digit value*, which let a number arriving as
-`+1602…` through unmasked, so the mask depended on the caller's own
-formatting), `delivery-outcomes.jsonl`
-(every wake-up and announcement outcome), and `heartbeat.jsonl` (one row per
-health cycle). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
+Three ledgers in the host-mounted `/share/switchboard/` can be read without a
+shell. `callqos-outcomes.jsonl` mirrors the call-quality ledger record for
+record, except that an `ext` longer than an extension (a telephone number on a
+trunk leg) is masked to its last four digits and flagged `ext_redacted: true`.
+v0.99.0 made that rule length-only; before then a number arriving as `+1…` went
+through unmasked. `delivery-outcomes.jsonl` is not a mirror but the delivery
+ledger itself: every wake-up and announcement outcome, the only copy, and the
+record that the wake-up and announcement reconcilers, the announcement retry
+and the duplicate check read. `heartbeat.jsonl` holds one row per health cycle.
+The same folder also holds `asterisk.log` (the scrubbed readable log) and
+`backup-window.jsonl` (when each backup began and ended). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
 cycle the row ran in, and `since_prev_s` how long it actually waited. `next_sleep_s`
 is the wait that follows the row. The row that ends warm-up therefore reads
 `phase: warmup` beside `next_sleep_s: 300`. `transitions` lists every reachability
@@ -1625,8 +1705,13 @@ The assistant's own ledger is deliberately **not** mirrored — see
   state over the loopback-only Asterisk Manager (AMI) socket.
 - **Services** run under s6-overlay: a one-shot config generator, then Asterisk,
   the web UI, the console (telnet + web), the resident recognizer, the wake-up
-  scheduler, and the two health pollers. Each optional service idles when its
-  feature is turned off.
+  scheduler (whose 20-second loop also files the announcement verdicts and runs
+  the announcement auto-retry), and the two health pollers. Each optional service
+  idles when its feature is turned off (except the link-health poller, which
+  keeps scrubbing the readable log; §11), so `wakeup_enabled: false` also stops
+  announcement verdicts and retries. The web UI reads the same switch: with
+  wake-up calls off it treats the retry as off and never holds an identical
+  repeat back for a replay that cannot run.
 - Built on the Home Assistant **Alpine 3.21** base image (a two-stage build that
   compiles whisper.cpp from source), with `fastapi` / `uvicorn` / `jinja2` and
   best-effort `espeak-ng`, `ffmpeg`, and the ConfBridge/Page modules.
@@ -1680,7 +1765,7 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | "No common codec" / call fails instantly | A device is offering only a non-µ-law codec. Make sure G.711 µ-law (PCMU) is enabled on it ([§13](#13-codecs--g711-µ-law-only-on-purpose)). |
 | Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
-| Investigating something that happened **before** a restart/reboot | Notices, warnings, errors **and endpoint reachability** (`Endpoint <n> is now Unreachable`, added in v0.84.0 — before that the durable log held none of it, and the one whole-house outage could not be investigated from it) | Notices, warnings, and errors are also written durably to `/data/state/asterisk.log` on the persistent data volume — it survives restarts and reboots, unlike the Log tab, whose buffer rotates within hours. Registration flaps, trunk timeouts, and RTP errors from before a crash live there. |
+| Investigating something that happened **before** a restart/reboot | Asterisk's notices, warnings and errors, plus endpoint reachability (`Endpoint <n> is now Unreachable`, since v0.84.0), are written durably to `/data/state/asterisk.log` on the persistent data volume, so registration flaps, trunk timeouts and RTP errors from before a crash are there. That file is private to the add-on (it also carries the dialplan trace) and is trimmed at boot to its newest half once it passes 8 MB. The copy readable from the host is `/share/switchboard/asterisk.log`: notices, warnings and errors only, with SIP accounts and private LAN addresses scrubbed out. The add-on's Log tab reaches back about two days, across a host reboot. |
 | LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
@@ -1717,9 +1802,14 @@ essentials:
   all, and the web terminal's sign-in is off until `console_users` has an entry —
   so if you move either bind, put it on a trusted network first. The sidebar
   console (§10) needs neither.
-- `GET /phonebook.xml` on port 8099 is deliberately reachable from the LAN
-  without authentication so the cordless can fetch its remote phonebook; it
-  exposes room names and internal extensions only ([§8](#8-the-wp826-wifi-cordless-optional)).
+- Two read-only GETs on port 8099 are deliberately reachable from the LAN
+  without authentication. `/phonebook.xml` lets the cordless fetch its remote
+  phonebook and exposes room names and internal extensions only
+  ([§8](#8-the-wp826-wifi-cordless-optional)). `/announce/a<digits>.wav` is the
+  speaker announcement clip a Home Assistant media player fetches. Handset
+  announcement clips are not served to the LAN (since v0.106.0).
+  `POST /api/announce/{ext}` is accepted from the LAN only with a matching
+  `X-Announce-Token`, and never while `announce_token` is blank.
 
 ---
 

@@ -1,13 +1,15 @@
 ---
 name: Switchboard
-version: "0.106.2"
+version: "0.106.3"
 slug: switchboard
 description: >-
   Self-hosted Asterisk PBX that turns analog house phones into a smart intercom,
   via a Grandstream GXW4216 V2. Room-to-room calling, an on-box voice operator,
-  wake-up calls, paging, announcements, a local voice assistant, and an optional
-  SIP trunk. Speech recognition and voice run on the box; nothing goes to a
-  cloud service. G.711 u-law end to end. These phones cannot dial 911.
+  a talking clock, wake-up calls, paging, announcements, a local voice
+  assistant, a live dashboard, and an optional SIP trunk. Speech recognition and
+  voice run on the box; nothing goes to a cloud service. G.711 u-law end to end.
+  These phones cannot reach emergency services; dialling 911 plays a notice
+  saying so.
 url: https://github.com/tesseractAZ/Switchboard/tree/main/switchboard
 arch:
   - amd64

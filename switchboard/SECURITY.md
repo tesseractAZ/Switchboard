@@ -22,8 +22,9 @@ fixes for older versions — update to the current release.
 
 ## Automated scanning
 
-Every push and pull request is analysed by **CodeQL** (`security-extended`) for
-both Python and JavaScript. There is **no** dependency-manifest scanning: every
+Every push to `main` and every pull request into it is analysed by **CodeQL**
+(`security-extended`) for both Python and JavaScript, and the tree is re-analysed
+weekly. There is **no** dependency-manifest scanning: every
 runtime dependency is installed by `apk add` / `pip install` inside
 `switchboard/Dockerfile`, which GitHub's dependency graph does not parse, so
 Dependabot raises no advisories for this repository.
@@ -258,7 +259,7 @@ control.
   | Call-quality script (`switchboard-callqos`) | `asterisk` | append to and trim `callqos-outcomes.jsonl`; append to `delivery-outcomes.jsonl` |
   | Link-health poller (`rtpmon`) | root | scrub `asterisk.log`; append to and trim `heartbeat.jsonl` |
   | Wake-up AGIs | `asterisk` | append to `delivery-outcomes.jsonl` |
-  | Wake-up scheduler, web UI | root | append to `delivery-outcomes.jsonl` |
+  | Wake-up scheduler, web UI, operator console | root | append to `delivery-outcomes.jsonl` |
 
   Every append to `delivery-outcomes.jsonl` also trims it and adds group-write.
   Each of these opens the file without following a symbolic link, refuses
@@ -269,6 +270,19 @@ control.
   reconciler treats a delivery ledger that is not a regular file as unwritable,
   and declines to judge the ring rather than escalate it. Asterisk's own logger
   is outside this: it opens `asterisk.log` by name, as `asterisk`.
+
+  Not every reader of `delivery-outcomes.jsonl` takes the same care. The web
+  UI's pre-announce duplicate check, and the wake-up scheduler's content check
+  just before it replays an announcement, open it the guarded way and read at
+  most its newest 256 KiB. The scheduler's other reads do not. On every poll
+  (20 seconds), as root, it opens the file by name and reads it whole. That read
+  follows a link. A FIFO planted in place of the ledger blocks it, and with it
+  the scheduler loop, wake-up calls included, until another process next opens
+  the ledger for writing. The passes that act on what was read (judging a
+  wake-up ring or an announcement, choosing a retry) first confirm with `lstat`
+  that the ledger is a regular, writable file, and stand down otherwise, so a
+  planted link makes them do nothing rather than act on whatever the link
+  points at.
 
   The scrub rewrites the live `/share` file only. The private copy in
   `/data/state/asterisk.log` keeps all three in full — that is the whole reason
@@ -361,10 +375,11 @@ these defenses are generated automatically:
   dial modes. Prefix-dial mode additionally blocks a bare `900`; direct-dial mode
   does not need to, because its outbound pattern (`_1NXXNXXXXXX`) requires the
   leading 1 and never matches a bare 10-digit number.
-- **Dial-flag hygiene.** Inbound calls use `r`-only Dial flags — an outside caller
-  is never given the in-call `##`/`*2` DTMF transfer/feature codes. Outbound calls
-  use `rT` — your internal caller may transfer, but the far PSTN party may not
-  invoke your feature codes.
+- **Dial-flag hygiene.** Inbound calls carry no transfer or feature flags, only
+  `r` and a `b()` pre-dial handler that tags the call with the outside-line ring,
+  so an outside caller is never given the in-call `##`/`*2` DTMF transfer/feature
+  codes. Outbound calls use `rT` — your internal caller may transfer, but the far
+  PSTN party may not invoke your feature codes.
 - **Internal-only transfers.** DTMF transfers resolve in a dedicated context that
   contains only internal room extensions (plus the operator) and has **no outbound
   rule and no catch-all**, so a transferred-in outside caller keying `## 9 1 900…`
@@ -439,8 +454,9 @@ LAN, configure `console_users` to gate it.
 `console_web_enabled: false` turns off the standalone terminal and does **not**
 affect the Ingress console. `console_enabled: false` **does**: the Ingress
 terminal bridges to the operator console on `127.0.0.1:2300`, so disabling that
-console — or binding it to anything other than loopback — leaves `/console/`
-showing "unavailable".
+console, or binding it to a single LAN address (which excludes 127.0.0.1),
+leaves `/console/` showing "unavailable". `0.0.0.0` includes loopback and keeps it
+working.
 
 ### The AppArmor profile is coarse
 
@@ -454,22 +470,28 @@ container mediation, not a least-privilege sandbox.
 The WP826 presents a self-signed certificate that cannot be replaced, so the
 device-health monitor and the maintenance tool cannot validate it by chain.
 Set **`cordless_cert_sha256`** (obtain it with `WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint`)
-and both will verify the exact certificate **before** transmitting the admin
-password, refusing to continue on a mismatch. Left blank, the connection still
-works but is unauthenticated: a LAN-positioned attacker could impersonate the
-handset and capture that password.
+and the device-health monitor verifies the exact certificate **before**
+transmitting the admin password, refusing to continue on a mismatch. The
+maintenance tool does not read add-on options: it takes the same fingerprint
+from the `WP826_CERT_SHA256` environment variable, checks it before logging in,
+and exits on a mismatch. Left blank (or, for the tool, unset), the connection
+still works but is unauthenticated (the tool prints a warning): a LAN-positioned
+attacker could impersonate the handset and capture that password.
 
 ### Device tooling accepts a self-signed certificate
 
 `tools/wp826.mjs` is a **developer-only utility** (not shipped in the add-on image)
 that administers a Grandstream WP826 cordless over its HTTPS API. The phone presents
 a self-signed certificate with no validatable chain, so the tool sets
-`rejectUnauthorized: false` and reads its admin password from a local file. This is
+`rejectUnauthorized: false`, compares the certificate's SHA-256 against
+`WP826_CERT_SHA256` before it logs in (warning and proceeding unverified when
+that is unset), and reads its admin password from a local file. This is
 an accepted LAN-local risk for a personal device-admin tool and is not part of the
-add-on's request path. (Two CodeQL alerts flag this `rejectUnauthorized: false`;
-the rule `js/disabling-certificate-validation` is listed for `tools/wp826.mjs` in
-`.github/codeql-baseline.json` with that justification, so it does not fail CI.
-The alerts are **not** dismissed — they stay visible in the Security tab.)
+add-on's request path. (CodeQL flags each of the tool's `rejectUnauthorized: false`
+settings. The rule `js/disabling-certificate-validation` is listed for
+`tools/wp826.mjs` in `.github/codeql-baseline.json` with that justification, so it
+does not fail CI, and its alerts are dismissed as "won't fix" in the Security tab,
+where they remain listed among the closed alerts.)
 
 ---
 

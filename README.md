@@ -21,8 +21,8 @@ want it, dial the outside world over a SIP trunk like it's a cell phone.
 
 **The dashboard** in the Home Assistant sidebar — every phone's registration and
 call state, the trunk registration and speech-engine health, per-phone latency,
-and one click to ring, patch two rooms together, hang up, transfer, page, or set a
-wake-up:
+and one click to ring, patch two rooms together, hang up, transfer, page, or set
+and cancel a wake-up:
 
 ![The Switchboard dashboard in the Home Assistant sidebar](switchboard/docs/img/dashboard.png)
 
@@ -46,9 +46,14 @@ over telnet on the Home Assistant machine itself:
   hear every room and extension read out.
 - **Talking clock (dial `41`)** — an old-style "at the sound of the tone" speaking
   clock in your local time.
-- **Wake-up calls (dial `42`)** — say a time ("seven thirty", "quarter past six");
-  the phone rings you and speaks it back, and can raise a Home Assistant scene, read
-  the local weather, and announce your next calendar event.
+- **Wake-up calls (dial `42`)** — say a time ("seven thirty", "quarter past six")
+  or "cancel". The phone rings you at that time and speaks it, and can raise a Home
+  Assistant scene, read the local weather, and announce your next calendar event.
+  An unanswered wake-up is rung a second time if the phone is registered and idle.
+  One that still is not delivered is reported as a critical phone notification
+  (`wakeup_push_target`), or as a Home Assistant notification if no push target is
+  set or the push fails. Wake-ups can also be set and cancelled from the dashboard
+  and the operator console.
 - **Home-automation voice menu (dial `43`)** — turn your Home Assistant lights on
   and off by voice, room by room.
 - **Intercom paging (dial `44`)** — talk out of every handset at once.
@@ -57,16 +62,27 @@ over telnet on the Home Assistant machine itself:
 - **Announcements (dial `46`)** — record a message and play it out your Home
   Assistant speakers, bracketed by a station chime. A companion HTTP endpoint lets
   Home Assistant (or another add-on) speak an alert *onto a handset* — turning any
-  phone, including a WiFi cordless, into an announce target.
+  phone, including a WiFi cordless, into an announce target. A handset
+  announcement whose audio never played is sent again automatically once the
+  phone reports itself registered and idle. That covers a handset still
+  re-registering after a restart, one that was busy, and one that went unanswered
+  (`announce_retry_attempts`, default 2, each started within 150 seconds of the
+  original send). An identical repeat that the room has already heard is
+  answered as a duplicate rather than played twice, and so is one still on its
+  way while the retry is running (not when `announce_retry_attempts` is 0 or
+  wake-up calls are off).
 - **An outside line, dialed like a cell phone.** Enable a SIP trunk for real
   inbound and outbound calls. With **direct dial** you dial `1` + the 10-digit
   number with no prefix. Requiring that leading `1` is what keeps the operator,
-  rooms `11` and `20`, and the feature codes dialling instantly — a bare-10
+  rooms `11` and `20`, and most feature codes dialling instantly — a bare-10
   pattern would make each of them look like the *start* of a phone number and
-  stall on the gateway's inter-digit timer. Rooms `12`–`19` are the exception:
-  they are both a complete extension and the first two digits of an 11-digit
-  number, so those wait out the timer. All behind layered toll-fraud protection.
-  Off by default; room-to-room needs no trunk.
+  stall on the gateway's inter-digit timer. Two cases still wait out that timer
+  (or send at once on `#`). Rooms `12`–`19` are each both a complete extension
+  and the first two digits of an 11-digit number. The talking clock `41` is also
+  the start of directory assistance `411`, a clash between feature codes that
+  applies with or without direct dial
+  ([DOCS §7.4](switchboard/DOCS.md#74-dial-plan--the-send-delay)). All behind
+  layered toll-fraud protection. Off by default; room-to-room needs no trunk.
 - **A live dashboard** in the Home Assistant sidebar (Ingress): every phone's
   registration and call state, the trunk's registration and the speech engine's
   health, per-phone latency, one-click test-ring, patch-two-rooms, hang-up,
@@ -125,8 +141,10 @@ tones pass through cleanly. See
    as its port comes online. Pick up a phone and dial another room. Done.
 
 Changing options and restarting the add-on regenerates the entire Asterisk
-configuration — **the add-on options are the single source of truth**; hand edits to
-`/etc/asterisk/*.conf` are overwritten on every start.
+configuration — **the add-on options, plus the optional
+[options overlay](switchboard/DOCS.md#the-options-overlay-advanced) file, are the
+single source of truth**; hand edits to `/etc/asterisk/*.conf` are overwritten on
+every start.
 
 ## Feature codes at a glance
 
@@ -162,7 +180,10 @@ only). The table shows the defaults.
   Manager (AMI) socket, served behind Home Assistant Ingress.
 - The health monitors, wake-up scheduler, resident recognizer, and operator console
   run as separate supervised services under s6-overlay, each idling when its feature
-  is off.
+  is off. Two services do more than their name says. The wake-up scheduler also
+  runs the announcement retry and delivery verdicts, so turning wake-up calls off
+  stops those too. The link-health poller keeps scrubbing the readable log copy
+  when link health is off.
 - Built on the Home Assistant **Alpine** base image (a two-stage build that compiles
   whisper.cpp from source), under an AppArmor profile and host networking (required
   for SIP + RTP on your LAN).
@@ -196,7 +217,8 @@ WP826 WiFi cordless ──────WiFi────────────�
 - **[Changelog](switchboard/CHANGELOG.md)** — the full release history.
 - **[Measured behaviour](switchboard/PERFORMANCE.md)** — what the system is
   observed doing in service, from its own ledgers: call quality, link health,
-  which alarms have ever actually fired.
+  wake-up and announcement delivery, the voice assistant, whether anything is
+  transcoded, which alarms have ever actually fired, and test coverage.
 - **Printable manual** — a [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
   carries the README + Security + reference assembled into a **Word (`.docx`)**
   and **PDF** you can read offline. (Releases v0.69.0 through v0.80.0 shipped
@@ -214,9 +236,14 @@ The Ingress dashboard is reachable only from the Home Assistant Supervisor; the
 Asterisk Manager socket is loopback-only with a fresh random secret each boot and no
 shell-command privilege; the SIP trunk blocks international/premium prefixes and
 confines every transfer to internal destinations. **The operator console runs in
-the Home Assistant sidebar**, where your Home Assistant login is the only login and
-the port it is served on refuses every connection whose peer is not the Supervisor
-— WebSocket upgrades included. Host networking means that port *does* listen on
+the Home Assistant sidebar**, where your Home Assistant login is the only login,
+and the port it is served on refuses every connection whose peer is not the
+Supervisor (WebSocket upgrades included). There are three narrow HTTP exceptions.
+Two read-only GETs are open to the LAN: speaker-announcement clips
+(`/announce/a<digits>.wav`, fetched by Home Assistant media players) and the
+cordless phonebook (`/phonebook.xml`). `POST /api/announce/<ext>` is accepted from
+the LAN only with the configured `announce_token`, which is blank by default and
+so keeps that path closed. Host networking means that port *does* listen on
 your LAN; the guard, not the bind, is what closes it. The two standalone consoles — telnet on
 `2300` and the browser terminal on `8100` — both default to `127.0.0.1`, so neither
 is reachable from your LAN as shipped. Neither has authentication of its own that
