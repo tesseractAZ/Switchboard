@@ -114,6 +114,33 @@ def test_the_boot_rewrite_removes_every_leak_class_and_nothing_else(tmp_path):
     assert CLEAN in out
 
 
+@BOTH_MODES
+def test_the_v0107_timestamp_keeps_every_scrub_rule_working(tmp_path, writer_stopped):
+    """v0.107.0 stamps lines "[2026-10-02 19:47:53.381 -0700] LEVEL[...]". The
+    VERBOSE rule keys on the "[<date>] LEVEL[" shape and the masks on content, so
+    both must still fire — and the offset, which is neither, must survive."""
+    stamp = "[2026-10-02 19:47:53.381 -0700]"
+    verbose = VERBOSE_LINE.replace("[Sep  9 19:50:47]", stamp)
+    acct = ACCT_LINE.replace("[Sep  7 18:39:35]", stamp)
+    qualify = QUALIFY_LINE.replace("[Sep  7 04:06:41]", stamp)
+    clean = f"{stamp} NOTICE[108] cel_custom.c: No mappings found.\n"
+    f = tmp_path / "asterisk.log"
+    original = verbose + acct + qualify + clean
+    f.write_text(original)
+
+    r = ls.scrub(f, writer_stopped=writer_stopped)
+    out = f.read_text()
+
+    assert (r.dropped, r.redacted) == (1, 2), r
+    assert "16025551234" not in out and "VERBOSE" not in out
+    assert "123456_acct" not in out and "192.168.1.71" not in out
+    assert clean in out, "a clean line with the new stamp must be left exactly as it was"
+    if not writer_stopped:
+        assert out.split("\n")[0] == stamp + " " + "*" * (len(verbose) - 1 - len(stamp) - 1), \
+            "the in-place pass keeps the whole new stamp and masks the rest"
+        assert len(out) == len(original)
+
+
 # --------------------------------------------------------------------------- #
 # The scrubber: the in-place pass that runs while Asterisk appends
 # --------------------------------------------------------------------------- #

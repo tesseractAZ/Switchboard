@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.107.0
+
+**`log_level` now does what its documentation says.** The manual, SECURITY.md
+and the option's help text all said that a `log_level` of `notice`, `warning`,
+`error` or `critical` keeps Asterisk's verbose trace out of the add-on's Log tab.
+That trace includes every dialled and calling number. It did not: Asterisk
+always sends verbose lines to its console and drops there only the ones above
+its `-v` count, and the add-on started it with `-vvv` at every level. Those four
+levels now start Asterisk without `-v`. Asterisk still prints level-0 verbose
+lines at any `-v`, so the add-on's own per-call `[rtpqos]` summary and
+`Operator dial` lines move from level 0 to level 1: they leave the Log tab with
+the trace at those four levels and stay in the durable log. A few of
+Asterisk's own start-up and shutdown messages are level 0 and still appear.
+`info` (the default), `debug` and `trace` are unchanged. The count is decided in one place, next to the logger
+configuration, and handed to the start script through
+`/run/switchboard/asterisk-verbosity`. Verified on Asterisk 20.11.1 with a
+second, module-less instance: without `-v` its console printed none of the
+verbosity-3 lines that its log file received.
+
+**The durable log keeps its diagnostic lines at every `log_level`.**
+`/data/state/asterisk.log` is now configured `verbose(3)` (it was `verbose(2)`).
+In Asterisk 20.11.1 the number filters nothing that reaches the file. It sets
+the level Asterisk produces verbose lines at, so the file keeps its
+verbosity-3 lines — `Contact <n>/… is now Unreachable`, `Added contact` and
+`Removed contact … due to request` — when the console runs without `-v`. The
+documentation called the `Contact` line verbosity 2; it is verbosity 3.
+
+**Asterisk's log lines carry the full date, milliseconds and UTC offset.**
+`[Oct  1 01:00:17]` is now `[2026-10-01 01:00:17.289 -0700]`, in both log files
+and on the notices, warnings and errors in the Log tab. A line can now be
+placed against `heartbeat.jsonl` (UTC), the gateway's own log, and lines from
+another year. The scrub of the readable copy and the outage reader key on the
+message, not the date, and are tested with the new stamp.
+
+**The manual explains how to tell a gateway restart from a network stall.** A
+gateway that is back within its registration window renews most registrations
+instead of re-creating them, so a restart can look like a short outage in which
+most phones stayed registered. The troubleshooting table now says where to look:
+the gateway's System Up Time, its Automatic Reboot schedule (`P21929`, `P21930`,
+`P28118`), and `P81` (Unregister On Reboot). With `P81` set to `1`, a restart
+leaves `Removed contact … due to request` in the durable log, which a stall
+never does. `P81` is added to the gateway P-code table.
+
 ## 0.106.3
 
 **With wake-up calls turned off, a repeated announcement is no longer held back

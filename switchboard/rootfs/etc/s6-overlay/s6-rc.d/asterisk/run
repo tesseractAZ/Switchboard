@@ -13,8 +13,20 @@ chown -R asterisk:asterisk /var/run/asterisk /var/log/asterisk /var/lib/asterisk
 # right even if the symlink didn't take.
 export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
 
+# The -v count decides whether Asterisk's verbose trace — the dialplan trace,
+# every dialled number included — reaches the add-on log: Asterisk always routes
+# verbose lines to its console and drops those above this count there. The init
+# step derives it from log_level (switchboard-config asterisk_console_verbosity):
+# 3 for info, debug and trace; 0 for notice and above. The durable
+# /data/state/asterisk.log keeps its reachability lines at any count, because its
+# logger channel holds the generation level at 3. A missing or unexpected value
+# means the default, info.
+VERBOSITY="$(cat /run/switchboard/asterisk-verbosity 2>/dev/null || echo 3)"
+case "${VERBOSITY}" in
+    0) set -- ;;
+    *) set -- -vvv ;;
+esac
+
 # -f  foreground (no fork, so s6 supervises it)
-# -vvv  verbose dialplan/call tracing in the log (Dial outcomes, DIALSTATUS) —
-#       invaluable for diagnosing call flow; call volume on a home PBX is low
 # -U/-G  drop to the asterisk user
-exec asterisk -f -vvv -U asterisk -G asterisk
+exec asterisk -f "$@" -U asterisk -G asterisk

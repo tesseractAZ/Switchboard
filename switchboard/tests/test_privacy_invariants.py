@@ -7,7 +7,8 @@ say in their own home. Until v0.80.0 there was no test, no hook and no CI job
 enforcing any of that — the discipline was held by maintainer habit alone, which
 by this project's own doctrine means it was inert.
 
-THE SHAPE OF THE HAZARD. Asterisk runs `-vvv`. Until v0.94.7 logger.conf routed
+THE SHAPE OF THE HAZARD. Asterisk produces verbose lines at every log_level (the
+/data channel's verbose(3) holds that level). Until v0.94.7 logger.conf routed
 the `verbose` class to `/share/switchboard/asterisk.log`, which is host-mounted
 and world-readable BY DESIGN — that is the entire purpose of the directory — and
 captured in Supervisor backups. So the obvious way to make an AGI diagnostic
@@ -34,12 +35,13 @@ already leaks, so one more Verbose() costs nothing."
 The safety therefore rests on a fact, not on a design — and a fact holds only
 until someone adds one line. These tests are that line's tripwire.
 
-WHY THE ROUTING IS NOT SIMPLY FLIPPED. Sending `verbose` to the private /data log
-instead looks like the obvious fix and would break the fleet-outage detector:
-`Endpoint <n> is now Unreachable` is itself a VERBOSE-class line, /data carries
-zero of them, and `rtpmon.endpoint_transitions()` reads the /share file to
-reconstruct outages that fall between two health samples. Keeping the channel and
-forbidding speech on it is the arrangement that satisfies both.
+WHERE THE VERBOSE CLASS GOES NOW. Since v0.94.7 `verbose` goes to the private
+/data log and to the console, never to /share. `Endpoint <n> is now Unreachable`
+is itself a VERBOSE-class line, so `rtpmon.endpoint_transitions()` reads /data to
+reconstruct outages that fall between two health samples. (This paragraph used to
+say /data carried none of those lines and the reader used /share — true before
+v0.84.0 and v0.94.7 respectively, not since.) Speech is forbidden on every channel
+that carries verbose, which is what the tests below pin.
 """
 import re
 import subprocess
@@ -204,7 +206,8 @@ def test_the_world_readable_log_carries_no_dialplan_trace():
     does not. `/data` carried `verbose(2)` from v0.84.0 and still logged 208
     `pbx.c: Executing` lines on 2026-09-09 -- while receiving ZERO on Sep 4-5,
     when it had no `verbose` keyword at all. The KEYWORD admits the trace; the
-    number is decoration.
+    number does not filter it. (Since v0.107.0 the /data channel's number does
+    set the level Asterisk produces verbose lines at, so it is not decoration.)
 
     So the only lever is where the reader looks. `endpoint_transitions()` now
     reads the private `/data` copy, and this world-readable one carries

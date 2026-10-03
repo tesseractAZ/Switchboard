@@ -8,7 +8,7 @@ configuration:
   # ── Core ──────────────────────────────────────────────────────────────
   log_level:
     name: Log Level
-    description: How much detail Asterisk writes to the add-on log. Only three of the seven values differ — 'debug' and 'trace' are identical (both add debug + verbose detail), 'info' adds verbose detail, and 'notice', 'warning', 'error' and 'critical' all behave the same (notices, warnings and errors only). It is not a severity filter, so picking 'error' does not silence notices. 'info' is right for normal use; drop to 'debug' only when diagnosing a problem, then set it back — it is very noisy.
+    description: How much of Asterisk reaches the add-on log. Only three of the seven values differ — 'info' shows notices, warnings and errors plus Asterisk's verbose call trace, which includes dialled and calling numbers; 'debug' and 'trace' are identical and add Asterisk's debug messages, such as each trunk registration attempt; 'notice', 'warning', 'error' and 'critical' are identical and show notices, warnings and errors (plus a few of Asterisk's own start-up messages), with no call trace. It is not a severity filter, so picking 'error' does not silence notices. 'info' is right for normal use; drop to 'debug' only to diagnose the trunk, then set it back. The add-on's private diagnostic log keeps the call trace at every setting.
   rtp_start:
     name: RTP Port Range — Start
     description: First UDP port for live call audio (RTP). The default 10000–10200 gives ~100 simultaneous call legs. Only change if another service needs these ports; must be below the End value.

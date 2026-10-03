@@ -150,7 +150,7 @@ control.
 
   | Destination | Carries | Kept | Readable from outside the add-on |
   | --- | --- | --- | --- |
-  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account. Registrations and failed qualifies with each phone's LAN address. Recognised speech when `assistant_transcripts` is `true` (see below) | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below) | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
   | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
@@ -160,12 +160,28 @@ control.
   boot's add-on log 30 hours after a host reboot, and that log still reached
   back about two days. Treat everything in its row as readable by any Home
   Assistant administrator for that long. A `log_level` of `notice` or above
-  takes the verbose trace off the console; it changes neither file.
+  takes the verbose trace off the console; it changes neither file. That has
+  been true only since v0.107.0. Asterisk always sends verbose lines to its
+  console and drops there the ones above its `-v` count, and until v0.107.0 it
+  started with `-vvv` at every `log_level` — so the trace, numbers included,
+  stayed in the journal at `notice` and above while this document said
+  otherwise. Those levels now start it without `-v`; verified on Asterisk
+  20.11.1, its console then prints no verbose line above level 0 — none of the
+  dialplan trace and none of the numbers in it. Level 0 is the one exception:
+  Asterisk prints those lines at any `-v`. Asterisk writes a few of its own
+  start-up and shutdown messages there, and until v0.107.0 the add-on wrote its
+  per-call `[rtpqos]` summary and `Operator dial` lines there too; they are now
+  level 1, so they leave the journal with the trace and stay in `/data`.
 
-  The `/data` copy is configured `notice,warning,error,verbose(2)`, and the level
-  number does not do what it appears to. It was added in v0.84.0 to keep endpoint
-  reachability — `Endpoint <n> is now Unreachable` and its `Contact` twin, which
-  Asterisk emits at verbosity 2. Until then the durable log did not keep it:
+  The `/data` copy is configured `notice,warning,error,verbose(3)` (`verbose(2)`
+  until v0.107.0), and the level number does not do what it appears to: it
+  filters nothing that reaches the file. What it does do is hold the level
+  Asterisk produces verbose lines at, so the file keeps its verbosity-3 lines
+  even when the console runs without `-v`. The verbose class was added in
+  v0.84.0 to keep endpoint reachability — `Endpoint <n> is now Unreachable`
+  (verbosity 2) and the `Contact <n>/… is now Unreachable` line beside it
+  (verbosity 3; earlier text here called it verbosity 2). Until then the durable
+  log did not keep it:
   across twenty-five days it held no record of whether the phones were
   reachable, so the one whole-fleet outage this system has had could not be
   investigated from the copy that survives. The expectation was that
@@ -286,7 +302,8 @@ control.
 
   The scrub rewrites the live `/share` file only. The private copy in
   `/data/state/asterisk.log` keeps all three in full — that is the whole reason
-  the two copies differ — and so does the add-on journal. The scrub touches
+  the two copies differ — and so does the add-on journal, which carries the
+  VERBOSE lines at `log_level` `info`, `debug` or `trace`. The scrub touches
   neither of those, nor any backup taken before a line was scrubbed.
 
   What this means in practice: **since v0.94.7 the dialplan trace is no longer

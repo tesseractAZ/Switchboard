@@ -1049,6 +1049,34 @@ def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
         pm._transition_offset = None
 
 
+def test_transitions_read_the_v0107_timestamp(tmp_path) -> None:
+    """v0.107.0 stamps lines "[2026-10-01 01:00:17.289 -0700]". The reader keys on
+    the message, never on the date, so the new stamp must change nothing."""
+    log = tmp_path / "asterisk.log"
+    log.write_text("[2026-10-01 00:59:00.000 -0700] VERBOSE[1] pbx.c: Asterisk Ready.\n")
+    real = pm.ENDPOINT_LOG_PATH
+    pm.ENDPOINT_LOG_PATH = str(log)
+    pm._transition_offset = None
+    try:
+        check("transitions (new stamp): the first call sets the watermark",
+              pm.endpoint_transitions() == [])
+        with open(log, "a") as fh:
+            fh.write("[2026-10-01 01:00:17.289 -0700] VERBOSE[322] "
+                     "res_pjsip/pjsip_configuration.c: Endpoint 11 is now Unreachable\n")
+            fh.write("[2026-10-01 01:00:17.289 -0700] VERBOSE[322] "
+                     "res_pjsip/pjsip_options.c: Contact 11/sip:11@x is now Unreachable.  RTT: 0.000 msec\n")
+            fh.write("[2026-10-01 01:01:14.326 -0700] VERBOSE[628] res_pjsip_registrar.c: "
+                     "Removed contact 'sip:11@x' from AOR '11' due to request\n")
+            fh.write("[2026-10-01 01:01:14.328 -0700] VERBOSE[322] "
+                     "res_pjsip/pjsip_configuration.c: Endpoint 11 is now Reachable\n")
+        t = pm.endpoint_transitions()
+        check("transitions (new stamp): the drop and the recovery, nothing else",
+              [(x["ext"], x["state"]) for x in t] == [("11", "Unreachable"), ("11", "Reachable")])
+    finally:
+        pm.ENDPOINT_LOG_PATH = real
+        pm._transition_offset = None
+
+
 def test_heartbeat_carries_the_transitions(tmp_path) -> None:
     """The heartbeat must SAY that it spanned an outage.
 
