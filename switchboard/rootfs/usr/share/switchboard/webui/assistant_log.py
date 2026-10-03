@@ -22,8 +22,12 @@ emit it through Asterisk's logger. Do not do that here. Until v0.94.7 logger.con
 routed ``verbose`` to ``/share/switchboard/asterisk.log``, which is host-mounted and
 world-readable BY DESIGN; today it routes it to the console (the add-on journal)
 and to ``/data/state/asterisk.log``, a durable file captured in add-on backups.
-Asterisk runs ``-vvv``, so a single ``Verbose()`` carrying a transcript would copy
-household speech into both, whatever ``transcripts`` says. This module writes
+Asterisk produces verbose lines at every ``log_level`` (the /data channel's
+``verbose(3)`` holds that level), so a single ``Verbose()`` carrying a transcript
+would copy household speech into /data always, and into the journal too — at
+the default ``log_level``, and at EVERY ``log_level`` if written at level 0 (the
+default for a bare ``Verbose()``), because Asterisk's console prints level-0
+lines with no ``-v`` — whatever ``transcripts`` says. This module writes
 to ``/data`` instead, which is unreachable from outside: container shell blocked by
 protection mode, backups encrypted, add-on API 403 on every path.
 

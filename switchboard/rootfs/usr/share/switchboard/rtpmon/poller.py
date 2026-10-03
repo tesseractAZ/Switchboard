@@ -684,6 +684,8 @@ def _now_iso() -> str:
 # The forensic Asterisk log carries every endpoint reachability TRANSITION at
 # VERBOSE level, e.g.
 #   [Sep  1 01:00:49] VERBOSE[308] res_pjsip/pjsip_configuration.c: Endpoint 16 is now Unreachable
+# (since v0.107.0 the stamp reads `[2026-10-01 01:00:17.289 -0700]`; the reader
+# keys on the message, never on the date, so either form counts the same).
 #
 # ★ v0.94.7 — READS THE PRIVATE LOG, NOT THE SHARED ONE. These transitions are
 # VERBOSE-class, and so is the full dialplan trace, which quotes dialled and
