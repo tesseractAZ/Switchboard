@@ -1024,13 +1024,15 @@ def test_logger_durable_persistent_file() -> None:
     check("logger: durable file scoped to notice,warning,error",
           "/data/state/asterisk.log => notice,warning,error" in lg)
     file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
-    # v0.84.0 — the durable channel now carries verbose(2) and ONLY level 2.
-    # The level number is the whole design: bare `verbose` inherits the console
-    # level and drags the verb-3 dialplan trace onto the persistent volume;
-    # `verbose(1)` selects nothing, because the reachability lines this exists
-    # for are ast_verb(2).
-    check("logger: durable file takes verbose(2) exactly — not bare, not (1)",
-          file_line.endswith("=> notice,warning,error,verbose(2)"))
+    # v0.107.0 — verbose(3). In Asterisk 20.11.1 the number does not filter what
+    # the channel receives; it raises the level Asterisk GENERATES at (the highest
+    # of the -v count and every channel's verbose(N)). At 3 the file keeps its
+    # level-3 forensic lines — `Contact ... is now`, `Added contact`, `Removed
+    # contact ... due to request` — even when log_level starts Asterisk with no
+    # -v at all. Bare `verbose` would not hold that floor; verbose(2) would let
+    # the level-3 lines vanish at log_level notice.
+    check("logger: durable file takes verbose(3) exactly — the generation floor",
+          file_line.endswith("=> notice,warning,error,verbose(3)"))
     check("logger: no legacy ephemeral 'messages' file channel", "messages =>" not in lg)
 
 
@@ -1058,13 +1060,102 @@ def test_logger_channels_live_under_logfiles() -> None:
 
 def test_logger_durable_file_stays_low_volume_at_debug() -> None:
     # Even when log_level is debug/trace (console gets debug,verbose), the DURABLE
-    # file must stay notice,warning,error — a debug trace on the persistent volume
-    # would defeat the low-wear design.
+    # file takes no debug class — log_level changes the console, never this file.
     lg = sbc.render_logger({"log_level": "debug"})
     file_line = [l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")][0]
-    check("logger: durable file is notice,warning,error even at debug",
-          file_line.endswith("=> notice,warning,error,verbose(2)"))
+    check("logger: durable file has no debug class even at debug",
+          file_line.endswith("=> notice,warning,error,verbose(3)"))
     check("logger: console DOES escalate to debug", "console => notice,warning,error,debug,verbose" in lg)
+
+
+def test_logger_durable_file_is_the_same_at_every_log_level() -> None:
+    # The forensic file must not lose its reachability lines because someone
+    # quietened the add-on log: at log_level notice Asterisk starts with no -v,
+    # and only this channel's verbose(3) keeps those lines being generated.
+    lines = set()
+    for level in ("trace", "debug", "info", "notice", "warning", "error", "critical"):
+        lg = sbc.render_logger({"log_level": level})
+        lines.add(next(l for l in lg.splitlines() if l.startswith("/data/state/asterisk.log")))
+    check("logger: durable file line is identical at all seven log levels", len(lines) == 1)
+
+
+def test_logger_dateformat_carries_year_milliseconds_and_offset() -> None:
+    # v0.107.0. Asterisk's default "%b %e %T" has no year, no milliseconds and no
+    # UTC offset, so a log line could not be placed against heartbeat.jsonl (UTC),
+    # a gateway's own log, or a line from another year. Verified on the running
+    # Asterisk 20.11.1: this renders "[2026-10-02 19:47:53.381 -0700]".
+    lg = sbc.render_logger({})
+    general = lg.split("[logfiles]")[0]
+    m = re.search(r"^dateformat = (.+)$", general, re.M)
+    check("logger: [general] sets the dateformat", m is not None)
+    fmt = m.group(1) if m else ""
+    check("logger: it is the named constant", fmt == sbc.ASTERISK_LOG_DATEFORMAT)
+    for spec, what in (("%F", "the full date"), ("%3q", "milliseconds"), ("%z", "the UTC offset")):
+        check(f"logger: dateformat carries {what} ({spec})", spec in fmt)
+    # logscrub finds a line's severity by its "[<date>] LEVEL[" shape. A "]"
+    # inside the date would close the bracket early, and VERBOSE lines would stop
+    # being dropped from the world-readable copy.
+    check("logger: dateformat contains no ']'", "]" not in fmt)
+    check("logger: appendhostname is never set (it renames every file channel)",
+          "appendhostname" not in lg)
+
+
+def test_console_verbosity_follows_log_level() -> None:
+    # v0.107.0. Asterisk always routes verbose lines to its console and drops the
+    # ones above the -v count there (asterisk.c `verbose_line_level >
+    # option_verbose`), so the -v count, not the console channel's keywords,
+    # decides whether the dialplan trace — dialled numbers included — reaches the
+    # add-on log. Until v0.107.0 the run script passed -vvv at every log_level.
+    schema = (Path(__file__).resolve().parents[1] / "config.yaml").read_text()
+    m = re.search(r"log_level:\s*list\(([^)]+)\)", schema)
+    levels = m.group(1).split("|") if m else []
+    want = {"trace": 3, "debug": 3, "info": 3,
+            "notice": 0, "warning": 0, "error": 0, "critical": 0}
+    check(f"log_level: every schema value has an expected count ({levels})",
+          sorted(levels) == sorted(want))
+    for level in levels:
+        v = sbc.asterisk_console_verbosity({"log_level": level})
+        check(f"log_level {level}: Asterisk starts with {want.get(level)} -v", v == want.get(level))
+        console = next(l for l in sbc.render_logger({"log_level": level}).splitlines()
+                       if l.startswith("console =>"))
+        check(f"log_level {level}: the console channel names verbose exactly when -v > 0",
+              ("verbose" in console) == (v > 0))
+    check("log_level unset or empty: the default, info, so 3",
+          sbc.asterisk_console_verbosity({}) == 3
+          and sbc.asterisk_console_verbosity({"log_level": ""}) == 3
+          and sbc.asterisk_console_verbosity({"log_level": None}) == 3)
+
+
+def test_no_dialplan_line_logs_at_verbose_level_0() -> None:
+    # Asterisk's console prints a level-0 verbose line even when started with no
+    # -v (asterisk.c drops only lines ABOVE the -v count). log_level notice and
+    # above are documented as notices, warnings and errors, so a level-0
+    # Verbose() in the generated dialplan would break that promise on every call.
+    # The add-on's own lines ([rtpqos], Operator dial) are level 1 since v0.107.0.
+    src = SBC_PATH.read_text()
+    # Only the generated dialplan lines; comments may name Verbose() freely.
+    plan = [l for l in src.splitlines()
+            if ("same = " in l or "exten => " in l) and not l.lstrip().startswith("#")]
+    calls = [l for l in plan if "Verbose(" in l]
+    check(f"dialplan: the generator has Verbose() lines to check ({len(calls)})", len(calls) >= 3)
+    check("dialplan: no Verbose(0, ...) line",
+          not [l for l in calls if re.search(r"Verbose\(\s*0\s*,", l)])
+    check("dialplan: no bare Verbose(message), which defaults to level 0",
+          not [l for l in calls if re.search(r"Verbose\((?!\s*\d\s*,)", l)])
+    check("dialplan: the [rtpqos] and Operator dial lines are level 1",
+          src.count("Verbose(1,[rtpqos]") == 2 and src.count("Verbose(1,Operator dial") == 1)
+
+
+def test_main_hands_the_verbosity_to_the_run_script() -> None:
+    # The asterisk run script reads /run/switchboard/asterisk-verbosity for its -v
+    # count. It must be written from the function the console channel uses, so
+    # the two can never disagree about log_level.
+    src = inspect.getsource(sbc.main)
+    check("main: writes asterisk-verbosity from asterisk_console_verbosity(opts)",
+          re.search(r'\(RUN_DIR / "asterisk-verbosity"\)\.write_text\('
+                    r'f"\{asterisk_console_verbosity\(opts\)\}\\n"\)', src) is not None)
+    check("main: writes it before logger.conf is rendered",
+          src.find('"asterisk-verbosity"') < src.find('"logger.conf"'))
 
 
 def test_secret_semicolon_or_whitespace_rejected() -> None:

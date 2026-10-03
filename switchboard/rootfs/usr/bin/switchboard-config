@@ -663,7 +663,10 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,Dial(PJSIP/${OP_TARGET},30,rtT)",
         # Dial fell through (didn't answer): tell the caller WHY rather than a
         # bland goodbye. ${DIALSTATUS} = BUSY | NOANSWER | CHANUNAVAIL | CONGESTION.
-        " same = n,Verbose(0,Operator dial ${OP_TARGET} -> ${DIALSTATUS})",
+        # Level 1, not 0 (v0.107.0): Asterisk's console prints level-0 lines even
+        # with no -v, so a level-0 line would reach the add-on log at log_level
+        # notice and above, which are documented as notices, warnings and errors.
+        " same = n,Verbose(1,Operator dial ${OP_TARGET} -> ${DIALSTATUS})",
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"BUSY\"]?busy)",
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"NOANSWER\"]?noanswer)",
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"CHANUNAVAIL\"]?unavail)",
@@ -1369,7 +1372,8 @@ def render_rtpqos_context() -> list:
         ' same = n,GotoIf($[("${RXC}" = "" | "${RXC}" = "0") & ("${TXC}" = "" | "${TXC}" = "0")]?nomedia)',
         # cid is attacker-controlled on inbound trunk calls (spoofable PSTN caller-ID);
         # FILTER to phone chars so it can't forge log fields or inject a line.
-        " same = n,Verbose(0,[rtpqos] chan=${CHANNEL(name)} cid=${IF($[${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6]?****${FILTER(0-9+*#,${CALLERID(num)}):-4}:${FILTER(0-9+*#,${CALLERID(num)})})} "
+        # Level 1, not 0 (v0.107.0), for the reason at the operator's Verbose().
+        " same = n,Verbose(1,[rtpqos] chan=${CHANNEL(name)} cid=${IF($[${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6]?****${FILTER(0-9+*#,${CALLERID(num)}):-4}:${FILTER(0-9+*#,${CALLERID(num)})})} "
         "codec=${CHANNEL(audionativeformat)} readfmt=${CHANNEL(audioreadformat)} "
         "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} "
         f"rxcount=${{RXC}} txcount=${{TXC}} "
@@ -1387,7 +1391,7 @@ def render_rtpqos_context() -> list:
         # ledger. Silence in a quality ledger has to mean "nothing happened", and
         # it did not. The row carries only what is actually known -- who, which
         # leg, how far it got, why it ended -- and invents no metrics.
-        " same = n(nomedia),Verbose(0,[rtpqos] chan=${CHANNEL(name)} "
+        " same = n(nomedia),Verbose(1,[rtpqos] chan=${CHANNEL(name)} "
         "cid=${IF($[${LEN(${FILTER(0-9+*#,${CALLERID(num)})})} > 6]?****${FILTER(0-9+*#,${CALLERID(num)}):-4}:${FILTER(0-9+*#,${CALLERID(num)})})} nomedia=1 "
         "billsec=${CDR(billsec)} hcause=${HANGUPCAUSE} tag=${ARG1} "
         "stage=${FILTER(a-z,${SW_STAGE})})",
@@ -2061,12 +2065,42 @@ def render_manager(ami_user: str, ami_secret: str) -> str:
 # --------------------------------------------------------------------------- #
 # logger.conf
 # --------------------------------------------------------------------------- #
+# The log_level values that put Asterisk's verbose trace in the add-on log. Every
+# other value (notice, warning, error, critical) keeps it out.
+LOG_LEVELS_WITH_VERBOSE = ("trace", "debug", "info")
+
+# Year, milliseconds and UTC offset on every line Asterisk writes to its files
+# (and on the console's notice/warning/error lines). Asterisk's default,
+# "%b %e %T", has none of the three, so a line could not be placed against
+# heartbeat.jsonl (UTC), the gateway's own log, or a line from another year.
+# Never put "]" in it: logscrub finds a line's severity by the "[<date>] LEVEL["
+# shape, and a "]" inside the date would end the bracket early.
+ASTERISK_LOG_DATEFORMAT = "%F %T.%3q %z"
+
+
+def asterisk_console_verbosity(opts: dict) -> int:
+    """The -v count Asterisk is started with: 3 for info, debug and trace; 0 otherwise.
+
+    Asterisk always routes verbose lines to its console, whatever logger.conf says
+    for the console channel, and the console then drops the ones above this count
+    (asterisk.c, `verbose_line_level > option_verbose`). So this number, not the
+    console channel's keywords, is what decides whether the dialplan trace, every
+    dialled number included, reaches the add-on log. Before v0.107.0 the run script
+    passed -vvv unconditionally, and log_level notice and above left the trace in
+    the journal although the documentation said they took it out.
+
+    The durable file does not depend on this: its verbose(3) keeps Asterisk
+    generating level-3 lines at any console count (see render_logger)."""
+    level = str(opts.get("log_level", "info") or "info").strip()
+    return 3 if level in LOG_LEVELS_WITH_VERBOSE else 0
+
+
 def render_logger(opts: dict) -> str:
     level = str(opts.get("log_level", "info") or "info").strip()
     base = "notice,warning,error"
     if level in ("debug", "trace"):
         base += ",debug,verbose"
-    elif level == "info":
+    elif asterisk_console_verbosity(opts):
         base += ",verbose"
     # console → the add-on's journald/log endpoint (the live view). PLUS a durable
     # copy on the persistent /data volume, so operational forensics (registration
@@ -2096,15 +2130,29 @@ def render_logger(opts: dict) -> str:
     return (
         ";; GENERATED by switchboard-config\n"
         "[general]\n"
+        f"dateformat = {ASTERISK_LOG_DATEFORMAT}\n"
         "\n"
         "[logfiles]\n"
         f"console => {base}\n"
-        # ★ verbose(2), not bare `verbose`. The durable channel needs endpoint
-        # reachability and nothing else that verbose carries.
+        # ★ verbose(3) — v0.107.0. In Asterisk 20.11.1 the number does NOT filter
+        # what this file receives (logger.c compares it against a local that is
+        # always 0): any channel carrying the `verbose` keyword gets every verbose
+        # line Asterisk generates. What the number DOES do is raise the level
+        # Asterisk generates at: the system verbose level is the highest of the
+        # -v count and every channel's verbose(N). At 3 this file keeps its
+        # forensic lines whatever log_level sets the console to:
+        #   level 2  `Endpoint <n> is now Unreachable`   (pjsip_configuration.c)
+        #   level 3  `Contact <n>/... is now Unreachable` (pjsip_options.c)
+        #   level 3  `Added contact ...` / `Removed contact ... due to request`
+        #            (res_pjsip_registrar.c — a gateway that unregisters on
+        #            reboot shows up here as "due to request")
+        #   level 3  `pbx.c: Executing`, the dialplan trace
+        # Measured on the running system 2026-10-02 with a second, module-less
+        # Asterisk: no -v and this channel at verbose(3) still wrote every
+        # level-3 line here while the console printed none of them.
         #
-        # `Endpoint <n> is now Unreachable` (res_pjsip/pjsip_configuration.c) and
-        # `Contact <n>/... is now Unreachable` (res_pjsip/pjsip_options.c) are
-        # both emitted at ast_verb(2). Until v0.84.0 this channel was
+        # History. Until v0.107.0 this read verbose(2), with comments saying the
+        # Contact line was level 2 — it is level 3. Until v0.84.0 this channel was
         # notice,warning,error only, so it carried ZERO reachability information
         # across 25 days — and the 2026-09-01 whole-fleet outage, the single
         # event this log exists to explain, was unanswerable from it. The
@@ -2121,7 +2169,7 @@ def render_logger(opts: dict) -> str:
         # reachability lines are what rtpmon's fleet-outage detector reads, and
         # /data is not readable from outside the container. SECURITY.md says what
         # the file therefore holds.
-        "/data/state/asterisk.log => notice,warning,error,verbose(2)\n"
+        "/data/state/asterisk.log => notice,warning,error,verbose(3)\n"
         # The readable twin, and the one that needed the cap MOST.
         #
         # ★ v0.94.6 — THE LEVEL CAP WAS ON THE WRONG CHANNEL. v0.84.0 correctly
@@ -2131,7 +2179,7 @@ def render_logger(opts: dict) -> str:
         # backwards: /share is host-mounted, readable by anything on the box, and
         # captured in Supervisor backups.
         #
-        # A bare `verbose` inherits the console level (Asterisk runs -vvv), so
+        # A bare `verbose` inherits the console level (then -vvv at every log_level), so
         # this channel took level-3 lines: `pbx.c: Executing [...]`, `Called
         # PJSIP/<number>@trunk`, `Spawn extension (rooms, <number>, ...)`. Those
         # carry the DIALLED AND CALLING NUMBERS as plain text. Measured on the
@@ -2152,7 +2200,9 @@ def render_logger(opts: dict) -> str:
         # `verbose(2)` since v0.84.0 and still logged 208 `pbx.c: Executing`
         # lines on 2026-09-09 -- and /data received ZERO of them on Sep 4-5, when
         # it had no `verbose` keyword at all. The keyword is what admits them;
-        # the number does nothing.
+        # the number does not filter. (Since v0.107.0 it does set the generation
+        # floor — see the /data channel note above — so never reduce /data to a
+        # bare `verbose`.)
         #
         # Both the wanted line (`Endpoint <n> is now (Un)Reachable`, 480 in the
         # sampled window) and the leaking line (`pbx.c: Executing`, 2203) are the
@@ -2732,6 +2782,9 @@ def main() -> None:
     # talking clock and console clock read local time.
     tz = apply_timezone(resolve_timezone(opts))
     (RUN_DIR / "tz").write_text(tz + "\n")
+    # The asterisk run script reads this for its -v count, so log_level decides
+    # it in exactly one place (asterisk_console_verbosity), next to logger.conf.
+    (RUN_DIR / "asterisk-verbosity").write_text(f"{asterisk_console_verbosity(opts)}\n")
     ensure_voice_dirs()          # ASR + announce dirs (needed even if operator off)
     write_operator_runtime(opts)
     write_features_runtime(opts)

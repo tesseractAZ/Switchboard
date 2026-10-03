@@ -218,6 +218,36 @@ def test_the_loopback_guard_is_correct_where_it_actually_runs():
     check(f"the guard was actually executed ({checked} cases)", checked == len(_LOOPBACK_CASES) * 2)
 
 
+def test_the_asterisk_run_script_takes_its_verbosity_from_the_init_step():
+    """v0.107.0: Asterisk's -v count follows log_level, through the file the init
+    step writes. Runs the script's REAL block, under `sh` as on the Pi."""
+    import tempfile
+    run = (_S6 / "asterisk" / "run").read_text()
+    exec_lines = [l.strip() for l in run.splitlines() if l.strip().startswith("exec asterisk")]
+    check("asterisk/run: exactly one exec line", len(exec_lines) == 1)
+    check('asterisk/run: the exec line hard-codes no -v; it passes "$@"',
+          bool(exec_lines) and "-v" not in exec_lines[0] and '"$@"' in exec_lines[0])
+    marker = 'VERBOSITY="$(cat /run/switchboard/asterisk-verbosity'
+    check("asterisk/run: reads /run/switchboard/asterisk-verbosity", marker in run)
+    if marker not in run:
+        return
+    start = run.index(marker)
+    block = run[start:run.index("esac", start) + len("esac")]
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "asterisk-verbosity"
+        body = block.replace("/run/switchboard/asterisk-verbosity", str(f))
+        cases = (("0\n", ""), ("3\n", "-vvv"), (None, "-vvv"), ("", "-vvv"), ("junk\n", "-vvv"))
+        for content, want in cases:
+            if content is None:
+                f.unlink(missing_ok=True)
+            else:
+                f.write_text(content)
+            r = subprocess.run(["sh", "-c", body + '\nprintf "[%s]" "$*"'],
+                               capture_output=True, text=True)
+            check(f"asterisk/run: verbosity file {content!r} -> flags [{want}]",
+                  r.stdout == f"[{want}]")
+
+
 def test_the_bind_is_resolved_before_the_warning_that_depends_on_it():
     """console-web resolved BIND eight lines BELOW the notice that used it."""
     root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
