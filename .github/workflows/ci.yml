@@ -59,6 +59,31 @@ jobs:
         working-directory: switchboard
         run: python3 tests/test_switchboard_config.py
 
+  # A profile the host parser rejects never shows in the add-on log: the add-on
+  # comes back under docker-default, or under the previously loaded profile until
+  # the next host boot, when it fails to start. So compile apparmor.txt with a
+  # real parser on every change — fresh (-K: no cache), without loading it (-Q).
+  # The runner's parser is newer than the one HAOS ships (3.1.7), so this gates
+  # syntax; the release is still boot-tested against the host parser.
+  apparmor:
+    name: AppArmor profile compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure apparmor_parser
+        run: |
+          command -v apparmor_parser >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends apparmor; }
+          apparmor_parser --version | head -1
+
+      - name: Compile switchboard/apparmor.txt
+        run: |
+          sudo apparmor_parser -Q -K switchboard/apparmor.txt
+          names="$(sudo apparmor_parser -N -K switchboard/apparmor.txt)"
+          echo "profiles: ${names}"
+          test "${names}" = "switchboard"
+
   docker-smoke:
     # Build the add-on container for EVERY architecture config.yaml declares.
     # The build context is ./switchboard — HA Supervisor builds an add-on from

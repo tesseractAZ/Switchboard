@@ -24,7 +24,8 @@ import os
 import re
 import stat
 
-# tmpfs under /run: clips are ephemeral by design and deliberately never durable
+# Under /run (container-local, discarded when the Supervisor recreates the
+# container at every add-on start): clips are ephemeral by design and never durable
 # — they are rendered household speech, and this add-on does not persist that.
 # The same path inside the same container for the webui and the scheduler.
 ANNOUNCE_DIR = "/run/switchboard/announce"

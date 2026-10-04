@@ -1086,19 +1086,22 @@ Save & **Apply**; reboot the gateway if ports don't register.
 The GXW's web UI works, but its **SSH command shell** is the authoritative,
 scriptable way to read and write settings — and, importantly, the **only** way to
 *confirm* a value. Grandstream's `export`/HTTP config views show the *firmware
-default* for many Profile-1 codes, not the committed value; only `get P<n>` in the
-shell reflects what's actually running.
+default* for many Profile-1 codes, not the committed value; only `get <n>` in the
+shell reflects what's actually running. The shell takes the **bare number**:
+`get 4200` reads the dial plan, while `get P4200` prints `(null)` whatever the
+value is.
 
 ```
 ssh admin@<gateway-ip>        # password = the GXW admin password
 > config                      # enter config mode
-CONFIG> get P4200             # read a value (authoritative)
-CONFIG> set P85 3             # change a value
+CONFIG> get 4200              # read a value (authoritative; no "P")
+CONFIG> set 85 3              # change a value
 CONFIG> commit                # persist
 CONFIG> exit
 ```
 
-Useful P-codes (Profile 1 is shared by every FXS port assigned to it in §7.2):
+Useful P-codes (Profile 1 is shared by every FXS port assigned to it in §7.2; type
+them at the shell without the `P`):
 
 | P-code | Setting | Reference value |
 |--------|---------|-----------------|

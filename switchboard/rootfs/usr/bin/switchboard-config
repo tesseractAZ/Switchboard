@@ -320,7 +320,7 @@ def write(path: Path, content: str, mode: int = 0o640) -> None:
     them there (SIP auth passwords in pjsip.conf, the AMI secret in manager.conf).
     Creating with 0640 via os.open — instead of write_text + chmod — means there is
     never a window where the default umask leaves the file world-readable. Group
-    read goes to the asterisk group (Asterisk runs -U asterisk -G asterisk)."""
+    read goes to the asterisk group (Asterisk runs as the asterisk user and group)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)  # intentional: 0640 root:asterisk — the asterisk group MUST read it (that is the point)
     with os.fdopen(fd, "w") as fh:
@@ -2309,7 +2309,7 @@ def ensure_share_log_dir() -> None:
     number and this directory is readable from outside; the stamped trace now
     exists only in /data. See render_logger.)
 
-    Asterisk runs as -U asterisk, so it must own the directory to open the file.
+    Asterisk runs as the asterisk user, so it must own the directory to open the file.
     Best-effort throughout: a logging convenience must never block a PBX start."""
     try:
         SHARE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2474,7 +2474,7 @@ def ensure_state_dir() -> None:
     The wake-up store (wakeup/store.py) and the MWI store (webui/mwi_store.py) are
     written by BOTH the root services (wakeup-scheduler, webui) AND asterisk-user
     processes — the dial-42 wake-up AGI and the dialplan's
-    ``System(/usr/bin/switchboard-mwi clear ...)``. Asterisk runs as ``-U asterisk``,
+    ``System(/usr/bin/switchboard-mwi clear ...)``. Asterisk runs as the ``asterisk`` user,
     so those processes must be able to create the flock ``.lock`` and atomic-rename
     temp files NEXT TO the JSON (an os.replace needs write on the containing dir).
 
@@ -2627,7 +2627,9 @@ def write_operator_runtime(opts: dict) -> None:
 
 def ensure_voice_dirs() -> None:
     """Create the asterisk-writable ASR record dir + announcement-audio dir under
-    /run (tmpfs). These are needed by the wake-up, status, automation AND announce
+    /run (the container's writable layer, discarded when the Supervisor recreates
+    the container at every add-on start). These are needed by the wake-up, status,
+    automation AND announce
     AGIs — all toggleable INDEPENDENTLY of the voice operator — so they must exist
     regardless of ``operator.enabled`` (they used to live in write_operator_runtime,
     which early-returns when the operator is off, silently breaking dial-46/45)."""
@@ -2697,7 +2699,7 @@ def check_gateway_ports(opts: dict) -> list:
 def write_features_runtime(opts: dict) -> None:
     """Stage the HA-integrated voice-feature settings (smart wake-up + announce)
     for the AGIs, which run as the asterisk user and CANNOT read root-only
-    /data/options.json. Written to /run/switchboard/features.json (tmpfs,
+    /data/options.json. Written to /run/switchboard/features.json (container-local,
     asterisk-readable). Entity ids are validated here as defence in depth."""
     players = [e for e in (_clean_eid(p, ("media_player",)) for p in (opts.get("announce_players") or [])) if e]
     payload = {
@@ -2803,8 +2805,9 @@ def main() -> None:
     write(ASTERISK_ETC / "features.conf", render_features())
 
     # The AMI secret must exist on file for dialplan-System()-spawned consumers
-    # (switchboard-mwi) to authenticate; it lives in tmpfs (/run, RAM-backed), is
-    # regenerated on every boot, and AMI itself binds 127.0.0.1 only. Created 0640
+    # (switchboard-mwi) to authenticate; it lives under /run in the container's
+    # writable layer (not a tmpfs: it sits on disk until the Supervisor recreates
+    # the container at the next add-on start), is regenerated on every boot, and AMI itself binds 127.0.0.1 only. Created 0640
     # atomically (os.open) so no default-umask window ever exposes it; asterisk
     # group gets read via the group chown below.
     env_path = RUN_DIR / "ami.env"

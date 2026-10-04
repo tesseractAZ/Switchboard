@@ -1,33 +1,204 @@
 #include <tunables/global>
 
+# AppArmor profile for the Switchboard add-on.
+#
+# LOADING. The Supervisor copies this file, renames the single column-0
+# "profile switchboard" line to <repo-hash>_switchboard (flags kept) and loads
+# it in enforce mode. Its loader counts column-0 "profile" lines and refuses a
+# file with more than one, so any future child profile must be nested and
+# indented. A profile the parser rejects is not reported in the add-on log:
+# the add-on can come back under docker-default, or keep the previously
+# loaded profile until the next host boot, when it then fails to start.
+# After every change, check both inside the container, as root:
+#   cat /proc/1/attr/current      -> "<repo-hash>_switchboard (enforce)"
+#   d=/usr/.aa-probe-$$; mkdir "$d" 2>/dev/null && { rmdir "$d"; echo OLD; } \
+#     || echo NEW                 -> NEW means this version is loaded
+#   (a fresh name each run: "touch" on an existing file only sets times,
+#    which AppArmor does not check, so it cannot prove anything)
+#
+# SCOPE. One profile covers every process: s6 as PID1 (root), the root init
+# step and pollers, Asterisk and the AGIs (uid 100), whisper-server (uid 100)
+# and the backup hooks the Supervisor runs through docker exec. Rules cannot
+# tell these apart, so this profile removes only what no process uses.
+#
+# LOGGING. A plain "deny" is silent; "audit deny" logs a DENIED record. On
+# HAOS those records go to the host's AUDIT journal, not to dmesg — read them
+# with `journalctl _TRANSPORT=audit` on the host; an empty dmesg proves
+# nothing. Every deny here except /root and /home is "audit deny" because none
+# should fire in normal operation: a record means a new writer to fix, or an
+# intrusion.
+#
+# PARSER. There is no "abi" line, so the host parser (AppArmor 3.1.7 on HAOS
+# 18) compiles against its default feature set: file, capability, mount,
+# signal and ptrace rules are enforced; network rules (unix included) are
+# not. Validate every edit with a fresh, cache-free compile:
+#   apparmor_parser -Q -K --warn=abi --warn=rule-not-enforced <copy>
+#     (expect only the default-feature-abi and network-not-enforced notes;
+#      anything else means the parser or kernel features changed)
+
 profile switchboard flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
 
-  # The container runs under this named AppArmor profile (mediated — no host
-  # escape). We grant broad file/capability/signal/network access because
-  # s6-overlay's init plus Asterisk need it across many paths; this can be
-  # tightened later. This mirrors the documented Home Assistant add-on pattern.
+  # --- Baseline grants -----------------------------------------------------
+
+  # "file," stays. It grants read, write, append, link, lock, mmap and
+  # inherit-exec on every path. s6-overlay re-opens /init for READING on
+  # shutdown and restart; a sibling add-on that replaced "file," with a
+  # per-path list holding "/init ix" (exec without read) crash-looped with
+  # "cannot open /init: Permission denied". Tighten only by subtracting with
+  # the deny rules below (a deny always wins over an allow), never by removing
+  # "file,". The old per-path ix/rwix/rwk lines are gone because "file,"
+  # already granted all of it.
   file,
+
+  # "signal," stays. The container has its own PID namespace and every process
+  # carries this one label, so narrowing protects nothing, and a wrong peer
+  # would block the runtime's SIGTERM to PID1 or s6's stop signals. The
+  # Supervisor's rename also means a literal peer=switchboard never matches.
   signal,
-  capability,
+
+  # "network," stays. Without an "abi" line no network rule is enforced; this
+  # line keeps sockets working if one is added later. Raw and packet sockets
+  # are blocked through the capability list instead (net_raw below).
   network,
 
-  # s6-overlay init system: ensure the boot chain can exec.
-  /init ix,
-  /bin/** ix,
-  /usr/bin/** ix,
-  /usr/sbin/** ix,
-  /run/{s6,s6-rc*,service}/** ix,
-  /package/** ix,
-  /command/** ix,
-  /etc/s6-overlay/** ix,
-  /etc/services.d/** rwix,
-  /etc/cont-init.d/** rwix,
-  /etc/cont-finish.d/** rwix,
-  /run/{,**} rwk,
-  /dev/tty rw,
+  # --- Capabilities: explicit allow list -----------------------------------
+  # Replaces the former blanket "capability,". An unlisted capability is
+  # denied and logged, so a missing entry shows on the first boot.
 
-  # bashio helpers used by the run scripts.
-  /usr/lib/bashio/** ix,
-  /tmp/** rwk,
+  # switchboard-config ownership repair at boot; the asterisk run script chown.
+  capability chown,
+  # Root writes into asterisk-owned dirs: /etc/asterisk (0750) at boot,
+  # /data/state and /share/switchboard (2775) every poller cycle, backup hooks.
+  capability dac_override,
+  # Root chmod/fchmod of asterisk-owned files and dirs.
+  capability fowner,
+  # Keeps the setgid bit on /data/state and /share/switchboard. Without it the
+  # kernel strips the bit silently, root-created files land in group root and
+  # the AGIs lose write access to the shared ledgers.
+  capability fsetid,
+  # Root s6 stopping uid-100 Asterisk, whisper-server, astcanary and AGIs.
+  # Without it a stop waits for the runtime's timeout and SIGKILL.
+  capability kill,
+  # s6-setuidgid, which starts Asterisk and whisper-server as uid 100.
+  capability setgid,
+  capability setuid,
+  # Only needed when console_port or console_web_port is set below 1024 (the
+  # schema type "port" allows it). Every default listener is on 1024 or above.
+  capability net_bind_service,
+
+  # Granted by the container runtime but used by nothing here, so denied and
+  # logged if attempted: setpcap, sys_chroot, mknod, audit_write (by omission)
+  # and the two below. net_raw: no raw or packet socket user; with host
+  # networking, AF_PACKET plus net_raw would let a compromised root process
+  # sniff or inject on the host LAN. setfcap: a "w" deny does not cover
+  # setxattr, so file capabilities on shipped binaries are refused here.
+  audit deny capability net_raw,
+  audit deny capability setfcap,
+
+  # Outside the container's bounding set today, so the kernel refuses them
+  # before AppArmor is asked. Denied here so that a later "privileged:" grant
+  # or a re-added blanket "capability," cannot hand them out. net_admin is
+  # what Asterisk asks for at start; with host networking it would reconfigure
+  # the HOST's network. dac_read_search is the open_by_handle_at container
+  # escape; bpf and perfmon are kernel attack surface.
+  audit deny capability sys_admin,
+  audit deny capability sys_module,
+  audit deny capability sys_rawio,
+  audit deny capability sys_ptrace,
+  audit deny capability sys_boot,
+  audit deny capability sys_time,
+  audit deny capability syslog,
+  audit deny capability mac_admin,
+  audit deny capability mac_override,
+  audit deny capability net_admin,
+  audit deny capability dac_read_search,
+  audit deny capability bpf,
+  audit deny capability perfmon,
+
+  # --- Write-locks on shipped code and data --------------------------------
+  # Nothing writes these at runtime (no apk or pip). They hold the binaries,
+  # libraries, Asterisk modules (/usr/lib/asterisk/modules), the whisper model
+  # (/usr/share/whisper) and the Python code (/usr/share/switchboard). The
+  # Supervisor recreates the container on every add-on start, so these locks
+  # guard one container lifetime: code that s6, the backup hooks and the AGIs
+  # run later. Persistence across restarts lives in /data, /config and /share,
+  # which stay writable.
+  #
+  # Mask is "wl", never "wal". "w" already includes append, and the parser
+  # rejects any mask holding both "a" and "w"; a "wal" mask kept a sibling
+  # add-on from starting after a host reboot.
+  #
+  # A "w" deny covers more than writes: the kernel also refuses chmod, chown,
+  # create, unlink, rename, mkdir, symlink, truncate and unix-socket bind on
+  # these paths, even for root. Only utimes and setxattr fall outside it
+  # (hence the setfcap deny above). "l" refuses hardlinks named inside these
+  # trees. A hardlink named elsewhere (ln /usr/bin/x /tmp/x) is refused by the
+  # link-subset check that "file,"'s own "l" carries, because the new name
+  # would have "w" the target lacks: never replace "file," with a "link" rule
+  # that lacks "subset". r, m, k and x are untouched, so loading and
+  # executing still work.
+  #
+  # These rely on two image facts, or they would log on every boot and call:
+  #  - Python bytecode is precompiled at build and PYTHONDONTWRITEBYTECODE is
+  #    set, so no process tries to create __pycache__ under /usr;
+  #  - the asterisk run script chowns /var/lib/asterisk non-recursively, so it
+  #    no longer walks agi-bin, sounds and moh.
+  audit deny /init wl,
+  audit deny /bin/{,**} wl,
+  audit deny /sbin/{,**} wl,
+  audit deny /lib/{,**} wl,
+  audit deny /usr/{,**} wl,
+
+  # AGI scripts (run by Asterisk as uid 100) and shipped audio, including the
+  # 911 notice prompt. Recordings use absolute paths under
+  # /run/switchboard/asr; Asterisk would resolve a relative recording name
+  # into sounds/, which this refuses. /var/lib/asterisk itself (astdb.sqlite3
+  # and its journal) and keys/ stay writable.
+  audit deny /var/lib/asterisk/{agi-bin,sounds,moh}/{,**} wl,
+
+  # Not locked yet; each needs a host soak first:
+  #  - /command, /package, /etc/s6-overlay: PID1 trees. A wrong deny there is
+  #    an init crash-loop that the add-on log never shows.
+  #  - /etc/asterisk, /etc/localtime, /etc/timezone: switchboard-config
+  #    rewrites them at every boot, so they need a child profile for it.
+  #  - /var/spool/asterisk, /config, /data/options.json.
+  # Never lock /run, /tmp, /data as a whole, /share/switchboard,
+  # /var/run/asterisk, /var/log/asterisk or the top level of
+  # /var/lib/asterisk: s6, Asterisk and the services write there, and s6
+  # executes run scripts from /run.
+
+  # --- Secrets and kernel interfaces ---------------------------------------
+  # No process authenticates local users or keeps files under /root or /home.
+  # "r" also denies stat(), so an ls or find sweep over /etc logs a getattr
+  # denial for shadow. /root and /home are denied quietly: interactive
+  # docker-exec shells (HOME=/root) try to keep their history there.
+  audit deny /etc/{shadow,gshadow}{,-} r,
+  deny /root/** rw,
+  deny /home/** rw,
+  # Nothing writes kernel tunables or reads firmware and LSM state. The runtime
+  # mounts /proc/sys and /sys read-only today; these keep it so if that changes,
+  # and replace the docker-default denies this profile takes the place of.
+  audit deny /proc/sys/** w,
+  audit deny /proc/sysrq-trigger w,
+  audit deny /proc/{irq,bus,fs,driver,acpi,scsi,tty}/** w,
+  audit deny /sys/** w,
+  audit deny /sys/firmware/** r,
+  audit deny /sys/kernel/security/** r,
+
+  # --- Mount and ptrace ----------------------------------------------------
+  # Nothing mounts (s6-linux-init-shutdownd runs in container mode) and
+  # nothing traces another process. Both were already refused implicitly;
+  # these rules make that explicit and keep the record. Only "trace" is
+  # denied: the base abstraction's same-profile ptrace "read" stays, so
+  # /proc/<pid>/{exe,fd,environ} of other ROOT-owned processes stay readable
+  # for docker-exec diagnostics. uid-100 processes (Asterisk, whisper-server,
+  # the AGIs) are already unreadable to root: that needs CAP_SYS_PTRACE, which
+  # is outside the bounding set. A bare "deny ptrace," would also take away
+  # the read silently.
+  audit deny mount,
+  audit deny remount,
+  audit deny umount,
+  audit deny pivot_root,
+  audit deny ptrace (trace),
 }

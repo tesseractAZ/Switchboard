@@ -521,7 +521,7 @@ def test_a_playback_too_short_to_be_recorded_IS_replayed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_nothing_from_before_this_process_started_is_replayed_or_judged(tmp_path):
     """A restart inside the retry window abandons the clip, deliberately: the clip
-    lives in tmpfs the restart clears, the resolving record comes from a detached
+    lives under /run, which the restart clears, the resolving record comes from a detached
     process the restart kills, and before an upgrade it may have been a build that
     wrote none. So the new process neither replays it nor counts its attempts nor
     files a verdict for it."""
@@ -538,7 +538,7 @@ def test_nothing_from_before_this_process_started_is_replayed_or_judged(tmp_path
 def test_attempts_after_the_boundary_are_counted_from_the_ledger(tmp_path):
     """★ THE BUDGET LIVES ON DISK. Counting attempts in memory would let the
     restart that causes this defect hand the same clip a fresh budget — and the
-    clip is still on the tmpfs for the first five minutes, so it would play."""
+    clip is still under /run for the first five minutes, so it would play."""
     b = _Bench(tmp_path)
     b.queue(ago=100)
     b.attempted(ago=80, attempt=1)
