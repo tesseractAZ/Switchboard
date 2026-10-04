@@ -185,6 +185,13 @@ SOURCE_CONSOLE = "console"
 # three Do-Not-Disturb-bypassing pushes saying nobody had picked up — to the
 # person who had just spoken a new time into that handset.
 WAKEUP_SNOOZED = "snoozed"
+# ...and a wake-up that never rang because its time passed beyond the grace
+# window: the phone stayed busy or offline, or Switchboard itself was not running
+# (a power cut took the host down from 01:46 to 08:15 on 2026-10-04 and an 08:00
+# wake-up left no record anywhere but one log line). `reason` says which.
+WAKEUP_MISSED = "missed"
+MISSED_NOT_RUNNING = "not-running"
+MISSED_GRACE_EXPIRED = "grace-expired"
 
 # The longest an announcement may be. Read here rather than in app.py because the
 # reconciler MUST NOT judge an announcement undelivered while it is still
