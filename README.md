@@ -235,7 +235,10 @@ never tagged: tagging was manual until v0.46.1 and that one was missed. See
 The Ingress dashboard is reachable only from the Home Assistant Supervisor; the
 Asterisk Manager socket is loopback-only with a fresh random secret each boot and no
 shell-command privilege; the SIP trunk blocks international/premium prefixes and
-confines every transfer to internal destinations. **The operator console runs in
+confines every transfer to internal destinations. Asterisk runs as an unprivileged
+user with no capabilities, and the add-on's AppArmor profile refuses every capability
+the add-on does not use and any write to its shipped code, root included. **The
+operator console runs in
 the Home Assistant sidebar**, where your Home Assistant login is the only login,
 and the port it is served on refuses every connection whose peer is not the
 Supervisor (WebSocket upgrades included). There are three narrow HTTP exceptions.
