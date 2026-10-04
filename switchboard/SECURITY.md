@@ -485,9 +485,10 @@ granted broad file, signal, capability and network access. It now removes what n
 process in the add-on uses, but it still does not list every path the add-on may
 touch:
 
-- **Kept broad on purpose: `file,`, `signal,` and `network,`.** No read or execute is
-  ever refused. s6-overlay re-reads `/init` when the container stops, and a per-path
-  list that misses one read crash-loops the container. With no `abi` line, the host's
+- **Kept broad on purpose: `file,`, `signal,` and `network,`.** No execute is ever
+  refused, and no read outside `/root`, `/home` and the paths under *Also refused*
+  below. s6-overlay re-reads `/init` when the container stops, and a per-path list
+  that misses one read crash-loops the container. With no `abi` line, the host's
   parser (AppArmor 3.1.7) does not enforce network rules in any case.
 - **Capabilities are an explicit list:** `chown`, `dac_override`, `fowner`, `fsetid`,
   `kill`, `setgid`, `setuid` and `net_bind_service`. Everything else is refused. That
@@ -496,17 +497,25 @@ touch:
   grant could hand out.
 - **Shipped code is write-locked** for every process, root included: `/usr`, `/bin`,
   `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees. A lock
-  refuses writes, hardlinks, `chmod` and `chown` there. Python bytecode is compiled
-  into the image and never written at runtime.
+  refuses writes, creating, deleting or renaming files, `mkdir`, truncation, hardlinks,
+  `chmod` and `chown` there; only timestamps and extended attributes fall outside it,
+  and file capabilities are refused through `setfcap` instead. Python bytecode is
+  compiled into the image and never written at runtime. Inside the container this
+  also means `apk add` and `pip install` are refused, and an AGI or any other shipped
+  file cannot be edited in place (`Permission denied`): a change means a new image.
 - **Asterisk starts as the `asterisk` user with no permitted capabilities.** Until
   v0.108.0 it started as root and switched user itself, which kept root's permitted
   capability set. A compromise of the process that talks to the SIP trunk could then
   have raised `dac_override`, `setuid` or `chown` again.
-- **Also refused:** reading `/etc/shadow`; writing kernel tunables (`/proc/sys`,
-  `/sys`); reading firmware and LSM state; mounting; tracing another process.
+- **Also refused:** reading `/etc/shadow` and `/etc/gshadow`; writing kernel tunables
+  (`/proc/sys`, `/sys`); reading firmware and LSM state; mounting; tracing another
+  process; reading or writing under `/root` or `/home`, which nothing in the add-on
+  uses. Those two are refused without a record, because an interactive `docker exec`
+  shell (`HOME=/root`) tries to keep its history there.
 - **Not locked yet:** the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`),
-  `/etc/asterisk` (rewritten at every boot), `/var/spool/asterisk`, and the
-  persistent volumes `/data`, `/share` and `/config`. The add-on writes to these, or a
+  `/etc/asterisk` (rewritten at every boot), `/var/spool/asterisk`, `/run` and `/tmp`
+  (s6 runs its service scripts from `/run`), and the persistent volumes `/data`,
+  `/share` and `/config`. The add-on writes to these, or a
   wrong rule there would be a crash-loop that the add-on log never shows. They are
   also where anything would persist across restarts: the Supervisor recreates the
   container at every add-on start, so the locked trees only matter within one
@@ -521,9 +530,13 @@ network and volumes, through:
 - service restarts;
 - a full stop and start.
 
-The only denials recorded were the three deliberate write probes.
+The only denials recorded were the three deliberate write probes. After deployment
+the profile was confirmed in enforce mode, a fresh write probe under `/usr` was
+refused, and the audit journal stayed clean through calls to the clock, the operator
+and announcements. The CI job `apparmor` compiles the profile on every change, and
+`tests/test_apparmor_profile.py` pins its rules and the image facts they rely on.
 
-Every rule except the ones for `/root` and `/home` is `audit deny`, so a firing rule
+Every deny rule except the ones for `/root` and `/home` is `audit deny`, so a firing rule
 leaves a `DENIED` record. On HAOS those records go to the host's **audit journal**
 (`journalctl _TRANSPORT=audit`), not to `dmesg`. Any record there that names the
 add-on's profile means an access the add-on is not expected to make.

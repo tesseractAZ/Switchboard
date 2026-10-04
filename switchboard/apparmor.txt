@@ -35,6 +35,19 @@
 #   apparmor_parser -Q -K --warn=abi --warn=rule-not-enforced <copy>
 #     (expect only the default-feature-abi and network-not-enforced notes;
 #      anything else means the parser or kernel features changed)
+#
+# TESTING. A compile proves only that the parser accepts the file. The CI job
+# "apparmor" compiles it with a newer parser on every push and pull request;
+# tests/test_apparmor_profile.py pins its invariants (the three blanket
+# grants, the capability list, the "wl" write-locks, the trees no deny may
+# touch) and the image facts the write-locks rely on. Before a release,
+# boot-test against the host's parser: load the copy under a TEST name (never
+# the live one) and run an isolated copy of the add-on under it, on its own
+# bridge network and volumes, with dummy options and the trunk off:
+#   docker run --security-opt apparmor=<test-name> ...
+# Take it through boot, one call per feature code, the backup hooks, service
+# restarts and a full stop/start, then read the host's audit journal: only
+# deliberate probes may appear.
 
 profile switchboard flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
@@ -99,8 +112,8 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   # Outside the container's bounding set today, so the kernel refuses them
   # before AppArmor is asked. Denied here so that a later "privileged:" grant
   # or a re-added blanket "capability," cannot hand them out. net_admin is
-  # what Asterisk asks for at start; with host networking it would reconfigure
-  # the HOST's network. dac_read_search is the open_by_handle_at container
+  # what Asterisk asked to keep while it switched user itself (-U/-G, before
+  # 0.108.0); with host networking it would reconfigure the HOST's network. dac_read_search is the open_by_handle_at container
   # escape; bpf and perfmon are kernel attack surface.
   audit deny capability sys_admin,
   audit deny capability sys_module,

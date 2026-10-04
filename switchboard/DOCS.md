@@ -1720,7 +1720,11 @@ The assistant's own ledger is deliberately **not** mirrored — see
   compiles whisper.cpp from source), with `fastapi` / `uvicorn` / `jinja2` and
   best-effort `espeak-ng`, `ffmpeg`, and the ConfBridge/Page modules.
 - Runs under an **AppArmor** profile and **host networking** (required for SIP +
-  RTP on your LAN). Architectures: `amd64`, `aarch64`.
+  RTP on your LAN). Since 0.108.0 the profile allows only the capabilities the add-on
+  uses (no raw sockets) and write-locks the shipped code for every process, and
+  Asterisk runs as the unprivileged `asterisk` user with no capabilities
+  ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)).
+  Architectures: `amd64`, `aarch64`.
 
 ---
 
@@ -1770,13 +1774,14 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
 | Investigating something that happened **before** a restart/reboot | Asterisk's notices, warnings and errors, plus endpoint reachability (`Endpoint <n> is now Unreachable`, since v0.84.0) and each phone's registration being added or removed, are written durably to `/data/state/asterisk.log` on the persistent data volume, so registration flaps, trunk timeouts and RTP errors from before a crash are there. Since v0.107.0 each line carries the full date, milliseconds and UTC offset, so it can be placed against `heartbeat.jsonl` (UTC) and the gateway's own clock. That file is private to the add-on (it also carries the dialplan trace) and is trimmed at boot to its newest half once it passes 8 MB. The copy readable from the host is `/share/switchboard/asterisk.log`: notices, warnings and errors only, with SIP accounts and private LAN addresses scrubbed out. The add-on's Log tab reaches back about two days, across a host reboot. |
-| Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting: on the reference GXW4216 V2 a restart takes about a minute. A gateway that is back within its registration window renews most registrations instead of re-creating them, so "most phones stayed registered" does **not** rule a restart out. To tell: the gateway's status page shows its **System Up Time**; with `P81` (Unregister On Reboot, §7.3) set to `1` the gateway clears its registrations when it restarts, which `/data/state/asterisk.log` records as `Removed contact … due to request` — a network stall never produces that line. The gateway's own **Automatic Reboot** schedule is `P21929` (`0` off, `1` daily, `2` weekly, `3` monthly) at hour `P21930` and day of the month `P28118`. |
+| Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting: on the reference GXW4216 V2 a restart takes about a minute. Without `P81` (below), a gateway that is back within its registration window renews most registrations instead of re-creating them, so "most phones stayed registered" does **not** rule a restart out. To tell: the gateway's status page shows its **System Up Time**; with `P81` (Unregister On Reboot, §7.3) set to `1` the gateway clears its old registrations as it boots, which `/data/state/asterisk.log` records as `Removed contact … due to request` followed by `Added contact` in the same second. The pair comes at the **end** of the outage, as the phones come back, not when they drop, and a power cut leaves it too. A network stall never produces the `due to request` line. The gateway's own **Automatic Reboot** schedule is `P21929` (`0` off, `1` daily, `2` weekly, `3` monthly) at hour `P21930` and day of the month `P28118`. |
 | LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. |
+| A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
 
@@ -1801,6 +1806,9 @@ essentials:
   boot and no shell-command privilege.
 - The trunk blocks international/premium prefixes and confines transfers to
   internal destinations.
+- Inside the container, Asterisk runs as the unprivileged `asterisk` user with no
+  capabilities, and the AppArmor profile refuses raw sockets and any write to the
+  shipped code, root included.
 - **Change the default room secrets** before your phones register.
 - Both standalone consoles bind to `127.0.0.1` by default since 0.94.0, so
   neither is on your LAN as shipped. The telnet console has no authentication at
