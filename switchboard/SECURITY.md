@@ -100,8 +100,11 @@ or smuggle a dial string. Client-facing errors are generic (`forbidden`,
 The Manager socket that the dashboard, console, and monitors use is bound to
 `127.0.0.1:5038` with a permit list restricted to loopback. Its password is a
 **fresh 24-character random secret generated on every boot** and written only to
-the generated config and a tmpfs file (`0640`, group `asterisk`) — never to
-persistent disk.
+the generated config and a file under `/run/switchboard` (`0640`, group
+`asterisk`) — never to `/data`, `/share` or `/config`, so never into a backup.
+Both sit in the container's own writable layer, not in RAM: `/run` is not a
+tmpfs here. That layer is discarded when the Supervisor recreates the container,
+which it does at every add-on start.
 
 The Manager account deliberately **withholds the `command` write class** — Asterisk's
 CLI `Command` action is remote code execution, and it is the one dangerous
@@ -475,12 +478,55 @@ console, or binding it to a single LAN address (which excludes 127.0.0.1),
 leaves `/console/` showing "unavailable". `0.0.0.0` includes loopback and keeps it
 working.
 
-### The AppArmor profile is coarse
+### The AppArmor profile is narrowed, not a per-path sandbox
 
-The add-on runs under a named AppArmor profile that mediates the container (no host
-escape), but the profile grants broad file/signal/capability/network access — the
-documented Home Assistant add-on pattern for an s6 + Asterisk workload. Treat it as
-container mediation, not a least-privilege sandbox.
+The add-on runs under its own AppArmor profile (`apparmor.txt`). Until v0.108.0 it
+granted broad file, signal, capability and network access. It now removes what no
+process in the add-on uses, but it still does not list every path the add-on may
+touch:
+
+- **Kept broad on purpose: `file,`, `signal,` and `network,`.** No read or execute is
+  ever refused. s6-overlay re-reads `/init` when the container stops, and a per-path
+  list that misses one read crash-loops the container. With no `abi` line, the host's
+  parser (AppArmor 3.1.7) does not enforce network rules in any case.
+- **Capabilities are an explicit list:** `chown`, `dac_override`, `fowner`, `fsetid`,
+  `kill`, `setgid`, `setuid` and `net_bind_service`. Everything else is refused. That
+  includes `net_raw`, which with host networking would let a compromised process
+  sniff or inject on the LAN. It also includes the capabilities a later `privileged:`
+  grant could hand out.
+- **Shipped code is write-locked** for every process, root included: `/usr`, `/bin`,
+  `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees. A lock
+  refuses writes, hardlinks, `chmod` and `chown` there. Python bytecode is compiled
+  into the image and never written at runtime.
+- **Asterisk starts as the `asterisk` user with no permitted capabilities.** Until
+  v0.108.0 it started as root and switched user itself, which kept root's permitted
+  capability set. A compromise of the process that talks to the SIP trunk could then
+  have raised `dac_override`, `setuid` or `chown` again.
+- **Also refused:** reading `/etc/shadow`; writing kernel tunables (`/proc/sys`,
+  `/sys`); reading firmware and LSM state; mounting; tracing another process.
+- **Not locked yet:** the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`),
+  `/etc/asterisk` (rewritten at every boot), `/var/spool/asterisk`, and the
+  persistent volumes `/data`, `/share` and `/config`. The add-on writes to these, or a
+  wrong rule there would be a crash-loop that the add-on log never shows. They are
+  also where anything would persist across restarts: the Supervisor recreates the
+  container at every add-on start, so the locked trees only matter within one
+  container's lifetime.
+
+How it was verified: the profile was compiled fresh with the host's own parser and
+loaded under a test name. An isolated copy of the add-on ran under it, on its own
+network and volumes, through:
+- boot;
+- one call to each feature code;
+- the backup hooks;
+- service restarts;
+- a full stop and start.
+
+The only denials recorded were the three deliberate write probes.
+
+Every rule except the ones for `/root` and `/home` is `audit deny`, so a firing rule
+leaves a `DENIED` record. On HAOS those records go to the host's **audit journal**
+(`journalctl _TRANSPORT=audit`), not to `dmesg`. Any record there that names the
+add-on's profile means an access the add-on is not expected to make.
 
 ### The cordless handset's certificate
 

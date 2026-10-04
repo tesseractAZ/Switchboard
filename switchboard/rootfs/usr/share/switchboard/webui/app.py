@@ -792,7 +792,7 @@ def _announce_name(ext: str) -> str:
 
 def _cleanup_announce_dir(max_age: int = 300) -> None:
     """Prune announcement WAVs older than max_age seconds. Best-effort; never raises
-    into a request, so the ephemeral tmpfs clips don't accumulate."""
+    into a request, so the ephemeral clips under /run don't accumulate."""
     try:
         os.makedirs(ANNOUNCE_DIR, exist_ok=True)
         now = time.time()

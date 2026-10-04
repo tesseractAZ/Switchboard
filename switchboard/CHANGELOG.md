@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.108.0
+
+**The AppArmor profile is narrowed.** It granted every capability, and every file,
+signal and network access. It now removes what no process in the add-on uses:
+- **Capabilities are an explicit list.** chown, dac_override, fowner, fsetid,
+  kill, setgid, setuid and net_bind_service are allowed. Everything else is
+  refused, including net_raw, which with host networking would allow sniffing
+  on the LAN.
+- **Shipped code is write-locked** for every process, root included: `/usr`,
+  `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and
+  music-on-hold trees. A lock refuses writes, hardlinks, chmod and chown.
+- **Explicit refusals:** reading `/etc/shadow`, writing kernel tunables,
+  reading firmware and LSM state, mount, and tracing another process.
+
+`file,`, `signal,` and `network,` stay broad, so no read or execute is ever
+refused. s6-overlay re-reads `/init` when the container stops, and a per-path
+list that misses one read crash-loops the container. Every new deny is audited.
+
+The profile was compiled fresh with the host's own parser (AppArmor 3.1.7) and
+loaded under a test name. An isolated copy of the add-on then ran under it, with
+its own network and volumes, through:
+- boot;
+- one call to each feature code;
+- the backup hooks;
+- service restarts;
+- a full stop and start.
+
+The only denials recorded were the three deliberate write probes. On HAOS those
+records go to the host's audit journal (`journalctl _TRANSPORT=audit`), not to
+`dmesg`; the profile header and SECURITY.md now say so. A new CI job compiles
+the profile on every change, and tests pin its shape.
+
+**Asterisk starts as the `asterisk` user, with no permitted capabilities.** It
+used to start as root and switch user itself (`-U`/`-G`). That kept root's
+permitted capability set, because Asterisk asks to keep capabilities so that it
+can hold on to net_admin, which the container never grants. A compromised
+Asterisk — the process that talks to the SIP trunk — could then have raised
+dac_override, setuid or chown again. It now starts through `s6-setuidgid`, as
+whisper-server already did. Verified in the boot test: its permitted and effective
+capability sets are both empty.
+
+**Python bytecode is compiled into the image.** Nothing wrote `__pycache__` at
+build time, so root services wrote it under `/usr` at runtime. The AGIs, running
+as the asterisk user under root-owned code, could not write it, so they
+recompiled every module on every call. `PYTHONDONTWRITEBYTECODE` is now set and
+the bytecode is precompiled.
+
+**The Asterisk start script no longer chowns its sounds and AGIs.** Only
+`/var/lib/asterisk` itself (for astdb) and `keys/` are given back to the
+asterisk user. A recursive chown walked the whole sound tree on every start, and
+under the write-lock each file would be refused and logged.
+
+**Corrections:**
+- `/run` is not a tmpfs in this container. Several comments and SECURITY.md
+  called it RAM-backed. The AMI secret and the announcement clips there sit in
+  the container's own writable layer on disk, which the Supervisor discards
+  when it recreates the container at every add-on start. They never go into
+  `/data`, `/share`, `/config` or a backup.
+- The gateway's command shell takes bare numbers: `get 4200`, not `get P4200`,
+  which prints `(null)` whatever the value. The manual (§7.3) said otherwise.
+- `.dockerignore` sat at the repository root, outside the `./switchboard` build
+  context, so no build read it. It now lives in `switchboard/` and also
+  excludes `.pytest_cache`.
+
 ## 0.107.0
 
 **`log_level` now does what its documentation says.** The manual, SECURITY.md

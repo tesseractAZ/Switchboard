@@ -171,6 +171,18 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /etc/s6-overlay/s6-rc.d/devhealth/run \
     && chmod +x /usr/share/switchboard/devhealth/poller.py
 
+# Python bytecode is compiled HERE, once, and never written at runtime. The
+# AppArmor profile write-locks /usr, so a process that tried to create a
+# __pycache__ there would be refused and logged — and the AGIs, running as the
+# asterisk user under root-owned code, recompiled every module on every call.
+# The add-on's own code compiles strictly (a syntax error fails the build); the
+# stdlib pass skips the test trees that are deliberately not valid Python 3.
+# Default timestamp invalidation is kept, so an edited .py is never shadowed by
+# a stale .pyc.
+ENV PYTHONDONTWRITEBYTECODE=1
+RUN python3 -m compileall -q -j 0 /usr/share/switchboard \
+    && python3 -m compileall -q -j 0 -x '/(tests?|lib2to3|idlelib)/' /usr/lib/python3.12
+
 EXPOSE 5060/udp
 EXPOSE 8099/tcp
 EXPOSE 8100/tcp
@@ -186,4 +198,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.107.0"
+    io.hass.version="0.108.0"

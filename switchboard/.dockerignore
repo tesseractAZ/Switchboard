@@ -1,0 +1,15 @@
+# The image is built from this directory (context ./switchboard — CI, the release
+# workflow and the Supervisor all build from here), and `COPY rootfs /` would
+# otherwise bake in whatever the developer's machine left lying around. A stale
+# .pyc is not inert: Python will import a bytecode file whose .py source has been
+# renamed or deleted if it lands in a directory on sys.path, so a rename that
+# looks complete in git can be silently undone inside the container. Since
+# v0.108.0 the AppArmor profile write-locks /usr and the AGI tree, so a stale
+# cache baked in here could not even be replaced at runtime.
+#
+# Until v0.108.0 this file sat at the repository root, outside the build
+# context, where no build ever read it.
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.DS_Store

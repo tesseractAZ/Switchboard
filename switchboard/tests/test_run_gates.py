@@ -223,7 +223,8 @@ def test_the_asterisk_run_script_takes_its_verbosity_from_the_init_step():
     step writes. Runs the script's REAL block, under `sh` as on the Pi."""
     import tempfile
     run = (_S6 / "asterisk" / "run").read_text()
-    exec_lines = [l.strip() for l in run.splitlines() if l.strip().startswith("exec asterisk")]
+    exec_lines = [l.strip() for l in run.splitlines()
+                  if l.strip().startswith("exec ") and " asterisk -f" in l]
     check("asterisk/run: exactly one exec line", len(exec_lines) == 1)
     check('asterisk/run: the exec line hard-codes no -v; it passes "$@"',
           bool(exec_lines) and "-v" not in exec_lines[0] and '"$@"' in exec_lines[0])
