@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.108.2
+
+**A wake-up missed while Switchboard was down is now recorded and reported.**
+On 2026-10-04 a power cut took the host down from 01:46 to 08:15, and an 08:00
+wake-up did not ring. When Switchboard started again it dropped the wake-up as
+too late, which is right, but it left no record except one log line. Its single
+notification attempt was made while Home Assistant was still starting, and went
+nowhere.
+
+- **The miss is recorded in the delivery ledger** as `missed`, with a `reason`:
+  - `not-running`: the wake-up was due before Switchboard started;
+  - `grace-expired`: the phone stayed busy or offline through its grace window.
+- **The notification names the cause.** It no longer blames a busy phone for an
+  outage.
+- **The notification is retried every tick until Home Assistant accepts it,** for
+  up to an hour (`WAKEUP_MISSED_NOTIFY_RETRY_SECONDS`).
+
 ## 0.108.1
 
 **Documentation brought in line with the AppArmor review.** No change to how the

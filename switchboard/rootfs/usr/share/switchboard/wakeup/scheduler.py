@@ -820,28 +820,76 @@ def _record_retry_failure(cand: dict, attempt: int, reason: str,
         log(f"could not record the failed retry of {cand['sound']}: {exc}")
 
 
+# Missed-wake-up notifications that Home Assistant has not accepted yet, by ext.
+# ★ A SINGLE ATTEMPT IS NOT ENOUGH. This scheduler starts in the services phase,
+# before Home Assistant Core. After a power cut (2026-10-04: host down 01:46 to
+# 08:15) the first tick finds the morning's wake-up already missed and reports it
+# while Core is still booting — the one notify went nowhere and the miss stayed
+# invisible. So a notification is kept and retried every tick until notify()
+# reports success, for up to NOTIFY_RETRY_FOR seconds.
+_pending_missed: dict = {}
+NOTIFY_RETRY_FOR = int(os.environ.get("WAKEUP_MISSED_NOTIFY_RETRY_SECONDS", "3600"))
+
+
+def _missed_message(ext: str, hhmm, late: int, not_running: bool) -> str:
+    if not_running:
+        return (f"Extension {ext}'s {hhmm} wake-up call did not ring: Switchboard "
+                f"was not running at that time (the add-on or Home Assistant was "
+                f"down, e.g. after a power cut). It was {late} minutes past due "
+                f"when Switchboard started again, too late to ring.")
+    return (f"Extension {ext}'s {hhmm} wake-up call could not be delivered — the "
+            f"phone stayed busy or offline through its grace window (gave up "
+            f"{late} minutes late).")
+
+
+def _flush_missed_notifications(now: float) -> None:
+    """Post every pending missed-wake-up notification; keep the ones that fail."""
+    if ha_client is None:
+        _pending_missed.clear()
+        return
+    for ext, item in list(_pending_missed.items()):
+        if now - item["since"] > NOTIFY_RETRY_FOR:
+            log(f"missed-wake-up notification for ext {ext} still not accepted "
+                f"after {NOTIFY_RETRY_FOR}s; giving up (the ledger has the record)")
+            del _pending_missed[ext]
+            continue
+        ok = False
+        try:
+            ok = bool(ha_client.notify(item["message"],
+                                       title="Switchboard: missed wake-up",
+                                       notification_id=f"switchboard_missed_wakeup_{ext}"))
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not post missed-wake-up notification yet: {exc}")
+        if ok:
+            del _pending_missed[ext]
+            log(f"missed-wake-up notification posted for ext {ext}")
+
+
 def tick() -> None:
     now = time.time()
     _reconcile_rings(now)
     fired, missed = store.due(now)
     for ext, entry in missed:
-        late = int((now - entry.get("target_epoch", now)) / 60)
+        target = entry.get("target_epoch", now)
+        late = int((now - target) / 60)
         hhmm = entry.get("hhmm")
-        log(f"missed wake-up for ext {ext} ({hhmm}) — {late} min late; skipped")
-        # A missed wake-up used to be log-only (invisible unless you tailed the
-        # add-on log). Surface it in Home Assistant's notifications so the user
-        # actually learns the phone never got its wake-up call.
+        # Due before this process started: nothing was running to ring it.
+        not_running = target < _STARTED
+        reason = ("not-running" if not_running else "grace-expired")
+        if _delivery is not None:
+            reason = (_delivery.MISSED_NOT_RUNNING if not_running
+                      else _delivery.MISSED_GRACE_EXPIRED)
+        log(f"missed wake-up for ext {ext} ({hhmm}) — {late} min late; skipped "
+            f"({'Switchboard was not running at the set time' if not_running else 'phone busy or offline through the grace window'})")
+        # A missed wake-up used to be log-only, then one notify attempt. It is now
+        # a ledger row (the record survives even if no notification ever lands)...
+        _record(ext, _delivery.WAKEUP_MISSED if _delivery is not None else "missed",
+                hhmm=hhmm, late_min=late, reason=reason)
+        # ...and a notification retried until Home Assistant accepts it.
         if ha_client is not None:
-            try:
-                ha_client.notify(
-                    f"Extension {ext}'s {hhmm} wake-up call could not be delivered — "
-                    f"the phone stayed busy or offline through its grace window "
-                    f"(gave up {late} minutes late).",
-                    title="Switchboard: missed wake-up",
-                    notification_id=f"switchboard_missed_wakeup_{ext}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log(f"could not post missed-wake-up notification: {exc}")
+            _pending_missed[ext] = {"since": now,
+                                    "message": _missed_message(ext, hhmm, late, not_running)}
+    _flush_missed_notifications(now)
     if not fired:
         return
 

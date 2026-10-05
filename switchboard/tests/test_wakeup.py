@@ -865,3 +865,98 @@ def test_the_escalation_does_not_claim_a_ring_that_never_happened(tmp_path):
           pushes and "rung twice" in pushes[0])
     check("re-ring: and it does NOT claim the attempt was skipped",
           pushes and "second attempt was not made" not in pushes[0])
+
+
+def test_a_missed_wakeup_is_recorded_and_its_notification_retried(tmp_path):
+    """2026-10-04: a power cut took the host down from 01:46 to 08:15. At 08:15 the
+    scheduler found the 08:00 wake-up already missed, logged one line, and made ONE
+    notify attempt while Home Assistant Core was still booting — so the miss left
+    no ledger row and no notification. Now: a `missed` row with the cause, and a
+    notification retried every tick until Home Assistant accepts it."""
+    import json as _json
+    import sys as _sys
+
+    webui = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+             / "switchboard" / "webui")
+    _sys.path.insert(0, str(webui))
+    delivery = SourceFileLoader("delivery", str(webui / "delivery.py")).load_module()
+    out = tmp_path / "d.jsonl"
+    saved_path = delivery.OUTCOME_PATH
+    delivery.OUTCOME_PATH = str(out)
+
+    class _Pre:
+        @staticmethod
+        def due(now): return ([], [])
+        @staticmethod
+        def get_endpoints(): return []
+        @staticmethod
+        def notify(*a, **k): return True
+    pre_saved = {k: _sys.modules.get(k) for k in ("store", "ami", "ha_client", "delivery")}
+    for k in ("store", "ami", "ha_client"):
+        _sys.modules[k] = _Pre
+    _sys.modules["delivery"] = delivery
+    try:
+        sched = SourceFileLoader(
+            "sw_scheduler_missed",
+            str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+                / "switchboard" / "wakeup" / "scheduler.py")).load_module()
+    finally:
+        for k, v in pre_saved.items():
+            if v is None:
+                _sys.modules.pop(k, None)
+            else:
+                _sys.modules[k] = v
+
+    calls = []
+
+    class _HA:
+        answers = [False, True]           # Core still booting, then up
+        @classmethod
+        def notify(cls, message, title="", notification_id=""):
+            calls.append((notification_id, message))
+            return cls.answers.pop(0) if cls.answers else True
+
+    started = sched._STARTED
+
+    class _Store:
+        first = True
+        @classmethod
+        def due(cls, now):
+            if cls.first:
+                cls.first = False
+                return ([], [("19", {"hhmm": "08:00", "target_epoch": started - 900}),   # before start
+                             ("14", {"hhmm": "07:00", "target_epoch": started + 1})])    # while running
+            return ([], [])
+
+    saved = {k: getattr(sched, k, None) for k in ("store", "ami", "ha_client", "_delivery", "_reconcile_rings")}
+    try:
+        sched._delivery = delivery
+        sched.store = _Store
+        sched.ami = _Pre
+        sched.ha_client = _HA
+        sched._reconcile_rings = lambda now: None
+        sched._pending_missed.clear()
+
+        sched.tick()
+        rows = [_json.loads(l) for l in out.read_text().splitlines()]
+        missed = {r["ext"]: r for r in rows if r.get("outcome") == delivery.WAKEUP_MISSED}
+        check("missed: both misses are ledger rows", set(missed) == {"19", "14"})
+        check("missed: due before the scheduler started -> not-running",
+              missed["19"].get("reason") == delivery.MISSED_NOT_RUNNING)
+        check("missed: due while it ran -> grace-expired",
+              missed["14"].get("reason") == delivery.MISSED_GRACE_EXPIRED)
+        check("missed: the outage message names the outage, not a busy phone",
+              any("19" in nid and "was not running" in msg for nid, msg in calls)
+              and not any("19" in nid and "busy or offline" in msg for nid, msg in calls))
+        check("missed: a notify Home Assistant refused stays pending",
+              len(sched._pending_missed) == 1)
+
+        sched.tick()
+        check("missed: the next tick retries it and clears it once accepted",
+              not sched._pending_missed and len(calls) == 3)
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                setattr(sched, k, v)
+        sched._pending_missed.clear()
+        delivery.OUTCOME_PATH = saved_path

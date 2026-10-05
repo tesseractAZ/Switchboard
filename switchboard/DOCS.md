@@ -666,7 +666,10 @@ all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
 `answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
 finally `undelivered` — or `snoozed`, when the room's own phone changed the
 wake-up during the ring. Each set and cancel is a row of its own, `set` or
-`cancelled`, with its `source`.
+`cancelled`, with its `source`. A wake-up whose time passed without it ringing is
+`missed` (since 0.108.2), with a `reason`: `grace-expired` when the room stayed
+busy or offline through its grace window, `not-running` when Switchboard itself was
+down at that time (after a power cut, for example).
 
 A room holds **one** pending wake-up, so setting a second one replaces the
 first. Since v0.104.0 the `set` row for a replacement also names the time it
@@ -1780,7 +1783,7 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
-| Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. |
+| Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. If Switchboard itself was not running at the set time (the add-on or the host was down, e.g. after a power cut), the wake-up is dropped as soon as it starts again; since 0.108.2 that miss is recorded in the delivery ledger (`outcome: missed`, `reason: not-running`) and the notification says so, retried until Home Assistant has finished starting and accepts it. |
 | A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
