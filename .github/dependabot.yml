@@ -1,0 +1,19 @@
+# Weekly version updates for the GitHub Actions the workflows use. Every action
+# is pinned by commit SHA with its version in a trailing comment; Dependabot
+# updates both together, so the pin stays a SHA. All bumps in a week land in one
+# grouped pull request, so CI (tests, AppArmor compile, both image builds) runs
+# once per batch. Security alerts are separate and unaffected by this file.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
