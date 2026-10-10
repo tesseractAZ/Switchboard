@@ -1,0 +1,82 @@
+name: Dependabot auto-merge
+
+# Merges a Dependabot GitHub-Actions pull request once the CI workflow has passed
+# on its exact head commit — tests, the AppArmor compile and both image builds —
+# and only if every update in it is a minor or patch bump.
+#
+# Major bumps stay open for review: some actions (the registry login, the release
+# upload) run only when a release is published, so a green pull-request CI cannot
+# vouch for a breaking change in them.
+#
+# Why workflow_run: main has no required status checks, so GitHub's native
+# auto-merge would merge without waiting for CI. This runs after CI completes,
+# in the default branch's context, and never checks out or executes code from
+# the pull request — it reads the PR's metadata and diff through the API only.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/github_actions/')
+    name: Merge a passing minor/patch Dependabot Actions PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check the PR and merge it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          num="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$num" ] || { echo "no pull request on this CI run; nothing to do"; exit 0; }
+
+          # Dependabot's own, still open, still at the commit CI just passed, into
+          # main, and touching workflow files only.
+          gh pr view "$num" -R "$REPO" --json author,headRefOid,state,baseRefName,files \
+            | jq -e --arg sha "$HEAD_SHA" '
+                .author.login == "app/dependabot" and .headRefOid == $sha and
+                .state == "OPEN" and .baseRefName == "main" and
+                all(.files[].path; startswith(".github/workflows/"))' >/dev/null \
+            || { echo "PR #$num is not an eligible Dependabot Actions PR; leaving it open"; exit 0; }
+
+          gh pr diff "$num" -R "$REPO" > "$RUNNER_TEMP/pr.diff"
+          if ! python3 - "$RUNNER_TEMP/pr.diff" <<'PY'
+          import re, sys
+          USES = re.compile(r"^([-+])\s*(?:-\s+)?uses:\s*([\w./-]+)@[0-9a-f]{40}\s*#\s*v?(\d+)\.")
+          old, new = {}, {}
+          for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+              if line.startswith(("+++", "---")):
+                  continue
+              if re.match(r"^[-+]\s*(?:-\s+)?uses:", line):
+                  m = USES.match(line)
+                  if not m:
+                      sys.exit("a uses: line without a SHA pin and version comment: " + line.strip())
+                  (old if m.group(1) == "-" else new).setdefault(m.group(2), set()).add(m.group(3))
+          if not new:
+              sys.exit("no action updates in the diff")
+          for action, majors in sorted(new.items()):
+              if action not in old:
+                  sys.exit(f"{action}: newly added action")
+              if majors != old[action]:
+                  sys.exit(f"{action}: major version {sorted(old[action])} -> {sorted(majors)}")
+          print("all updates are minor or patch:", ", ".join(sorted(new)))
+          PY
+          then
+            echo "PR #$num needs review (see above); leaving it open"
+            exit 0
+          fi
+
+          # --match-head-commit: refuse if anything was pushed after CI passed.
+          gh pr merge "$num" -R "$REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA"
