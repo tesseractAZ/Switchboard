@@ -44,6 +44,39 @@ analysis-only `.py` copy of each `.agi` before scanning; those copies exist
 solely in CI. An alert against `switchboard-operator.py` refers to
 `switchboard-operator.agi`.
 
+### The CI supply chain
+
+Every action the workflows use is pinned by full commit SHA, with its version in
+a trailing comment, so a tag moved or re-pointed upstream cannot change the
+action code that runs here. GitHub raises no Dependabot security alert for an
+action pinned by SHA — alerts cover only actions referenced by version. The pins
+are kept current by Dependabot **version** updates instead
+(`.github/dependabot.yml`): once a week, on Monday, every pending bump arrives in
+one grouped pull request (commit prefix `ci`) that moves each SHA and its comment
+together.
+
+`.github/workflows/dependabot-automerge.yml` merges that pull request without a
+review only when all of these hold:
+
+- the CI workflow — tests, the AppArmor compile and both image builds — passed
+  on the pull request's exact head commit;
+- the pull request is Dependabot's, still open, targets `main`, and changes only
+  files under `.github/workflows/`;
+- every `uses:` line it changes is still pinned by SHA with a version comment,
+  replaces an action already in use rather than adding one, and keeps that
+  action's major version.
+
+Anything else stays open for review, and one major bump leaves the whole week's
+group open with it. Some actions (the container-registry login, for one) run
+only in the release workflow (`publish-release.yml`), so a green pull-request CI
+cannot vouch for a breaking change in them. The merge job never checks out or
+runs code from the pull request — it reads the pull request's metadata and diff
+through the API. The workflow grants nothing at its top level; its one job holds
+`contents: write` and `pull-requests: write`, and it merges with
+`--match-head-commit`, so a commit pushed after CI passed is refused. `main` has
+no required status checks, which is why this runs after CI rather than through
+GitHub's own auto-merge, which would merge without waiting for it.
+
 ---
 
 ## Security model
@@ -106,9 +139,13 @@ Both sit in the container's own writable layer, not in RAM: `/run` is not a
 tmpfs here. That layer is discarded when the Supervisor recreates the container,
 which it does at every add-on start.
 
-The Manager account deliberately **withholds the `command` write class** — Asterisk's
-CLI `Command` action is remote code execution, and it is the one dangerous
-privilege the account does not have. The account holds `originate` (for the
+The Manager account deliberately **withholds the `command` write class**, so
+Asterisk's CLI `Command` action is refused. It does hold the `system` write class,
+which the trunk re-register (`PJSIPRegister`) needs. With `system`, Asterisk also
+lets an `Originate` run the `System` application, so whoever holds the secret can
+run a command as the `asterisk` user. That is no more than Asterisk can already do
+from its own dialplan, and the secret is readable only by root and the `asterisk`
+group. The account holds `originate` (for the
 test-ring, connect, page, wake-up, and announce actions), but every web-app
 origination is pinned to a **fixed internal target**: test-ring runs a fixed
 `Playback` to a known room, while connect, wake-up, page and announce originate

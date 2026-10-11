@@ -133,7 +133,8 @@ Password fields read back as `\r******\r` when set and `""` when empty, so a mas
 is proof a value is stored. A blank `P35`/`P47` means that account is genuinely
 unconfigured — not an API fault.
 
-> Firmware **1.0.3.35 is below 1.0.3.98**, so the remote-URL ringtone trick
+> Firmware **1.0.3.39** (the reference cordless; Grandstream's GA release is
+> 1.0.3.35) is below 1.0.3.98, so the remote-URL ringtone trick
 > (`Alert-Info: <http://host/x.wav>;info=ringN`) is **not** available — a custom
 > ring needs an on-device upload (below).
 
