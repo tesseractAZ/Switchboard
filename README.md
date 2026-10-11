@@ -52,7 +52,11 @@ over telnet on the Home Assistant machine itself:
   An unanswered wake-up is rung a second time if the phone is registered and idle.
   One that still is not delivered is reported as a critical phone notification
   (`wakeup_push_target`), or as a Home Assistant notification if no push target is
-  set or the push fails. Wake-ups can also be set and cancelled from the dashboard
+  set or the push fails. One that could not ring at all, because the phone stayed
+  busy or offline through the 10-minute grace window or Switchboard was down (after
+  a power cut, say) until that window had passed, is recorded as missed and reported
+  as a Home Assistant notification that names the cause, retried for up to an hour
+  until Home Assistant accepts it. Wake-ups can also be set and cancelled from the dashboard
   and the operator console.
 - **Home-automation voice menu (dial `43`)** — turn your Home Assistant lights on
   and off by voice, room by room.
@@ -125,9 +129,10 @@ tones pass through cleanly. See
 
 ## Quick start
 
-1. **Add the repository** to Home Assistant → Settings → Add-ons → Add-on Store →
+1. **Add the repository** to Home Assistant → Settings → Apps → Install app →
    ⋮ → Repositories → `https://github.com/tesseractAZ/Switchboard`, then install
-   **Switchboard**.
+   **Switchboard**. (Before Home Assistant 2026.2, apps were called add-ons: Settings →
+   Add-ons → Add-on Store → ⋮ → Repositories.)
 2. Open **Configuration** and define one entry under `rooms` per phone — a unique
    `ext` (2–6 digits), a friendly `name`, and a strong `secret` (the SIP password
    that port will use). **Change the `change-me-…` placeholder secrets.**
@@ -233,8 +238,9 @@ never tagged: tagging was manual until v0.46.1 and that one was missed. See
 ## Security in one paragraph
 
 The Ingress dashboard is reachable only from the Home Assistant Supervisor; the
-Asterisk Manager socket is loopback-only with a fresh random secret each boot and no
-shell-command privilege; the SIP trunk blocks international/premium prefixes and
+Asterisk Manager socket is loopback-only, with a fresh random secret each boot that
+only root and the `asterisk` group can read, and it withholds Asterisk's CLI
+`command` class; the SIP trunk blocks international/premium prefixes and
 confines every transfer to internal destinations. Asterisk runs as an unprivileged
 user with no capabilities, and the add-on's AppArmor profile refuses every capability
 the add-on does not use and any write to its shipped code, root included. **The

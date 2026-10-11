@@ -13,6 +13,9 @@ name: CI
 #
 # Renaming a job here silently drops it from any branch-protection required set —
 # those rules match on the job NAME.
+#
+# Renaming this WORKFLOW (`name: CI`) silently switches off
+# dependabot-automerge.yml, which listens for `workflow_run` of "CI" by name.
 
 on:
   push:
