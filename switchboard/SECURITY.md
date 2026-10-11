@@ -128,33 +128,54 @@ containing CR/LF — so the JSON API cannot be used to inject Manager protocol l
 or smuggle a dial string. Client-facing errors are generic (`forbidden`,
 `unreachable`); detail is logged server-side only.
 
-### 2. The Asterisk Manager (AMI) is loopback-only
+### 2. The Asterisk Manager (AMI) is loopback-only, split into two accounts
 
 The Manager socket that the dashboard, console, and monitors use is bound to
-`127.0.0.1:5038` with a permit list restricted to loopback. Its password is a
-**fresh 24-character random secret generated on every boot** and written only to
-the generated config and a file under `/run/switchboard` (`0640`, group
-`asterisk`) — never to `/data`, `/share` or `/config`, so never into a backup.
-Both sit in the container's own writable layer, not in RAM: `/run` is not a
-tmpfs here. That layer is discarded when the Supervisor recreates the container,
-which it does at every add-on start.
+`127.0.0.1:5038`, and each account's access list denies every address before it
+permits loopback. Each account's password is a **fresh 24-character random secret
+generated on every boot** and written only to the generated config and one file
+per account under `/run/switchboard` — never to `/data`, `/share` or `/config`, so
+never into a backup. Both sit in the container's own writable layer, not in RAM:
+`/run` is not a tmpfs here. That layer is discarded when the Supervisor recreates
+the container, which it does at every add-on start.
 
-The Manager account deliberately **withholds the `command` write class**, so
-Asterisk's CLI `Command` action is refused. It does hold the `system` write class,
-which the trunk re-register (`PJSIPRegister`) needs. With `system`, Asterisk also
-lets an `Originate` run the `System` application, so whoever holds the secret can
-run a command as the `asterisk` user. That is no more than Asterisk can already do
-from its own dialplan, and the secret is readable only by root and the `asterisk`
-group. The account holds `originate` (for the
-test-ring, connect, page, wake-up, and announce actions), but every web-app
-origination is pinned to a **fixed internal target**: test-ring runs a fixed
-`Playback` to a known room, while connect, wake-up, page and announce originate
-into a fixed internal dialplan context (`rooms`, `wakeup-deliver`, `page` and
-`switchboard-announce-play` respectively). Announce moved off `Playback` in
-v0.57.0 so that it has a hangup extension and therefore a quality record; the
-target is no less fixed for it. Every extension is validated against the configured room set before
-the call, so an origination can only ever ring an internal phone — it cannot be
-steered into an outside call even with the privilege.
+Since v0.109.0 there are two Manager accounts, and no account holds both
+`originate` and `system`. With `system`, Asterisk lets an `Originate` run the
+`System`, `Exec` or `AGI` application and lets `Getvar` evaluate `SHELL()`. The
+single account before it held both classes, so its secret amounted to a shell as
+the `asterisk` user.
+
+| Account | Write classes | Used for | Secret readable by |
+|---|---|---|---|
+| `switchboard-call` | `originate`, `call` | test-ring, connect, page, wake-up, announce, hang up, transfer, device and codec reads | root only (`0600`) |
+| `switchboard-status` | `system` | the status poll (endpoints, contacts, channels), trunk registration status and re-register, message-waiting | root and the `asterisk` group (`0640`) |
+
+- **The call account cannot reach a shell.** Without `system`, Asterisk refuses an
+  `Originate` of `System`, `Exec` or `AGI` and a `Getvar` of `SHELL()`.
+- **The status account cannot place a call.** It has no `originate`, and with no
+  `call` or `reporting` class it cannot run `Getvar` at all.
+- **Neither account holds `command`,** so Asterisk's CLI `Command` action is refused.
+  Neither holds `config`, so `UpdateConfig` is refused as well.
+- **Neither subscribes to events** (`read = none`). Every list reply arrives in the
+  action's own response.
+- **The status secret is the one the `asterisk` group can read.** Its only reader
+  at that uid is the message-waiting helper, which the dial plan runs through
+  `System()` and which needs only `PJSIPNotify`.
+- **A refused action is an error.** An action sent with the wrong account raises an
+  error rather than reading as "no phones, no calls".
+
+Every web-app origination is pinned to a **fixed internal target**:
+- test-ring runs a fixed `Playback` to a known room;
+- connect, wake-up, page and announce originate into a fixed internal dialplan
+  context (`rooms`, `wakeup-deliver`, `page` and `switchboard-announce-play`
+  respectively).
+
+Announce moved off `Playback` in v0.57.0 so that it has a hangup extension and
+therefore a quality record; the target is no less fixed for it. Every extension is
+validated against the configured room set before the call, so an origination can
+only ever ring an internal phone. It cannot be steered into an outside call even
+with the privilege. Hang up refuses Asterisk's `/regex/` channel form, which would
+end every matching call.
 
 ### The SIP listener (`5060/udp`) and the resident recognizer
 
@@ -175,7 +196,7 @@ control.
 ### 3. Secret handling & scrubbing
 
 - Generated config files that contain cleartext secrets (SIP passwords, the AMI
-  secret) are written **`0640` via `os.open`** (no world-readable umask window),
+  secrets) are written **`0640` via `os.open`** (no world-readable umask window),
   owned by group `asterisk`.
 - Each room is validated before it's written: a missing/duplicate/all-zero or
   non-2–6-digit extension is skipped, and a secret containing control characters,
@@ -540,6 +561,25 @@ touch:
   compiled into the image and never written at runtime. Inside the container this
   also means `apk add` and `pip install` are refused, and an AGI or any other shipped
   file cannot be edited in place (`Permission denied`): a change means a new image.
+- **The Asterisk configuration has one writer** (since v0.109.0). `/etc/asterisk`,
+  `/etc/localtime` and `/etc/timezone` are write-locked for every process, root
+  included, except the configuration generator. It runs at boot under a nested
+  child profile, `<slug>//switchboard_config`. That child lists exactly the files
+  the generator writes and the four capabilities it uses, and it runs no program.
+  - Only a root process that runs the generator by its path enters the child.
+    Asterisk and its AGIs stay outside it.
+  - `/etc/asterisk` belongs to root (group `asterisk`, read-only) from the image
+    build, so Asterisk could not rewrite its own configuration even without the
+    profile.
+  - Before this, Asterisk owned that directory, and the old Manager account held
+    the `config` class. A compromised Asterisk process, or anything holding that
+    secret (`UpdateConfig`), could rewrite the dial plan. The change would have
+    taken effect at the next reload and lasted until the next add-on start.
+- **Also write-locked since v0.109.0:** Asterisk's spool (`/var/spool/asterisk`) and
+  the s6 init trees (`/command`, `/package`, `/etc/s6-overlay` and s6's legacy
+  `/etc` directories). Nothing here records calls, uses call files or keeps
+  voicemail. The call-file loader (`pbx_spool`) is not loaded, so a dropped file
+  cannot place a call.
 - **Asterisk starts as the `asterisk` user with no permitted capabilities.** Until
   v0.108.0 it started as root and switched user itself, which kept root's permitted
   capability set. A compromise of the process that talks to the SIP trunk could then
@@ -549,28 +589,37 @@ touch:
   process; reading or writing under `/root` or `/home`, which nothing in the add-on
   uses. Those two are refused without a record, because an interactive `docker exec`
   shell (`HOME=/root`) tries to keep its history there.
-- **Not locked yet:** the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`),
-  `/etc/asterisk` (rewritten at every boot), `/var/spool/asterisk`, `/run` and `/tmp`
-  (s6 runs its service scripts from `/run`), and the persistent volumes `/data`,
-  `/share` and `/config`. The add-on writes to these, or a
-  wrong rule there would be a crash-loop that the add-on log never shows. They are
-  also where anything would persist across restarts: the Supervisor recreates the
-  container at every add-on start, so the locked trees only matter within one
-  container's lifetime.
+- **Not locked:** `/run` and `/tmp` (s6 runs its service scripts from `/run`), the
+  rest of `/etc` (the container runtime bind-mounts `hosts`, `hostname` and
+  `resolv.conf` there), and the persistent volumes `/data`, `/share` and `/config`.
+  The add-on writes to these, or a wrong rule there would be a crash-loop that the
+  add-on log never shows. They are also where anything would persist across
+  restarts: the Supervisor recreates the container at every add-on start, so the
+  locked trees only matter within one container's lifetime.
 
-How it was verified: the profile was compiled fresh with the host's own parser and
-loaded under a test name. An isolated copy of the add-on ran under it, on its own
-network and volumes, through:
+How it was verified: each version of the profile was compiled fresh with the host's
+own parser and loaded under a test name. An isolated copy of the add-on ran under
+it, on its own network and volumes, through:
 - boot;
 - one call to each feature code;
 - the backup hooks;
 - service restarts;
-- a full stop and start.
+- an options change and a full stop and start.
 
-The only denials recorded were the three deliberate write probes. After deployment
-the profile was confirmed in enforce mode, a fresh write probe under `/usr` was
-refused, and the audit journal stayed clean through calls to the clock, the operator
-and announcements. The CI job `apparmor` compiles the profile on every change, and
+v0.108.0 recorded only its three deliberate write probes. For v0.109.0 the run also
+covered the following:
+- both Manager accounts, probed action by action;
+- every web-app Manager call;
+- the message-waiting helper as the `asterisk` user;
+- write probes into each newly locked tree, root included.
+
+The status account was refused `Originate`, `Getvar`, `Command` and `UpdateConfig`.
+The call account was refused `System`, `Exec` and `AGI` originations, `SHELL()`,
+`Command`, `UpdateConfig` and the status actions. The audit journal held exactly the
+six deliberate probes, and nothing from the configuration generator's child profile.
+After each deployment the profile is confirmed in enforce mode with a fresh write
+probe, and the audit journal is read through calls. The CI job `apparmor` compiles
+the profile on every change and checks both profile names.
 `tests/test_apparmor_profile.py` pins its rules and the image facts they rely on.
 
 Every deny rule except the ones for `/root` and `/home` is `audit deny`, so a firing rule

@@ -1328,8 +1328,8 @@ it authenticates per-INVITE). v0.48.0 closes it from three sides:
 2. the link-health poller watches the registration every cycle, publishes
    `sensor.switchboard_trunk_health`, and **auto-sends a re-register** if it
    ever sees Rejected/Stopped (via the native `PJSIPRegister` AMI action —
-   v0.48.0 used the `Command` CLI bridge, which the add-on's own AMI account
-   is deliberately not authorised to run, so that recovery was inert until
+   v0.48.0 used the `Command` CLI bridge, which none of the add-on's AMI
+   accounts is authorised to run, so that recovery was inert until
    v0.49.0);
 3. if the registration stays down for 2 consecutive cycles, a persistent
    notification fires. Recovery does **not** dismiss it: the poller posts a
@@ -1709,7 +1709,8 @@ The assistant's own ledger is deliberately **not** mirrored — see
 - On every start, **`switchboard-config`** regenerates
   `/etc/asterisk/{pjsip,extensions,confbridge,modules,pjsip_notify,rtp,manager,logger,features}.conf`
   from your add-on options (`/data/options.json`). The options are the source of
-  truth; hand edits are overwritten.
+  truth; hand edits are overwritten, and since 0.109.0 they are refused: only the
+  generator, under its own AppArmor child profile, may write those files.
 - **Offline voice.** Speech-to-text is **whisper.cpp** (English `base.en` model,
   ~142 MB), kept resident in RAM by a loopback-only server with a per-call
   `whisper-cli` fallback. Text-to-speech is **espeak-ng**. Both run on-box under
@@ -1731,7 +1732,9 @@ The assistant's own ledger is deliberately **not** mirrored — see
 - Runs under an **AppArmor** profile and **host networking** (required for SIP +
   RTP on your LAN). Since 0.108.0 the profile allows only the capabilities the add-on
   uses (no raw sockets) and write-locks the shipped code for every process, and
-  Asterisk runs as the unprivileged `asterisk` user with no capabilities
+  Asterisk runs as the unprivileged `asterisk` user with no capabilities. Since
+  0.109.0 it also write-locks the Asterisk configuration, Asterisk's spool and the
+  s6 init trees, and the config generator runs under a child profile of its own
   ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)).
   Architectures: `amd64`, `aarch64`.
 
@@ -1790,7 +1793,7 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. If Switchboard itself was not running at the set time (the add-on or the host was down, e.g. after a power cut), the wake-up still rings if Switchboard is back within that 10-minute grace window, under the same registered-and-idle rule; if it comes back later, the wake-up is dropped as soon as it starts again. Since 0.108.2 that miss is recorded in the delivery ledger (`outcome: missed`, `reason: not-running`) and the notification says so, retried until Home Assistant has finished starting and accepts it. |
-| A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
+| A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Since v0.109.0 it also refuses writes to the Asterisk configuration (`/etc/asterisk`, `/etc/localtime`, `/etc/timezone`), Asterisk's spool (`/var/spool/asterisk`) and the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`); only the config generator may write the first three, under a child profile named `<slug>//switchboard_config`, whose own refusals carry that name. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
 
@@ -1811,14 +1814,15 @@ exposure, secret handling, and the short list of things
 essentials:
 
 - The Ingress dashboard is reachable only from the Home Assistant Supervisor.
-- The Asterisk Manager socket is loopback-only, with a fresh random secret every
-  boot that only root and the `asterisk` group can read. The account withholds
-  Asterisk's CLI `command` class.
+- The Asterisk Manager socket is loopback-only. Since 0.109.0 it has two accounts,
+  each with a fresh random secret every boot. The one that places calls cannot
+  reach a shell, and its secret is readable by root only. The one that reads
+  status cannot place calls. Neither holds Asterisk's CLI `command` class.
 - The trunk blocks international/premium prefixes and confines transfers to
   internal destinations.
 - Inside the container, Asterisk runs as the unprivileged `asterisk` user with no
   capabilities, and the AppArmor profile refuses raw sockets and any write to the
-  shipped code, root included.
+  shipped code or the Asterisk configuration, root included.
 - **Change the default room secrets** before your phones register.
 - Both standalone consoles bind to `127.0.0.1` by default since 0.94.0, so
   neither is on your LAN as shipped. The telnet console has no authentication at

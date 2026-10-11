@@ -109,14 +109,37 @@ def test_hostile_inputs() -> None:
     rtp = sbc.render_rtp(opts)
     check("junk rtp falls back to defaults", "rtpstart = 10000" in rtp and "rtpend = 10200" in rtp)
 
-    mgr = sbc.render_manager("switchboard", "sek")
-    write_line = [l for l in mgr.splitlines() if l.startswith("write =")][0]
-    # 'command' (CLI/RCE) stays excluded. 'originate' IS granted (paired with
-    # 'system') for the per-room test-ring button — the web app constrains it to
-    # ringing a known ext with a fixed Playback, never an outside Dial.
-    check("AMI write still excludes command (no CLI/RCE)", "command" not in write_line)
-    check("AMI write grants originate (test-ring) + system", "originate" in write_line and "system" in write_line)
-    check("AMI write keeps the status-action classes", "system" in write_line and "reporting" in write_line)
+    mgr = sbc.render_manager({"call": "sek-call", "status": "sek-status"})
+    # Asterisk splits a class list on "," and trims nothing (ast_instring), so
+    # "originate, call" would grant originate alone. Parse it the same way.
+    sections, cur = {}, None
+    for line in mgr.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            cur = sections.setdefault(line[1:-1], [])
+        elif cur is not None and line:
+            cur.append(line)
+
+    def classes(user, key):
+        val = next(l.split("=", 1)[1].strip() for l in sections[user] if l.startswith(key + " ="))
+        return set(val.split(","))
+    call, status = sbc.AMI_ACCOUNTS["call"][0], sbc.AMI_ACCOUNTS["status"][0]
+    check("AMI: exactly the two accounts", set(sections) == {"general", call, status})
+    check("AMI: call account writes originate+call only", classes(call, "write") == {"originate", "call"})
+    check("AMI: status account writes system only", classes(status, "write") == {"system"})
+    for user in (call, status):
+        w = classes(user, "write")
+        check(f"AMI: {user} is not a shell (never originate AND system)",
+              not {"originate", "system"} <= w)
+        check(f"AMI: {user} excludes command (no CLI/RCE)", "command" not in w and "all" not in w)
+        check(f"AMI: {user} subscribes to no events", classes(user, "read") == {"none"})
+        acl = [l for l in sections[user] if l.startswith(("deny", "permit"))]
+        # A lone permit is a no-op in Asterisk's ACL; deny-all must come first.
+        check(f"AMI: {user} denies everything, then permits loopback",
+              acl == ["deny = 0.0.0.0/0.0.0.0", "permit = 127.0.0.1/255.255.255.255"])
+    check("AMI: status account cannot Getvar (no call/reporting beside system)",
+          not classes(status, "write") & {"call", "reporting"})
+    check("AMI: each account carries its own secret",
+          "secret = sek-call" in sections[call] and "secret = sek-status" in sections[status])
     # Asterisk defaults displayconnects=yes, which logs a logon/logoff PAIR per
     # AMI session. The pollers open one per cycle, so those pairs were 82.4% and
     # then 89.4% of the add-on log across two audit windows -- crowding out the
@@ -125,7 +148,7 @@ def test_hostile_inputs() -> None:
     check("AMI suppresses per-session connect/disconnect log spam",
           "displayconnects = no" in mgr)
     check("AMI is still loopback-only (the reason suppressing it is safe)",
-          "bindaddr = 127.0.0.1" in mgr and "permit = 127.0.0.1/255.255.255.255" in mgr)
+          "bindaddr = 127.0.0.1" in mgr)
 
 
 def test_whitespace_dial_prefix() -> None:
@@ -1912,6 +1935,83 @@ def test_features_runtime_carries_per_room_scenes(tmp_path) -> None:
               wk["scenes"] == {"12": "scene.wakeup_kitchen"})
     finally:
         sbc.RUN_DIR = saved
+
+
+def test_state_dir_never_follows_a_planted_symlink() -> None:
+    """/data/state is asterisk-writable, so uid 100 can plant a link in it. The
+    root init step must never create, chmod or truncate through one (chown goes
+    through the same fd helper; it needs root to exercise)."""
+    import os
+    import stat as _stat
+    import tempfile
+    from pathlib import Path as _P
+    root = _P(tempfile.mkdtemp())
+    data, outside = root / "data", root / "outside"
+    state = data / "state"
+    state.mkdir(parents=True)
+    outside.mkdir()
+    victim = outside / "victim"
+    victim.write_text("keep me")
+    os.chmod(victim, 0o600)
+    big = outside / "big.log"
+    big.write_bytes(b"x\n" * (sbc.DURABLE_LOG_MAX_BYTES // 2 + 10))
+    (state / "wakeups.json").symlink_to(outside / "created-through-link")   # dangling
+    (state / "mwi.json.lock").symlink_to(victim)
+    (state / "callqos.jsonl").symlink_to(victim)
+    (state / "asterisk.log").symlink_to(big)
+    big_before = big.read_bytes()
+    orig_data, orig_state = sbc.DATA_DIR, sbc.STATE_DIR
+    sbc.DATA_DIR, sbc.STATE_DIR = data, state
+    try:
+        sbc.ensure_state_dir()
+        check("symlink: a dangling link is not followed to create its target",
+              not (outside / "created-through-link").exists())
+        check("symlink: the planted links are left as links",
+              (state / "wakeups.json").is_symlink() and (state / "mwi.json.lock").is_symlink())
+        check("symlink: the target's mode is not widened to 0664",
+              _stat.S_IMODE(victim.stat().st_mode) == 0o600)
+        check("symlink: the target's content is untouched", victim.read_text() == "keep me")
+        check("symlink: the log trim does not truncate through a link", big.read_bytes() == big_before)
+        check("symlink: the real files beside them are still created",
+              (state / "mwi.json").is_file() and (state / "wakeups.json.lock").is_file())
+    finally:
+        sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_ami_credentials_files() -> None:
+    import stat as _stat
+    import tempfile
+    from pathlib import Path as _P
+    d = _P(tempfile.mkdtemp())
+    target = d / "elsewhere"
+    target.write_text("untouched")
+    (d / "ami-call.env").symlink_to(target)
+    sbc.write_ami_env(d / "ami-call.env", "AMI_CALL", "switchboard-call", "c1", 0o600, group=None)
+    sbc.write_ami_env(d / "ami-status.env", "AMI_STATUS", "switchboard-status", "s1", 0o640, group=None)
+    call, status = d / "ami-call.env", d / "ami-status.env"
+    check("ami env: a planted link is replaced, its target untouched",
+          not call.is_symlink() and target.read_text() == "untouched")
+    check("ami env: call file is 0600", _stat.S_IMODE(call.stat().st_mode) == 0o600)
+    check("ami env: status file is 0640", _stat.S_IMODE(status.stat().st_mode) == 0o640)
+    check("ami env: the names ami.py reads",
+          call.read_text() == "AMI_CALL_USER=switchboard-call\nAMI_CALL_SECRET=c1\n"
+          and status.read_text() == "AMI_STATUS_USER=switchboard-status\nAMI_STATUS_SECRET=s1\n")
+    src = SBC_PATH.read_text()
+    check("ami env: main() writes the call file root-only and the status file to group asterisk",
+          'ami_secrets["call"], 0o600, group=None)' in src
+          and 'ami_secrets["status"], 0o640, group="asterisk")' in src)
+    check("ami env: main() removes the pre-0.109.0 single-account file",
+          '(RUN_DIR / "ami.env").unlink()' in src)
+
+
+def test_pbx_spool_is_never_loaded() -> None:
+    # No call files are used, pbx_spool would mkdir spool/outgoing (write-locked
+    # by the AppArmor profile) at every load, and a call-file dir is an
+    # originate path that needs no AMI secret.
+    check("modules: pbx_spool noloaded", "noload = pbx_spool.so" in sbc.render_modules({}))
+
 
 if __name__ == "__main__":
     # Auto-discover instead of listing every test by hand: the hand-maintained

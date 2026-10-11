@@ -171,6 +171,15 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /etc/s6-overlay/s6-rc.d/devhealth/run \
     && chmod +x /usr/share/switchboard/devhealth/poller.py
 
+# /etc/asterisk belongs to root, readable by the asterisk group. Alpine's package
+# hands it to the asterisk user, which let the PBX rewrite its own configuration
+# (AMI UpdateConfig, "dialplan save"). switchboard-config, root under its own
+# AppArmor child profile, is the only writer; it regenerates the files every boot
+# as 0640 root:asterisk. tests/test_apparmor_profile.py pins this line; the
+# AppArmor profile's /etc/asterisk write-lock and child profile assume it.
+RUN chown -R root:asterisk /etc/asterisk \
+    && chmod -R u=rwX,g=rX,o= /etc/asterisk
+
 # Python bytecode is compiled HERE, once, and never written at runtime. The
 # AppArmor profile write-locks /usr, so a process that tried to create a
 # __pycache__ there would be refused and logged — and the AGIs, running as the
@@ -198,4 +207,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.108.3"
+    io.hass.version="0.109.0"

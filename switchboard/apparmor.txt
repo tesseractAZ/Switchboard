@@ -5,49 +5,69 @@
 # LOADING. The Supervisor copies this file, renames the single column-0
 # "profile switchboard" line to <repo-hash>_switchboard (flags kept) and loads
 # it in enforce mode. Its loader counts column-0 "profile" lines and refuses a
-# file with more than one, so any future child profile must be nested and
-# indented. A profile the parser rejects is not reported in the add-on log:
-# the add-on can come back under docker-default, or keep the previously
-# loaded profile until the next host boot, when it then fails to start.
+# file with more than one, so the one child profile (switchboard_config, at
+# the end) is nested and indented. The parser names it
+# <repo-hash>_switchboard//switchboard_config, and the host's OS Agent accepts
+# a "<file name>//<child>" name. A profile the parser rejects is not reported
+# in the add-on log: the add-on can come back under docker-default, or keep
+# the previously loaded profile until the next host boot, when it then fails
+# to start.
 # After every change, check both inside the container, as root:
 #   cat /proc/1/attr/current      -> "<repo-hash>_switchboard (enforce)"
-#   d=/usr/.aa-probe-$$; mkdir "$d" 2>/dev/null && { rmdir "$d"; echo OLD; } \
+#   d=/package/.aa-probe-$$; mkdir "$d" 2>/dev/null && { rmdir "$d"; echo OLD; } \
 #     || echo NEW                 -> NEW means this version is loaded
 #   (a fresh name each run: "touch" on an existing file only sets times,
 #    which AppArmor does not check, so it cannot prove anything)
+# A PBX that answers also proves the child transition: only the child may
+# write /etc/asterisk, so without it the init step fails and nothing starts.
 #
-# SCOPE. One profile covers every process: s6 as PID1 (root), the root init
-# step and pollers, Asterisk and the AGIs (uid 100), whisper-server (uid 100)
-# and the backup hooks the Supervisor runs through docker exec. Rules cannot
-# tell these apart, so this profile removes only what no process uses.
+# SCOPE. The parent profile covers every process but one: s6 as PID1 (root),
+# the pollers and web services (root), Asterisk and the AGIs (uid 100),
+# whisper-server (uid 100) and the backup hooks the Supervisor runs through
+# docker exec. Rules cannot tell these apart, so the parent removes only what
+# none of them uses. The exception is switchboard-config, the init step that
+# regenerates the Asterisk configuration and the zone link at every boot. It
+# runs under the nested child, the only label that may write /etc/asterisk,
+# /etc/localtime and /etc/timezone. Never re-run it by hand in a running
+# add-on: it would hand Asterisk new Manager secrets the running services do
+# not hold, and trim a log Asterisk has open. Restart the add-on instead.
 #
 # LOGGING. A plain "deny" is silent; "audit deny" logs a DENIED record. On
 # HAOS those records go to the host's AUDIT journal, not to dmesg — read them
 # with `journalctl _TRANSPORT=audit` on the host; an empty dmesg proves
 # nothing. Every deny here except /root and /home is "audit deny" because none
 # should fire in normal operation: a record means a new writer to fix, or an
-# intrusion.
+# intrusion. The child is an allow list: whatever it does not list is refused
+# and logged as DENIED with profile=".../switchboard_config", so a missing
+# grant shows on the first boot.
 #
 # PARSER. There is no "abi" line, so the host parser (AppArmor 3.1.7 on HAOS
 # 18) compiles against its default feature set: file, capability, mount,
 # signal and ptrace rules are enforced; network rules (unix included) are
 # not. Validate every edit with a fresh, cache-free compile:
 #   apparmor_parser -Q -K --warn=abi --warn=rule-not-enforced <copy>
-#     (expect only the default-feature-abi and network-not-enforced notes;
+#     (expect only feature-abi notes: the file has no abi line, and base
+#      declares abi/3.0, once for the parent and once for the child; and
+#      not-enforced notes for network and unix rules, again for both;
 #      anything else means the parser or kernel features changed)
+#   apparmor_parser -N -K <copy>  -> exactly "switchboard" and
+#                                    "switchboard//switchboard_config"
 #
 # TESTING. A compile proves only that the parser accepts the file. The CI job
-# "apparmor" compiles it with a newer parser on every push and pull request;
-# tests/test_apparmor_profile.py pins its invariants (the three blanket
-# grants, the capability list, the "wl" write-locks, the trees no deny may
-# touch) and the image facts the write-locks rely on. Before a release,
-# boot-test against the host's parser: load the copy under a TEST name (never
-# the live one) and run an isolated copy of the add-on under it, on its own
-# bridge network and volumes, with dummy options and the trunk off:
+# "apparmor" compiles it with a newer parser on every push and pull request
+# and checks the two profile names; tests/test_apparmor_profile.py pins its
+# invariants (the three blanket grants, the capability lists, the "wl"
+# write-locks, the trees no deny may touch, the child's shape) and the image
+# facts the rules rely on. Before a release, boot-test against the host's
+# parser: load the copy under a TEST name (never the live one) and run an
+# isolated copy of the add-on under it, on its own bridge network and
+# volumes, with dummy options and the trunk off:
 #   docker run --security-opt apparmor=<test-name> ...
 # Take it through boot, one call per feature code, the backup hooks, service
-# restarts and a full stop/start, then read the host's audit journal: only
-# deliberate probes may appear.
+# restarts, an options change and a full stop/start, then read the host's
+# audit journal: only deliberate probes may appear. Give journalctl a
+# relative --since ("-45min"): the host journal keeps local time, and an
+# absolute UTC stamp can select an empty window that looks like a clean run.
 
 profile switchboard flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
@@ -75,20 +95,41 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   # are blocked through the capability list instead (net_raw below).
   network,
 
+  # --- switchboard-config runs under the child profile ---------------------
+  # The init oneshot (s6-rc.d/init-switchboard/up) runs it by this exact path,
+  # through /bin/sh. An exact-path rule overrides the inherit-exec "file,"
+  # grant by glob, so this exec, and only this one, enters the nested child
+  # at the end of the file. The kernel keys the transition on the script's
+  # path; the interpreter is then mapped under the child. Run as
+  # "python3 <path>" it stays here and its /etc/asterisk writes are refused;
+  # with an env shebang the child cannot map env. Either way the init step
+  # fails and no service starts, so the tests pin the "up" line and the
+  # "#!/usr/bin/python3 -IB" shebang. Capital "Cx" also sets AT_SECURE, so
+  # musl ignores LD_* variables, and -I makes Python ignore PYTHON* variables
+  # and the user site, so nothing in the environment loads code into the child.
+  # "owner" limits the transition to a process whose fsuid owns the file:
+  # root, which owns it from the image. Asterisk and the AGIs (uid 100) that
+  # exec it stay in this profile, where /etc/asterisk is write-locked, and
+  # /etc/asterisk is root:asterisk from the image build in any case.
+  owner /usr/bin/switchboard-config Cx -> switchboard_config,
+
   # --- Capabilities: explicit allow list -----------------------------------
   # Replaces the former blanket "capability,". An unlisted capability is
   # denied and logged, so a missing entry shows on the first boot.
+  # switchboard-config has its own, smaller list in the child.
 
-  # switchboard-config ownership repair at boot; the asterisk run script chown.
+  # The asterisk run script's chown of its run, log and lib dirs.
   capability chown,
-  # Root writes into asterisk-owned dirs: /etc/asterisk (0750) at boot,
-  # /data/state and /share/switchboard (2775) every poller cycle, backup hooks.
+  # Root writes into asterisk-owned dirs: /data/state and /share/switchboard
+  # (2775) every poller cycle, and the backup hooks.
   capability dac_override,
-  # Root chmod/fchmod of asterisk-owned files and dirs.
+  # Root chmod/fchmod of asterisk-owned files (the shared stores' 0664 repair).
   capability fowner,
-  # Keeps the setgid bit on /data/state and /share/switchboard. Without it the
-  # kernel strips the bit silently, root-created files land in group root and
-  # the AGIs lose write access to the shared ledgers.
+  # Kept the setgid bit on /data/state and /share/switchboard when
+  # switchboard-config ran here; without it the kernel strips the bit
+  # silently, root-created files land in group root and the AGIs lose write
+  # access to the shared ledgers. That repair now runs in the child, which
+  # has its own grant. Kept until a soak shows no root service here needs it.
   capability fsetid,
   # Root s6 stopping uid-100 Asterisk, whisper-server, astcanary and AGIs.
   # Without it a stop waits for the runtime's timeout and SIGKILL.
@@ -113,8 +154,9 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   # before AppArmor is asked. Denied here so that a later "privileged:" grant
   # or a re-added blanket "capability," cannot hand them out. net_admin is
   # what Asterisk asked to keep while it switched user itself (-U/-G, before
-  # 0.108.0); with host networking it would reconfigure the HOST's network. dac_read_search is the open_by_handle_at container
-  # escape; bpf and perfmon are kernel attack surface.
+  # 0.108.0); with host networking it would reconfigure the HOST's network.
+  # dac_read_search is the open_by_handle_at container escape; bpf and
+  # perfmon are kernel attack surface.
   audit deny capability sys_admin,
   audit deny capability sys_module,
   audit deny capability sys_rawio,
@@ -170,12 +212,37 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   # and its journal) and keys/ stay writable.
   audit deny /var/lib/asterisk/{agi-bin,sounds,moh}/{,**} wl,
 
-  # Not locked yet; each needs a host soak first:
-  #  - /command, /package, /etc/s6-overlay: PID1 trees. A wrong deny there is
-  #    an init crash-loop that the add-on log never shows.
-  #  - /etc/asterisk, /etc/localtime, /etc/timezone: switchboard-config
-  #    rewrites them at every boot, so they need a child profile for it.
-  #  - /var/spool/asterisk, /config, /data/options.json.
+  # Asterisk configuration and the zone link. switchboard-config rewrites them
+  # at every boot, under the child; nothing else writes them. Asterisk itself
+  # could rewrite its configuration (AMI UpdateConfig and CreateConfig, CLI
+  # "dialplan save", an AMI MixMonitor with an absolute path); nothing here
+  # uses any of those, and this refuses all of them.
+  audit deny /etc/asterisk/{,**} wl,
+  audit deny /etc/{localtime,timezone} wl,
+
+  # Asterisk's spool. Nothing here records, uses call files or voicemail.
+  # Relies on the generated modules.conf noloading pbx_spool, which creates
+  # spool/outgoing on every load and would otherwise be refused at each boot.
+  # A feature that records (MixMonitor, ChanSpy, Dictate, voicemail,
+  # ConfBridge name recording, ARI recordings) must first lift this for its
+  # own subdirectory.
+  audit deny /var/spool/asterisk/{,**} wl,
+
+  # s6-overlay. /package holds the s6, s6-rc and execline binaries that PID1
+  # and every supervisor run later; /command links to them. s6 only reads
+  # its definitions under /etc and runs from copies under /run, which stays
+  # writable. Checked against s6-overlay 3.2.2.0 (the frozen base:3.21 image)
+  # with S6_LOGGING, S6_RUNTIME_PROFILE and S6_READ_ONLY_ROOT unset (the
+  # tests pin that the Dockerfile sets none): recheck all three on a
+  # base-image change.
+  audit deny /command/{,**} wl,
+  audit deny /package/{,**} wl,
+  audit deny /etc/s6-overlay/{,**} wl,
+  audit deny /etc/{cont-init.d,cont-finish.d,services.d,fix-attrs.d,cont-profile.d}/{,**} wl,
+
+  # Not locked: /config and /data/options.json (persistent volumes; their
+  # writers have not been surveyed) and the rest of /etc (the runtime
+  # bind-mounts hosts, hostname and resolv.conf there).
   # Never lock /run, /tmp, /data as a whole, /share/switchboard,
   # /var/run/asterisk, /var/log/asterisk or the top level of
   # /var/lib/asterisk: s6, Asterisk and the services write there, and s6
@@ -214,4 +281,69 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   audit deny umount,
   audit deny pivot_root,
   audit deny ptrace (trace),
+
+  # --- Child: switchboard-config -------------------------------------------
+  # Entered only through the Cx rule above. It inherits nothing from the
+  # parent: no "file,", no blanket grant. Of its writes, only /etc/asterisk
+  # and the zone go beyond what the parent already allows; the rest are the
+  # parent's own grants, listed again because nothing carries over.
+  profile switchboard_config flags=(attach_disconnected,mediate_deleted) {
+    #include <abstractions/base>
+
+    # Reads: everything, on purpose. Python stats and opens freely, and a
+    # refused read here fails the boot-critical init step. The same read
+    # denies as the parent.
+    /{,**} r,
+    audit deny /etc/{shadow,gshadow}{,-} r,
+    deny /root/** rw,
+    deny /home/** rw,
+    audit deny /sys/firmware/** r,
+    audit deny /sys/kernel/security/** r,
+
+    # The kernel picks this profile once, from the script's path, then maps
+    # the shebang's interpreter under it: python3 needs "m" here, not "x".
+    # ld-musl, libpython and the extension modules come from base
+    # (/{usr/,}lib{,32,64}/**.so* mr).
+    /usr/bin/python3.{1,}[0-9] m,
+
+    # Writes: exactly what main() writes; the tests pin the file names to its
+    # write() calls.
+    #  - the Asterisk configuration (the directory only if it is missing);
+    /etc/asterisk/ w,
+    /etc/asterisk/{pjsip,extensions,confbridge,modules,pjsip_notify,rtp,manager,logger,features}.conf w,
+    #  - the zone: unlink and re-create the link, write the name;
+    /etc/localtime w,
+    /etc/timezone w,
+    #  - the runtime handoff to the services: options snapshot, zone,
+    #    verbosity, operator and features maps, AMI credentials, ASR and
+    #    announce dirs;
+    /run/switchboard/{,**} w,
+    #  - the shared stores, the durable-log trim and the one-time move of
+    #    the two stores out of /data;
+    /data/state/{,**} w,
+    /data/{wakeups,mwi}.json w,
+    #  - the readable log copy and its ownership repair.
+    /share/switchboard/{,**} w,
+
+    # Ownership and mode repair of asterisk-owned files and dirs, root writes
+    # into the 2775 dirs, and keeping their setgid bit. No setuid, setgid or
+    # kill: it starts nothing and signals nothing.
+    capability chown,
+    capability dac_override,
+    capability fowner,
+    capability fsetid,
+
+    # The runtime or s6 may stop the container while this runs.
+    signal (receive),
+
+    # Supervisor /info lookup for the timezone (TCP) and its DNS (UDP). Not
+    # enforced without an abi line; listed so that adding one keeps it working.
+    network inet stream,
+    network inet6 stream,
+    network inet dgram,
+    network inet6 dgram,
+
+    # No exec rule: the child runs no program. Base's only one (ecryptfs,
+    # under /root and /home) is unreachable: both trees are denied.
+  }
 }

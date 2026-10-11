@@ -3,12 +3,6 @@
 # on the host (host_network) so the Supervisor can reach it.
 bashio::log.info "Starting Switchboard web UI on :8099 ..."
 
-if [ -f /run/switchboard/ami.env ]; then
-    # shellcheck disable=SC1091
-    source /run/switchboard/ami.env
-    export AMI_USER AMI_SECRET
-fi
-
 cd /usr/share/switchboard/webui || exit 1
 # Read options from the post-overlay snapshot (init-switchboard writes it);
 # falls back to /data/options.json when absent. Keeps every consumer on ONE

@@ -44,12 +44,6 @@ else
     bashio::log.notice "The operator console is UNAUTHENTICATED on ${BIND} and can ring/connect/hang up phones. Set console_bind to 127.0.0.1 to restrict it, or console_enabled:false to turn it off."
 fi
 
-if [ -f /run/switchboard/ami.env ]; then
-    # shellcheck disable=SC1091
-    source /run/switchboard/ami.env
-    export AMI_USER AMI_SECRET
-fi
-
 export CONSOLE_PORT="${PORT}"
 export CONSOLE_HOST="${BIND}"
 # Timezone backstop: the init step points /etc/localtime at the resolved zone,

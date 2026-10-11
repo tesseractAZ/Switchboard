@@ -85,7 +85,8 @@ jobs:
           sudo apparmor_parser -Q -K switchboard/apparmor.txt
           names="$(sudo apparmor_parser -N -K switchboard/apparmor.txt)"
           echo "profiles: ${names}"
-          test "${names}" = "switchboard"
+          # The parent and its one nested child (switchboard-config's profile).
+          test "${names}" = "$(printf 'switchboard\nswitchboard//switchboard_config')"
 
   docker-smoke:
     # Build the add-on container for EVERY architecture config.yaml declares.
