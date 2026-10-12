@@ -30,6 +30,12 @@ def check(name: str, cond: bool) -> None:
     assert cond, name
 
 
+def _seed_ami_creds() -> None:
+    """Stand in for the two credentials files switchboard-config writes at boot."""
+    ami._creds_cache.update({ami.CALL: ("switchboard-call", "test-secret"),
+                             ami.STATUS: ("switchboard-status", "test-secret")})
+
+
 # A PJSIPShowEndpoints capture: banner, Login ack, action ack, two EndpointList
 # events (one online "Not in use", one offline "Unavailable"), the trunk, then
 # the terminator. Note the real Asterisk field casing (ObjectName/DeviceState).
@@ -438,8 +444,8 @@ def test_status_bundle_socket_loop() -> None:
     # case (must still parse correct data via the timeout, not hang/corrupt); and
     # an auth failure (must raise). Guards a future Asterisk that drops ActionID
     # echo from silently slowing the live board with no test signal.
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
 
     def run(fake):
         ami.socket.create_connection = lambda *a, **k: fake
@@ -468,7 +474,7 @@ def test_status_bundle_socket_loop() -> None:
         check("bundle e2e: auth failure raises AMIError", raised)
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_call_codec_summary() -> None:
@@ -546,8 +552,8 @@ class _FakeGetvarSocket:
 def test_get_channel_codec_reads_value() -> None:
     # The Getvar response's Value (the codec) is read back over the socket, and an
     # auth failure degrades to "" rather than raising into the status path.
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     try:
         ami.socket.create_connection = lambda *a, **k: _FakeGetvarSocket(value="ulaw")
         check("codec: Getvar Value parsed as the codec", ami.get_channel_codec("PJSIP/11-1") == "ulaw")
@@ -555,7 +561,7 @@ def test_get_channel_codec_reads_value() -> None:
         check("codec: auth failure degrades to '' (no raise into status)", ami.get_channel_codec("PJSIP/11-1") == "")
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_device_state_guards() -> None:
@@ -569,8 +575,8 @@ def test_device_state_guards() -> None:
 def test_device_state_reads_value() -> None:
     # The channel-less Getvar of DEVICE_STATE(PJSIP/<ext>) round-trips the Value,
     # and an auth failure degrades to "" (fail open) instead of raising.
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     try:
         fake = _FakeGetvarSocket(value="INUSE")
         ami.socket.create_connection = lambda *a, **k: fake
@@ -582,7 +588,7 @@ def test_device_state_reads_value() -> None:
         check("devstate: auth failure degrades to '' (fail open)", ami.get_device_state("19") == "")
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_device_busy() -> None:
@@ -684,8 +690,8 @@ class _FakeSplitGetvarSocket:
 def test_a_getvar_reply_written_in_two_parts_is_read_whole() -> None:
     # ★ The 2026-09-22 defect: the read stopped on the header and DEVICE_STATE
     # came back "" on 28 of 29 announcements, so the pre-send guard never judged.
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     try:
         ami.socket.create_connection = lambda *a, **k: _FakeSplitGetvarSocket(
             "DEVICE_STATE(PJSIP/19)", "NOT_INUSE")
@@ -701,7 +707,7 @@ def test_a_getvar_reply_written_in_two_parts_is_read_whole() -> None:
               ami.get_channel_codec("PJSIP/11-1") == "ulaw")
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 class _FakeCodecBatchSocket:
@@ -747,8 +753,8 @@ class _FakeCodecBatchSocket:
 def test_codecs_for_channels_batched() -> None:
     # All active channels' codecs read over ONE login (one Getvar each, ActionID-
     # multiplexed) — not one connect/login/logoff per channel (the v0.9.4 churn).
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     try:
         chans = [{"channel": "PJSIP/11-1"}, {"channel": "PJSIP/16-2"}]
         fake = _FakeCodecBatchSocket({"PJSIP/11-1": "ulaw", "PJSIP/16-2": "g722"})
@@ -761,7 +767,7 @@ def test_codecs_for_channels_batched() -> None:
         check("codec batch: one Getvar per channel", fake.sent.count(b"Action: Getvar") == 2)
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_transfer_channel_guard() -> None:
@@ -821,8 +827,8 @@ class _FakeRedirectSocket:
 def test_transfer_channel_redirect() -> None:
     # A valid transfer issues exactly one Redirect into [rooms] at the target ext
     # and returns True on Success; an Error response returns False (no exception).
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     allowed = {"11", "12"}
     try:
         fake = _FakeRedirectSocket(ok=True)
@@ -837,7 +843,7 @@ def test_transfer_channel_redirect() -> None:
               ami.transfer_channel("PJSIP/trunk-1", "12", allowed) is False)
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_peer_channels_by_ext() -> None:
@@ -981,19 +987,123 @@ def test_send_register_uses_an_action_the_ami_account_is_allowed_to_run() -> Non
     check("send_register: names the registration section",
           any(l.strip() == "Registration: trunk-reg" for l in sent["lines"]))
 
-    # Now the coupling: what the action needs vs what we grant.
+    # Now the coupling: what the action needs vs what the account it logs in
+    # with is granted. PJSIPRegister is registered by
+    # res_pjsip_outbound_registration with EVENT_FLAG_SYSTEM; Command needs the
+    # `command` class.
+    check("send_register: logs in with the status account",
+          ami._ACTION_ACCOUNT["pjsipregister"] == ami.STATUS)
+    granted = _granted_write_classes()
+    check("manager.conf grants the status account `system` (what PJSIPRegister needs)",
+          "system" in granted[ami.STATUS])
+    check("no account holds `command`, so Command is unusable and send_register "
+          "must not depend on it",
+          all("command" not in classes for classes in granted.values()))
+
+
+def _granted_write_classes() -> dict:
+    """{account key: write classes} from the generated manager.conf, split the
+    way Asterisk splits it: on "," with nothing trimmed (ast_instring)."""
     sbc_path = Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "bin" / "switchboard-config"
     sbc = SourceFileLoader("sbc_for_ami_test", str(sbc_path)).load_module()
-    mgr = sbc.render_manager("switchboard", "secret")
-    write = next(l.split("=", 1)[1] for l in mgr.splitlines() if l.startswith("write ="))
-    write_classes = {c.strip() for c in write.split(",")}
-    # PJSIPRegister is registered by res_pjsip_outbound_registration with
-    # EVENT_FLAG_SYSTEM; Command needs the `command` class.
-    check("manager.conf grants `system` (what PJSIPRegister needs)",
-          "system" in write_classes)
-    check("manager.conf withholds `command` from WRITE — so Command is unusable "
-          "and send_register must not depend on it",
-          "command" not in write_classes)
+    mgr = sbc.render_manager({"call": "a", "status": "b"})
+    by_user = {}
+    user = None
+    for line in mgr.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            user = line[1:-1]
+        elif line.startswith("write =") and user:
+            by_user[user] = set(line.split("=", 1)[1].strip().split(","))
+    return {key: by_user[user] for key, (user, _) in sbc.AMI_ACCOUNTS.items()}
+
+
+# The class each action is registered with in Asterisk 20.11.1; an account may
+# run an action when its write mask shares any class with it (manager.c:7012).
+_ACTION_CLASSES = {
+    "originate": {"originate"},
+    "getvar": {"call", "reporting"},
+    "hangup": {"system", "call"},
+    "redirect": {"call"},
+    "pjsipshowendpoints": {"system"},
+    "pjsipshowcontacts": {"system"},
+    "pjsipnotify": {"system"},
+    "coreshowchannels": {"system", "reporting"},
+    "pjsipshowregistrationsoutbound": {"system", "reporting"},
+    "pjsipregister": {"system"},
+}
+
+
+def test_every_action_logs_in_with_an_account_that_may_run_it() -> None:
+    granted = _granted_write_classes()
+    check("ami: the action table and the class table name the same actions",
+          set(ami._ACTION_ACCOUNT) == set(_ACTION_CLASSES))
+    for action, account in ami._ACTION_ACCOUNT.items():
+        check(f"ami: {action} runs as an account that holds its class",
+              bool(granted[account] & _ACTION_CLASSES[action]))
+    sent = {m.group(1).lower()
+            for m in re.finditer(r'"Action: (\w+)"', AMI_PATH.read_text())}
+    sent -= {"login", "logoff"}
+    check("ami: every action the module sends is in the account table",
+          sent <= set(ami._ACTION_ACCOUNT))
+
+
+def test_no_account_is_a_shell() -> None:
+    # With `system`, Originate may run System/Exec/AGI and Getvar may read
+    # SHELL(); with `call` or `reporting` an account may Getvar at all.
+    for account, classes in _granted_write_classes().items():
+        check(f"ami: {account} does not hold both originate and system",
+              not {"originate", "system"} <= classes)
+        check(f"ami: {account} cannot both Getvar and reach SHELL()",
+              not ("system" in classes and classes & {"call", "reporting"}))
+
+
+def test_one_session_is_one_account() -> None:
+    for actions in ([["Action: Originate"], ["Action: PJSIPShowContacts"]],
+                    [["Action: Command"]],
+                    [["Channel: x"]]):
+        raised = False
+        try:
+            ami._account_for(actions)
+        except ValueError:
+            raised = True
+        check(f"ami: refuses {actions!r}", raised)
+    check("ami: the status bundle is one status session",
+          ami._account_for([["Action: PJSIPShowEndpoints"], ["Action: PJSIPShowContacts"],
+                            ["Action: CoreShowChannels"]]) == ami.STATUS)
+
+
+def test_credentials_come_from_the_account_file() -> None:
+    import os
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    (d / "call.env").write_text("AMI_CALL_USER=switchboard-call\nAMI_CALL_SECRET=c1\n")
+    old = {k: os.environ.get(k) for k in ("AMI_CALL_ENV", "AMI_STATUS_ENV")}
+    os.environ["AMI_CALL_ENV"] = str(d / "call.env")
+    os.environ["AMI_STATUS_ENV"] = str(d / "missing.env")
+    ami._creds_cache.clear()
+    try:
+        check("ami: call creds read from the call file",
+              ami._creds(ami.CALL) == ("switchboard-call", "c1"))
+        (d / "call.env").unlink()
+        check("ami: a complete pair is cached (one read per process, not per poll)",
+              ami._creds(ami.CALL) == ("switchboard-call", "c1"))
+        raised = False
+        try:
+            ami._creds(ami.STATUS)
+        except ami.AMIError:
+            raised = True
+        check("ami: a missing status file is 'not configured', not a crash", raised)
+        check("ami: a miss is not cached", ami.STATUS not in ami._creds_cache)
+        (d / "missing.env").write_text("AMI_STATUS_USER=switchboard-status\nAMI_STATUS_SECRET=s1\n")
+        check("ami: and is retried on the next call",
+              ami._creds(ami.STATUS) == ("switchboard-status", "s1"))
+    finally:
+        ami._creds_cache.clear()
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_send_register_rejects_a_bogus_section_name() -> None:
@@ -1312,14 +1422,14 @@ class _ScriptedAMISocket:
 
 
 def _with_socket(fake, fn):
-    orig_conn, orig_secret = ami.socket.create_connection, ami.AMI_SECRET
-    ami.AMI_SECRET = "test-secret"
+    orig_conn = ami.socket.create_connection
+    _seed_ami_creds()
     ami.socket.create_connection = lambda *a, **k: fake
     try:
         return fn()
     finally:
         ami.socket.create_connection = orig_conn
-        ami.AMI_SECRET = orig_secret
+        ami._creds_cache.clear()
 
 
 def test_a_status_poll_with_no_phone_registered_does_not_stall() -> None:
@@ -1440,3 +1550,69 @@ def test_a_list_action_cannot_go_through_the_single_response_reader() -> None:
         ami.socket.create_connection = orig
     check("single-response only: list mode is refused", raised)
     check("single-response only: before any connection", calls == [])
+
+
+class _DeniedAMISocket(_FakeAMISocket):
+    """Logs in, then refuses every tagged action for want of a class, the way
+    Asterisk answers an action the account's write mask does not cover."""
+
+    def _response(self) -> bytes:
+        ids = re.findall(r"ActionID: (\S+)", self.sent.decode())
+        return ("Response: Success\r\nMessage: Authentication accepted\r\n\r\n" + "".join(
+            f"Response: Error\r\nActionID: {a}\r\nMessage: Permission denied\r\n\r\n"
+            for a in ids)).encode()
+
+
+def test_each_session_logs_in_as_its_own_account() -> None:
+    fake = _FakeAMISocket()
+    _with_socket(fake, ami.get_status_bundle)
+    check("login: the status poll logs in as the status account",
+          b"Username: switchboard-status\r\n" in fake.sent
+          and b"switchboard-call" not in fake.sent)
+    fake = _FakeAMISocket()
+    _with_socket(fake, lambda: ami.ring_extension("11"))
+    check("login: a test ring logs in as the call account",
+          b"Username: switchboard-call\r\n" in fake.sent
+          and b"switchboard-status" not in fake.sent)
+
+
+def test_a_refused_action_is_an_error_not_an_empty_answer() -> None:
+    # Before the split a refusal could not happen; after it, an action sent with
+    # the wrong account would read as "no phones, no calls" on the board.
+    for name, fn in (("status bundle", ami.get_status_bundle),
+                     ("originate", lambda: ami.ring_extension("11"))):
+        raised = False
+        try:
+            _with_socket(_DeniedAMISocket(), fn)
+        except ami.AMIError as exc:
+            raised = "permission denied" in str(exc)
+        check(f"denied: {name} raises AMIError('permission denied ...')", raised)
+
+
+def test_hangup_and_redirect_take_only_real_channel_names() -> None:
+    # Asterisk skips leading blanks in a header value, then reads "/.../" as a
+    # pattern: " /./" or "\t/./" would hang up every call in the house.
+    calls = []
+    real = ami._ami_command
+    ami._ami_command = lambda *a, **k: calls.append(a) or []
+    try:
+        for bad in (" /./", "\t/./", "\x0b/x/", "/PJSIP/.*/", "", "PJSIP/11\r\nAction: Command",
+                    "11-0001", " PJSIP/11-1", "PJSIP/", "PJSIP/" + "x" * 201):
+            check(f"channel guard: hangup refuses {bad!r}", ami.hangup_channel(bad) is False)
+            check(f"channel guard: redirect refuses {bad!r}",
+                  ami.transfer_channel(bad, "11", ["11"]) is False)
+        check("channel guard: nothing reached AMI", calls == [])
+        for good in ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1", "PJSIP/trunk-00000003"):
+            ami.hangup_channel(good)
+        check("channel guard: real channel names still go through", len(calls) == 3)
+    finally:
+        ami._ami_command = real
+
+
+def test_the_codec_read_logs_in_as_the_call_account() -> None:
+    # Getvar is a call-class action; with the status account every read would be
+    # refused and the codec column would go blank without an error.
+    fake = _FakeAMISocket()
+    _with_socket(fake, lambda: ami.codecs_for_channels([{"channel": "PJSIP/11-1"}]))
+    check("codecs: logs in as switchboard-call",
+          b"Username: switchboard-call\r\n" in fake.sent and b"switchboard-status" not in fake.sent)

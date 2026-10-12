@@ -13,8 +13,20 @@ from pathlib import Path
 
 ADDON = Path(__file__).resolve().parents[1]
 PROFILE = (ADDON / "apparmor.txt").read_text()
-RULES = [l.strip() for l in PROFILE.splitlines()
-         if l.strip() and not l.strip().startswith("#")]
+CHILD_HEAD = "\n  profile switchboard_config flags=(attach_disconnected,mediate_deleted) {\n"
+_before, _head, _after = PROFILE.partition(CHILD_HEAD)
+_child_body, _close, _rest = _after.partition("\n  }\n")
+PARENT_TEXT = _before + "\n" + _rest
+CHILD_TEXT = _child_body
+
+
+def _rules(text: str) -> list[str]:
+    return [l.strip() for l in text.splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+
+
+RULES = _rules(PARENT_TEXT)
+CHILD_RULES = _rules(CHILD_TEXT)
 
 ALLOWED_CAPS = {"chown", "dac_override", "fowner", "fsetid", "kill",
                 "setgid", "setuid", "net_bind_service"}
@@ -22,13 +34,26 @@ MUST_DENY_CAPS = {"net_raw", "setfcap", "sys_admin", "sys_module", "sys_rawio",
                   "sys_ptrace", "sys_boot", "sys_time", "syslog", "mac_admin",
                   "mac_override", "net_admin", "dac_read_search", "bpf", "perfmon"}
 WRITE_LOCKED = ["/init", "/bin/{,**}", "/sbin/{,**}", "/lib/{,**}", "/usr/{,**}",
-                "/var/lib/asterisk/{agi-bin,sounds,moh}/{,**}"]
+                "/var/lib/asterisk/{agi-bin,sounds,moh}/{,**}",
+                # wave 2 (v0.109.0), boot-tested on the host parser
+                "/etc/asterisk/{,**}", "/etc/{localtime,timezone}",
+                "/var/spool/asterisk/{,**}", "/command/{,**}", "/package/{,**}",
+                "/etc/s6-overlay/{,**}",
+                "/etc/{cont-init.d,cont-finish.d,services.d,fix-attrs.d,cont-profile.d}/{,**}"]
 # s6 writes or executes from these, Asterisk and the services write there, or
 # they are the persistent volumes: a deny on any of them is a crash-loop or a
 # broken feature, and none was boot-tested.
-NEVER_DENIED = ("/run", "/tmp", "/data", "/share", "/config", "/command",
-                "/package", "/etc/s6-overlay", "/etc/asterisk", "/var/run/asterisk",
-                "/var/log/asterisk", "/var/spool/asterisk")
+NEVER_DENIED = ("/run", "/tmp", "/data", "/share", "/config", "/var/run/asterisk",
+                "/var/log/asterisk")
+# What switchboard-config may write, and nothing else. A new write in main()
+# must be added here and to the child deliberately.
+CHILD_WRITES = {
+    "/etc/asterisk/",
+    "/etc/asterisk/{pjsip,extensions,confbridge,modules,pjsip_notify,rtp,manager,logger,features}.conf",
+    "/etc/localtime", "/etc/timezone", "/run/switchboard/{,**}", "/data/state/{,**}",
+    "/data/{wakeups,mwi}.json", "/share/switchboard/{,**}",
+}
+CHILD_CAPS = {"chown", "dac_override", "fowner", "fsetid"}
 FILE_RULE = re.compile(r"^(audit\s+)?(deny\s+)?(/\S*)\s+([a-zA-Z]+),$")
 
 
@@ -50,7 +75,7 @@ def test_the_three_blanket_grants_stay():
 def test_no_mask_combines_append_and_write():
     # The parser rejects a mask holding both "a" and "w" — the profile then
     # fails to load and the add-on cannot start after the next host boot.
-    for rule in RULES:
+    for rule in RULES + CHILD_RULES:
         m = FILE_RULE.match(rule)
         if m:
             perms = m.group(4)
@@ -121,3 +146,93 @@ def test_asterisk_starts_unprivileged():
     run = (ADDON / "rootfs/etc/s6-overlay/s6-rc.d/asterisk/run").read_text()
     execs = [l.strip() for l in run.splitlines() if l.strip().startswith("exec ")]
     assert execs == ['exec s6-setuidgid asterisk asterisk -f "$@"'], execs
+
+
+# --- the switchboard-config child (v0.109.0) ---------------------------------
+
+def test_the_child_is_nested_once_and_closes_the_file():
+    # The Supervisor's loader refuses a second column-0 profile line, so the
+    # child is indented inside the parent, and the parent's brace ends the file.
+    assert PROFILE.count(CHILD_HEAD) == 1
+    heads = [l for l in PROFILE.splitlines() if l.lstrip().startswith("profile ")]
+    assert len(heads) == 2, heads
+    assert _close and _rest.strip() == "}", _rest[-200:]
+    # The child inherits nothing, so it needs base itself (ld-musl, libpython).
+    assert CHILD_TEXT.startswith("    #include <abstractions/base>\n")
+
+
+def test_only_root_enters_the_child_and_by_one_exact_path():
+    # Any transition or unconfined exec, in either spelling (path-first or
+    # perms-first, with or without a mask), and any "->".
+    exec_mode = re.compile(r"(^|\s)[a-zA-Z]*[PpCcUu]i?x(\s|,)|->")
+    transitions = [r for r in RULES if exec_mode.search(r) and not r.startswith(("#", "deny ", "audit deny "))]
+    assert transitions == ["owner /usr/bin/switchboard-config Cx -> switchboard_config,"], transitions
+
+
+# Every rule the child may hold, by shape. Anything else (an exec mode, a
+# transition, change_profile, ptrace, mount, signal send, a blanket grant) fails.
+CHILD_SHAPES = (
+    re.compile(r"^/\S* (r|w|m)+,$"),                       # read / write / map
+    re.compile(r"^(audit )?deny /\S+ (r|rw|wl),$"),         # the read denies
+    re.compile(r"^capability [a-z_]+,$"),
+    re.compile(r"^signal \(receive\),$"),
+    re.compile(r"^network inet6? (stream|dgram),$"),
+)
+
+
+def test_the_child_runs_nothing_and_has_no_blanket_grant():
+    for rule in CHILD_RULES:
+        assert any(p.match(rule) for p in CHILD_SHAPES), f"rule outside the child's allowed shapes: {rule}"
+    assert "/usr/bin/python3.{1,}[0-9] m," in CHILD_RULES
+
+
+def test_the_child_writes_exactly_what_main_writes():
+    # a, l and k are write-class too; "owner" is caught by the shape test.
+    writes = {m.group(3) for r in CHILD_RULES for m in [FILE_RULE.match(r)]
+              if m and not m.group(2) and set(m.group(4)) & set("walk")}
+    assert writes == CHILD_WRITES, sorted(writes ^ CHILD_WRITES)
+    src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
+    confs = set(re.findall(r'write\(ASTERISK_ETC / "([a-z_]+)\.conf"', src))
+    listed = re.search(r"/etc/asterisk/\{([a-z_,]+)\}\.conf w,", CHILD_TEXT).group(1).split(",")
+    assert confs == set(listed), sorted(confs ^ set(listed))
+
+
+def test_the_child_capabilities_and_read_denies():
+    caps = {m.group(1) for r in CHILD_RULES for m in [re.match(r"^capability (\w+),$", r)] if m}
+    assert caps == CHILD_CAPS, sorted(caps ^ CHILD_CAPS)
+    for rule in ("audit deny /etc/{shadow,gshadow}{,-} r,", "deny /root/** rw,",
+                 "deny /home/** rw,", "audit deny /sys/firmware/** r,",
+                 "audit deny /sys/kernel/security/** r,", "signal (receive),"):
+        assert rule in CHILD_RULES, rule
+
+
+def test_the_init_step_execs_the_child_path_directly():
+    # Run as "python3 <path>" or through an env shebang, the exec would not
+    # match the Cx rule (or the child could not map env) and the boot would fail.
+    up = (ADDON / "rootfs/etc/s6-overlay/s6-rc.d/init-switchboard/up").read_text()
+    assert up.startswith('/bin/sh -c "/usr/bin/switchboard-config && '), up
+    src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
+    # -I: no PYTHON* variables, user site or script-dir imports in the child.
+    assert src.splitlines()[0] == "#!/usr/bin/python3 -IB"
+
+
+def test_the_image_hands_etc_asterisk_to_root():
+    dockerfile = (ADDON / "Dockerfile").read_text()
+    m = re.search(r"^RUN chown -R root:asterisk /etc/asterisk \\\n\s+&& chmod -R u=rwX,g=rX,o= /etc/asterisk$",
+                  dockerfile, re.M)
+    assert m, "the /etc/asterisk ownership layer is gone"
+    # After every layer that installs packages or copies files in.
+    assert m.start() > dockerfile.rindex("\nCOPY rootfs /")
+    assert m.start() > dockerfile.rindex("\nRUN apk add")
+
+
+def test_s6_runs_with_the_settings_the_s6_locks_were_checked_against():
+    for name in ("Dockerfile", "config.yaml"):
+        text = (ADDON / name).read_text()
+        for var in ("S6_LOGGING", "S6_RUNTIME_PROFILE", "S6_READ_ONLY_ROOT"):
+            assert var not in text, f"{var} in {name}"
+
+
+def test_pbx_spool_is_noloaded_for_the_spool_lock():
+    src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
+    assert '"noload = pbx_spool.so",' in src

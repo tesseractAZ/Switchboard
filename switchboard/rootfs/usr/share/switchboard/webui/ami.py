@@ -21,27 +21,102 @@ import socket
 
 AMI_HOST = "127.0.0.1"
 AMI_PORT = 5038
-AMI_USER = os.environ.get("AMI_USER", "switchboard")
-AMI_SECRET = os.environ.get("AMI_SECRET", "")
+# ★ TWO MANAGER ACCOUNTS (v0.109.0), and every action logs in with the one that
+# holds its class. switchboard-config's AMI_ACCOUNTS is the other half:
+#
+#   call    originate,call  Originate, Getvar, Hangup, Redirect
+#   status  system          the PJSIP lists, CoreShowChannels, PJSIPRegister,
+#                           PJSIPNotify
+#
+# A single account used to hold both "originate" and "system", and with "system"
+# Asterisk lets an Originate run System/Exec/AGI, which made its secret a shell.
+# Neither account can do that now: the call account cannot reach System() or
+# SHELL(), and the status account cannot originate.
+CALL = "call"
+STATUS = "status"
+_ACTION_ACCOUNT = {
+    "originate": CALL,
+    "getvar": CALL,
+    "hangup": CALL,
+    "redirect": CALL,
+    "pjsipshowendpoints": STATUS,
+    "pjsipshowcontacts": STATUS,
+    "coreshowchannels": STATUS,
+    "pjsipshowregistrationsoutbound": STATUS,
+    "pjsipregister": STATUS,
+    "pjsipnotify": STATUS,
+}
+# Each account's credentials file, written every boot by switchboard-config. The
+# call file is root-only; the status file is also readable by group asterisk,
+# because switchboard-mwi runs from the dialplan's System() as the asterisk user.
+# The *_ENV variables override the paths in tests.
+_ENV_FILES = {
+    CALL: ("AMI_CALL_ENV", "/run/switchboard/ami-call.env", "AMI_CALL"),
+    STATUS: ("AMI_STATUS_ENV", "/run/switchboard/ami-status.env", "AMI_STATUS"),
+}
+_creds_cache: dict[str, tuple[str, str]] = {}
 
-# A process spawned by the dialplan — Asterisk `System()`, e.g. the operator's
-# MWI auto-clear running `switchboard-mwi clear <ext>` — inherits Asterisk's
-# environment, which does NOT carry the AMI secret (the s6 run scripts source
-# /run/switchboard/ami.env for the long-running services, but a System() child of
-# Asterisk doesn't). Fall back to that generated env file so any AMI consumer
-# works regardless of how it was launched. (`AMI_ENV` overrides the path in tests.)
-if not AMI_SECRET:
+
+def _creds(account: str) -> tuple[str, str]:
+    """(username, secret) for one Manager account, read from its file on first use.
+
+    Read lazily rather than at import, so importing this module never needs the
+    secret and a process only ever opens the file of an account it actually uses
+    (the status-only MWI helper never touches the call file it cannot read). Only
+    a complete pair is cached; a missing one is retried on the next call."""
+    hit = _creds_cache.get(account)
+    if hit:
+        return hit
+    env_var, default_path, prefix = _ENV_FILES[account]
     try:
-        with open(os.environ.get("AMI_ENV", "/run/switchboard/ami.env")) as _fh:
-            _env = dict(
+        with open(os.environ.get(env_var, default_path)) as fh:
+            env = dict(
                 ln.strip().split("=", 1)
-                for ln in _fh
+                for ln in fh
                 if "=" in ln and not ln.strip().startswith("#")
             )
-        AMI_USER = _env.get("AMI_USER", AMI_USER)
-        AMI_SECRET = _env.get("AMI_SECRET", AMI_SECRET)
     except OSError:
-        pass
+        env = {}
+    user, secret = env.get(f"{prefix}_USER", ""), env.get(f"{prefix}_SECRET", "")
+    if not (user and secret):
+        raise AMIError("AMI secret not configured")
+    _creds_cache[account] = (user, secret)
+    return user, secret
+
+
+def _account_for(actions: list[list[str]]) -> str:
+    """The one account that carries every action in a session. An action this
+    table does not classify is a programming error, and so is a session that would
+    need both accounts: one login is one account."""
+    accounts = set()
+    for act in actions:
+        head = act[0] if act else ""
+        key, _, name = head.partition(":")
+        account = _ACTION_ACCOUNT.get(name.strip().lower()) if key.strip().lower() == "action" else None
+        if account is None:
+            raise ValueError(f"no AMI account is mapped for {head!r}")
+        accounts.add(account)
+    if len(accounts) != 1:
+        raise ValueError("one AMI session cannot mix the call and status accounts")
+    return accounts.pop()
+
+
+def _login_lines(account: str) -> list[str]:
+    user, secret = _creds(account)
+    return ["Action: Login", f"Username: {user}", f"Secret: {secret}", "Events: off"]
+
+
+def _denied(blocks: list[dict], action_ids: set[str]) -> bool:
+    """True when Asterisk refused one of OUR actions for want of a class. That is
+    a configuration fault (an action used with the wrong account), never "no
+    data", so the callers raise it instead of returning an empty answer."""
+    return any(
+        b.get("actionid") in action_ids
+        and (b.get("response") or "").lower() == "error"
+        and "permission denied" in (b.get("message") or "").lower()
+        for b in blocks
+    )
+
 
 # A PJSIP endpoint's DeviceState is Asterisk's own aggregate of contact
 # reachability: with no bound/qualified contact it reads "Unavailable", and the
@@ -60,6 +135,25 @@ _REGISTERED_CONTACT_STATUSES = frozenset({"reachable", "nonqualified", "created"
 # ext into an AMI Channel string, so no caller can smuggle in CRLF / a dial
 # string even if it skipped its own validation.
 _EXT_RE = re.compile(r"[0-9]{1,6}")
+
+_TECH_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _valid_channel(name: str) -> bool:
+    """A channel name as Asterisk prints it: a technology that starts with a
+    letter, a slash, then 1-200 printable non-space ASCII characters
+    ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1").
+
+    It must START with a letter. Asterisk drops leading blanks from a header value
+    and then reads "Channel: /regex/" as a pattern that hangs up every channel it
+    matches, so " /./" passed a startswith("/") check and still ended every call.
+    Written without a regular expression: the value comes from the web UI, and
+    plain character checks are linear by construction."""
+    tech, slash, rest = (name or "").partition("/")
+    return (bool(slash) and 1 <= len(rest) <= 200
+            and tech[:1].isascii() and tech[:1].isalpha()
+            and all(c in _TECH_CHARS for c in tech)
+            and all("!" <= c <= "~" for c in rest))
 
 
 class AMIError(Exception):
@@ -421,8 +515,8 @@ def _ami_command(
     """
     if not single_response:
         raise ValueError("list actions go through _ami_actions")
-    if not AMI_SECRET:
-        raise AMIError("AMI secret not configured")
+    account = _account_for([action_lines])
+    login = _login_lines(account)
 
     if not action_id:
         action_id = _next_action_id()
@@ -440,8 +534,7 @@ def _ami_command(
         except socket.timeout:
             pass
 
-        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
-              "Events: off"])
+        send(login)
         send(action_lines)
 
         data = bytearray(buf)
@@ -472,8 +565,12 @@ def _ami_command(
 
     blocks = parse_ami_blocks(bytes(data))
     if login_failed(blocks):
-        # Generic message; the caller logs detail server-side.
+        # Generic message; the caller logs detail server-side. Drop the cached
+        # pair so the next call re-reads the file a restart may have rewritten.
+        _creds_cache.pop(account, None)
         raise AMIError("authentication failed")
+    if _denied(blocks, {action_id}):
+        raise AMIError(f"permission denied for {action_lines[0]}")
     return blocks
 
 
@@ -501,8 +598,8 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
     whole timeout (see :func:`actions_complete`). The parsed buffer is correct
     either way — the failure mode is latency, never wrong data.
     """
-    if not AMI_SECRET:
-        raise AMIError("AMI secret not configured")
+    account = _account_for(actions)
+    login = _login_lines(account)
 
     want: set[str] = set()
     tagged: list[list[str]] = []
@@ -523,8 +620,7 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
         except socket.timeout:
             pass
 
-        send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
-              "Events: off"])
+        send(login)
         for action_lines in tagged:
             send(action_lines)
 
@@ -550,7 +646,10 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
 
     blocks = parse_ami_blocks(bytes(data))
     if login_failed(blocks):
+        _creds_cache.pop(account, None)
         raise AMIError("authentication failed")
+    if _denied(blocks, want):
+        raise AMIError("permission denied for a list action")
     return blocks
 
 
@@ -559,7 +658,7 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
 
     The caller MUST have validated ``ext`` against the configured rooms — this
     only ever rings a known endpoint and runs a fixed Playback (never Dial), so
-    it cannot place an outside call even though the AMI account holds the
+    it cannot place an outside call even though the call account holds the
     originate privilege. Async: the phone rings for ``ring_seconds`` (≈ one ring
     cycle) and, if answered, hears the test prompt. Returns True if Asterisk
     accepted (queued) the originate.
@@ -696,8 +795,8 @@ def get_device_state(ext: str) -> str:
     Returns "" on any failure (AMI down, auth, bad ext) so callers treat an
     unreadable state as unknown — for the announce busy-guard that means FAIL
     OPEN and place the call. Getvar evaluates the dialplan function without a
-    channel (DEVICE_STATE needs none) using only the ``call`` privilege the AMI
-    account already holds, exactly like :func:`get_channel_codec`. ``ext`` is
+    channel (DEVICE_STATE needs none) using only the ``call`` privilege the call
+    account holds, exactly like :func:`get_channel_codec`. ``ext`` is
     digit-guarded before interpolation so a CRLF-bearing value can't inject
     extra AMI lines."""
     if not _EXT_RE.fullmatch(ext or ""):
@@ -733,7 +832,7 @@ def announce_to_ext(ext: str, sound: str, caller_num: str = "8000", timeout_s: i
 
     Like ring_extension this runs a fixed Playback (never Dial), so it can only
     play a LOCAL file to a KNOWN endpoint — never an outside call — even though the
-    AMI account holds originate privilege. The caller MUST have validated ext; we
+    call account holds the originate privilege. The caller MUST have validated ext; we
     additionally reject a sound/caller_num that could smuggle extra AMI headers
     (CR/LF) or a non-digit caller number. Returns True if Asterisk queued it."""
     if not _EXT_RE.fullmatch(ext or ""):
@@ -961,9 +1060,11 @@ def hangup_channel(channel: str) -> bool:
     """Hang up one channel by its Asterisk channel name (operator "hang up").
 
     The channel string comes from CoreShowChannels (Asterisk-supplied), but we
-    still reject CRLF defensively so it can't inject extra AMI lines.
+    still hold it to the shape of a real channel name (``_valid_channel``): no CR/LF
+    to inject extra AMI lines, and nothing Asterisk would read as its
+    ``/regex/`` form, which hangs up every channel the pattern matches.
     """
-    if not channel or "\r" in channel or "\n" in channel:
+    if not _valid_channel(channel):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(
@@ -989,14 +1090,14 @@ def transfer_channel(channel: str, target_ext: str, allowed_exts) -> bool:
     ``target_ext`` MUST be in ``allowed_exts`` (the configured room set), exactly
     like :func:`connect_extensions` — so a redirect can only ever land on a known
     room's ``_X.`` pattern, never the trunk's outbound ``_<prefix>.`` pattern. The
-    ``channel`` comes from CoreShowChannels but CRLF is rejected defensively. Uses
-    the AMI ``Redirect`` action (the ``call`` privilege the account holds) — NOT the
+    ``channel`` comes from CoreShowChannels but must still look like one. Uses
+    the AMI ``Redirect`` action (the ``call`` privilege the call account holds) — NOT the
     withheld ``command`` class. Returns True on Success.
     """
     allowed = set(allowed_exts or ())
     if target_ext not in allowed or not _EXT_RE.fullmatch(target_ext or ""):
         return False
-    if not channel or "\r" in channel or "\n" in channel:
+    if not _valid_channel(channel):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(
@@ -1135,12 +1236,11 @@ def send_register(reg_name: str = "trunk-reg") -> bool:
 
     Uses the NATIVE ``PJSIPRegister`` action, not the ``Command`` CLI bridge.
     v0.48.0 shipped the CLI form and it could never have worked: this add-on
-    grants the AMI account ``command`` in READ but deliberately withholds it
-    from WRITE (see render_manager + SECURITY.md), and ``Action: Command``
-    is authorised against the WRITE class — so every kick would have been
+    never grants the ``command`` class (see render_manager + SECURITY.md), and
+    ``Action: Command`` is authorised against it, so every kick would have been
     rejected "Permission denied", silently, on the one path that exists to
     recover a dead outside line. PJSIPRegister is authorised against ``system``,
-    which the account already holds, so the recovery works with no widening of
+    which the status account holds, so the recovery works with no widening of
     AMI privilege."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", reg_name or ""):
         return False  # our own section ids only
@@ -1193,7 +1293,7 @@ def get_channel_codec(channel: str) -> str:
     with no transcoding: a leg reading "ulaw" bridged to a trunk leg also reading
     "ulaw" is un-transcoded; a mismatch (e.g. "g722" ↔ "ulaw") reveals a transcode.
 
-    Uses only the ``call`` privilege the AMI account already holds — NOT the
+    Uses only the ``call`` privilege the call account holds — NOT the
     deliberately-withheld ``command`` (CLI/RCE) class. ``channel`` comes from
     CoreShowChannels (Asterisk-supplied); CRLF is rejected defensively so it can
     never inject extra AMI lines.
@@ -1231,7 +1331,11 @@ def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
         name = ch.get("channel", "")
         if name and "\r" not in name and "\n" not in name:
             items.append((_next_action_id(), name))
-    if not items or not AMI_SECRET:
+    if not items:
+        return {}
+    try:
+        login = _login_lines(CALL)
+    except AMIError:
         return {}
     by_id = {aid: name for aid, name in items}
     want = set(by_id)
@@ -1248,8 +1352,7 @@ def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
                 buf += sock.recv(4096)
             except socket.timeout:
                 pass
-            send(["Action: Login", f"Username: {AMI_USER}", f"Secret: {AMI_SECRET}",
-              "Events: off"])
+            send(login)
             for aid, name in items:
                 send(["Action: Getvar", f"Channel: {name}",
                       "Variable: CHANNEL(audioreadformat)", f"ActionID: {aid}"])
@@ -1274,6 +1377,7 @@ def codecs_for_channels(channels: list[dict]) -> dict[str, str]:
         return {}
     blocks = parse_ami_blocks(bytes(data))
     if login_failed(blocks):
+        _creds_cache.pop(CALL, None)
         return {}
     for b in blocks:
         aid = b.get("actionid", "")
