@@ -136,6 +136,13 @@ _REGISTERED_CONTACT_STATUSES = frozenset({"reachable", "nonqualified", "created"
 # string even if it skipped its own validation.
 _EXT_RE = re.compile(r"[0-9]{1,6}")
 
+# A channel name as Asterisk prints it: a technology, a slash, then printable
+# non-space ASCII ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1"). It must
+# START with a letter. Asterisk drops leading blanks from a header value and then
+# reads "Channel: /regex/" as a pattern that hangs up every channel it matches,
+# so " /./" passed a startswith("/") check and still ended every call.
+_CHANNEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*/[!-~]{1,200}")
+
 
 class AMIError(Exception):
     pass
@@ -1041,11 +1048,11 @@ def hangup_channel(channel: str) -> bool:
     """Hang up one channel by its Asterisk channel name (operator "hang up").
 
     The channel string comes from CoreShowChannels (Asterisk-supplied), but we
-    still reject CRLF defensively so it can't inject extra AMI lines, and a
-    leading "/": Asterisk reads ``Channel: /regex/`` as a pattern and hangs up
-    every channel it matches. No real channel name starts with one.
+    still hold it to the shape of a real channel name (``_CHANNEL_RE``): no CR/LF
+    to inject extra AMI lines, and nothing Asterisk would read as its
+    ``/regex/`` form, which hangs up every channel the pattern matches.
     """
-    if not channel or "\r" in channel or "\n" in channel or channel.startswith("/"):
+    if not _CHANNEL_RE.fullmatch(channel or ""):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(
@@ -1071,14 +1078,14 @@ def transfer_channel(channel: str, target_ext: str, allowed_exts) -> bool:
     ``target_ext`` MUST be in ``allowed_exts`` (the configured room set), exactly
     like :func:`connect_extensions` — so a redirect can only ever land on a known
     room's ``_X.`` pattern, never the trunk's outbound ``_<prefix>.`` pattern. The
-    ``channel`` comes from CoreShowChannels but CRLF is rejected defensively. Uses
+    ``channel`` comes from CoreShowChannels but must still look like one. Uses
     the AMI ``Redirect`` action (the ``call`` privilege the call account holds) — NOT the
     withheld ``command`` class. Returns True on Success.
     """
     allowed = set(allowed_exts or ())
     if target_ext not in allowed or not _EXT_RE.fullmatch(target_ext or ""):
         return False
-    if not channel or "\r" in channel or "\n" in channel:
+    if not _CHANNEL_RE.fullmatch(channel or ""):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(

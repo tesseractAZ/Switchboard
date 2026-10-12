@@ -5,17 +5,23 @@
 **The Asterisk Manager is split into two accounts, and the AppArmor profile's
 second wave locks the Asterisk configuration, its spool and the s6 init trees.**
 
-- **No Manager account can both place calls and reach a shell.**
+- **No Manager account can run a program.**
   - The single account held `originate` and `system`. With `system`, Asterisk lets
     an `Originate` run `System`, `Exec` or `AGI` and lets `Getvar` read `SHELL()`,
-    so its secret amounted to a shell as the `asterisk` user.
+    so one secret could both place calls and run programs.
   - `switchboard-call` (`originate`, `call`) places, ends and transfers calls and
-    reads device state and codecs. Asterisk refuses it `System`, `Exec`, `AGI`
-    and `SHELL()`. Its secret is readable by root only.
+    reads device state and codecs. Asterisk refuses it `System`, `Exec`, `AGI`,
+    `SHELL()` and `EVAL()`. Its credentials file is readable by root only.
   - `switchboard-status` (`system`) reads endpoints, contacts, channels and the
     trunk registration, re-registers the trunk and sets message-waiting. It
-    cannot originate or run `Getvar`. Its secret is readable by the `asterisk`
-    group, for the message-waiting helper the dial plan runs.
+    cannot originate or run `Getvar`. Its credentials file is also readable by
+    the `asterisk` group, for the message-waiting helper the dial plan runs.
+  - Both secrets are also in `manager.conf`, which Asterisk must read, and
+    `system` lets the status account read Asterisk's configuration. SECURITY.md
+    lists what the split does and does not separate.
+  - The dialplan functions that read configuration and the environment
+    (`func_env`, `func_config`, `func_sorcery`) are no longer loaded. Nothing
+    used them, and they let a call-class `Getvar` read configuration values.
   - Neither account holds `command` or `config`, and neither subscribes to
     events. Each account's access list now denies every address before it
     permits loopback; a lone `permit` was a no-op.
@@ -23,7 +29,8 @@ second wave locks the Asterisk configuration, its spool and the s6 init trees.**
     on first use. The services no longer export a shared secret, and the old
     `ami.env` is removed at boot.
   - An action refused for want of a class is reported as an error, not as an
-    empty board. Hang up refuses Asterisk's `/regex/` channel form.
+    empty board. Hang up and transfer accept only a real channel name, so
+    Asterisk's `/regex/` form, leading blanks included, is refused.
 - **The Asterisk configuration has one writer.**
   - `/etc/asterisk`, `/etc/localtime` and `/etc/timezone` are write-locked for every
     process, root included.

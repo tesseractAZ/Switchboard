@@ -1971,6 +1971,13 @@ def render_modules(opts: dict) -> str:
         # No call files are used. pbx_spool would mkdir spool/outgoing at load, which
         # the AppArmor profile refuses, and a call-file directory is an originate path.
         "noload = pbx_spool.so",
+        # Dialplan functions that read configuration files, configuration
+        # objects and the process environment. Nothing here uses them, and a
+        # Manager session holding only the call class could otherwise read
+        # values through Getvar that the account split is meant to keep apart.
+        "noload = func_env.so",
+        "noload = func_config.so",
+        "noload = func_sorcery.so",
         "",
         ";; Message-waiting NOTIFY (stutter tone) + page-all intercom.",
         "load = res_pjsip_notify.so",
@@ -2601,6 +2608,13 @@ def ensure_state_dir() -> None:
                 if fd is None:
                     continue      # never chown through a link
                 try:
+                    st = os.fstat(fd)
+                    # A file another user owns that is not group-writable is
+                    # private to that writer (the root poller's 0600 cordless
+                    # ledger, the 0640 link-health ledger). Handing it to the
+                    # asterisk user would let every AGI read and rewrite it.
+                    if st.st_uid != pw.pw_uid and not st.st_mode & 0o020:
+                        continue
                     os.fchown(fd, pw.pw_uid, pw.pw_gid)
                 finally:
                     os.close(fd)

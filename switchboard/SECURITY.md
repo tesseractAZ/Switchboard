@@ -142,27 +142,45 @@ the container, which it does at every add-on start.
 Since v0.109.0 there are two Manager accounts, and no account holds both
 `originate` and `system`. With `system`, Asterisk lets an `Originate` run the
 `System`, `Exec` or `AGI` application and lets `Getvar` evaluate `SHELL()`. The
-single account before it held both classes, so its secret amounted to a shell as
-the `asterisk` user.
+single account before it held both classes, so one secret could both place calls
+and run programs.
 
-| Account | Write classes | Used for | Secret readable by |
+| Account | Write classes | Used for | Credentials file |
 |---|---|---|---|
-| `switchboard-call` | `originate`, `call` | test-ring, connect, page, wake-up, announce, hang up, transfer, device and codec reads | root only (`0600`) |
-| `switchboard-status` | `system` | the status poll (endpoints, contacts, channels), trunk registration status and re-register, message-waiting | root and the `asterisk` group (`0640`) |
+| `switchboard-call` | `originate`, `call` | test-ring, connect, page, wake-up, announce, hang up, transfer, device and codec reads | `/run/switchboard/ami-call.env`, root only (`0600`) |
+| `switchboard-status` | `system` | the status poll (endpoints, contacts, channels), trunk registration status and re-register, message-waiting | `/run/switchboard/ami-status.env`, root and the `asterisk` group (`0640`) |
 
-- **The call account cannot reach a shell.** Without `system`, Asterisk refuses an
-  `Originate` of `System`, `Exec` or `AGI` and a `Getvar` of `SHELL()`.
-- **The status account cannot place a call.** It has no `originate`, and with no
-  `call` or `reporting` class it cannot run `Getvar` at all.
-- **Neither account holds `command`,** so Asterisk's CLI `Command` action is refused.
-  Neither holds `config`, so `UpdateConfig` is refused as well.
-- **Neither subscribes to events** (`read = none`). Every list reply arrives in the
-  action's own response.
-- **The status secret is the one the `asterisk` group can read.** Its only reader
-  at that uid is the message-waiting helper, which the dial plan runs through
-  `System()` and which needs only `PJSIPNotify`.
-- **A refused action is an error.** An action sent with the wrong account raises an
-  error rather than reading as "no phones, no calls".
+**What the split guarantees:**
+- **Neither account can run a program through the Manager.** The call account has
+  no `system`, so Asterisk refuses an `Originate` of `System`, `Exec` or `AGI` and
+  a `Getvar` of `SHELL()` or `EVAL()`. The status account cannot originate and
+  cannot run `Getvar` at all.
+- **Neither account holds `command` or `config`,** so the CLI `Command` action and
+  `UpdateConfig` are refused, and the AppArmor profile write-locks the
+  configuration in any case.
+- **The call account cannot read configuration through `Getvar`.** The dialplan
+  functions that read configuration files, configuration objects and the process
+  environment (`func_config`, `func_sorcery`, `func_env`) are not loaded; nothing
+  in the add-on uses them.
+- **Neither account subscribes to events** (`read = none`). Every list reply
+  arrives in the action's own response.
+- **A refused action is an error,** not an empty board.
+- **Hang up and transfer accept only a real channel name.** Asterisk's
+  `/regex/` form, which would end every matching call, is refused.
+
+**What it does not:**
+- **Both secrets are also in `manager.conf`** (`0640 root:asterisk`), which
+  Asterisk must read. The `asterisk` user can therefore read both secrets. The
+  credentials files' modes decide only which of the add-on's own services read
+  each copy.
+- **`system` also reads Asterisk's configuration.** The status account needs it
+  for the PJSIP status, notify and register actions; Asterisk has no narrower
+  class for them. With it, a status session can read the configuration Asterisk
+  holds, including the call secret and the SIP passwords. Status sessions carry
+  only fixed actions and digit-checked extensions.
+- **The call account can originate into any dialplan context the add-on
+  generates.** The web app pins each origination to a fixed target (below), but
+  Asterisk does not restrict the account to those targets.
 
 Every web-app origination is pinned to a **fixed internal target**:
 - test-ring runs a fixed `Playback` to a known room;

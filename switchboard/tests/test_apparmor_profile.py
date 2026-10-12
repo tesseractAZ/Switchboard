@@ -162,22 +162,34 @@ def test_the_child_is_nested_once_and_closes_the_file():
 
 
 def test_only_root_enters_the_child_and_by_one_exact_path():
-    transitions = [r for r in RULES if re.search(r"\s[CcPp]i?x\b|\s[CcPp]x\s*->", r)]
+    # Any transition or unconfined exec, in either spelling (path-first or
+    # perms-first, with or without a mask), and any "->".
+    exec_mode = re.compile(r"(^|\s)[a-zA-Z]*[PpCcUu]i?x(\s|,)|->")
+    transitions = [r for r in RULES if exec_mode.search(r) and not r.startswith(("#", "deny ", "audit deny "))]
     assert transitions == ["owner /usr/bin/switchboard-config Cx -> switchboard_config,"], transitions
+
+
+# Every rule the child may hold, by shape. Anything else (an exec mode, a
+# transition, change_profile, ptrace, mount, signal send, a blanket grant) fails.
+CHILD_SHAPES = (
+    re.compile(r"^/\S* (r|w|m)+,$"),                       # read / write / map
+    re.compile(r"^(audit )?deny /\S+ (r|rw|wl),$"),         # the read denies
+    re.compile(r"^capability [a-z_]+,$"),
+    re.compile(r"^signal \(receive\),$"),
+    re.compile(r"^network inet6? (stream|dgram),$"),
+)
 
 
 def test_the_child_runs_nothing_and_has_no_blanket_grant():
     for rule in CHILD_RULES:
-        assert rule not in ("file,", "capability,", "signal,", "network,", "ptrace,"), rule
-        m = FILE_RULE.match(rule)
-        if m:
-            assert "x" not in m.group(4).lower(), rule
+        assert any(p.match(rule) for p in CHILD_SHAPES), f"rule outside the child's allowed shapes: {rule}"
     assert "/usr/bin/python3.{1,}[0-9] m," in CHILD_RULES
 
 
 def test_the_child_writes_exactly_what_main_writes():
+    # a, l and k are write-class too; "owner" is caught by the shape test.
     writes = {m.group(3) for r in CHILD_RULES for m in [FILE_RULE.match(r)]
-              if m and not m.group(2) and "w" in m.group(4)}
+              if m and not m.group(2) and set(m.group(4)) & set("walk")}
     assert writes == CHILD_WRITES, sorted(writes ^ CHILD_WRITES)
     src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
     confs = set(re.findall(r'write\(ASTERISK_ETC / "([a-z_]+)\.conf"', src))

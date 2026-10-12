@@ -1589,15 +1589,30 @@ def test_a_refused_action_is_an_error_not_an_empty_answer() -> None:
         check(f"denied: {name} raises AMIError('permission denied ...')", raised)
 
 
-def test_hangup_refuses_the_regex_form() -> None:
-    # "Channel: /.../" hangs up every channel the pattern matches.
+def test_hangup_and_redirect_take_only_real_channel_names() -> None:
+    # Asterisk skips leading blanks in a header value, then reads "/.../" as a
+    # pattern: " /./" or "\t/./" would hang up every call in the house.
     calls = []
     real = ami._ami_command
     ami._ami_command = lambda *a, **k: calls.append(a) or []
     try:
-        check("hangup: a leading slash is refused", ami.hangup_channel("/PJSIP/.*/") is False)
-        check("hangup: and never reaches AMI", calls == [])
-        ami.hangup_channel("PJSIP/11-00000001")
-        check("hangup: a real channel name still goes through", len(calls) == 1)
+        for bad in (" /./", "\t/./", "\x0b/x/", "/PJSIP/.*/", "", "PJSIP/11\r\nAction: Command",
+                    "11-0001", " PJSIP/11-1"):
+            check(f"channel guard: hangup refuses {bad!r}", ami.hangup_channel(bad) is False)
+            check(f"channel guard: redirect refuses {bad!r}",
+                  ami.transfer_channel(bad, "11", ["11"]) is False)
+        check("channel guard: nothing reached AMI", calls == [])
+        for good in ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1", "PJSIP/trunk-00000003"):
+            ami.hangup_channel(good)
+        check("channel guard: real channel names still go through", len(calls) == 3)
     finally:
         ami._ami_command = real
+
+
+def test_the_codec_read_logs_in_as_the_call_account() -> None:
+    # Getvar is a call-class action; with the status account every read would be
+    # refused and the codec column would go blank without an error.
+    fake = _FakeAMISocket()
+    _with_socket(fake, lambda: ami.codecs_for_channels([{"channel": "PJSIP/11-1"}]))
+    check("codecs: logs in as switchboard-call",
+          b"Username: switchboard-call\r\n" in fake.sent and b"switchboard-status" not in fake.sent)

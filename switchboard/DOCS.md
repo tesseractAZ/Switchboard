@@ -1815,9 +1815,9 @@ essentials:
 
 - The Ingress dashboard is reachable only from the Home Assistant Supervisor.
 - The Asterisk Manager socket is loopback-only. Since 0.109.0 it has two accounts,
-  each with a fresh random secret every boot. The one that places calls cannot
-  reach a shell, and its secret is readable by root only. The one that reads
-  status cannot place calls. Neither holds Asterisk's CLI `command` class.
+  each with a fresh random secret every boot. Neither can run a program through
+  the Manager, and neither holds Asterisk's CLI `command` class; SECURITY.md says
+  what the two accounts do and do not separate.
 - The trunk blocks international/premium prefixes and confines transfers to
   internal destinations.
 - Inside the container, Asterisk runs as the unprivileged `asterisk` user with no

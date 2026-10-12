@@ -2620,3 +2620,67 @@ def test_the_share_log_trim_keeps_history_instead_of_emptying_the_file() -> None
           out.splitlines()[0].startswith("[Sep 11] line"))
     import shutil
     shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_ownership_pass_never_follows_a_link_or_takes_a_private_file() -> None:
+    """The chown runs as root at boot. It must act only through a no-follow fd on
+    a regular file, and must leave a file another user keeps private (not group
+    writable) with that user."""
+    import os
+    import tempfile
+    from pathlib import Path as _P
+    root = _P(tempfile.mkdtemp())
+    data, outside = root / "data", root / "outside"
+    state = data / "state"
+    state.mkdir(parents=True)
+    outside.mkdir()
+    victim = outside / "victim"
+    victim.write_text("x")
+    (state / "planted").symlink_to(victim)
+    shared = state / "mwi.json"
+    shared.write_text("{}")
+    os.chmod(shared, 0o664)
+    private = state / "cordless-mos.jsonl"
+    private.write_text("")
+    os.chmod(private, 0o600)
+
+    class _Pw:                       # an "asterisk" that is not the file owner
+        pw_uid = os.getuid() + 4242
+        pw_gid = os.getgid()
+    chowned, chowned_paths = [], []
+    real_fchown, real_chown, real_getpwnam = os.fchown, os.chown, sbc.pwd.getpwnam
+    os.fchown = lambda fd, uid, gid: chowned.append(os.fstat(fd).st_ino)
+    os.chown = lambda path, uid, gid, **kw: chowned_paths.append(str(path))
+    sbc.pwd.getpwnam = lambda name: _Pw
+    orig_data, orig_state = sbc.DATA_DIR, sbc.STATE_DIR
+    sbc.DATA_DIR, sbc.STATE_DIR = data, state
+    try:
+        sbc.ensure_state_dir()
+    finally:
+        os.fchown, os.chown, sbc.pwd.getpwnam = real_fchown, real_chown, real_getpwnam
+        sbc.DATA_DIR, sbc.STATE_DIR = orig_data, orig_state
+    try:
+        check("chown: never reaches a link's target", victim.stat().st_ino not in chowned)
+        check("chown: never by path inside the dir (only the dir itself)",
+              chowned_paths == [str(state)])
+        check("chown: the group-writable shared store is handed over",
+              shared.stat().st_ino in chowned)
+        check("chown: a private file another user owns is left alone",
+              private.stat().st_ino not in chowned)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_unused_config_reading_functions_are_not_loaded() -> None:
+    mods = sbc.render_modules({})
+    for m in ("func_env.so", "func_config.so", "func_sorcery.so"):
+        check(f"modules: {m} noloaded", f"noload = {m}" in mods)
+    # They stay unloaded only while nothing generated depends on them.
+    import re as _re
+    opts = {"rooms": sbc.valid_rooms([{"ext": "11", "name": "A", "secret": "s1"},
+                                       {"ext": "12", "name": "B", "secret": "s2"}])}
+    text = sbc.render_extensions(opts) + sbc.render_features() + sbc.render_confbridge()
+    check("modules: the generated dialplan calls none of their functions",
+          not _re.search(r"\b(ENV|STAT|FILE|FILE_COUNT_LINE|FILE_FORMAT|DIRNAME|BASENAME|AST_CONFIG|AST_SORCERY)\(", text))
+
