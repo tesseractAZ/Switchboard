@@ -136,12 +136,24 @@ _REGISTERED_CONTACT_STATUSES = frozenset({"reachable", "nonqualified", "created"
 # string even if it skipped its own validation.
 _EXT_RE = re.compile(r"[0-9]{1,6}")
 
-# A channel name as Asterisk prints it: a technology, a slash, then printable
-# non-space ASCII ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1"). It must
-# START with a letter. Asterisk drops leading blanks from a header value and then
-# reads "Channel: /regex/" as a pattern that hangs up every channel it matches,
-# so " /./" passed a startswith("/") check and still ended every call.
-_CHANNEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*/[!-~]{1,200}")
+_TECH_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _valid_channel(name: str) -> bool:
+    """A channel name as Asterisk prints it: a technology that starts with a
+    letter, a slash, then 1-200 printable non-space ASCII characters
+    ("PJSIP/19-0000001a", "Local/41@rooms-00000002;1").
+
+    It must START with a letter. Asterisk drops leading blanks from a header value
+    and then reads "Channel: /regex/" as a pattern that hangs up every channel it
+    matches, so " /./" passed a startswith("/") check and still ended every call.
+    Written without a regular expression: the value comes from the web UI, and
+    plain character checks are linear by construction."""
+    tech, slash, rest = (name or "").partition("/")
+    return (bool(slash) and 1 <= len(rest) <= 200
+            and tech[:1].isascii() and tech[:1].isalpha()
+            and all(c in _TECH_CHARS for c in tech)
+            and all("!" <= c <= "~" for c in rest))
 
 
 class AMIError(Exception):
@@ -1048,11 +1060,11 @@ def hangup_channel(channel: str) -> bool:
     """Hang up one channel by its Asterisk channel name (operator "hang up").
 
     The channel string comes from CoreShowChannels (Asterisk-supplied), but we
-    still hold it to the shape of a real channel name (``_CHANNEL_RE``): no CR/LF
+    still hold it to the shape of a real channel name (``_valid_channel``): no CR/LF
     to inject extra AMI lines, and nothing Asterisk would read as its
     ``/regex/`` form, which hangs up every channel the pattern matches.
     """
-    if not _CHANNEL_RE.fullmatch(channel or ""):
+    if not _valid_channel(channel):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(
@@ -1085,7 +1097,7 @@ def transfer_channel(channel: str, target_ext: str, allowed_exts) -> bool:
     allowed = set(allowed_exts or ())
     if target_ext not in allowed or not _EXT_RE.fullmatch(target_ext or ""):
         return False
-    if not _CHANNEL_RE.fullmatch(channel or ""):
+    if not _valid_channel(channel):
         return False
     action_id = _next_action_id()
     blocks = _ami_command(

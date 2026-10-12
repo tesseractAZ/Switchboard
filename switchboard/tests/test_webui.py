@@ -1597,7 +1597,7 @@ def test_hangup_and_redirect_take_only_real_channel_names() -> None:
     ami._ami_command = lambda *a, **k: calls.append(a) or []
     try:
         for bad in (" /./", "\t/./", "\x0b/x/", "/PJSIP/.*/", "", "PJSIP/11\r\nAction: Command",
-                    "11-0001", " PJSIP/11-1"):
+                    "11-0001", " PJSIP/11-1", "PJSIP/", "PJSIP/" + "x" * 201):
             check(f"channel guard: hangup refuses {bad!r}", ami.hangup_channel(bad) is False)
             check(f"channel guard: redirect refuses {bad!r}",
                   ami.transfer_channel(bad, "11", ["11"]) is False)
