@@ -38,7 +38,7 @@ permissions:
 jobs:
   docs:
     name: Build documentation (.docx + .pdf)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -120,7 +120,7 @@ jobs:
   # this runner and a maintainer's machine, so byte-comparison would be noise).
   screenshots:
     name: Render documentation screenshots
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -152,7 +152,7 @@ jobs:
   screenshots-refresh:
     name: Refresh committed screenshots (on release)
     if: github.event_name == 'release' || inputs.tag != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:

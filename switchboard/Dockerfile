@@ -207,4 +207,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.109.0"
+    io.hass.version="0.109.1"
