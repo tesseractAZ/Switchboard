@@ -142,26 +142,7 @@ def test_store_due():
     check("due: a fired wake-up is left for the scheduler to remove", store.get("11") is not None)
     fired, missed = store.due(tgt + store.GRACE_SECONDS + 60)
     check("due: past the grace window -> missed and removed",
-          any(x[0] == "11" for x in missed) and store.get("11") is None)
-
-
-def main():
-    test_timeparse()
-    test_store_set_get()
-    test_store_cancel_if()
-    test_store_due()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all wakeup tests passed")
-
-
-if __name__ == "__main__":
-    main()
-
-
-# ── per-room wake-up scenes (v0.45.0) ────────────────────────────────────────
+          any(x[0] == "11" for x in missed) and store.get("11") is None)# ── per-room wake-up scenes (v0.45.0) ────────────────────────────────────────
 
 import importlib.machinery as _mach  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
@@ -960,3 +941,8 @@ def test_a_missed_wakeup_is_recorded_and_its_notification_retried(tmp_path):
                 setattr(sched, k, v)
         sched._pending_missed.clear()
         delivery.OUTCOME_PATH = saved_path
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

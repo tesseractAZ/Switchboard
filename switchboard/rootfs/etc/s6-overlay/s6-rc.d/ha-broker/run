@@ -1,0 +1,8 @@
+#!/command/with-contenv bashio
+# The Home Assistant broker (webui/ha_broker.py): the one root process that asks
+# Home Assistant for things on behalf of the asterisk user, whose programs hold no
+# Supervisor token. It listens on /run/switchboard/ha.sock (0660 root:asterisk)
+# and forwards only the request shapes those programs make. If it is down, their
+# Home Assistant features report "unavailable" and calls are unaffected.
+bashio::log.info "Starting Switchboard Home Assistant broker ..."
+exec python3 -B /usr/share/switchboard/webui/ha_broker.py

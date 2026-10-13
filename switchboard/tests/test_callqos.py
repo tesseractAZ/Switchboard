@@ -692,26 +692,6 @@ def test_playback_legs_do_not_drive_the_last_call_sensor() -> None:
         sys.modules.pop("ha_client", None)
 
 
-if __name__ == "__main__":
-    test_classify()
-    test_tolerant_parsing()
-    test_build_record()
-    test_ledger_append_and_cap()
-    test_ha_routing()
-    test_one_way_audio()
-    test_short_leg_never_one_way()
-    test_rtp_outranks_mangled_billsec()
-    test_ext_prefers_channel_endpoint()
-    test_mes_zero_is_no_data()
-    test_incoherent_low_mes_filtered()
-    test_argv_sanitizes_nonfinite()
-    test_alerts_option_read_from_features()
-    test_detach_gating()
-    test_main_never_raises()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
-
-
 def test_rtt_sampling_flags_a_statistically_empty_measurement() -> None:
     """A one-RTCP-round RTT must be distinguishable from a well-sampled one.
 
@@ -1571,3 +1551,8 @@ def test_the_ledger_timestamp_carries_an_iso_twin() -> None:
     finally:
         cq.PATH, cq.SHARE_OUTCOME_PATH = saved
         shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

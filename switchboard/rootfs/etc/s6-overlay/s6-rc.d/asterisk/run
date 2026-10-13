@@ -42,4 +42,7 @@ esac
 # dac_override, setuid or chown again. Started this way its permitted set is
 # empty. Nothing it does needs root: its config files are 0640 root:asterisk,
 # and every listener is on a port above 1024.
-exec s6-setuidgid asterisk asterisk -f "$@"
+# env -u: Asterisk, its AGIs and every program the dial plan runs never hold the
+# Supervisor token (v0.110.0). The run script itself still needs it for bashio;
+# what they need from Home Assistant they ask the broker for (ha-broker).
+exec env -u SUPERVISOR_TOKEN -u HASSIO_TOKEN s6-setuidgid asterisk asterisk -f "$@"

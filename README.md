@@ -242,9 +242,11 @@ Asterisk Manager socket is loopback-only, with two accounts that each get a fres
 random secret every boot; neither can run a program through the Manager or use
 Asterisk's CLI `command` class;
 the SIP trunk blocks international/premium prefixes and confines every transfer to
-internal destinations. Asterisk runs as an unprivileged user with no capabilities,
-and the add-on's AppArmor profile refuses every capability the add-on does not use
-and any write to its shipped code or its Asterisk configuration, root included. **The
+internal destinations. Asterisk runs as an unprivileged user with no capabilities
+and without the Home Assistant token (a root broker forwards only the requests its
+features make), and the add-on's AppArmor profile refuses every capability the
+add-on does not use and any write to its shipped code or its Asterisk configuration,
+root included. **The
 operator console runs in
 the Home Assistant sidebar**, where your Home Assistant login is the only login,
 and the port it is served on refuses every connection whose peer is not the

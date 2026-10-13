@@ -119,10 +119,5 @@ def test_decode_audio() -> None:
 
 
 if __name__ == "__main__":
-    test_resample()
-    test_box_filter()
-    test_read_wav_mono16()
-    test_url_host_guard()
-    test_decode_audio()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))

@@ -454,6 +454,39 @@ stored credential**. Generic service calls are restricted to an allow-list of
 domains (`light`, `scene`, `media_player`, `tts`, `climate`), the service name must
 be `[a-z_]+`, and every entity ID is domain-validated before a call is made.
 
+**The token stays with the root services** (since v0.110.0). It grants the whole
+Home Assistant Core API (`homeassistant_api: true`). Asterisk, its AGIs, the speech
+recognizer and every program the dial plan runs are the `asterisk` user, the
+processes that handle callers' audio and input, and they no longer hold it:
+
+- they start with `SUPERVISOR_TOKEN` and `HASSIO_TOKEN` removed from their
+  environment;
+- the copy s6-overlay keeps of every container variable,
+  `/run/s6/container_environment`, is made readable by root only at boot. It
+  shipped world-readable (`0644`), so before v0.110.0 any of those programs could
+  read the token from it.
+
+What they still need from Home Assistant they ask a root broker for, over a Unix
+socket that only root and the `asterisk` group can open (`/run/switchboard/ha.sock`,
+`0660`; a loopback TCP port would be reachable from the whole host under host
+networking). The broker forwards only the requests those programs make, each with
+its arguments checked, and refuses and logs anything else:
+
+| Request | What the broker accepts |
+|---|---|
+| Reads | one entity's state, all states, the fixed lights template, the home location, a calendar's events in a date range |
+| Lights | `light.turn_on` and `light.turn_off` on one `light.` entity |
+| Scenes | `scene.turn_on` on `scene.` entities |
+| Announcements | `media_player.play_media` of this add-on's own clip URL on `media_player.` entities |
+| Assistant | Home Assistant's built-in local conversation agent only |
+| Pushes | `sensor.switchboard_last_call`, and a persistent notification |
+
+Everything else the token allows (other services and domains, `tts` and `climate`,
+mobile push, configuration, the event bus, history, the Supervisor API) is out of
+reach for those programs. One request on the list carries real reach of its own:
+the conversation agent acts on whatever entities are exposed to Assist, as it does
+for anyone who speaks to it.
+
 ### 5. The announce endpoint
 
 `POST /api/announce/{ext}` speaks a clip onto a room handset. Over the LAN it is
@@ -491,6 +524,19 @@ these defenses are generated automatically:
   masquerade.
 - **Origin guard.** Outbound origination is refused when the originating channel is
   the trunk endpoint itself — a version-independent backstop.
+- **Dialled-number filter** (since v0.110.0). Only digits, `*` and `#` reach the
+  trunk `Dial`, and a number from which the filter removed anything is refused. In
+  prefix mode the outbound pattern's `.` matches any character, and `Dial` reads
+  `&`, `/`, `@` and `,` in its argument, so before this a dialled string was passed
+  through as written. `+` is not allowed: it would bypass the `011` international
+  block.
+- **The operator keeps outside callers out of the house** (since v0.110.0). A
+  transferred-in outside caller can still be connected to a room, ask the directory
+  or hear the clock. Asked for lights, the status readout, an announcement or a
+  page, they get the operator's goodbye. The operator identifies a room by the
+  channel's PJSIP endpoint, which configuration sets, never by caller ID, which the
+  caller sets. The message-waiting clear used to put caller ID into a shell command
+  line.
 - **REFER rejection.** The trunk endpoint sets `allow_transfer = no`, so a
   provider-side / remote party can't REFER Switchboard into an outbound leg. (Room
   endpoints keep transfer enabled so the cordless's Transfer button still works.)

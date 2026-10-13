@@ -284,16 +284,6 @@ def test_blind_reset_keeps_the_alert_latch_so_recovery_still_fires() -> None:
           dh.health_transition("ok", st) == "recovered")
 
 
-if __name__ == "__main__":
-    test_classify_cordless()
-    test_classify_gateway()
-    test_health_transition()
-    test_last_call_mos()
-    test_resolve_cordless_ip()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
-
-
 # ── WP826 certificate pinning (v0.46.0) ──────────────────────────────────────
 
 def test_normalize_pin_accepts_pasted_shapes() -> None:
@@ -1235,3 +1225,8 @@ def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
     ju = dh.judge_rtp_records(rec(T + 12), [genuine, unscored], "19")[0]
     check("misdial: ...and it still wins on distance, as it always did",
           ju["leg"]["ts"] == float(T + 10) and dh.mos_verdict(ju) == "unmeasured")
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

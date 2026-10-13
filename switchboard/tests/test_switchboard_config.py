@@ -219,8 +219,9 @@ def test_direct_dial_mode() -> None:
     e = sbc.render_extensions(opts)
     # The 11-digit (1 + 10) outbound pattern is present, in [rooms], dialed AS-IS.
     check("direct: 11-digit pattern in [rooms]", _context_of(e, "exten = _1NXXNXXXXXX,") == "rooms")
-    check("direct: dials ${EXTEN} as-is (no prefix strip)",
-          "Dial(PJSIP/${EXTEN}@trunk" in e and "${EXTEN:1}" not in e)
+    check("direct: dials ${EXTEN} as-is (no prefix strip), through the digit filter",
+          "Set(SW_OUTNUM=${FILTER(0-9*#,${EXTEN})})" in e
+          and "Dial(PJSIP/${SW_OUTNUM}@trunk" in e and "${EXTEN:1}" not in e)
     # A bare 10-digit number is deliberately NOT routed (leading 1 required).
     check("direct: NO bare 10-digit outbound pattern", "exten = _NXXNXXXXXX," not in e)
     # The prefix rule is GONE (direct_dial overrides dial_prefix=9).
@@ -961,18 +962,24 @@ def test_operator_mwi_clear() -> None:
     # never delay the answered caller, and GATED on the caller being a room ext:
     # an outside caller reaches the operator via transfer, and clearing MWI for
     # an external number just errors and queues a pointless replay.
+    # The room comes from the channel's PJSIP endpoint, never from caller ID: an
+    # outside caller transferred to the operator sets their own caller ID, and
+    # the old line spliced that text into the $[...] gate and the System() line.
+    check("operator: the calling room is the digit-filtered endpoint",
+          "Set(SW_ROOM=${FILTER(0-9,${CHANNEL(endpoint)})})" in on)
     check("operator: clears the caller's MWI on dialing 0 (backgrounded)",
-          "System(/usr/bin/switchboard-mwi clear ${CALLERID(num)} &)" in on)
-    check("operator: MWI-clear gated on the caller being a room ext",
-          'ExecIf($["${CALLERID(num)}" : "^(11|12)$"]?System(/usr/bin/switchboard-mwi clear' in on)
+          "System(/usr/bin/switchboard-mwi clear ${SW_ROOM} &)" in on)
+    check("operator: MWI-clear gated on the calling room being a room ext",
+          'ExecIf($["${SW_ROOM}" : "^(11|12)$"]?System(/usr/bin/switchboard-mwi clear' in on)
+    check("operator: caller ID reaches no expression or command in [operator]",
+          not any("CALLERID(num)" in l and ("$[" in l or "System(" in l)
+                  for l in on.split("[operator]", 1)[1].split("\n[", 1)[0].splitlines()))
+    check("operator: exactly one MWI-clear line", on.count("switchboard-mwi clear") == 1)
     lines = on.splitlines()
     answer_i = next(i for i, l in enumerate(lines) if l.strip() == "same = n,Answer()")
     clear_i = next(i for i, l in enumerate(lines) if "switchboard-mwi clear" in l)
     check("operator: MWI-clear runs AFTER Answer() (no ring-path latency)",
           clear_i > answer_i)
-    # The injected CID payload must never appear (security regression guard).
-    check("operator: no injection payload in the MWI-clear path",
-          "System(touch" not in on and "rm -rf" not in on)
     # Gated on mwi_enabled.
     off = sbc.render_extensions({"rooms": rooms, "mwi_enabled": False, "trunk": {}})
     check("operator: no MWI-clear when MWI disabled",
@@ -2013,28 +2020,99 @@ def test_pbx_spool_is_never_loaded() -> None:
     check("modules: pbx_spool noloaded", "noload = pbx_spool.so" in sbc.render_modules({}))
 
 
-if __name__ == "__main__":
-    # Auto-discover instead of listing every test by hand: the hand-maintained
-    # list silently skipped newly added tests (the overlay tests were invisible
-    # to this runner the day they landed). Tests that take pytest fixtures
-    # (tmp_path) can't run here — they are reported as skipped so the gap is
-    # visible rather than silent.
-    import inspect
-    import sys as _sys
-    _mod = _sys.modules[__name__]
-    _skipped = []
-    for _name, _fn in sorted(vars(_mod).items()):
-        if not _name.startswith("test_") or not callable(_fn):
-            continue
-        if inspect.signature(_fn).parameters:
-            _skipped.append(_name)
-            continue
-        _fn()
-    if _skipped:
-        print(f"\nSKIPPED (pytest fixtures required — run pytest for these): "
-              + ", ".join(_skipped))
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
+def test_outside_callers_get_no_house_features_from_the_operator() -> None:
+    # A transferred-in outside caller reaches [operator]; the hand-offs that act on
+    # the house must be refused for them, keyed on the endpoint, not caller ID.
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"},
+                             {"ext": "12", "name": "O", "secret": "s2"}])
+    op = sbc.render_operator_context("11|12", automation_on=True, mwi_on=True, trunk_on=True,
+                                     status_on=True, announce_on=True, page_route=True,
+                                     directory_on=True, clock_route=True)
+    text = "\n".join(op)
+    gate = [i for i, l in enumerate(op) if "SW_INHOUSE" in l and "GotoIf" in l]
+    check("operator: one in-house gate", len(gate) == 1)
+    g = op[gate[0]]
+    for feat in ("automation", "status", "announce", "page"):
+        check(f"operator: {feat} refused to an outside caller", f'"${{OP_RESULT}}" = "{feat}"' in g)
+    for feat in ("connect", "directory", "clock"):
+        check(f"operator: {feat} still open to an outside caller", f'"{feat}"' not in g)
+    check("operator: in-house means a room endpoint",
+          'Set(SW_INHOUSE=${IF($["${SW_ROOM}" : "^(11|12)$"]?1:0)})' in text)
+    first_handoff = min(i for i, l in enumerate(op) if 'GotoIf($["${OP_RESULT}" =' in l)
+    check("operator: the gate runs before every hand-off", gate[0] < first_handoff)
+
+
+def test_the_outbound_number_reaches_dial_only_as_digits() -> None:
+    # Prefix mode's "." matches any character, and Dial reads & / @ , in its
+    # argument. Only digits, * and # may pass; "+" would slip past the 011 block.
+    ob = sbc.render_outbound_rules("9", "5205550100")
+    text = "\n".join(ob)
+    check("outbound: filtered to digits, * and #", "Set(SW_OUTNUM=${FILTER(0-9*#,${EXTEN:1})})" in text)
+    check("outbound: refused when the filter removed anything",
+          "GotoIf($[${LEN(${EXTEN:1})} != ${LEN(${SW_OUTNUM})}]?blocked)" in text)
+    check("outbound: Dial uses only the filtered number",
+          "Dial(PJSIP/${SW_OUTNUM}@trunk,60,rT)" in text and "Dial(PJSIP/${EXTEN" not in text)
+    check("outbound: the refusal label exists", " same = n(blocked),Congestion(5)" in text)
+    check("outbound: '+' is not in the allowlist", "FILTER(0-9*#," in text and "FILTER(0-9*#+" not in text)
+    lines = [l for l in ob if "SW_OUTNUM" in l or "Dial(" in l or "CHANNEL(endpoint)" in l]
+    order = [next(i for i, l in enumerate(ob) if k in l) for k in
+             ('"${CHANNEL(endpoint)}" = "trunk"', "Set(SW_OUTNUM=", "GotoIf($[${LEN(", "Dial(PJSIP/")]
+    check("outbound: origin guard, filter, length check, then Dial", order == sorted(order) and lines)
+
+
+def test_rtpqos_chan_arg_is_allowlist_filtered_before_the_shell() -> None:
+    # TrySystem runs through /bin/sh -c; double quotes do not stop $ or backtick
+    # expansion, so --chan passes an allowlist like --cid, --stage and --sound.
+    ctx = "\n".join(sbc.render_rtpqos_context())
+    want = '--chan "${FILTER(A-Za-z0-9/_.\\-,${CHANNEL(name)})}"'
+    trysys = [l for l in ctx.splitlines() if "TrySystem(" in l]
+    check("rtpqos: two TrySystem lines", len(trysys) == 2)
+    check("rtpqos: --chan is FILTERed on both", all(want in l for l in trysys))
+    check("rtpqos: no raw CHANNEL(name) reaches a TrySystem",
+          all('"${CHANNEL(name)}"' not in l for l in trysys))
+    check("rtpqos: no bare ';' (an extensions.conf comment) on a TrySystem line",
+          all(";" not in l.replace("\;", "") for l in trysys))
+    check("rtpqos: TrySystem lines still end backgrounded", all(l.rstrip().endswith("&)") for l in trysys))
+
+
+def test_synonym_phrases_are_scrubbed_like_room_names() -> None:
+    import json as _json
+    import tempfile
+    from pathlib import Path as _P
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    orig = sbc.RUN_DIR
+    try:
+        run = _P(tempfile.mkdtemp()); sbc.RUN_DIR = run
+        sbc.write_operator_runtime({"rooms": rooms, "operator": {"enabled": True},
+                                    "operator_synonyms": [
+                                        {"ext": "11", "phrases": ["the\x00 kitchen\r\n", "  cook   room "]},
+                                        {"ext": "1x1", "phrases": ["bad ext"]},
+                                        {"ext": "12", "phrases": ["\x07\x1b"]}]})
+        syn = _json.loads((run / "operator.json").read_text())["synonyms"]
+        check("synonyms: control characters out, whitespace collapsed",
+              syn.get("11") == ["the kitchen", "cook room"])
+        check("synonyms: a malformed extension is dropped", "1x1" not in syn)
+        check("synonyms: an entry with nothing left after scrubbing is dropped", "12" not in syn)
+    finally:
+        sbc.RUN_DIR = orig
+
+
+def test_the_mwi_helper_takes_only_an_extension() -> None:
+    import io
+    import contextlib
+    import sys
+    webui = str(SBC_PATH.parents[1] / "share" / "switchboard" / "webui")
+    if webui not in sys.path:
+        sys.path.append(webui)
+    mwi = SourceFileLoader("sbmwi", str(SBC_PATH.parent / "switchboard-mwi")).load_module()
+    touched = []
+    mwi.cmd_set = lambda ext, on: touched.append(ext) or 0
+    for bad in ("1;x", "", "11 12", "-1", "1234567", "١١"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            check(f"mwi: refuses {bad!r}", mwi.main(["clear", bad]) == 2)
+    check("mwi: nothing was acted on", touched == [])
+    check("mwi: a real extension still goes through", mwi.main(["clear", "11"]) == 0 and touched == ["11"])
+
 
 
 def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
@@ -2684,3 +2762,16 @@ def test_unused_config_reading_functions_are_not_loaded() -> None:
     check("modules: the generated dialplan calls none of their functions",
           not _re.search(r"\b(ENV|STAT|FILE|FILE_COUNT_LINE|FILE_FORMAT|DIRNAME|BASENAME|AST_CONFIG|AST_SORCERY)\(", text))
 
+
+def test_the_standalone_runner_is_the_last_thing_in_this_file() -> None:
+    # The runner discovers tests from the module's namespace at the moment it
+    # runs, so a test defined below it is invisible to `python3 <this file>`.
+    # Sixteen tests sat there unnoticed until v0.110.0.
+    src = Path(__file__).read_text()
+    tail = src.split('\nif __name__ == "__main__":', 1)[1]
+    check("runner: no test is defined after the __main__ block", "\ndef test_" not in tail)
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

@@ -342,14 +342,5 @@ def test_wakeup_gate():
 
 
 if __name__ == "__main__":
-    test_area()
-    test_area_ambiguous()
-    test_area_unassigned()
-    test_light()
-    test_intent()
-    test_automation_gate()
-    test_feature_intent()
-    test_stt_rooms_decision()
-    test_wakeup_gate()
-    print(f"\n{_count - _failures}/{_count} passed")
-    raise SystemExit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))
