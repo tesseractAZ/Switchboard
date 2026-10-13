@@ -42,7 +42,11 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    # Pinned to 24.04, not 26.04 like every other job: CodeQL's system
+    # requirements list Ubuntu 22.04 and 24.04 only (checked 2026-10-12), and
+    # GitHub's floating "latest" label becomes 26.04 on 2026-10-19. Move it
+    # when 26.04 is listed; tests/test_workflow_runners.py pins both halves.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

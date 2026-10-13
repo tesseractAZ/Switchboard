@@ -35,7 +35,7 @@ concurrency:
 jobs:
   tests:
     name: Tests (python)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -70,7 +70,7 @@ jobs:
   # syntax; the release is still boot-tested against the host parser.
   apparmor:
     name: AppArmor profile compiles
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -95,13 +95,13 @@ jobs:
     #
     # Each architecture builds on a NATIVE runner: this image compiles
     # whisper.cpp from source, and doing that for aarch64 under QEMU user-mode
-    # emulation on an x86 runner takes tens of minutes. `ubuntu-24.04-arm` is
+    # emulation on an x86 runner takes tens of minutes. `ubuntu-26.04-arm` is
     # free for public repositories, so the emulation layer buys nothing.
     #
     # The first run is slow (whisper.cpp + a ~150 MB model download); the buildx
     # GHA cache makes repeats short.
     name: Dockerfile smoke build (${{ matrix.arch }})
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +143,7 @@ jobs:
     # tag when they disagree — catching it here means the PR fails, not the
     # release.
     name: Version consistency
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: config.yaml == Dockerfile label

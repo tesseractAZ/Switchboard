@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.109.1
+
+**Every build and check runs on Ubuntu 26.04.** No change to how the add-on runs.
+
+- The tests, the AppArmor compile, the image builds, the documentation build and
+  the release, tag and Dependabot workflows run on `ubuntu-26.04`. The aarch64
+  image builds run natively on `ubuntu-26.04-arm`.
+- Each job names its runner image instead of GitHub's floating `latest` label,
+  which becomes 26.04 on 2026-10-19. The operating system a build runs on now
+  changes only in a reviewed diff.
+- CodeQL stays on `ubuntu-24.04`: its system requirements list only Ubuntu 22.04
+  and 24.04.
+- `tests/test_workflow_runners.py` pins every job's runner, including CodeQL's.
+  SECURITY.md's CI supply-chain section describes the rule.
+- This release's images are the first built on the new runners.
+
 ## 0.109.0
 
 **The Asterisk Manager is split into two accounts, and the AppArmor profile's
