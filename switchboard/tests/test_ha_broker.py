@@ -27,6 +27,7 @@ sys.path.insert(0, str(WEBUI))
 ha_client = SourceFileLoader("ha_client", str(WEBUI / "ha_client.py")).load_module()
 sys.modules["ha_client"] = ha_client
 broker = SourceFileLoader("ha_broker", str(WEBUI / "ha_broker.py")).load_module()
+broker._lan_ip = lambda: "192.0.2.10"          # this host, as the AGI would see it
 
 S6 = ADDON / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
 AGI = ADDON / "rootfs" / "var" / "lib" / "asterisk" / "agi-bin"
@@ -162,8 +163,9 @@ def test_a_refused_request_never_reaches_home_assistant():
     reply = broker.handle_line(json.dumps({"method": "POST", "path": "/services/homeassistant/restart",
                                            "body": {}}).encode(), fake)
     assert "refused" in reply and forwarded == []
-    reply = broker.handle_line(json.dumps({"method": "GET", "path": "/states", "body": None}).encode(), fake)
-    assert reply == {"status": 200, "text": "ok"} and forwarded == [("GET", "/states")]
+    fake_states = lambda m, p, b: forwarded.append((m, p)) or (200, "[]")
+    reply = broker.handle_line(json.dumps({"method": "GET", "path": "/states", "body": None}).encode(), fake_states)
+    assert reply == {"status": 200, "text": "[]"} and forwarded == [("GET", "/states")]
 
 
 def _serve(tmp: Path, forward, allowed_uids=None):
@@ -196,12 +198,12 @@ def _restore(env, old):
 def test_a_process_without_the_token_goes_through_the_broker():
     tmp = Path(tempfile.mkdtemp())
     seen = []
-    fwd = lambda m, p, b: seen.append((m, p)) or (200, json.dumps({"state": "on", "attributes": {}}))
+    fwd = lambda m, p, b: seen.append((m, p)) or (200, json.dumps({"entity_id": "light.kitchen", "state": "on", "attributes": {}}))
     server, path = _serve(tmp, fwd)
     env, old = _client(path)
     try:
         assert oct(os.stat(path).st_mode & 0o777) == oct(0o660)
-        assert ha_client.get_state("light.kitchen") == {"state": "on", "attributes": {}}
+        assert ha_client.get_state("light.kitchen") == {"entity_id": "light.kitchen", "state": "on", "attributes": {}}
         assert seen == [("GET", "/states/light.kitchen")]
         # Allowed by ha_client's own domain list, refused by the broker: reads as
         # Home Assistant saying no, never reaches it.
@@ -222,11 +224,11 @@ def test_a_refusal_first_does_not_make_the_client_back_off():
     # 20 s back-off and silence the next, allowed call.
     tmp = Path(tempfile.mkdtemp())
     seen = []
-    server, path = _serve(tmp, lambda m, p, b: seen.append(p) or (200, json.dumps({"state": "on"})))
+    server, path = _serve(tmp, lambda m, p, b: seen.append(p) or (200, json.dumps({"entity_id": "light.kitchen", "state": "on"})))
     env, old = _client(path)
     try:
         assert ha_client.call_service("tts", "speak", {"entity_id": "tts.x"}) is False
-        assert ha_client.get_state("light.kitchen") == {"state": "on"}
+        assert ha_client.get_state("light.kitchen") == {"entity_id": "light.kitchen", "state": "on", "attributes": {}}
         assert seen == ["/states/light.kitchen"]
     finally:
         _restore(env, old)
@@ -249,15 +251,14 @@ def test_a_peer_outside_root_and_asterisk_gets_nothing():
 
 
 def test_a_root_service_with_the_token_never_uses_the_broker():
+    env, old = _client(__file__)          # no token, no override; the socket path exists
     os.environ["SUPERVISOR_TOKEN"] = "t"
-    old = ha_client.BROKER_SOCKET
-    ha_client.BROKER_SOCKET = __file__            # exists, must still be ignored
     try:
         bases = [b for b, _ in ha_client._candidates()]
         assert bases == ["http://supervisor/core/api", "http://172.30.32.2/core/api"], bases
     finally:
-        ha_client.BROKER_SOCKET = old
-        del os.environ["SUPERVISOR_TOKEN"]
+        os.environ.pop("SUPERVISOR_TOKEN", None)   # _restore re-sets only saved values
+        _restore(env, old)
 
 
 def test_no_broker_and_no_token_means_unreachable_not_a_crash():
@@ -296,3 +297,92 @@ def test_the_broker_is_a_supervised_service_after_init():
     assert "chmod +x /etc/s6-overlay/s6-rc.d/ha-broker/run" in (ADDON / "Dockerfile").read_text()
     # Asterisk must not wait on it: a broker fault may cost HA features, never calls.
     assert not (S6 / "asterisk" / "dependencies.d" / "ha-broker").exists()
+
+
+# --- what a read hands back -------------------------------------------------
+
+STATES = [
+    {"entity_id": "camera.front_door", "state": "idle", "attributes": {
+        "access_token": "secret-token", "entity_picture": "/api/camera_proxy/camera.front_door?token=secret-token",
+        "friendly_name": "Front door"}},
+    {"entity_id": "device_tracker.phone", "state": "home", "attributes": {"latitude": 32.2, "longitude": -110.9}},
+    {"entity_id": "climate.hall", "state": "heat", "last_changed": "x",
+     "attributes": {"friendly_name": "Hall", "current_temperature": 68, "hvac_modes": ["heat"]}},
+]
+
+
+def test_state_reads_carry_only_what_the_callers_use():
+    st, text = broker.filter_reply("GET", "/states", 200, json.dumps(STATES))
+    out = json.loads(text)
+    assert st == 200 and "secret-token" not in text and "latitude" not in text and "last_changed" not in text
+    assert out[2] == {"entity_id": "climate.hall", "state": "heat",
+                      "attributes": {"friendly_name": "Hall", "current_temperature": 68}}
+    st, text = broker.filter_reply("GET", "/states/camera.front_door", 200, json.dumps(STATES[0]))
+    assert "secret-token" not in text and json.loads(text)["state"] == "idle"
+    # The caller that reads them still gets what it needs.
+    real = ha_client._request
+    ha_client._request = lambda m, p, b=None: broker.filter_reply(m, p, 200, json.dumps(STATES))
+    try:
+        import ha_reports
+        climates = [s for s in ha_client.get_states() if s["entity_id"].startswith("climate.")]
+        assert climates[0]["attributes"]["current_temperature"] == 68
+    finally:
+        ha_client._request = real
+
+
+def test_the_config_read_is_only_the_location():
+    full = {"latitude": 32.2, "longitude": -110.9, "unit_system": {"temperature": "°F", "length": "mi"},
+            "allowlist_external_dirs": ["/config"], "components": ["a"], "internal_url": "http://x"}
+    st, text = broker.filter_reply("GET", "/config", 200, json.dumps(full))
+    assert json.loads(text) == {"latitude": 32.2, "longitude": -110.9, "unit_system": {"temperature": "°F"}}
+
+
+def test_an_unparseable_read_is_withheld_not_passed_through():
+    assert broker.filter_reply("GET", "/states", 200, "<html>proxy error</html>") == (502, "")
+    # Writes and non-200s pass untouched.
+    assert broker.filter_reply("POST", "/states/sensor.switchboard_last_call", 200, "ok") == (200, "ok")
+    assert broker.filter_reply("GET", "/states", 401, "no") == (401, "no")
+
+
+def test_a_clip_must_come_from_this_host_and_port():
+    body = lambda url: {"entity_id": "media_player.k", "media_content_id": url, "media_content_type": "music"}
+    path = "/services/media_player/play_media"
+    assert broker.check("POST", path, body("http://192.0.2.10:8099/announce/a1.wav")) is None
+    assert broker.check("POST", path, body("http://198.51.100.7:8099/announce/a1.wav"))
+    assert broker.check("POST", path, body("http://192.0.2.10:22/announce/a1.wav"))
+    assert broker.check("POST", path, body("http://attacker.example.net:8099/announce/a1.wav"))
+
+
+def test_the_broker_never_forwards_to_itself():
+    # Importing the broker turns ha_client's broker route off in its own process.
+    assert ha_client.BROKER_SOCKET == "", ha_client.BROKER_SOCKET
+    env, old = _client("")
+    try:
+        assert list(ha_client._candidates()) == []
+    finally:
+        _restore(env, old)
+
+
+def test_the_warm_up_stops_once_home_assistant_answers():
+    calls = []
+    real = ha_client.available
+    ha_client.available = lambda: calls.append(1) or True
+    try:
+        broker._warm(stop_after=5)
+        assert calls == [1]
+    finally:
+        ha_client.available = real
+
+
+def test_a_broker_that_is_down_is_logged():
+    import io
+    import contextlib
+    env, old = _client("/nonexistent-dir/ha.sock")
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            assert ha_client.get_states() == []
+    finally:
+        _restore(env, old)
+    assert "no Home Assistant token and no broker" in err.getvalue(), err.getvalue()
+

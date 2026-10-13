@@ -221,7 +221,10 @@ def test_negative_cache() -> None:
     check("neg-cache: unreachable -> (None, None)", ha_client._request("GET", "/") == (None, None))
     check("neg-cache: sets a back-off window", ha_client._dead_until > 0)
     check("neg-cache: short-circuits while dead", ha_client._request("GET", "/states") == (None, None))
-    ha_client._dead_until = 0.0  # don't leak state into other checksdef test_power_entities_have_no_built_in_defaults() -> None:
+    ha_client._dead_until = 0.0  # don't leak state into other checks
+
+
+def test_power_entities_have_no_built_in_defaults() -> None:
     """The dial-a-status power branch must query only what THIS install configured.
 
     ha_reports used to ship one particular home's EcoFlow entity ids as

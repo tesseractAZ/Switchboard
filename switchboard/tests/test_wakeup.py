@@ -142,7 +142,10 @@ def test_store_due():
     check("due: a fired wake-up is left for the scheduler to remove", store.get("11") is not None)
     fired, missed = store.due(tgt + store.GRACE_SECONDS + 60)
     check("due: past the grace window -> missed and removed",
-          any(x[0] == "11" for x in missed) and store.get("11") is None)# ── per-room wake-up scenes (v0.45.0) ────────────────────────────────────────
+          any(x[0] == "11" for x in missed) and store.get("11") is None)
+
+
+# ── per-room wake-up scenes (v0.45.0) ────────────────────────────────────────
 
 import importlib.machinery as _mach  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402

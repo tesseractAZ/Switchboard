@@ -481,6 +481,12 @@ its arguments checked, and refuses and logs anything else:
 | Assistant | Home Assistant's built-in local conversation agent only |
 | Pushes | `sensor.switchboard_last_call`, and a persistent notification |
 
+Reads are trimmed before they are returned: a state carries only its entity, its
+value, and the two attributes the callers use (a name and a current temperature),
+so no camera access token, picture URL or tracker coordinate passes; the
+configuration read carries only the home's coordinates and temperature unit. An
+announcement must be this add-on's own clip URL, on this host's web UI port.
+
 Everything else the token allows (other services and domains, `tts` and `climate`,
 mobile push, configuration, the event bus, history, the Supervisor API) is out of
 reach for those programs. One request on the list carries real reach of its own:
@@ -525,9 +531,10 @@ these defenses are generated automatically:
 - **Origin guard.** Outbound origination is refused when the originating channel is
   the trunk endpoint itself — a version-independent backstop.
 - **Dialled-number filter** (since v0.110.0). Only digits, `*` and `#` reach the
-  trunk `Dial`, and a number from which the filter removed anything is refused. In
-  prefix mode the outbound pattern's `.` matches any character, and `Dial` reads
-  `&`, `/`, `@` and `,` in its argument, so before this a dialled string was passed
+  trunk `Dial`, and only digits reach a room `Dial` or the test that decides it is a
+  room; a dialled string from which the filter removed anything is refused. The
+  outbound and room patterns' `.` matches any character, and `Dial` reads `&`,
+  `/`, `@` and `,` in its argument, so before this a dialled string was passed
   through as written. `+` is not allowed: it would bypass the `011` international
   block.
 - **The operator keeps outside callers out of the house** (since v0.110.0). A
@@ -535,8 +542,10 @@ these defenses are generated automatically:
   or hear the clock. Asked for lights, the status readout, an announcement or a
   page, they get the operator's goodbye. The operator identifies a room by the
   channel's PJSIP endpoint, which configuration sets, never by caller ID, which the
-  caller sets. The message-waiting clear used to put caller ID into a shell command
-  line.
+  caller sets, and asks again after the operator's speech step, because an attended
+  transfer completed meanwhile can put a different caller on the line. Each house
+  feature checks again when it starts. The message-waiting clear used to put
+  caller ID into a shell command line.
 - **REFER rejection.** The trunk endpoint sets `allow_transfer = no`, so a
   provider-side / remote party can't REFER Switchboard into an outbound leg. (Room
   endpoints keep transfer enabled so the cordless's Transfer button still works.)

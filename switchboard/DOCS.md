@@ -279,7 +279,9 @@ unreachable dialplan that still reads as a working feature.
 On a live call, an analog phone can blind-transfer with **`##`** and
 attended-transfer with **`*2`**. Transfers are confined to internal destinations —
 you cannot transfer a call out to the trunk. IP phones (like the cordless) use
-their own Transfer button.
+their own Transfer button. A `*2` consult call to the operator counts as an
+outside line for the house features and the message-waiting clear (see the
+operator below): to use those, dial `0` directly.
 
 ---
 
@@ -325,9 +327,19 @@ refuses to guess between two similar names.
 
 Dialing `0` also **clears the caller's own message-waiting indicator** — the
 stutter tone means "call the operator", and they just did. It is cleared after
-the call is answered and in the background, so it never delays the greeting; it
-applies only to callers whose caller ID is a configured room (an outside caller
-transferred to `0` is skipped), and only while `mwi_enabled` is on.
+the call is answered and in the background, so it never delays the greeting. It
+applies only to a call from a configured room's own phone, identified by the PJSIP
+endpoint configuration assigns, never by caller ID, which a caller can set. So an
+outside caller transferred to `0` is skipped, and so is a `*2` consult to `0`
+(dial `0` directly instead). It also applies only while `mwi_enabled` is on.
+
+**House features are for the room phones** (since 0.110.0). Lights, dial-a-status,
+announce and page act on the house, so the operator hands them only to a room
+phone that dialled `0` itself. An outside caller transferred to the operator, or a
+room's `*2` consult to `0`, can still be connected to a room, use the directory,
+hear the clock or set a wake-up; asked for anything else, they hear the operator's
+goodbye. The same check runs again when each of those features starts, including
+when it is dialled by its own code.
 
 ### Directory assistance — dial `411`
 
@@ -1796,7 +1808,7 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. If Switchboard itself was not running at the set time (the add-on or the host was down, e.g. after a power cut), the wake-up still rings if Switchboard is back within that 10-minute grace window, under the same registered-and-idle rule; if it comes back later, the wake-up is dropped as soon as it starts again. Since 0.108.2 that miss is recorded in the delivery ledger (`outcome: missed`, `reason: not-running`) and the notification says so, retried until Home Assistant has finished starting and accepts it. |
-| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the **Log** tab shows `[ha-broker] refused` | Since 0.110.0 those features reach Home Assistant through the add-on's broker, which accepts only the requests they make. A `refused` line names the request and the rule it failed. One you did not cause by hand is a bug: report it with that line. A broker that is not running shows as `[ha_client]` errors instead, and calls themselves are unaffected. |
+| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the **Log** tab shows `[ha-broker] refused` | Since 0.110.0 those features reach Home Assistant through the add-on's broker, which accepts only the requests they make. A `refused` line names the request and the rule it failed. One you did not cause by hand is a bug: report it with that line. A broker that is not running shows instead as `[ha_client] Home Assistant unreachable through the broker` or `[ha_client] no Home Assistant token and no broker`, and calls themselves are unaffected. On a line transferred in from outside (or a `*2` consult), those features are refused by design: dial `0` or the feature code directly from a room phone. |
 | A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Since v0.109.0 it also refuses writes to the Asterisk configuration (`/etc/asterisk`, `/etc/localtime`, `/etc/timezone`), Asterisk's spool (`/var/spool/asterisk`) and the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`); only the config generator may write the first three, under a child profile named `<slug>//switchboard_config`, whose own refusals carry that name. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):

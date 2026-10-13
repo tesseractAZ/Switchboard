@@ -21,3 +21,15 @@ def test_each_runner_is_the_shared_one_and_comes_last():
         assert len(re.findall(r'^if __name__ == "__main__":', src, re.M)) == 1, p.name
         # No hand-maintained list of tests left behind.
         assert not re.search(r"^def main\(", src, re.M), p.name
+
+
+def test_no_test_definition_is_glued_into_another_line():
+    # A test definition joined onto the end of a line can only parse as part of a
+    # comment, and then the test silently stops existing: removing the old
+    # main() blocks once did exactly that (v0.110.0 review).
+    import io
+    import tokenize
+    for p in sorted(TESTS.glob("test_*.py")):
+        toks = tokenize.generate_tokens(io.StringIO(p.read_text()).readline)
+        bad = [t.start[0] for t in toks if t.type == tokenize.COMMENT and "def test_" in t.string]
+        assert not bad, f"{p.name}: lines {bad}"

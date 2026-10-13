@@ -93,7 +93,9 @@ def _broker_request(method: str, path: str, body):
     handling applies. Raises OSError when the broker cannot be reached."""
     line = json.dumps({"method": method, "path": path, "body": body}).encode() + b"\n"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(TIMEOUT + 2)
+        # The broker answers only when its forward has finished, and a cold
+        # forward may try both Supervisor addresses: wait for that worst case.
+        sock.settimeout(2 * TIMEOUT + 3)
         sock.connect(BROKER_SOCKET)
         sock.sendall(line)
         buf = b""
@@ -124,6 +126,8 @@ def _request(method: str, path: str, body=None):
     if not _cached and time.time() < _dead_until:
         return None, None
     cands = [_cached] if _cached else list(_candidates())
+    if not cands and not os.environ.get("HA_BASE_URL"):
+        _log(f"no Home Assistant token and no broker at {BROKER_SOCKET or '(none)'}")
     for cand in cands:
         if not cand:
             continue
@@ -131,8 +135,13 @@ def _request(method: str, path: str, body=None):
         if base == _BROKER:
             try:
                 status, text = _broker_request(method, path, body)
-            except (OSError, ValueError):
-                continue  # broker down, or HA unreachable behind it
+            except socket.timeout:
+                # The broker is alive but slow: this call fails, later ones may not.
+                _log(f"Home Assistant broker timed out on {method} {path}")
+                return None, None
+            except (OSError, ValueError) as exc:
+                _log(f"Home Assistant unreachable through the broker at {BROKER_SOCKET}: {exc}")
+                continue
             _cached = cand
             _dead_until = 0.0
             return status, text

@@ -673,7 +673,7 @@ def test_inbound_dial_has_no_transfer_flags() -> None:
 
     # Room-to-room and operator Dials are internal on both ends -> keep 'tT'.
     check("room-to-room Dial keeps tT (both ends internal)",
-          "Dial(PJSIP/${EXTEN},30,rtT)" in e)
+          "Dial(PJSIP/${SW_DEST},30,rtT)" in e)
 
 
 def test_features_conf_transfer() -> None:
@@ -965,12 +965,16 @@ def test_operator_mwi_clear() -> None:
     # The room comes from the channel's PJSIP endpoint, never from caller ID: an
     # outside caller transferred to the operator sets their own caller ID, and
     # the old line spliced that text into the $[...] gate and the System() line.
-    check("operator: the calling room is the digit-filtered endpoint",
-          "Set(SW_ROOM=${FILTER(0-9,${CHANNEL(endpoint)})})" in on)
+    check("operator: the calling room is the digit-filtered endpoint ([sw-room])",
+          "Set(SW_ROOM=${FILTER(0-9,${CHANNEL(endpoint)})})" in on
+          and 'Set(SW_INHOUSE=${IF($["${SW_ROOM}" : "^(11|12)$"]?1:0)})' in on)
+    check("operator: [sw-room] reads the endpoint only on a PJSIP channel",
+          on.index('GotoIf($["${CHANNEL(channeltype)}" != "PJSIP"]?done)')
+          < on.index("Set(SW_ROOM=${FILTER(0-9,${CHANNEL(endpoint)})})"))
     check("operator: clears the caller's MWI on dialing 0 (backgrounded)",
           "System(/usr/bin/switchboard-mwi clear ${SW_ROOM} &)" in on)
     check("operator: MWI-clear gated on the calling room being a room ext",
-          'ExecIf($["${SW_ROOM}" : "^(11|12)$"]?System(/usr/bin/switchboard-mwi clear' in on)
+          'ExecIf($["${SW_INHOUSE}" = "1"]?System(/usr/bin/switchboard-mwi clear' in on)
     check("operator: caller ID reaches no expression or command in [operator]",
           not any("CALLERID(num)" in l and ("$[" in l or "System(" in l)
                   for l in on.split("[operator]", 1)[1].split("\n[", 1)[0].splitlines()))
@@ -1313,7 +1317,7 @@ def test_transfer_toll_fraud_defense() -> None:
     # LAYER B2/B3/B4: __TRANSFER_CONTEXT stamped everywhere (double-underscore).
     check("toll: uses inherited __TRANSFER_CONTEXT (survives blind-transfer)",
           "TRANSFER_CONTEXT=internal-xfer" in e and "__TRANSFER_CONTEXT" in e)
-    check("toll: Set precedes the room Dial", _set_precedes_dial(el, "Dial(PJSIP/${EXTEN},30,rtT"))
+    check("toll: Set precedes the room Dial", _set_precedes_dial(el, "Dial(PJSIP/${SW_DEST},30,rtT"))
     check("toll: Set precedes the operator Dial", _set_precedes_dial(el, "Dial(PJSIP/${OP_TARGET},30,rtT"))
     check("toll: Set precedes the outbound @trunk Dial", _set_precedes_dial(el, "@trunk,60,rT"))
     tk = pj[pj.index("[trunk]\n"):pj.index("[trunk-identify]")]
@@ -2036,11 +2040,37 @@ def test_outside_callers_get_no_house_features_from_the_operator() -> None:
         check(f"operator: {feat} refused to an outside caller", f'"${{OP_RESULT}}" = "{feat}"' in g)
     for feat in ("connect", "directory", "clock"):
         check(f"operator: {feat} still open to an outside caller", f'"{feat}"' not in g)
-    check("operator: in-house means a room endpoint",
-          'Set(SW_INHOUSE=${IF($["${SW_ROOM}" : "^(11|12)$"]?1:0)})' in text)
+    agi = next(i for i, l in enumerate(op) if "AGI(switchboard-operator.agi)" in l)
+    gosubs = [i for i, l in enumerate(op) if "Gosub(sw-room,s,1)" in l]
+    check("operator: the room is asked before the AGI (MWI) and again after it (the gate)",
+          len(gosubs) == 2 and gosubs[0] < agi < gosubs[1] < gate[0])
     first_handoff = min(i for i, l in enumerate(op) if 'GotoIf($["${OP_RESULT}" =' in l)
     check("operator: the gate runs before every hand-off", gate[0] < first_handoff)
+    # Second layer: each house feature checks on entry too, so a caller swapped
+    # in after the hand-off is refused there.
+    e = sbc.render_extensions({"rooms": rooms, "trunk": {}, "assistant_enabled": True,
+                               "automation_enabled": True, "status_enabled": True,
+                               "announce_enabled": True})
+    for ctx in ("[automation]", "[status]", "[announce]", "[assistant]"):
+        check(f"{ctx} is rendered for this check", ctx in e)
+        body = e.split(ctx, 1)[1].split("\n[", 1)[0]
+        check(f"{ctx}: in-house guard before Answer()",
+              body.index("Gosub(sw-room,s,1)") < body.index('GotoIf($["${SW_INHOUSE}" != "1"]?refused)')
+              < body.index("Answer()") and "n(refused),Hangup()" in body)
+    page = e.split("NoOp(Page)", 1)[1].split("\n\n", 1)[0]
+    check("page: in-house guard before Page()",
+          page.index('GotoIf($["${SW_INHOUSE}" != "1"]?refused)') < page.index("Page(") and "n(refused),Hangup()" in page)
 
+
+def test_sw_room_never_calls_an_empty_extension_a_room() -> None:
+    # With no rooms configured the room pattern is "^()$", which matches an empty
+    # value: a non-room PJSIP endpoint (the trunk, filtered to "") must still not
+    # count as in-house.
+    ctx = sbc.render_sw_room_context("")
+    text = "\n".join(ctx)
+    check("sw-room: an empty SW_ROOM skips the room test",
+          text.index('GotoIf($["${SW_ROOM}" = ""]?done)') < text.index("Set(SW_INHOUSE=${IF("))
+    check("sw-room: SW_INHOUSE starts at 0", text.index("Set(SW_INHOUSE=0)") < text.index("Set(SW_INHOUSE=${IF("))
 
 def test_the_outbound_number_reaches_dial_only_as_digits() -> None:
     # Prefix mode's "." matches any character, and Dial reads & / @ , in its
@@ -2059,6 +2089,27 @@ def test_the_outbound_number_reaches_dial_only_as_digits() -> None:
              ('"${CHANNEL(endpoint)}" = "trunk"', "Set(SW_OUTNUM=", "GotoIf($[${LEN(", "Dial(PJSIP/")]
     check("outbound: origin guard, filter, length check, then Dial", order == sorted(order) and lines)
 
+
+def test_no_raw_dialled_string_reaches_an_expression_or_dial() -> None:
+    # A device registered with a room's credentials chooses ${EXTEN}. It may be
+    # measured (LEN) but never tested as text, dialled or passed to a program.
+    import re as _re
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "A", "secret": "s1"},
+                             {"ext": "12", "name": "B", "secret": "s2"}])
+    for direct in (False, True):
+        trunk = {"enabled": True, "provider_host": "192.0.2.1", "username": "u", "secret": "s",
+                 "dial_prefix": "9", "direct_dial": direct}
+        e = sbc.render_extensions({"rooms": rooms, "trunk": trunk})
+        for line in e.splitlines():
+            unlen = _re.sub(r"\$\{LEN\(\$\{EXTEN(:\d+)?\}\)\}", "", line)
+            for expr in _re.findall(r"\$\[([^\]]*)\]", unlen):
+                check(f"no raw EXTEN in $[...] ({'direct' if direct else 'prefix'}): {line.strip()[:60]}",
+                      "${EXTEN" not in expr)
+            if _re.search(r"(Dial|System|TrySystem)\(", line):
+                check(f"no raw EXTEN in Dial/System: {line.strip()[:60]}", "${EXTEN" not in line)
+        check("room route filters to digits first", "Set(SW_DEST=${FILTER(0-9,${EXTEN})})" in e)
+        check("room route refuses a string the filter changed",
+              "GotoIf($[${LEN(${EXTEN})} != ${LEN(${SW_DEST})}]?invalid)" in e)
 
 def test_rtpqos_chan_arg_is_allowlist_filtered_before_the_shell() -> None:
     # TrySystem runs through /bin/sh -c; double quotes do not stop $ or backtick
@@ -2766,7 +2817,7 @@ def test_unused_config_reading_functions_are_not_loaded() -> None:
 def test_the_standalone_runner_is_the_last_thing_in_this_file() -> None:
     # The runner discovers tests from the module's namespace at the moment it
     # runs, so a test defined below it is invisible to `python3 <this file>`.
-    # Sixteen tests sat there unnoticed until v0.110.0.
+    # Seventeen tests sat there unnoticed until v0.110.0.
     src = Path(__file__).read_text()
     tail = src.split('\nif __name__ == "__main__":', 1)[1]
     check("runner: no test is defined after the __main__ block", "\ndef test_" not in tail)

@@ -718,7 +718,10 @@ def test_poller_gated_on_clients() -> None:
         console.build_board = orig_build
         console.load_rooms_cfg = orig_rooms
         console.load_options = orig_opts
-        console.POLL_SECONDS = orig_poll# --------------------------------------------------------------------------- #
+        console.POLL_SECONDS = orig_poll
+
+
+# --------------------------------------------------------------------------- #
 # The lights list scrolls.
 # --------------------------------------------------------------------------- #
 def _many_lights(n=34):

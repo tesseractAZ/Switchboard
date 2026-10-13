@@ -47,11 +47,23 @@ import sys
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import announce_audio  # noqa: E402
 import ha_client  # noqa: E402
+
+# The broker holds the token and never asks itself: with no token it must report
+# Home Assistant unreachable, not forward the request back into its own socket.
+ha_client.BROKER_SOCKET = ""
 
 SOCKET_PATH = os.environ.get("SWITCHBOARD_HA_BROKER", "/run/switchboard/ha.sock")
 MAX_REQUEST = 64 * 1024
-MAX_RESPONSE = 8 * 1024 * 1024
+WEBUI_PORT = os.environ.get("INGRESS_PORT") or "8099"
+_lan_ip = announce_audio.lan_ip     # the tests replace it
+
+# What a state read returns to the asterisk user: the entity, its state, and the
+# two attributes the callers read (ha_reports: a thermostat's name and current
+# temperature). Never camera access tokens or picture URLs, tracker coordinates,
+# media titles or anything else a state's attributes carry.
+STATE_ATTRS = ("friendly_name", "current_temperature")
 
 # Exact (domain, service) pairs, narrower than ha_client's domain allow-list.
 SERVICES = frozenset({
@@ -153,7 +165,13 @@ def check(method: str, path: str, body) -> str | None:
                   and isinstance(body.get("media_content_id"), str)
                   and _CLIP_URL.fullmatch(body["media_content_id"])
                   and body.get("media_content_type") == "music")
-            return None if ok else "bad play_media body"
+            if not ok:
+                return "bad play_media body"
+            # This add-on's own clip, from this host's web UI port only.
+            u = urlsplit(body["media_content_id"])
+            if u.hostname != _lan_ip() or str(u.port) != str(WEBUI_PORT):
+                return "clip URL is not this add-on's"
+            return None
     return "POST not allowed"
 
 
@@ -179,6 +197,37 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
+def _trim_state(st):
+    if not isinstance(st, dict):
+        return None
+    attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
+    return {"entity_id": st.get("entity_id"), "state": st.get("state"),
+            "attributes": {k: attrs[k] for k in STATE_ATTRS if k in attrs}}
+
+
+def filter_reply(method: str, path: str, status, text: str):
+    """Trim what a read hands back to only what the callers use. Returns
+    (status, text); a reply that cannot be parsed for trimming is withheld."""
+    if method != "GET" or status != 200:
+        return status, text
+    route = urlsplit(path).path
+    try:
+        if route == "/states":
+            data = [t for t in map(_trim_state, json.loads(text)) if t]
+        elif route.startswith("/states/"):
+            data = _trim_state(json.loads(text))
+        elif route == "/config":
+            d = json.loads(text)
+            data = {"latitude": d.get("latitude"), "longitude": d.get("longitude"),
+                    "unit_system": {"temperature": (d.get("unit_system") or {}).get("temperature")}}
+        else:
+            return status, text
+    except (ValueError, TypeError, AttributeError):
+        _log(f"withheld an unparseable reply to GET {route}")
+        return 502, ""
+    return status, json.dumps(data)
+
+
 def handle_line(line: bytes, forward=None) -> dict:
     """One request line in, one reply dict out. ``forward`` is ha_client._request
     in production and a fake in the tests."""
@@ -195,7 +244,8 @@ def handle_line(line: bytes, forward=None) -> dict:
         _log(f"refused {str(method)[:8]} {str(path)[:120]}: {reason}")
         return {"refused": reason}
     status, text = forward(method, path, body)
-    return {"status": status, "text": (text or "")[:MAX_RESPONSE]}
+    status, text = filter_reply(method, path, status, text or "")
+    return {"status": status, "text": text}
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -242,11 +292,24 @@ def make_server(path: str = SOCKET_PATH) -> _Server:
     return server
 
 
+def _warm(stop_after: float = 300.0) -> None:
+    """Find the working Home Assistant address once, before any caller waits on
+    it: a cold forward may try both candidates (twice the client's timeout)."""
+    import time
+    deadline = time.monotonic() + stop_after
+    while time.monotonic() < deadline:
+        if ha_client.available():
+            return
+        time.sleep(10)
+
+
 def serve(path: str = SOCKET_PATH) -> None:
     if not os.environ.get("SUPERVISOR_TOKEN") and not os.environ.get("HA_BASE_URL"):
         _log("WARNING: no Supervisor token; every forwarded request will report HA unreachable")
     server = make_server(path)
     _log(f"listening on {path}")
+    import threading
+    threading.Thread(target=_warm, daemon=True).start()
     server.serve_forever()
 
 

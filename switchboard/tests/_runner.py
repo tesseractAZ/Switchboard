@@ -3,8 +3,8 @@
     python3 switchboard/tests/<file>.py
 
 It runs every ``test_*`` function the module defines, in definition order, so a
-new test can never be missed by a hand-maintained list, which is how 200 tests
-sat unrun by these entry points until v0.110.0. Tests that take pytest fixtures
+new test can never be missed by a hand-maintained list, which is how 182 tests
+sat unrun by these entry points until v0.110.0 (counted by tracing each runner). Tests that take pytest fixtures
 are listed as skipped, so the gap stays visible. pytest remains the full gate.
 """
 import inspect
