@@ -219,7 +219,7 @@ WP826 WiFi cordless ──────WiFi────────────�
   codecs, troubleshooting, and reproducing the system on new hardware.
 - **[Security](switchboard/SECURITY.md)** — the security model, toll-fraud defenses,
   the accepted LAN-local risks, what you must configure, and how to report an issue.
-- **[Changelog](switchboard/CHANGELOG.md)** — the full release history.
+- **[Changelog](switchboard/CHANGELOG.md)** — recent releases; earlier ones are in the [changelog archive](switchboard/CHANGELOG-ARCHIVE.md).
 - **[Measured behaviour](switchboard/PERFORMANCE.md)** — what the system is
   observed doing in service, from its own ledgers: call quality, link health,
   wake-up and announcement delivery, the voice assistant, whether anything is

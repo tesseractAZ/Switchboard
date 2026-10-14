@@ -107,7 +107,7 @@ def test_no_real_lan_address_is_committed():
 def test_no_real_phone_number_is_committed():
     """555-01xx is the reserved-for-fiction block; anything else may be a real
     line. The trunk DID in particular must never appear."""
-    skip = {"switchboard/CHANGELOG.md"}          # historical, audited separately
+    skip = {"switchboard/CHANGELOG.md", "switchboard/CHANGELOG-ARCHIVE.md"}   # historical, audited separately
     hits = []
     for p, t in _text_files():
         rel = str(p.relative_to(ROOT))
@@ -445,7 +445,8 @@ def test_no_source_calls_the_add_on_journal_ephemeral(claim):
     me = Path(__file__).resolve()
     hits = []
     for p, t in _text_files():
-        if p.resolve() == me or str(p.relative_to(ROOT)) == "switchboard/CHANGELOG.md":
+        if p.resolve() == me or str(p.relative_to(ROOT)) in ("switchboard/CHANGELOG.md",
+                                                             "switchboard/CHANGELOG-ARCHIVE.md"):
             continue
         flat = " ".join(re.sub(r"(?m)^\s*#+", " ", t).split())
         if claim in flat:
