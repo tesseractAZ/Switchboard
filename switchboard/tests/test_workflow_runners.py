@@ -91,8 +91,18 @@ def test_no_floating_or_older_runner_label_anywhere():
 def test_codeql_must_prove_it_analysed_something():
     doc = yaml.safe_load((_WORKFLOWS / "codeql.yml").read_text())
     job = doc["jobs"]["analyze"]
-    rows = {r["language"]: r for r in job["strategy"]["matrix"]["include"]}
-    assert rows["python"]["min_accepted"] >= 1, rows["python"]
     gate = [s for s in job["steps"] if "check-sarif.mjs" in str(s.get("run", ""))]
-    assert len(gate) == 1 and "--min-accepted ${{ matrix.min_accepted }}" in gate[0]["run"], gate
+    assert len(gate) == 1, gate
+    assert "--min-accepted ${{ matrix.language == 'python' && 1 || 0 }}" in gate[0]["run"], gate[0]["run"]
+
+
+def test_codeql_matrix_keys_are_the_ones_main_was_analysed_with():
+    # Code scanning names each analysis configuration after the matrix values
+    # (".../analyze/language:python/sarif:python.sarif"). A new key renames the
+    # configuration: pull requests can then no longer be compared with main, and
+    # main's existing alerts, the dismissed ones included, belong to a
+    # configuration that no longer runs.
+    doc = yaml.safe_load((_WORKFLOWS / "codeql.yml").read_text())
+    rows = doc["jobs"]["analyze"]["strategy"]["matrix"]["include"]
+    assert [sorted(r) for r in rows] == [["language", "sarif"], ["language", "sarif"]], rows
 

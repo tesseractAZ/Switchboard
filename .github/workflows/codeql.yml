@@ -53,14 +53,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Keep these keys as they are: code scanning names each analysis
+          # configuration after the matrix values, and a new key renames the
+          # configuration, so pull requests can no longer be compared with main.
           - language: python
             sarif: python.sarif
-            # The baseline holds deliberate findings in 8 Python files; a real
-            # analysis always reports them, an empty one cannot.
-            min_accepted: 1
           - language: javascript-typescript
             sarif: javascript.sarif
-            min_accepted: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -113,4 +112,6 @@ jobs:
           if-no-files-found: warn
 
       - name: Fail on actionable CodeQL findings
-        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }} --min-accepted ${{ matrix.min_accepted }}
+        # Python: the baseline holds deliberate findings in 8 files that any real
+        # analysis reports; one that reproduces none of them extracted nothing.
+        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }} --min-accepted ${{ matrix.language == 'python' && 1 || 0 }}
