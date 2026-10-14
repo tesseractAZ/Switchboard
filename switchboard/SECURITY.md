@@ -56,11 +56,13 @@ one grouped pull request (commit prefix `ci`) that moves each SHA and its commen
 together.
 
 Every job also names its runner image, never GitHub's floating `latest` label, so
-the operating system a build runs on changes only in a reviewed diff. Since
-v0.109.1 that is Ubuntu 26.04, with native `ubuntu-26.04-arm` runners for the
-aarch64 image builds. CodeQL is the exception: it stays on Ubuntu 24.04 because
-its system requirements list only 22.04 and 24.04. `tests/test_workflow_runners.py`
-pins every job's runner.
+the operating system a build runs on changes only in a reviewed diff. Every job
+runs on Ubuntu 26.04, with native `ubuntu-26.04-arm` runners for the aarch64 image
+builds; CodeQL joined them in v0.110.0, retiring 24.04. CodeQL's published system
+requirements still list only Ubuntu 22.04 and 24.04, so the CI gate refuses a
+Python analysis that does not reproduce at least one of the baseline's known,
+accepted findings: an analysis that silently extracted nothing cannot pass as
+clean. `tests/test_workflow_runners.py` pins every job's runner and that check.
 
 `.github/workflows/dependabot-automerge.yml` merges that pull request without a
 review only when all of these hold:

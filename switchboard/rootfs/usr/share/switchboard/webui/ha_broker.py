@@ -287,7 +287,12 @@ def make_server(path: str = SOCKET_PATH) -> _Server:
         os.chown(path, 0, pwd.getpwnam("asterisk").pw_gid)
     except (KeyError, OSError) as exc:
         _log(f"WARNING: could not give the socket to group asterisk: {exc}")
-    os.chmod(path, 0o660)  # intentional: group asterisk is the broker's only client besides root
+    # The mode comes from the umask around bind(), with no chmod afterwards:
+    # connecting to a Unix socket needs write permission, so group asterisk must
+    # have it, and nothing else may. Checked rather than assumed.
+    mode = os.stat(path).st_mode & 0o777
+    if mode != 0o660:
+        _log(f"WARNING: socket mode is {oct(mode)}, expected 0o660")
     server.allowed_uids = _allowed_uids()
     return server
 

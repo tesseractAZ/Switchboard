@@ -55,6 +55,19 @@ review of the dial plan closed seven gaps.**
     must name a 2-6 digit extension.
   - **The weather forecast URL must be `https://api.weather.gov`,** checked where it
     is fetched, cached and read back from the cache.
+- **The manual's typefaces are restored.** The 0.109.1 PDF, the first built on
+  Ubuntu 26.04, came out with plain serif headings and proportional inline code:
+  pandoc 3.7's template asks for Aptos (absent on Linux) and no longer bolds
+  headings. The build now pins the template to Calibri and Cambria with bold
+  headings, installs their metric-compatible clones (Carlito, Caladea) for the
+  PDF, and maps code to DejaVu Sans Mono. The docs workflow checks each role
+  before the build and the embedded faces after it, so a fallback fails the
+  check instead of shipping.
+- **CodeQL runs on Ubuntu 26.04**, like every other job; 24.04 is retired. Its
+  published system requirements still list only 22.04 and 24.04, so the CI gate
+  now refuses a Python analysis that reproduces none of the baseline's known,
+  accepted findings (`check-sarif.mjs --min-accepted`): an analysis that extracted
+  nothing can no longer pass as a clean one.
 - **Tests:**
   - Every test file's standalone runner is one shared, discovering runner
     (`tests/_runner.py`). Hand-maintained lists and runner blocks defined above

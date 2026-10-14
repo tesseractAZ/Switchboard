@@ -42,19 +42,25 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    # Pinned to 24.04, not 26.04 like every other job: CodeQL's system
-    # requirements list Ubuntu 22.04 and 24.04 only (checked 2026-10-12), and
-    # GitHub's floating "latest" label becomes 26.04 on 2026-10-19. Move it
-    # when 26.04 is listed; tests/test_workflow_runners.py pins both halves.
-    runs-on: ubuntu-24.04
+    # 26.04 like every other job; 24.04 is retired here. CodeQL's published
+    # system requirements still list only Ubuntu 22.04 and 24.04 (checked
+    # 2026-10-13), so a run on 26.04 is one it does not promise. The failure
+    # that would matter is a silent one, an analysis that extracts nothing and
+    # so "finds" nothing: the gate below refuses a Python run that does not
+    # reproduce at least one of the baseline's known, accepted findings.
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - language: python
             sarif: python.sarif
+            # The baseline holds deliberate findings in 8 Python files; a real
+            # analysis always reports them, an empty one cannot.
+            min_accepted: 1
           - language: javascript-typescript
             sarif: javascript.sarif
+            min_accepted: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -107,4 +113,4 @@ jobs:
           if-no-files-found: warn
 
       - name: Fail on actionable CodeQL findings
-        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }}
+        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }} --min-accepted ${{ matrix.min_accepted }}

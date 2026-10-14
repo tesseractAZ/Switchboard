@@ -374,7 +374,7 @@ detector that cannot fire and a healthy system produce identical silence.
 
 | | | Source |
 | --- | --- | --- |
-| Tests | **1030** at 0.110.0, ~20 s | `pytest`, below |
+| Tests | **1045** at 0.110.0, ~20 s | `pytest`, below |
 | Mutants applied, 0.77.0–0.80.0 | 64 | release commits |
 | Killed | 64 | release commits |
 | Survived their first run | 10 | release commits |
