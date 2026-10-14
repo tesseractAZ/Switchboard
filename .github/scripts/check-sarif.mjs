@@ -60,6 +60,24 @@ try {
 }
 
 const runs = Array.isArray(sarif.runs) ? sarif.runs : [];
+
+// A partial scan is not a pass. A "diff-informed" (or overlay) pull-request
+// scan keeps a dataflow result only when its source or sink is on a changed
+// line, and marks its SARIF with runs[].properties.incrementalMode and a
+// "codeql-action/pr-diff-range" tool extension. codeql.yml turns that mode off;
+// if it ever comes back, fail here rather than report a clean partial scan.
+const partialScanReason = runs
+  .map((run) => {
+    const mode = run?.properties?.incrementalMode;
+    const diffRange = (run?.tool?.extensions ?? []).some((e) => e?.name === 'codeql-action/pr-diff-range');
+    return mode ? `incrementalMode=${JSON.stringify(mode)}` : diffRange ? 'pr-diff-range extension' : '';
+  })
+  .find(Boolean);
+if (partialScanReason) {
+  console.error(`✗ partial CodeQL scan (${partialScanReason}): results outside the diff are missing.`);
+  console.error('  Set CODEQL_ACTION_DIFF_INFORMED_QUERIES: \'false\' on the analyze job.');
+  process.exit(2);
+}
 let total = 0;
 const failing = [];
 const byLevel = { error: 0, warning: 0, note: 0, none: 0 };

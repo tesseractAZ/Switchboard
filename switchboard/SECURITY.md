@@ -62,7 +62,10 @@ builds; CodeQL joined them in v0.110.0, retiring 24.04. CodeQL's published syste
 requirements still list only Ubuntu 22.04 and 24.04, so the CI gate refuses a
 Python analysis that does not reproduce at least one of the baseline's known,
 accepted findings: an analysis that silently extracted nothing cannot pass as
-clean. `tests/test_workflow_runners.py` pins every job's runner and that check.
+clean. Pull-request scans are full scans: CodeQL's default "diff-informed" mode,
+which keeps a dataflow finding only when it touches a changed line, is turned off,
+and the gate refuses a partial result. `tests/test_workflow_runners.py` pins every
+job's runner and these checks.
 
 `.github/workflows/dependabot-automerge.yml` merges that pull request without a
 review only when all of these hold:

@@ -106,3 +106,35 @@ def test_codeql_matrix_keys_are_the_ones_main_was_analysed_with():
     rows = doc["jobs"]["analyze"]["strategy"]["matrix"]["include"]
     assert [sorted(r) for r in rows] == [["language", "sarif"], ["language", "sarif"]], rows
 
+
+def test_codeql_scans_pull_requests_in_full():
+    # Diff-informed PR scans drop dataflow results whose source and sink are both
+    # outside the diff; the PR then passes and main's full scan finds them later.
+    doc = yaml.safe_load((_WORKFLOWS / "codeql.yml").read_text())
+    env = doc["jobs"]["analyze"].get("env") or {}
+    assert env.get("CODEQL_ACTION_DIFF_INFORMED_QUERIES") == "false", env
+
+
+def test_the_gate_refuses_a_partial_scan(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node is not installed here; CI runs this")
+    gate = _WORKFLOWS.parent / "scripts" / "check-sarif.mjs"
+    base = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "CodeQL", "rules": []}}, "results": []}]}
+    full = tmp_path / "full.sarif"
+    full.write_text(json.dumps(base))
+    diff = json.loads(json.dumps(base)); diff["runs"][0]["properties"] = {"incrementalMode": ["diff-informed"]}
+    partial = tmp_path / "partial.sarif"
+    partial.write_text(json.dumps(diff))
+    ext = json.loads(json.dumps(base)); ext["runs"][0]["tool"]["extensions"] = [{"name": "codeql-action/pr-diff-range"}]
+    ranged = tmp_path / "ranged.sarif"
+    ranged.write_text(json.dumps(ext))
+    run = lambda p: subprocess.run([node, str(gate), str(p)], capture_output=True, text=True).returncode
+    assert run(full) == 0
+    assert run(partial) == 2
+    assert run(ranged) == 2
+
