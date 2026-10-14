@@ -114,16 +114,6 @@ def test_scene_mode_is_a_no_op_when_no_scene_is_configured() -> None:
     check("scene mode: and still says nothing", spoken == [])
 
 
-if __name__ == "__main__":
-    for fn in (test_scene_mode_fires_the_scene_and_says_nothing,
-               test_speak_mode_speaks_and_does_not_refire_the_scene,
-               test_no_argument_keeps_the_original_both_behaviour,
-               test_scene_mode_is_a_no_op_when_no_scene_is_configured):
-        fn()
-    print("FAILURES:", _failures)
-    raise SystemExit(1 if _failures else 0)
-
-
 def test_the_milestones_say_what_actually_happened() -> None:
     """`answered` means picked up. `spoken` means the time was played.
 
@@ -351,3 +341,8 @@ def test_the_greeting_follows_the_answer_within_a_second() -> None:
           len(waits) == 1 and 0 < waits[0][1] <= 0.5)
     check("settle: the scene is fired before the settle, not after it",
           between.index(agis[0]) < waits[0][0])
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

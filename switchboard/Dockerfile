@@ -165,6 +165,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /etc/s6-overlay/s6-rc.d/asterisk/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/whisper-server/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/webui/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/ha-broker/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/console-web/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/wakeup-scheduler/run \
@@ -207,4 +208,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.109.1"
+    io.hass.version="0.110.0"

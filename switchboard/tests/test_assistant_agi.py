@@ -234,14 +234,6 @@ def test_everything_on_the_path_is_local():
     check("no cloud stt entity is referenced", "home_assistant_cloud" not in src)
 
 
-if __name__ == "__main__":
-    for fn in list(globals().values()):
-        if callable(fn) and getattr(fn, "__name__", "").startswith("test_"):
-            fn()
-    print(f"\n{_failures} failure(s)")
-    sys.exit(1 if _failures else 0)
-
-
 # --------------------------------------------------------------------------- #
 # v0.80.0 — the ledger. Before this, nothing the assistant did survived the call.
 # --------------------------------------------------------------------------- #
@@ -633,3 +625,8 @@ def test_words_and_replies_reach_the_journal_only_when_transcripts_are_on(capsys
     finally:
         if saved is not None:
             sys.modules["ha_client"] = saved
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

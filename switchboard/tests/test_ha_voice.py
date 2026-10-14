@@ -224,25 +224,6 @@ def test_negative_cache() -> None:
     ha_client._dead_until = 0.0  # don't leak state into other checks
 
 
-def main() -> None:
-    test_speak_weather()
-    test_format_power()
-    test_format_house()
-    test_num_rejects_non_finite()
-    test_status_match()
-    test_format_calendar()
-    test_ha_client_guards()
-    test_announce_audio()
-    test_notify()
-    test_resolve_entities()
-    test_negative_cache()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all HA-voice foundation tests passed")
-
-
 def test_power_entities_have_no_built_in_defaults() -> None:
     """The dial-a-status power branch must query only what THIS install configured.
 
@@ -372,5 +353,34 @@ def test_forecast_is_retried_because_a_wakeup_gets_one_shot() -> None:
         _w._fetch_forecast_once = real
 
 
+def test_the_forecast_url_must_be_api_weather_gov() -> None:
+    ok = "https://api.weather.gov/gridpoints/TWC/90,49/forecast"
+    check("weather: the real forecast URL passes", weather._nws_url(ok))
+    for bad in ("http://api.weather.gov/gridpoints/x/forecast",
+                "https://api.weather.gov.example.net/x",
+                "https://api.weather.gov@example.net/x",
+                "https://api.weather.gov:8443/x",
+                "file:///etc/passwd", "", None):
+        check(f"weather: refuses {bad!r}", not weather._nws_url(bad))
+    raised = False
+    try:
+        weather._get("https://example.net/x")
+    except ValueError:
+        raised = True
+    check("weather: _get refuses a foreign URL before any request", raised)
+    # A poisoned disk cache entry is ignored, not fetched.
+    real_load, real_get = weather._grid_cache_load, weather._get
+    weather._grid_cache.clear()
+    weather._grid_cache_load = lambda: {"32.2,-110.9": "https://evil.example/x"}
+    weather._get = lambda url: {"properties": {"forecast": ok}}
+    try:
+        check("weather: a bad cached URL is replaced by a fresh lookup",
+              weather._forecast_url(32.2, -110.9) == ok)
+    finally:
+        weather._grid_cache_load, weather._get = real_load, real_get
+        weather._grid_cache.clear()
+
+
 if __name__ == "__main__":
-    main()
+    import _runner
+    raise SystemExit(_runner.run(globals()))

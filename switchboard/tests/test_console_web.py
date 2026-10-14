@@ -288,34 +288,6 @@ def test_env_int_tolerates_empty_port() -> None:
                 os.environ[k] = v
 
 
-def main() -> None:
-    test_env_int_tolerates_empty_port()
-    test_bridge_write_is_bounded()
-    test_accept_key()
-    test_parse_http_headers()
-    test_handshake_response()
-    test_encode_frame()
-    test_decode_frames_roundtrip()
-    test_decode_partial_held()
-    test_decode_control_frames()
-    test_decode_rejects_unmasked_client_frame()
-    test_naws()
-    test_strip_telnet_negotiation()
-    test_strip_telnet_subnegotiation()
-    test_strip_telnet_escaped_ff()
-    test_strip_telnet_partial_held()
-    test_origin_allowed()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all console-web tests passed")
-
-
-if __name__ == "__main__":
-    main()
-
-
 def test_the_startup_line_reports_reachability_not_just_the_gate():
     """★ Two log lines from one service must not disagree about a security fact.
 
@@ -384,3 +356,8 @@ def test_the_terminal_always_announces_its_size_on_a_new_socket():
         "iframe is resized by its parent with no window resize event")
     assert 'observe(document.getElementById("term"))' in html, (
         "the ResizeObserver is constructed but never attached to anything")
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

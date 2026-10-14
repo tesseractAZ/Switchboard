@@ -10,7 +10,11 @@
 // `security-severity` is >= HIGH (7.0). Notes/warnings are surfaced but don't
 // break the build (security-extended emits a fair number of low-signal notes).
 //
-// Usage: node check-sarif.mjs <path-to-sarif> [--fail-threshold <float>]
+// Usage: node check-sarif.mjs <path-to-sarif> [--fail-threshold <float>] [--min-accepted <int>]
+//
+// --min-accepted N fails the job when fewer than N results matched the baseline.
+// An analysis that silently extracted nothing reports no findings at all, and
+// without this the gate would call that a clean pass.
 import { readFileSync } from 'node:fs';
 
 // Reviewed + accepted findings (see .github/codeql-baseline.json). Matching is
@@ -30,12 +34,17 @@ const isBaselined = (ruleId, path) =>
 const args = process.argv.slice(2);
 const thrIdx = args.indexOf('--fail-threshold');
 const FAIL_SEVERITY = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 7.0; // HIGH
-// Skip the flag AND its value when looking for the path — otherwise
+const minIdx = args.indexOf('--min-accepted');
+const MIN_ACCEPTED = minIdx >= 0 ? Number(args[minIdx + 1]) : 0;
+// Skip each flag AND its value when looking for the path — otherwise
 // `--fail-threshold 8.0 report.sarif` took "8.0" as the file to read, so the
 // script's own documented flag broke it whenever it came first.
-const sarifPath = args.find(
-  (a, i) => !a.startsWith('--') && !(thrIdx >= 0 && i === thrIdx + 1),
-);
+const valueIdx = new Set([thrIdx, minIdx].filter((i) => i >= 0).map((i) => i + 1));
+const sarifPath = args.find((a, i) => !a.startsWith('--') && !valueIdx.has(i));
+if (!Number.isInteger(MIN_ACCEPTED) || MIN_ACCEPTED < 0) {
+  console.error('--min-accepted needs a non-negative integer');
+  process.exit(2);
+}
 
 if (!sarifPath) {
   console.error('usage: check-sarif.mjs <sarif> [--fail-threshold <float>]');
@@ -132,6 +141,15 @@ console.log(
   `\nCodeQL results: ${total} total  (error:${byLevel.error} warning:${byLevel.warning} note:${byLevel.note})` +
     (suppressed ? `  [+${suppressed} accepted via baseline/suppression]` : '')
 );
+
+if (suppressed < MIN_ACCEPTED) {
+  console.error(
+    `\n✗ only ${suppressed} result(s) matched the baseline; at least ${MIN_ACCEPTED} expected.` +
+      '\n  The baseline lists findings any real analysis of this code reports, so an' +
+      '\n  analysis that reproduces none of them extracted nothing. Refusing to pass it.'
+  );
+  process.exit(2);
+}
 
 if (failing.length) {
   console.error(

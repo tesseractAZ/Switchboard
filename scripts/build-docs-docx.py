@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 TITLE = "Switchboard — Complete System Reference"
@@ -117,6 +118,62 @@ def assemble(repo_root: Path) -> str:
     return internalize_links(readme + PAGE_BREAK + security + PAGE_BREAK + docs)
 
 
+# The manual's typefaces, pinned in the .docx itself. pandoc 3.7 (Ubuntu 26.04)
+# changed its template's theme to Aptos Display / Aptos, which no Linux machine
+# has, and stopped making headings bold: the first manual built on 26.04 came out
+# with plain serif headings and proportional inline code while CI stayed green.
+# Calibri and Cambria are what pandoc 3.1's template asked for; Word has them,
+# and the PDF build renders them with their metric-compatible clones (Carlito,
+# Caladea), which the docs workflow installs and checks.
+THEME_FONTS = {"majorFont": "Calibri", "minorFont": "Cambria"}
+BOLD_STYLES = ("Title",) + tuple(f"Heading{n}" for n in range(1, 10))
+
+
+def pin_fonts(docx: Path) -> None:
+    """Rewrite the theme's Latin typefaces and make the heading styles bold, in
+    place. Raises if the template's shape changed (a theme font missing or
+    ambiguous, or no Heading1 style), so a future pandoc fails the build instead
+    of quietly un-pinning the fonts."""
+    with zipfile.ZipFile(docx) as z:
+        entries = [(info, z.read(info.filename)) for info in z.infolist()]
+    seen = set()
+    out = []
+    for info, data in entries:
+        if info.filename == "word/theme/theme1.xml":
+            xml = data.decode("utf-8")
+            for element, face in THEME_FONTS.items():
+                pat = re.compile(rf'(<a:{element}>\s*<a:latin typeface=")[^"]*(")')
+                xml, n = pat.subn(rf"\g<1>{face}\g<2>", xml)
+                if n != 1:
+                    raise RuntimeError(f"theme1.xml: expected one <a:{element}> latin typeface, found {n}")
+            data = xml.encode("utf-8")
+            seen.add("theme")
+        elif info.filename == "word/styles.xml":
+            xml = data.decode("utf-8")
+            bolded = 0
+            for sid in BOLD_STYLES:
+                m = re.search(rf'(<w:style [^>]*w:styleId="{sid}"[^>]*>)(.*?)(</w:style>)', xml, re.S)
+                if not m:
+                    continue
+                body = m.group(2)
+                if "<w:rPr>" not in body:
+                    body = body + "<w:rPr></w:rPr>"
+                if not re.search(r"<w:b\s*/>", body):
+                    body = body.replace("<w:rPr>", "<w:rPr><w:b/><w:bCs/>", 1)
+                xml = xml[:m.start(2)] + body + xml[m.end(2):]
+                bolded += 1
+            if not re.search(r'w:styleId="Heading1"', xml):
+                raise RuntimeError("styles.xml: no Heading1 style to make bold")
+            data = xml.encode("utf-8")
+            seen.add("styles")
+        out.append((info, data))
+    if seen != {"theme", "styles"}:
+        raise RuntimeError(f"docx is missing {sorted({'theme', 'styles'} - seen)}")
+    with zipfile.ZipFile(docx, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in out:
+            z.writestr(info, data)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Assemble Switchboard docs into a .docx (+ optional .pdf)")
     ap.add_argument("--repo-root", default=None,
@@ -169,8 +226,10 @@ def main() -> int:
     if proc.stderr.strip():
         sys.stderr.write(proc.stderr)  # Pandoc warnings — non-fatal, surface in CI
 
+    pin_fonts(output)
     size = output.stat().st_size
-    print(f"wrote {output} ({size:,} bytes) — v{version} @ {args.ref}")
+    print(f"wrote {output} ({size:,} bytes) — v{version} @ {args.ref}; theme fonts "
+          f"{THEME_FONTS['majorFont']}/{THEME_FONTS['minorFont']}, bold headings")
 
     # Optional: a reader-friendly PDF, converted from the .docx we just built via
     # LibreOffice headless (no LaTeX). The .docx stays the editable primary; the

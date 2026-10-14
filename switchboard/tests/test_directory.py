@@ -116,15 +116,5 @@ def test_resolve_stopword_guard() -> None:
 
 
 if __name__ == "__main__":
-    test_list_request()
-    test_cancel()
-    test_announce_text()
-    test_directory_text()
-    test_name_for()
-    test_resolve_misheard_list_never_dials()
-    test_resolve_real_rooms_still_connect()
-    test_resolve_unshadows_intent_named_rooms()
-    test_resolve_cancel_and_garbage_never_dial()
-    test_resolve_stopword_guard()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))

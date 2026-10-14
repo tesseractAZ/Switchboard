@@ -58,12 +58,6 @@ def test_status() -> None:
     check("one feature on + probe down -> down", sh.status(one_on) == "down")
 
 
-if __name__ == "__main__":
-    test_status()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    sys.exit(1 if _failures else 0)
-
-
 def test_the_stt_feature_gate_mirrors_the_run_script() -> None:
     """F34. Two copies of one gate, in two languages, and one of them drifted.
 
@@ -130,3 +124,8 @@ def test_an_assistant_only_install_can_report_the_recognizer_as_DOWN() -> None:
     sh.probe = lambda timeout=1.0: True
     check("assistant-only: a live recognizer reads UP",
           sh.status(only_assistant) == "up")
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

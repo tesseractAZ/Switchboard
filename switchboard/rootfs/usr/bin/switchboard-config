@@ -576,6 +576,39 @@ def render_trunk_pjsip(trunk: dict) -> list[str]:
 # --------------------------------------------------------------------------- #
 # extensions.conf  (dial plan)
 # --------------------------------------------------------------------------- #
+def render_sw_room_context(joined: str) -> list[str]:
+    """[sw-room], a Gosub target: which room is calling, if any.
+
+    Sets SW_ROOM to the calling room's extension, taken from the channel's PJSIP
+    endpoint (room endpoints are named by their extension; the trunk is "trunk"),
+    and SW_INHOUSE to 1 when that is a configured room. Configuration names the
+    endpoint and the caller cannot, unlike caller ID. Both stay empty / 0 for the
+    trunk and for any non-PJSIP channel (a *2 consult leg is a Local channel):
+    the channel type is checked first, because CHANNEL(endpoint) on another
+    channel type logs a WARNING. Digits only, so SW_ROOM is safe in any
+    expression or command line."""
+    return [
+        ";; ----- Which room is calling (Gosub target) -----",
+        "[sw-room]",
+        "exten = s,1,Set(SW_ROOM=)",
+        " same = n,Set(SW_INHOUSE=0)",
+        ' same = n,GotoIf($["${CHANNEL(channeltype)}" != "PJSIP"]?done)',
+        " same = n,Set(SW_ROOM=${FILTER(0-9,${CHANNEL(endpoint)})})",
+        ' same = n,GotoIf($["${SW_ROOM}" = ""]?done)',
+        f' same = n,Set(SW_INHOUSE=${{IF($["${{SW_ROOM}}" : "^({joined})$"]?1:0)}})',
+        " same = n(done),Return()",
+        "",
+    ]
+
+
+# A house feature's first steps: refuse anyone but a configured room's own phone.
+# Each context that uses these ends with a "refused" Hangup().
+_INHOUSE_GUARD = [
+    " same = n,Gosub(sw-room,s,1)",
+    ' same = n,GotoIf($["${SW_INHOUSE}" != "1"]?refused)',
+]
+
+
 def render_operator_context(joined: str, automation_on: bool = False,
                             mwi_on: bool = True, trunk_on: bool = False,
                             wakeup_on: bool = False, clock_route: bool = False,
@@ -599,6 +632,8 @@ def render_operator_context(joined: str, automation_on: bool = False,
         "[operator]",
         "exten = s,1,NoOp(Operator session start)",
         " same = n,Answer()",
+        # Which room is calling ([sw-room]): from the PJSIP endpoint, never caller ID.
+        " same = n,Gosub(sw-room,s,1)",
     ]
     if mwi_on:
         # The MWI stutter-tone means "you have a message / call the operator".
@@ -606,19 +641,30 @@ def render_operator_context(joined: str, automation_on: bool = False,
         # the instant they dial 0. Clear it AFTER Answer() and background it (`&`)
         # so a wedged AMI can never delay the answered caller up to the AMI
         # timeout — a moment-later clear is identical UX with zero ring latency.
-        # Room-callers ONLY: an OUTSIDE caller reaches the operator too (via a
-        # transfer from the answering phone), and their CALLERID is the external
-        # number — clearing MWI for it just errors and queues a pointless replay
-        # ("Asterisk MWI update failed (replay later)" in the log). Gate on the
-        # same room allow-list the operator Dial uses.
+        # Room-callers ONLY, identified by SW_ROOM below: the channel's own PJSIP
+        # endpoint, never its caller ID. An OUTSIDE caller reaches the operator
+        # too (via a transfer from the answering phone) and sets their own caller
+        # ID; the old gate spliced that text into both the $[...] test and the
+        # System() command line.
         lines += [
-            f' same = n,ExecIf($["${{CALLERID(num)}}" : "^({joined})$"]?System(/usr/bin/switchboard-mwi clear ${{CALLERID(num)}} &))',
+            ' same = n,ExecIf($["${SW_INHOUSE}" = "1"]?System(/usr/bin/switchboard-mwi clear ${SW_ROOM} &))',
         ]
     lines += [
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-operator.agi)",
         " same = n,NoOp(operator result=${OP_RESULT} target=${OP_TARGET})",
+        # Hand-offs that act on the house (lights, the status readout, a spoken
+        # announcement, the paging system) are for the household only. An outside
+        # caller transferred to the operator may still be connected to a room,
+        # ask the directory or hear the clock; asked for anything else, they get
+        # the operator's goodbye. A *2 consult leg has no endpoint and is refused
+        # too: dial 0 directly. Asked AGAIN after the AGI: an attended transfer
+        # completed while the AGI ran can put a different caller on this line.
+        " same = n,Gosub(sw-room,s,1)",
+        ' same = n,GotoIf($["${SW_INHOUSE}" != "1" & ("${OP_RESULT}" = "automation"'
+        ' | "${OP_RESULT}" = "status" | "${OP_RESULT}" = "announce"'
+        ' | "${OP_RESULT}" = "page")]?bye)',
     ]
     if wakeup_on:
         # A spoken "wake up call" hands off to the wake-up flow (same context as
@@ -817,11 +863,13 @@ def render_automation_context() -> list[str]:
         ";; ----- Voice home automation (lights) -----",
         "[automation]",
         "exten = s,1,NoOp(Automation)",
+    ] + _INHOUSE_GUARD + [
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-automation.agi)",
         " same = n,Hangup()",
+        " same = n(refused),Hangup()",
     ] + rtpqos_h("automation") + [
         "",
     ]
@@ -839,11 +887,13 @@ def render_assistant_context() -> list[str]:
         ";; ----- Local voice assistant (Home Assistant conversation agent) -----",
         "[assistant]",
         "exten = s,1,NoOp(Assistant)",
+    ] + _INHOUSE_GUARD + [
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-assistant.agi)",
         " same = n,Hangup()",
+        " same = n(refused),Hangup()",
     ] + rtpqos_h("assistant") + [
         "",
     ]
@@ -895,11 +945,13 @@ def render_status_context() -> list[str]:
         ";; ----- Dial-a-status voice menu -----",
         "[status]",
         "exten = s,1,NoOp(Status menu)",
+    ] + _INHOUSE_GUARD + [
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-status.agi)",
         " same = n,Hangup()",
+        " same = n(refused),Hangup()",
     ] + rtpqos_h("status") + [
         "",
     ]
@@ -958,11 +1010,13 @@ def render_announce_context() -> list[str]:
         ";; ----- Phone -> HA speaker announce -----",
         "[announce]",
         "exten = s,1,NoOp(Announce)",
+    ] + _INHOUSE_GUARD + [
         " same = n,Answer()",
         " same = n,Set(CHANNEL(language)=en)",
         " same = n,Wait(1)",
         " same = n,AGI(switchboard-announce.agi)",
         " same = n,Hangup()",
+        " same = n(refused),Hangup()",
     ] + rtpqos_h("announce-menu") + [
         "",
     ]
@@ -985,12 +1039,20 @@ def _outbound_dial_body(num_expr: str, caller_id: str) -> list:
         # this guard doesn't fire for it — that path is closed by the primary
         # defence, __TRANSFER_CONTEXT=internal-xfer, which has no outbound rule.)
         ' same = n,GotoIf($["${CHANNEL(endpoint)}" = "trunk"]?blocked)',
+        # Dial-string guard: in prefix mode the pattern's "." matches ANY
+        # character, and Dial reads "&", "/", "@" and "," in its argument. Keep
+        # only digits, * and # (provider service codes) and refuse the call if
+        # anything was removed. "+" goes too: it would slip past the 011
+        # international block. LEN() compares integers, so the dialled text
+        # itself never enters a $[...] expression.
+        f" same = n,Set(SW_OUTNUM=${{FILTER(0-9*#,{num_expr})}})",
+        f" same = n,GotoIf($[${{LEN({num_expr})}} != ${{LEN(${{SW_OUTNUM}})}}]?blocked)",
         f" same = n,{cid}",
         # Confine any onward ##/*2 transfer OF this outbound call to internal-only.
         " same = n,Set(__TRANSFER_CONTEXT=internal-xfer)",
         # 'rT' not 'rtT': 'T' lets our (internal) caller transfer via ##/*2, but
         # we drop 't' so the far-end PSTN callee can't invoke our feature codes.
-        f" same = n,Dial(PJSIP/{num_expr}@trunk,60,rT)",
+        " same = n,Dial(PJSIP/${SW_OUTNUM}@trunk,60,rT)",
         " same = n,Hangup()",
         " same = n(blocked),Congestion(5)",
         " same = n,Hangup()",
@@ -1261,7 +1323,7 @@ def render_rtpqos_context() -> list:
         # --detach: the sink forks into its own session so channel teardown on
         # hangup can't kill it after the sensor push but before the notification.
         " same = n,TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan"
-        ' --tag "${ARG1}" --chan "${CHANNEL(name)}"'
+        ' --tag "${ARG1}" --chan "${FILTER(A-Za-z0-9/_.\\-,${CHANNEL(name)})}"'
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         # ★ codec = the NEGOTIATED wire format; read_format = Asterisk's internal
         # read format, which is a DIFFERENT thing and was being reported as the
@@ -1328,7 +1390,7 @@ def render_rtpqos_context() -> list:
     )
     callqos_nomedia = (
         " same = n,TrySystem(/usr/bin/switchboard-callqos --detach --source dialplan"
-        ' --nomedia --tag "${ARG1}" --chan "${CHANNEL(name)}"'
+        ' --nomedia --tag "${ARG1}" --chan "${FILTER(A-Za-z0-9/_.\\-,${CHANNEL(name)})}"'
         ' --cid "${FILTER(0-9+*#,${CALLERID(num)})}"'
         ' --billsec "${CDR(billsec)}" --hcause "${HANGUPCAUSE}"'
         ' --stage "${FILTER(a-z,${SW_STAGE})}"'
@@ -1537,10 +1599,12 @@ def render_extensions(opts: dict) -> str:
             peers = "&".join(f"PJSIP/{e}" for e in exts)
             parts += [
                 f"exten = {page_ext},1,NoOp(Page)",
+            ] + _INHOUSE_GUARD + [
                 " same = n,Set(SW_TAG=page)",
                 f' same = n,Set(PAGEPEERS={peers})',
                 " same = n,Page(${PAGEPEERS},d)",
                 " same = n,Hangup()",
+                " same = n(refused),Hangup()",
                 "",
             ]
             reserved.add(page_ext)
@@ -1644,10 +1708,10 @@ def render_extensions(opts: dict) -> str:
         if trunk.get("enabled"):
             room_dial = [
                 " same = n(dial),Set(__TRANSFER_CONTEXT=internal-xfer)",
-                " same = n,Dial(PJSIP/${EXTEN},30,rtT)",
+                " same = n,Dial(PJSIP/${SW_DEST},30,rtT)",
             ]
         else:
-            room_dial = [" same = n(dial),Dial(PJSIP/${EXTEN},30,rtT)"]
+            room_dial = [" same = n(dial),Dial(PJSIP/${SW_DEST},30,rtT)"]
         parts += [
             "exten = _X.,1,NoOp(Room call to ${EXTEN})",
             # This IS a room-to-room call; say so explicitly rather than letting
@@ -1659,7 +1723,13 @@ def render_extensions(opts: dict) -> str:
             # this", and any startswith() downstream merged the two. Prefix
             # collisions inside one tag namespace are now a test failure.
             " same = n,Set(SW_TAG=room-to-room)",
-            f" same = n,GotoIf($[\"${{EXTEN}}\" : \"^({joined})$\"]?dial:invalid)",
+            # "." matches any character, and a device registered with a room's
+            # credentials chooses the dialled string. Digits only reach the test
+            # and the Dial; a string the filter changed is not a room. LEN()
+            # compares integers, so the raw text never enters a $[...].
+            " same = n,Set(SW_DEST=${FILTER(0-9,${EXTEN})})",
+            " same = n,GotoIf($[${LEN(${EXTEN})} != ${LEN(${SW_DEST})}]?invalid)",
+            f" same = n,GotoIf($[\"${{SW_DEST}}\" : \"^({joined})$\"]?dial:invalid)",
         ] + room_dial + [
             " same = n,Hangup()",
             # Generated congestion tone (no prompt sound file required).
@@ -1848,6 +1918,7 @@ def render_extensions(opts: dict) -> str:
             "",
         ]
 
+    parts += render_sw_room_context("|".join(exts))
     parts += render_rtpqos_context()
     return "\n".join(parts) + "\n"
 
@@ -2661,8 +2732,11 @@ def write_operator_runtime(opts: dict) -> None:
     synonyms: dict[str, list[str]] = {}
     for entry in (opts.get("operator_synonyms") or []):
         ext = str(entry.get("ext", "")).strip()
-        phrases = [str(p).strip() for p in (entry.get("phrases") or []) if str(p).strip()]
-        if ext and phrases:
+        # Scrubbed like room names (control characters out, whitespace runs
+        # collapsed): these reach the recognizer's prompt and its HTTP body.
+        phrases = [" ".join(_scrub(str(p)).split()) for p in (entry.get("phrases") or [])]
+        phrases = [p for p in phrases if p]
+        if re.fullmatch(r"[0-9]{2,6}", ext) and phrases:
             synonyms.setdefault(ext, []).extend(phrases)
 
     payload = {

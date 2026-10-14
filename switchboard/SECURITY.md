@@ -56,11 +56,13 @@ one grouped pull request (commit prefix `ci`) that moves each SHA and its commen
 together.
 
 Every job also names its runner image, never GitHub's floating `latest` label, so
-the operating system a build runs on changes only in a reviewed diff. Since
-v0.109.1 that is Ubuntu 26.04, with native `ubuntu-26.04-arm` runners for the
-aarch64 image builds. CodeQL is the exception: it stays on Ubuntu 24.04 because
-its system requirements list only 22.04 and 24.04. `tests/test_workflow_runners.py`
-pins every job's runner.
+the operating system a build runs on changes only in a reviewed diff. Every job
+runs on Ubuntu 26.04, with native `ubuntu-26.04-arm` runners for the aarch64 image
+builds; CodeQL joined them in v0.110.0, retiring 24.04. CodeQL's published system
+requirements still list only Ubuntu 22.04 and 24.04, so the CI gate refuses a
+Python analysis that does not reproduce at least one of the baseline's known,
+accepted findings: an analysis that silently extracted nothing cannot pass as
+clean. `tests/test_workflow_runners.py` pins every job's runner and that check.
 
 `.github/workflows/dependabot-automerge.yml` merges that pull request without a
 review only when all of these hold:
@@ -454,6 +456,45 @@ stored credential**. Generic service calls are restricted to an allow-list of
 domains (`light`, `scene`, `media_player`, `tts`, `climate`), the service name must
 be `[a-z_]+`, and every entity ID is domain-validated before a call is made.
 
+**The token stays with the root services** (since v0.110.0). It grants the whole
+Home Assistant Core API (`homeassistant_api: true`). Asterisk, its AGIs, the speech
+recognizer and every program the dial plan runs are the `asterisk` user, the
+processes that handle callers' audio and input, and they no longer hold it:
+
+- they start with `SUPERVISOR_TOKEN` and `HASSIO_TOKEN` removed from their
+  environment;
+- the copy s6-overlay keeps of every container variable,
+  `/run/s6/container_environment`, is made readable by root only at boot. It
+  shipped world-readable (`0644`), so before v0.110.0 any of those programs could
+  read the token from it.
+
+What they still need from Home Assistant they ask a root broker for, over a Unix
+socket that only root and the `asterisk` group can open (`/run/switchboard/ha.sock`,
+`0660`; a loopback TCP port would be reachable from the whole host under host
+networking). The broker forwards only the requests those programs make, each with
+its arguments checked, and refuses and logs anything else:
+
+| Request | What the broker accepts |
+|---|---|
+| Reads | one entity's state, all states, the fixed lights template, the home location, a calendar's events in a date range |
+| Lights | `light.turn_on` and `light.turn_off` on one `light.` entity |
+| Scenes | `scene.turn_on` on `scene.` entities |
+| Announcements | `media_player.play_media` of this add-on's own clip URL on `media_player.` entities |
+| Assistant | Home Assistant's built-in local conversation agent only |
+| Pushes | `sensor.switchboard_last_call`, and a persistent notification |
+
+Reads are trimmed before they are returned: a state carries only its entity, its
+value, and the two attributes the callers use (a name and a current temperature),
+so no camera access token, picture URL or tracker coordinate passes; the
+configuration read carries only the home's coordinates and temperature unit. An
+announcement must be this add-on's own clip URL, on this host's web UI port.
+
+Everything else the token allows (other services and domains, `tts` and `climate`,
+mobile push, configuration, the event bus, history, the Supervisor API) is out of
+reach for those programs. One request on the list carries real reach of its own:
+the conversation agent acts on whatever entities are exposed to Assist, as it does
+for anyone who speaks to it.
+
 ### 5. The announce endpoint
 
 `POST /api/announce/{ext}` speaks a clip onto a room handset. Over the LAN it is
@@ -491,6 +532,22 @@ these defenses are generated automatically:
   masquerade.
 - **Origin guard.** Outbound origination is refused when the originating channel is
   the trunk endpoint itself — a version-independent backstop.
+- **Dialled-number filter** (since v0.110.0). Only digits, `*` and `#` reach the
+  trunk `Dial`, and only digits reach a room `Dial` or the test that decides it is a
+  room; a dialled string from which the filter removed anything is refused. The
+  outbound and room patterns' `.` matches any character, and `Dial` reads `&`,
+  `/`, `@` and `,` in its argument, so before this a dialled string was passed
+  through as written. `+` is not allowed: it would bypass the `011` international
+  block.
+- **The operator keeps outside callers out of the house** (since v0.110.0). A
+  transferred-in outside caller can still be connected to a room, ask the directory
+  or hear the clock. Asked for lights, the status readout, an announcement or a
+  page, they get the operator's goodbye. The operator identifies a room by the
+  channel's PJSIP endpoint, which configuration sets, never by caller ID, which the
+  caller sets, and asks again after the operator's speech step, because an attended
+  transfer completed meanwhile can put a different caller on the line. Each house
+  feature checks again when it starts. The message-waiting clear used to put
+  caller ID into a shell command line.
 - **REFER rejection.** The trunk endpoint sets `allow_transfer = no`, so a
   provider-side / remote party can't REFER Switchboard into an outbound leg. (Room
   endpoints keep transfer enabled so the cordless's Transfer button still works.)

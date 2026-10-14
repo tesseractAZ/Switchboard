@@ -330,15 +330,5 @@ def test_the_option_reaches_switchboard_stt_through_features_json(tmp_path, monk
 
 
 if __name__ == "__main__":
-    test_server_ok_no_cli()
-    test_connect_refused_falls_back_to_cli()
-    test_read_hang_returns_empty_without_cli()
-    test_http_error_returns_empty_without_cli()
-    test_midrequest_reset_returns_empty_without_cli()
-    test_empty_transcript_not_double_charged()
-    test_multipart_prompt_only_when_bias_set()
-    test_normalize_identical_on_server_path()
-    test_read_timeout_default_and_override()
-    test_server_disabled_uses_cli()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))

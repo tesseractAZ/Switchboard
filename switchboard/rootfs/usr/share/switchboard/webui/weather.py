@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TIMEOUT = float(os.environ.get("SW_WEATHER_TIMEOUT", "6") or "6")
@@ -25,6 +26,18 @@ _UA = "Switchboard-HA-addon (github.com/tesseractAZ/Switchboard)"
 _grid_cache: dict = {}
 GRID_CACHE_PATH = os.environ.get("SW_WEATHER_GRID_CACHE",
                                  "/data/state/weather-grid.json")
+
+
+def _nws_url(url) -> bool:
+    """True only for an https URL on api.weather.gov. The forecast URL comes from
+    a third-party response and is cached in /data/state, which the asterisk user
+    can write, so it is checked wherever it is used. ``hostname`` lower-cases and
+    drops any user part, so "https://api.weather.gov@elsewhere/" is refused."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+        return u.scheme == "https" and u.hostname == "api.weather.gov" and u.port in (None, 443)
+    except ValueError:
+        return False
 
 
 def _grid_cache_load() -> dict:
@@ -53,6 +66,8 @@ def _grid_cache_store(key: str, url: str) -> None:
 
 
 def _get(url: str):
+    if not _nws_url(url):
+        raise ValueError("not an api.weather.gov URL")
     req = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Accept": "application/geo+json"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -65,11 +80,13 @@ def _forecast_url(lat, lon) -> str:
         return _grid_cache[key]
     skey = f"{key[0]},{key[1]}"
     disk = _grid_cache_load().get(skey)
-    if disk:
+    if disk and _nws_url(disk):
         _grid_cache[key] = disk
         return disk
     pts = _get(f"https://api.weather.gov/points/{skey}")
     url = (((pts or {}).get("properties") or {}).get("forecast")) or ""
+    if not _nws_url(url):
+        url = ""
     if url:
         _grid_cache[key] = url
         _grid_cache_store(skey, url)

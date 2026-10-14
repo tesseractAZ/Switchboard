@@ -75,8 +75,9 @@ def synthesize(text: str, out_base: str) -> bool:
         return False
     try:
         proc = subprocess.run(
-            [espeak, "-v", ESPEAK_VOICE, "-s", str(ESPEAK_WPM), "--stdout", text],
-            capture_output=True, timeout=15,
+            # "--": never read the text as an option, even when it starts with "-".
+            [espeak, "-v", ESPEAK_VOICE, "-s", str(ESPEAK_WPM), "--stdout", "--", text],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
         )
     except subprocess.TimeoutExpired:
         # Not `{exc}`: a TimeoutExpired renders its whole command line, and the

@@ -721,56 +721,6 @@ def test_poller_gated_on_clients() -> None:
         console.POLL_SECONDS = orig_poll
 
 
-def main() -> None:
-    test_client_gate()
-    test_poller_gated_on_clients()
-    test_parse_input()
-    test_render()
-    test_render_connect_mode()
-    test_render_ami_down()
-    test_navigation()
-    test_connect_mode_transitions()
-    test_render_transfer_mode()
-    test_transfer_mode_transitions()
-    test_transfer_offline_target_refused()
-    test_fmt12()
-    test_render_wakeups()
-    test_render_signals()
-    test_cancel_wakeup_key()
-    test_guarded_actions()
-    test_parse_input_backspace()
-    test_is_quit()
-    test_wakeup_when()
-    test_set_wakeup_mode()
-    test_set_wakeup_invalid_and_empty()
-    test_set_wakeup_buffer_capped()
-    test_set_wakeup_edit_prefill()
-    test_render_wakeup_mode()
-    test_help_mode()
-    test_vis_width()
-    test_center()
-    test_truncate_and_clamp()
-    test_page_confirm_accept()
-    test_page_confirm_cancel()
-    test_mwi_toggle()
-    test_mwi_set_failure()
-    test_mwi_badge_render()
-    test_lights_entry_and_unavailable()
-    test_lights_nav_toggle_exit()
-    test_lights_toggle_failure_no_flip()
-    test_help_and_bar_have_new_keys()
-    test_command_bar_fits_80()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all console tests passed")
-
-
-if __name__ == "__main__":
-    main()
-
-
 # --------------------------------------------------------------------------- #
 # The lights list scrolls.
 # --------------------------------------------------------------------------- #
@@ -972,3 +922,8 @@ def test_a_console_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path):
                 _sys.modules[k] = v
         d.OUTCOME_PATH = saved_out
         console.wakeup_store.cancel("11")
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

@@ -7,10 +7,10 @@ Every build and check runs on Ubuntu 26.04: `ubuntu-26.04`, and
 `ubuntu-latest`, so the image a job runs on changes only in a reviewed diff, not
 on the day GitHub moves the alias (it becomes 26.04 on 2026-10-19).
 
-The one exception is CodeQL. Its system requirements list Ubuntu 22.04 and 24.04
-only (checked 2026-10-12), so its analysis job stays on `ubuntu-24.04` until 26.04
-is listed. Both halves are pinned here: CodeQL may not move early, and nothing
-else may stay behind with it.
+CodeQL included, since v0.110.0: 24.04 is retired. CodeQL's published system
+requirements still list only 22.04 and 24.04, so its Python job must prove each
+run analysed something (``min_accepted``: at least one baseline finding
+reproduced), and this file pins that too.
 """
 import re
 from pathlib import Path
@@ -21,7 +21,6 @@ _WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 RUNNER = "ubuntu-26.04"
 NATIVE_MATRIX = "${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}"
-CODEQL_RUNNER = "ubuntu-24.04"
 
 # Every job, by file. Named rather than counted, so a renamed or deleted job
 # fails here instead of quietly shrinking what this file checks.
@@ -61,13 +60,10 @@ def test_every_job_names_its_runner():
         assert "runs-on" in job, f"{f}:{name} has no runs-on"
 
 
-def test_every_job_runs_on_ubuntu_26_04_except_codeql():
+def test_every_job_runs_on_ubuntu_26_04():
     seen = 0
     for f, name, job in _jobs():
         runs_on = job["runs-on"]
-        if (f, name) == ("codeql.yml", "analyze"):
-            assert runs_on == CODEQL_RUNNER, (f, name, runs_on)
-            continue
         matrix = (job.get("strategy") or {}).get("matrix") or {}
         if "arch" in matrix:
             assert runs_on == NATIVE_MATRIX, (f, name, runs_on)
@@ -75,7 +71,7 @@ def test_every_job_runs_on_ubuntu_26_04_except_codeql():
         else:
             assert runs_on == RUNNER, (f, name, runs_on)
         seen += 1
-    assert seen == 13, seen
+    assert seen == 14, seen
 
 
 def test_both_image_builds_run_on_native_runners():
@@ -89,6 +85,24 @@ def test_no_floating_or_older_runner_label_anywhere():
         text = path.read_text()
         assert "ubuntu-latest" not in text, path.name
         for label in re.findall(r"ubuntu-\d\d\.\d\d(?:-arm)?", text):
-            if path.name == "codeql.yml" and label == CODEQL_RUNNER:
-                continue
             assert label in ("ubuntu-26.04", "ubuntu-26.04-arm"), (path.name, label)
+
+
+def test_codeql_must_prove_it_analysed_something():
+    doc = yaml.safe_load((_WORKFLOWS / "codeql.yml").read_text())
+    job = doc["jobs"]["analyze"]
+    gate = [s for s in job["steps"] if "check-sarif.mjs" in str(s.get("run", ""))]
+    assert len(gate) == 1, gate
+    assert "--min-accepted ${{ matrix.language == 'python' && 1 || 0 }}" in gate[0]["run"], gate[0]["run"]
+
+
+def test_codeql_matrix_keys_are_the_ones_main_was_analysed_with():
+    # Code scanning names each analysis configuration after the matrix values
+    # (".../analyze/language:python/sarif:python.sarif"). A new key renames the
+    # configuration: pull requests can then no longer be compared with main, and
+    # main's existing alerts, the dismissed ones included, belong to a
+    # configuration that no longer runs.
+    doc = yaml.safe_load((_WORKFLOWS / "codeql.yml").read_text())
+    rows = doc["jobs"]["analyze"]["strategy"]["matrix"]["include"]
+    assert [sorted(r) for r in rows] == [["language", "sarif"], ["language", "sarif"]], rows
+

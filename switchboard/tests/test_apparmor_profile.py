@@ -145,7 +145,7 @@ def test_asterisk_starts_unprivileged():
     # With -U/-G Asterisk kept root's whole permitted capability set.
     run = (ADDON / "rootfs/etc/s6-overlay/s6-rc.d/asterisk/run").read_text()
     execs = [l.strip() for l in run.splitlines() if l.strip().startswith("exec ")]
-    assert execs == ['exec s6-setuidgid asterisk asterisk -f "$@"'], execs
+    assert execs == ['exec env -u SUPERVISOR_TOKEN -u HASSIO_TOKEN s6-setuidgid asterisk asterisk -f "$@"'], execs
 
 
 # --- the switchboard-config child (v0.109.0) ---------------------------------
@@ -210,7 +210,8 @@ def test_the_init_step_execs_the_child_path_directly():
     # Run as "python3 <path>" or through an env shebang, the exec would not
     # match the Cx rule (or the child could not map env) and the boot would fail.
     up = (ADDON / "rootfs/etc/s6-overlay/s6-rc.d/init-switchboard/up").read_text()
-    assert up.startswith('/bin/sh -c "/usr/bin/switchboard-config && '), up
+    # (the s6 environment directory is made root-only first; see test_ha_broker)
+    assert up.startswith('/bin/sh -c "chmod 0700 /run/s6/container_environment; /usr/bin/switchboard-config && '), up
     src = (ADDON / "rootfs/usr/bin/switchboard-config").read_text()
     # -I: no PYTHON* variables, user site or script-dir imports in the child.
     assert src.splitlines()[0] == "#!/usr/bin/python3 -IB"

@@ -279,11 +279,5 @@ def test_the_parser_reads_from_the_way_buildkit_does():
 
 
 if __name__ == "__main__":
-    test_no_build_file_where_the_supervisor_looks()
-    test_no_per_arch_dockerfile()
-    test_every_from_is_the_one_pinned_multiplatform_base()
-    test_workflows_build_what_the_device_builds()
-    test_build_yaml_labels_moved_into_the_dockerfile()
-    test_the_parser_reads_from_the_way_buildkit_does()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    sys.exit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))

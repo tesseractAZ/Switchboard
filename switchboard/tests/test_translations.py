@@ -48,12 +48,6 @@ def test_translation_completeness():
     check(f"translations: each entry has name + description (incomplete: {incomplete or 'none'})", not incomplete)
 
 
-if __name__ == "__main__":
-    test_translation_completeness()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    sys.exit(1 if _failures else 0)
-
-
 def test_addon_starts_in_the_services_phase() -> None:
     """Dial tone must not queue behind Home Assistant Core.
 
@@ -302,3 +296,8 @@ def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
     missing = sorted(n for n in cited if f'"{n}"' not in code)
     check(f"outcomes: every name the manual cites is one the code writes "
           f"({missing})", not missing)
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

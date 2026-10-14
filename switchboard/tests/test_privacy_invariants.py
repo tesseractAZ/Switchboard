@@ -423,7 +423,8 @@ def test_the_tts_helper_does_not_echo_the_text_it_failed_to_speak(tmp_path, caps
     def _run(cmd, **kw):
         raise _sp.TimeoutExpired(cmd, 15)
     tts.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=_sp.TimeoutExpired,
-                                           SubprocessError=_sp.SubprocessError)
+                                           SubprocessError=_sp.SubprocessError,
+                                           DEVNULL=_sp.DEVNULL)
     capsys.readouterr()
     assert tts.synthesize("the zebra lamp is on", str(tmp_path / "out")) is False
     err = capsys.readouterr().err

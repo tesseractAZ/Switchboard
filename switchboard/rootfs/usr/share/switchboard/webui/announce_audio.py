@@ -88,8 +88,10 @@ def build_announcement(text: str, out_path: str, voice: str = "en-us", speed: in
     speech = None
     rate = RATE
     try:
-        subprocess.run(["espeak-ng", "-v", voice, "-s", str(speed), "-w", tmp, text],
-                       check=True, capture_output=True, timeout=20)
+        # "--": the text is the caller's speech, so it must never be read as an
+        # option even when it starts with "-".
+        subprocess.run(["espeak-ng", "-v", voice, "-s", str(speed), "-w", tmp, "--", text],
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=20)
         with wave.open(tmp, "rb") as w:
             rate = w.getframerate()
             if w.getnchannels() == 1 and w.getsampwidth() == 2:

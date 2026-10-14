@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -64,9 +65,16 @@ def is_light_entity(entity_id: str) -> bool:
     return bool(_ENTITY_RE.match(entity_id or ""))
 
 
+# The asterisk user's programs hold no Supervisor token (v0.110.0); they reach
+# Home Assistant through the root broker on this socket (see ha_broker.py).
+BROKER_SOCKET = os.environ.get("SWITCHBOARD_HA_BROKER", "/run/switchboard/ha.sock")
+_BROKER = "broker"
+
+
 def _candidates():
     """(base_url, token) pairs to try, most-specific first. An explicit
-    HA_BASE_URL/HA_TOKEN (testing) wins; otherwise the Supervisor proxy."""
+    HA_BASE_URL/HA_TOKEN (testing) wins; otherwise the Supervisor proxy, or the
+    broker for a process without the token."""
     override = os.environ.get("HA_BASE_URL", "").strip().rstrip("/")
     if override:
         yield override, os.environ.get("HA_TOKEN", "").strip()
@@ -75,6 +83,34 @@ def _candidates():
     if token:
         yield "http://supervisor/core/api", token
         yield "http://172.30.32.2/core/api", token
+    elif os.path.exists(BROKER_SOCKET):
+        yield _BROKER, ""
+
+
+def _broker_request(method: str, path: str, body):
+    """One request through the broker. Returns (status, text) like the HTTP path;
+    a refused request reads as (403, reason), so the callers' "HA said no"
+    handling applies. Raises OSError when the broker cannot be reached."""
+    line = json.dumps({"method": method, "path": path, "body": body}).encode() + b"\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        # The broker answers only when its forward has finished, and a cold
+        # forward may try both Supervisor addresses: wait for that worst case.
+        sock.settimeout(2 * TIMEOUT + 3)
+        sock.connect(BROKER_SOCKET)
+        sock.sendall(line)
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    reply = json.loads(buf or b"{}")
+    if "refused" in reply:
+        _log(f"broker refused {method} {path}: {reply['refused']}")
+        return 403, str(reply["refused"])
+    if reply.get("status") is None:
+        raise OSError("broker could not reach Home Assistant")
+    return int(reply["status"]), str(reply.get("text") or "")
 
 
 _cached = None  # the first base that answered — skip dead hosts on later calls
@@ -90,10 +126,25 @@ def _request(method: str, path: str, body=None):
     if not _cached and time.time() < _dead_until:
         return None, None
     cands = [_cached] if _cached else list(_candidates())
+    if not cands and not os.environ.get("HA_BASE_URL"):
+        _log(f"no Home Assistant token and no broker at {BROKER_SOCKET or '(none)'}")
     for cand in cands:
         if not cand:
             continue
         base, token = cand
+        if base == _BROKER:
+            try:
+                status, text = _broker_request(method, path, body)
+            except socket.timeout:
+                # The broker is alive but slow: this call fails, later ones may not.
+                _log(f"Home Assistant broker timed out on {method} {path}")
+                return None, None
+            except (OSError, ValueError) as exc:
+                _log(f"Home Assistant unreachable through the broker at {BROKER_SOCKET}: {exc}")
+                continue
+            _cached = cand
+            _dead_until = 0.0
+            return status, text
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             f"{base}{path}",

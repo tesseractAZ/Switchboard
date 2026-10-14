@@ -201,8 +201,9 @@ def build_announcement_8k(text: str, out_path: str,
     in_rate = announce_audio.RATE
     try:
         subprocess.run(
-            ["espeak-ng", "-v", voice, "-s", str(speed), "-w", tmp, text],
-            check=True, capture_output=True, timeout=20,
+            # "--": never read the text as an option, even when it starts with "-".
+            ["espeak-ng", "-v", voice, "-s", str(speed), "-w", tmp, "--", text],
+            check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=20,
         )
         with wave.open(tmp, "rb") as w:
             speech, in_rate = _read_wav_mono16(w)

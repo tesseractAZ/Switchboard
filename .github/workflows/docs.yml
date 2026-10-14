@@ -80,6 +80,42 @@ jobs:
           command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
           libreoffice --version | head -1
 
+      # The typefaces the PDF must use, checked by ROLE before the build. The
+      # .docx asks for Calibri (headings) and Cambria (body), pinned by
+      # build-docs-docx.py; on Linux their faithful renderings are the
+      # metric-compatible clones Carlito and Caladea, which libreoffice only
+      # suggests and never installs. Code asks for Consolas, which has no Linux
+      # clone: it is aliased to DejaVu Sans Mono, the face every earlier manual
+      # used. Without this the first 26.04 manual shipped plain serif headings
+      # and proportional code, and every check here was green.
+      - name: Fonts for the PDF
+        run: |
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20)
+          timeout -k 10 120 sudo apt-get "${apt_opts[@]}" update
+          timeout -k 10 300 sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends \
+            fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu
+          conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fontconfig/conf.d"
+          mkdir -p "$conf_dir"
+          cat > "$conf_dir/99-switchboard-manual.conf" <<'FONTCONF'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <alias binding="same"><family>Consolas</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
+          </fontconfig>
+          FONTCONF
+          fc-cache -f >/dev/null 2>&1 || true
+          fail=0
+          role () {   # <requested family> <expected family>
+            got=$(fc-match -f '%{family[0]}' "$1")
+            if [ "$got" = "$2" ]; then echo "font role: $1 -> $got"
+            else echo "::error::font role: $1 resolves to '$got', expected '$2'"; fail=1; fi
+          }
+          role Calibri Carlito
+          role Cambria Caladea
+          role Consolas "DejaVu Sans Mono"
+          [ "$(fc-match -f '%{spacing}' Consolas)" = 100 ] || { echo "::error::Consolas does not resolve to a monospaced face"; fail=1; }
+          exit $fail
+
       - name: Build .pdf (render the .docx)
         run: |
           libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
@@ -87,7 +123,37 @@ jobs:
           test -s Switchboard-Documentation.pdf
           ls -la Switchboard-Documentation.docx Switchboard-Documentation.pdf
 
+      # And by what the PDF actually embedded: a role resolving correctly is not
+      # proof that LibreOffice used it. Alternatives as A|B: Ubuntu's Carlito is
+      # Carlito-Regular, LibreOffice's bundled copy Carlito.
+      - name: Check the PDF's typefaces
+        run: |
+          embedded=" $(python3 - Switchboard-Documentation.pdf <<'PY'
+          import re, sys, zlib
+          data = open(sys.argv[1], "rb").read()
+          blobs = [data]
+          for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
+              try:
+                  blobs.append(zlib.decompress(m.group(1)))
+              except zlib.error:
+                  pass
+          names = {re.sub(rb"^[A-Z]{6}\+", b"", n).decode()
+                   for b in blobs for n in re.findall(rb"/BaseFont\s*/([A-Za-z0-9+_.-]+)", b)}
+          print(" ".join(sorted(names)))
+          PY
+          ) "
+          echo "embedded:$embedded"
+          missing=""
+          for want in "Carlito|Carlito-Regular" "Carlito-Bold" "Caladea|Caladea-Regular" "DejaVuSansMono"; do
+            ok=0
+            for f in $(echo "$want" | tr '|' ' '); do case "$embedded" in *" $f "*) ok=1 ;; esac; done
+            [ "$ok" = 1 ] || missing="$missing $want"
+          done
+          [ -z "$missing" ] || { echo "::error::the manual fell back from its typefaces; not embedded:$missing"; exit 1; }
+
+      # Uploaded even when a check above failed, so the PDF can be looked at.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: documentation
           path: |

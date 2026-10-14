@@ -265,9 +265,5 @@ def test_a_hangup_mid_readout_sounds_no_tone() -> None:
 
 
 if __name__ == "__main__":
-    test_two_digit_group()
-    test_full_readouts()
-    test_structure_invariants()
-    test_saynumber_ranges()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
+    import _runner
+    raise SystemExit(_runner.run(globals()))

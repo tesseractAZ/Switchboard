@@ -91,12 +91,6 @@ def test_no_unsafe_idle_gates():
         check(f"{svc}/run idles only on explicit false for {flag}", hardened)
 
 
-if __name__ == "__main__":
-    test_no_unsafe_idle_gates()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    sys.exit(1 if _failures else 0)
-
-
 # A VALUE read must go through switchboard-opt, never bashio::config: bashio
 # parses /data/options.json directly and therefore BYPASSES the options overlay.
 # This shipped as a real defect — devhealth read the cordless battery thresholds
@@ -393,3 +387,8 @@ def test_the_uvicorn_ws_flag_and_the_installed_package_agree() -> None:
         assert impl not in ("auto", "none"), (
             "a WebSocket backend is installed but --ws does not name one; the "
             "console would depend on uvicorn's autodetection")
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

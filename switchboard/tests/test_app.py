@@ -428,37 +428,6 @@ def test_announce_helpers() -> None:
     check("announce: token empty by default (LAN announce disabled)", app._announce_token() == "")
 
 
-def main() -> None:
-    test_module_loads_without_fastapi()
-    test_cached_status_bundle()
-    test_valid_ext()
-    test_channel_has_crlf()
-    test_is_light_entity()
-    test_parse_wakeup_hhmm()
-    test_configured_room_exts()
-    test_channels_by_ext()
-    test_build_lights_payload()
-    test_index_html_controls()
-    test_card_action_buttons_labeled()
-    test_wakeup_ui_formatting()
-    test_dark_mode_covers_light_cards()
-    test_announce_serve_guard()
-    test_index_html_js_parses()
-    test_route_handlers_defined()
-    test_client_guard()
-    test_phonebook_xml()
-    test_announce_helpers()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all app helper tests passed")
-
-
-if __name__ == "__main__":
-    main()
-
-
 def test_delivery_outcomes_are_recorded_where_they_can_be_read(tmp_path) -> None:
     """Attempts that never became a call must still leave a record.
 
@@ -2071,3 +2040,8 @@ def test_the_tail_reader_drops_only_the_partial_first_line(tmp_path) -> None:
               all(r.get("sound") and r.get("_ts") for r in cut) and size > one * 4.5)
     finally:
         D.OUTCOME_PATH = saved
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

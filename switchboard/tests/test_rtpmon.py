@@ -689,34 +689,6 @@ def test_outage_notify_routing() -> None:
         sys.modules.pop("ha_client", None)
 
 
-if __name__ == "__main__":
-    test_rtt_ms()
-    test_is_reachable()
-    test_ip_from_uri()
-    test_build_phone_health()
-    test_summarize()
-    test_room_names()
-    test_poll_once_ami_down()
-    test_publish_routing()
-    test_warmup_done()
-    test_warmup_waits_for_every_wired_port()
-    test_warmup_holdouts()
-    test_history_append_caps()
-    test_is_mass_outage()
-    test_outage_transition()
-    test_outage_transition_warmup_never_counts()
-    test_partial_flag_actually_reaches_home_assistant()
-    test_worst_rtt_is_flagged_partial_when_phones_are_missing()
-    test_rollup_icon_tracks_the_partial_flag_not_raw_unreachable()
-    test_history_is_written_atomically()
-    test_trunk_transition()
-    test_trunk_check_skips_an_ami_down_cycle()
-    test_trunk_enabled_parses_options()
-    test_outage_notify_routing()
-    print(f"\n{'FAILED' if _failures else 'OK'} — {_failures} failure(s)")
-    raise SystemExit(1 if _failures else 0)
-
-
 # ── v0.47.0: report the wired fleet apart from the Wi-Fi cordless ────────────
 
 def _ph(ext, rtt, reachable=True, registered=True):
@@ -1809,3 +1781,8 @@ def test_a_trunk_drop_cannot_complete_a_phone_mass_drop() -> None:
     notes7, _ = _drive(with_cordless)
     check("mass-drop: four wired ports and the cordless are half of ten phones",
           len(notes7) == 1 and "(exts 11, 12, 13, 14, 19)" in notes7[0][0])
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))

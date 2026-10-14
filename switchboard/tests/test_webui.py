@@ -902,48 +902,6 @@ def test_peer_channels_prefers_outside_and_answered() -> None:
     check("peer: prefers the answered leg over a ringing one", an.get("11") == "PJSIP/12-b")
 
 
-def main() -> None:
-    test_endpoints()
-    test_actions_complete()
-    test_actions_responded()
-    test_codecs_for_channels_batched()
-    test_status_bundle_parse()
-    test_status_bundle_socket_loop()
-    test_call_codec_summary()
-    test_codecs_for_channels_no_io()
-    test_get_channel_codec_guards()
-    test_get_channel_codec_reads_value()
-    test_device_state_guards()
-    test_device_state_reads_value()
-    test_device_busy()
-    test_contacts()
-    test_registrations()
-    test_registered()
-    test_lowercasing()
-    test_login_failure()
-    test_stream_terminator()
-    test_channel_ext()
-    test_calls_internal()
-    test_calls_outside()
-    test_calls_operator()
-    test_calls_ringing()
-    test_lone_leg_excluded()
-    test_ring_ext_guard()
-    test_connect_hangup_guards()
-    test_transfer_channel_guard()
-    test_transfer_channel_redirect()
-    test_peer_channels_by_ext()
-    test_peer_channels_prefers_outside_and_answered()
-    test_page_all_guard()
-    test_set_mwi_guard()
-    test_no_calls()
-    print()
-    if _failures:
-        print(f"{_failures} FAILURE(S)")
-        raise SystemExit(1)
-    print("all webui AMI tests passed")
-
-
 def test_send_register_uses_an_action_the_ami_account_is_allowed_to_run() -> None:
     """The trunk auto-re-register must use an action our OWN manager.conf permits.
 
@@ -1121,10 +1079,6 @@ def test_send_register_rejects_a_bogus_section_name() -> None:
     finally:
         ami._ami_command = real
     check("send_register: never sent anything for a bogus name", calls == [])
-
-
-if __name__ == "__main__":
-    main()
 
 
 def test_announce_originates_into_the_dialplan_not_bare_playback() -> None:
@@ -1616,3 +1570,8 @@ def test_the_codec_read_logs_in_as_the_call_account() -> None:
     _with_socket(fake, lambda: ami.codecs_for_channels([{"channel": "PJSIP/11-1"}]))
     check("codecs: logs in as switchboard-call",
           b"Username: switchboard-call\r\n" in fake.sent and b"switchboard-status" not in fake.sent)
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))
