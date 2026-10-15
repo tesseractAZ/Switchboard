@@ -49,6 +49,16 @@ jobs:
     # so "finds" nothing: the gate below refuses a Python run that does not
     # reproduce at least one of the baseline's known, accepted findings.
     runs-on: ubuntu-26.04
+    # Full scans on pull requests too. By default the action runs PR scans
+    # "diff-informed": a dataflow result is kept only when its source or sink is
+    # on a changed line, so a PR could pass with a finding that only main's full
+    # scan reports, after the merge (on 2026-10-14 the PR scan saw 21 Python and
+    # 3 JS results where main's saw 23 and 4). Releases merge and deploy as soon
+    # as CI is green, so the PR scan must be the full one. The init step reads
+    # this (codeql-action v4.38.3 src/feature-flags.ts: exactly "false",
+    # lower-cased, disables it), and the gate below refuses a partial SARIF.
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
     strategy:
       fail-fast: false
       matrix:
