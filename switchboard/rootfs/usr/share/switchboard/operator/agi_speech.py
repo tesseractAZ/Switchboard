@@ -170,16 +170,23 @@ def rec_summary(reply: str, wav: str) -> str:
     """The `bytes=B secs=S end=E [no-speech]` part of a rec breadcrumb.
 
     `secs` comes from the WAV header, else from the size (8 kHz 16-bit mono:
-    16000 B/s behind a 44-byte header). `end` is the reason in Asterisk's
-    RECORD reply, and it says "timeout" both for the silence cutoff and for the
-    record_ms cap; secs tells them apart. `no-speech` marks a file that is only
-    the silence remainder: nothing crossed the silence threshold, which a
-    silent caller and a muted or dead microphone produce alike. A hang-up or a
-    key is not that remainder. switchboard-operator.agi keeps a twin."""
+    16000 B/s behind a 44-byte header). `end` is the bracketed word in
+    Asterisk's RECORD reply, whichever it is: "timeout" for both the silence
+    cutoff and the record_ms cap (secs tells them apart), "hangup", "dtmf", or
+    a failure such as "waitfor" or "writefile". A reply without one (an empty
+    read) logs no `end`. `no-speech` marks a file that is only the silence
+    remainder: nothing crossed the silence threshold, which a silent caller and
+    a muted or dead microphone produce alike. Only the silence cutoff leaves
+    that remainder, so no reply but "timeout" earns the flag, whatever the
+    size. switchboard-operator.agi keeps a twin."""
+    # Letters only: Asterisk's own reason word, never free text in the journal.
+    m = re.search(r"\(([a-z]+)\)", reply or "")
+    end = m.group(1) if m else ""
+    tail = f" end={end}" if end else ""
     try:
         size = os.path.getsize(wav)
     except OSError:
-        return "bytes=-1"                 # RECORD wrote nothing
+        return "bytes=-1" + tail          # RECORD wrote nothing
     secs = None
     try:
         with wave.open(wav, "rb") as w:
@@ -189,11 +196,9 @@ def rec_summary(reply: str, wav: str) -> str:
         pass           # a short or odd header: the size below still answers
     if secs is None:
         secs = max(size - 44, 0) / 16000
-    m = re.search(r"\((hangup|dtmf|timeout)\)", reply or "")
-    end = m.group(1) if m else ""
-    out = f"bytes={size} secs={secs:.2f}" + (f" end={end}" if end else "")
+    out = f"bytes={size} secs={secs:.2f}{tail}"
     lo, hi = SILENT_REMAINDER_S
-    if end in ("", "timeout") and lo <= secs <= hi:
+    if end == "timeout" and lo <= secs <= hi:
         out += " no-speech"
     return out
 
@@ -207,7 +212,9 @@ def listen(tag: str, attempt: int = 0, record_ms: int = 6000, silence_s: int = 2
 
     Each recording leaves a `[<tag>] rec` line (see rec_summary) before STT
     runs: the WAV is deleted afterwards, and an empty transcript alone cannot
-    tell a caller who said nothing from one whose words STT missed."""
+    tell a caller who said nothing from one whose words STT missed. A hang-up
+    while recording usually leaves no line at all rather than end=hangup:
+    Asterisk SIGHUPs the AGI once it has replied, and no caller handles it."""
     rec = f"{ASR_DIR}/{tag}-{os.getpid()}-{attempt}"
     stream(PROMPT_BEEP)
     reply = agi(f'RECORD FILE {rec} wav "" {record_ms} s={silence_s}')

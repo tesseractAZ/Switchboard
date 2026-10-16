@@ -64,11 +64,16 @@ CAPPED = 80000       # 10.00 s: the operator's RECORD_MS cap
 SILENCE_REPLY = "200 result=0 (timeout) endpos=8160"
 
 
+def _twins():
+    """Both copies of the rule, each under its own name."""
+    op, sp = _operator(), _speech()
+    return (("operator", op._rec_summary), ("speech", sp.rec_summary))
+
+
 def test_a_silent_capture_is_sized_and_flagged() -> None:
     tmp = tempfile.mkdtemp()
     try:
-        for name, mod in (("operator", _operator()), ("speech", _speech())):
-            summary = getattr(mod, "_rec_summary", None) or mod.rec_summary
+        for name, summary in _twins():
             line = summary(SILENCE_REPLY, _wav(os.path.join(tmp, "a.wav"), SILENT))
             check(f"{name}: the silence remainder is 16364 bytes and 1.02 s, flagged",
                   line == "bytes=16364 secs=1.02 end=timeout no-speech")
@@ -76,52 +81,79 @@ def test_a_silent_capture_is_sized_and_flagged() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_speech_a_hangup_and_the_cap_are_not_called_silence() -> None:
+def test_a_hangup_and_the_cap_are_not_called_silence() -> None:
     """`no-speech` has to mean the remainder and nothing else, or a review is
     back to guessing. A hang-up one second in is the same length and is not it."""
-    mod = _operator()
     tmp = tempfile.mkdtemp()
     try:
-        line = mod._rec_summary("200 result=0 (timeout) endpos=32800",
-                                _wav(os.path.join(tmp, "b.wav"), SPOKEN))
-        check("operator: a spoken capture states its length",
-              line == "bytes=65644 secs=4.10 end=timeout")
-        line = mod._rec_summary("200 result=-1 (hangup) endpos=8000",
-                                _wav(os.path.join(tmp, "c.wav"), 8000))
-        check("operator: a hang-up at the same length is not no-speech",
-              line == "bytes=16044 secs=1.00 end=hangup")
-        line = mod._rec_summary("200 result=0 (timeout) endpos=80000",
-                                _wav(os.path.join(tmp, "d.wav"), CAPPED))
-        check("operator: the RECORD_MS cap reads as the full window, not silence",
-              line == "bytes=160044 secs=10.00 end=timeout")
-        check("operator: a capture with one short sound in it is not the remainder",
-              "no-speech" not in mod._rec_summary(
-                  SILENCE_REPLY, _wav(os.path.join(tmp, "e.wav"), SILENT + 1600)))
+        for name, summary in _twins():
+            line = summary("200 result=0 (timeout) endpos=32800",
+                           _wav(os.path.join(tmp, "b.wav"), SPOKEN))
+            check(f"{name}: a spoken capture states its length",
+                  line == "bytes=65644 secs=4.10 end=timeout")
+            line = summary("200 result=-1 (hangup) endpos=8000",
+                           _wav(os.path.join(tmp, "c.wav"), 8000))
+            check(f"{name}: a hang-up at the same length is not no-speech",
+                  line == "bytes=16044 secs=1.00 end=hangup")
+            line = summary("200 result=0 (timeout) endpos=80000",
+                           _wav(os.path.join(tmp, "d.wav"), CAPPED))
+            check(f"{name}: the record cap reads as the full window, not silence",
+                  line == "bytes=160044 secs=10.00 end=timeout")
+            check(f"{name}: a capture with one short sound in it is not the remainder",
+                  "no-speech" not in summary(
+                      SILENCE_REPLY, _wav(os.path.join(tmp, "e.wav"), SILENT + 1600)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_only_the_silence_cutoff_earns_the_flag() -> None:
+    """Only RECORD's silence cutoff leaves the 1.02 s remainder, and it replies
+    (timeout). A lost reply or a failure word beside a file of that size shows
+    nothing about why it is that size, so the flag stays off; the word itself
+    is logged, so a RECORD failure is visible rather than missing."""
+    tmp = tempfile.mkdtemp()
+    try:
+        for name, summary in _twins():
+            path = _wav(os.path.join(tmp, "f.wav"), SILENT)
+            check(f"{name}: a lost reply logs no end and no flag",
+                  summary("", path) == "bytes=16364 secs=1.02")
+            check(f"{name}: a waitfor failure is named, and not called silence",
+                  summary("200 result=-1 (waitfor) endpos=8160", path)
+                  == "bytes=16364 secs=1.02 end=waitfor")
+            check(f"{name}: a writefile failure is named beside the missing file",
+                  summary("200 result=-1 (writefile)", os.path.join(tmp, "absent.wav"))
+                  == "bytes=-1 end=writefile")
+            check(f"{name}: only a bracketed word of letters is taken from the reply",
+                  summary("200 result=-1 (bad word) endpos=8160", path)
+                  == "bytes=16364 secs=1.02")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_a_missing_or_headerless_file_still_reads() -> None:
-    mod = _operator()
     tmp = tempfile.mkdtemp()
     try:
-        check("operator: no file is still bytes=-1, and claims nothing else",
-              mod._rec_summary(SILENCE_REPLY, os.path.join(tmp, "absent.wav")) == "bytes=-1")
-        raw = os.path.join(tmp, "raw.wav")
-        with open(raw, "wb") as fh:
-            fh.write(b"\0" * 16364)
-        check("operator: with no readable header the size gives the length",
-              mod._rec_summary("", raw) == "bytes=16364 secs=1.02 no-speech")
-        # A RIFF header cut short: the breadcrumb runs before STT, inside the
-        # call, so a parse error here must fall back, never raise.
-        import struct
-        odd = os.path.join(tmp, "odd.wav")
-        with open(odd, "wb") as fh:
-            fh.write(b"RIFF" + struct.pack("<I", 16340) + b"WAVEfmt "
-                     + struct.pack("<I", 2) + b"\x01\x00" + b"\0" * 16342)
-        check("operator: a malformed header falls back to the size",
-              mod._rec_summary(SILENCE_REPLY, odd)
-              == "bytes=16364 secs=1.02 end=timeout no-speech")
+        for name, summary in _twins():
+            check(f"{name}: no file is still bytes=-1, beside the reply's own word",
+                  summary(SILENCE_REPLY, os.path.join(tmp, "absent.wav"))
+                  == "bytes=-1 end=timeout")
+            check(f"{name}: no file and no reply is bare bytes=-1",
+                  summary("", os.path.join(tmp, "absent.wav")) == "bytes=-1")
+            raw = os.path.join(tmp, "raw.wav")
+            with open(raw, "wb") as fh:
+                fh.write(b"\0" * 16364)
+            check(f"{name}: with no readable header the size gives the length",
+                  summary(SILENCE_REPLY, raw) == "bytes=16364 secs=1.02 end=timeout no-speech")
+            # A RIFF header cut short: the breadcrumb runs before STT, inside the
+            # call, so a parse error here must fall back, never raise.
+            import struct
+            odd = os.path.join(tmp, "odd.wav")
+            with open(odd, "wb") as fh:
+                fh.write(b"RIFF" + struct.pack("<I", 16340) + b"WAVEfmt "
+                         + struct.pack("<I", 2) + b"\x01\x00" + b"\0" * 16342)
+            check(f"{name}: a malformed header falls back to the size",
+                  summary(SILENCE_REPLY, odd)
+                  == "bytes=16364 secs=1.02 end=timeout no-speech")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -135,13 +167,16 @@ def test_the_operator_and_the_shared_helper_agree() -> None:
     try:
         cases = [(SILENCE_REPLY, SILENT), ("200 result=0 (timeout) endpos=32800", SPOKEN),
                  ("200 result=-1 (hangup) endpos=8000", 8000), ("", SILENT),
+                 ("200 result=-1 (waitfor) endpos=8160", SILENT),
                  ("200 result=0 (timeout) endpos=80000", CAPPED), ("520 Invalid", 0)]
         for i, (reply, frames) in enumerate(cases):
             path = _wav(os.path.join(tmp, f"t{i}.wav"), frames)
             check(f"twins: {reply!r} with {frames} frames",
                   op._rec_summary(reply, path) == sp.rec_summary(reply, path))
         absent = os.path.join(tmp, "absent.wav")
-        check("twins: a missing file", op._rec_summary("", absent) == sp.rec_summary("", absent))
+        for reply in ("", "200 result=-1 (writefile)"):
+            check(f"twins: a missing file with {reply!r}",
+                  op._rec_summary(reply, absent) == sp.rec_summary(reply, absent))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
