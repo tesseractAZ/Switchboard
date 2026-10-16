@@ -322,7 +322,8 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 # every low score (capture_low_mos), whole, so each one can be studied instead of
 # guessed at. Only low scores are kept. The handset's record of a 4.4 call is
 # not, so the two can be compared on the PBX ledger's figures (callqos.jsonl
-# keeps every leg) but not on the handset's own fields.
+# keeps every leg within its rolling window, the last 300) but not on the
+# handset's own fields.
 #
 # The thresholds come from callqos, checked against the ledger. MES 78 is
 # classify()'s floor for "good". 1.0 % is NOT one of classify()'s cut-offs (it
@@ -628,8 +629,8 @@ def capture_low_mos(judged: list[dict], mos_min: float, now: float | None = None
     NO COMPARISON SET IS KEPT. A record at or above `mos_min` is skipped, so the
     handset's own fields for a good call are written neither here nor to any
     other ledger. A 2.2 leg can still be set beside a 4.4 leg of the same shape
-    on the PBX ledger's figures, which callqos.jsonl keeps for every leg, but
-    not on the handset's.
+    on the PBX ledger's figures, which callqos.jsonl keeps for every leg within
+    its rolling window (the last 300), but not on the handset's.
 
     Best-effort: a failed write is reported and retried next cycle, and never
     stops the poll."""
@@ -917,7 +918,18 @@ def rollup_is_stale(attrs: dict, now: float | None = None,
     advancing it, so it cannot raise an alert. `measured_at` is stamped to the
     whole second, truncated, so a stamp counts as earlier only when its whole
     second ended before `not_before`; one in the same second gets the benefit
-    of the doubt."""
+    of the doubt.
+
+    This poller's start stands in for "measured by a different rtpmon", and the
+    stand-in has two edges. Both read 'unknown', so neither can raise an alert.
+    rtpmon and devhealth start in parallel (each depends only on
+    init-switchboard), so the NEW rtpmon's first rollup can also predate this
+    process by more than that second. It reads 'unknown' until rtpmon publishes
+    again, one warm-up poll (15 s) later while the fleet is still converging,
+    which delays by one cycle the alert for a gateway that really is down. And
+    when devhealth alone restarts (s6 bringing back this service by itself)
+    while rtpmon keeps running, rtpmon's current rollup reads 'unknown' the
+    same way until its next publish, at most one link_health_interval."""
     stamped = attrs.get("measured_at")
     if not stamped:
         return False

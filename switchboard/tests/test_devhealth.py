@@ -284,12 +284,40 @@ def _iso(ts):
     return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def _drive_gateway(rollup_at, cycles):
+class _Clock:
+    """The loop's wall and monotonic clocks, moved only by its own sleep, so the
+    start, each read and each rollup are different moments as they are live.
+    `steps` lists (seconds after the start, jump): from that moment the wall
+    clock reads `jump` seconds off, as after an NTP correction, and the
+    monotonic clock does not. The start is part-way through a second, as a real
+    one is."""
+
+    def __init__(self, steps=(), wall=1_760_000_000.4, mono=50_000.0):
+        self.start_wall, self.start_mono = wall, mono
+        self.mono, self.steps = mono, list(steps)
+
+    def wall_at(self, mono):
+        since = mono - self.start_mono
+        return self.start_wall + since + sum(j for at, j in self.steps if since >= at)
+
+    def time(self):
+        return self.wall_at(self.mono)
+
+    def monotonic(self):
+        return self.mono
+
+
+def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
     """Run the REAL poll loop with the cordless disabled, so only the gateway
     half runs: the rollup read, the staleness gate, classify, publish and the
-    alert state machine. `rollup_at(cycle)` gives the link-health attributes the
-    fake HA holds on that cycle. Returns (gateway publishes, notifications)."""
+    alert state machine. `rollup_at(cycle, clock)` gives the link-health
+    attributes the fake HA holds on that cycle. The loop's time and datetime are
+    a _Clock that each sleep advances by `interval`: rollup_is_stale() reads
+    'now' from datetime, run() reads its start from time, and both must move
+    together. Returns (gateway publishes, notifications)."""
+    import datetime as _dt
     import types
+    clk = clock or _Clock()
     sets, notes = [], []
     n = {"c": 0}
     ha = types.ModuleType("ha_client")
@@ -299,32 +327,43 @@ def _drive_gateway(rollup_at, cycles):
     def _get(eid):
         if eid != "sensor.switchboard_link_health":
             return None
-        return {"state": "2.5", "attributes": rollup_at(n["c"])}
+        return {"state": "2.5", "attributes": rollup_at(n["c"], clk)}
     ha.get_state = _get
 
     class _Stop(Exception):
         pass
 
-    def _sleep(_s):
+    def _sleep(s):
         n["c"] += 1
         if n["c"] >= cycles:
             raise _Stop()
+        clk.mono += s
 
-    real_sleep, real_ha = dh.time.sleep, sys.modules.get("ha_client")
+    class _Now(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt.datetime.fromtimestamp(clk.time(), tz)
+
+    real_time, real_datetime = dh.time, dh.datetime
+    fake_time = types.ModuleType("time")
+    fake_time.__dict__.update({k: v for k, v in vars(real_time).items() if not k.startswith("__")})
+    fake_time.time, fake_time.monotonic, fake_time.sleep = clk.time, clk.monotonic, _sleep
+    fake_datetime = types.SimpleNamespace(datetime=_Now, timezone=_dt.timezone)
+    real_ha = sys.modules.get("ha_client")
     real_env = dict(os.environ)
     try:
         for k in ("CORDLESS_EXT", "GATEWAY_PORTS", "DEVICE_HEALTH_ALERTS"):
             os.environ.pop(k, None)
         os.environ.update({"CORDLESS_IP": "", "CORDLESS_PASSWORD": "",
-                           "DEVICE_HEALTH_INTERVAL": "30"})
+                           "DEVICE_HEALTH_INTERVAL": str(interval)})
         sys.modules["ha_client"] = ha
-        dh.time.sleep = _sleep
+        dh.time, dh.datetime = fake_time, fake_datetime
         try:
             dh.run()
         except _Stop:
             pass
     finally:
-        dh.time.sleep = real_sleep
+        dh.time, dh.datetime = real_time, real_datetime
         if real_ha is None:
             sys.modules.pop("ha_client", None)
         else:
@@ -340,14 +379,13 @@ def test_after_a_restart_the_previous_instances_rollup_reads_unknown_not_ok() ->
     instance's last rollup (all eight up, measured 125 s before this process
     started): that must read 'unknown', never 'ok, 8 of 8'. Cycle 2 has the new
     rtpmon's first rollup (all eight still re-registering) and cycle 3 its next
-    (all back), and both are used as normal."""
-    started = time.time()
-
-    def rollup(cycle):
+    (all back), each measured after the start and a few seconds before the read,
+    and both are used as normal."""
+    def rollup(cycle, clk):
         if cycle == 0:
-            return {"measured_at": _iso(started - 125), "poll_interval_s": 300,
+            return {"measured_at": _iso(clk.start_wall - 125), "poll_interval_s": 300,
                     "unreachable_exts": [], "offline_exts": []}
-        return {"measured_at": _iso(time.time()), "poll_interval_s": 300,
+        return {"measured_at": _iso(clk.time() - 5), "poll_interval_s": 300,
                 "unreachable_exts": list(_GW) if cycle == 1 else [], "offline_exts": []}
 
     gw, notes = _drive_gateway(rollup, cycles=3)
@@ -365,11 +403,13 @@ def test_after_a_restart_the_previous_instances_rollup_reads_unknown_not_ok() ->
 
 def test_a_fresh_rollup_still_drives_gateway_health_from_the_first_cycle() -> None:
     """The normal path the restart gate must not block: rollups rtpmon publishes
-    after this process started (stamped to the second, so often in the start's
-    own second) are judged from the first cycle, and a real partial outage
-    still alerts after its two consecutive cycles."""
-    def rollup(cycle):
-        return {"measured_at": _iso(time.time()), "poll_interval_s": 300,
+    after this process started are judged from the first cycle, the first one
+    stamped just before the start in the start's own second (measured_at is
+    truncated to the second), and a real partial outage still alerts after its
+    two consecutive cycles."""
+    def rollup(cycle, clk):
+        at = clk.start_wall - 0.3 if cycle == 0 else clk.time() - 20
+        return {"measured_at": _iso(at), "poll_interval_s": 300,
                 "unreachable_exts": [] if cycle == 0 else ["13", "14"], "offline_exts": []}
 
     gw, notes = _drive_gateway(rollup, cycles=3)
@@ -379,6 +419,42 @@ def test_a_fresh_rollup_still_drives_gateway_health_from_the_first_cycle() -> No
     check("fresh: a partial outage reads degraded", states[1:] == ["degraded", "degraded"])
     check("fresh: ...and alerts once, after two consecutive cycles",
           len(notes) == 1 and "degraded" in notes[0][0])
+
+
+def test_steady_rollups_are_read_on_every_cycle_whatever_the_wall_clock_does() -> None:
+    """The normal path at the production cadence: rtpmon publishes every 300 s
+    and devhealth reads every 120 s, so the rollup it reads was measured after
+    this process started and is anything up to 240 s old. No cycle may read
+    'unknown'.
+
+    The clocks have to move for this to mean anything. With both frozen at the
+    start, `not_before=time.time()` (the moment of each read taken for the
+    start) and a sign-flipped re-expression passed every test, and either holds
+    the sensor at 'unknown' for good at this cadence. The wall clock also steps
+    back an hour between the second and third cycles: a start captured once on
+    the wall clock would then sit an hour after every new rollup and refuse
+    them all, which is why run() re-expresses it from the monotonic clock on
+    every cycle."""
+    def rollup(cycle, clk):
+        # rtpmon's newest publish by now, on ITS schedule: the first just before
+        # this process started, inside the same second, then one every 300 s,
+        # each stamped with the wall clock of its own moment.
+        k = int((clk.mono - clk.start_mono + 0.3) // 300)
+        published = clk.start_mono - 0.3 + 300 * k
+        served.append(_iso(clk.wall_at(published)))
+        return {"measured_at": served[-1], "poll_interval_s": 300,
+                "unreachable_exts": [], "offline_exts": []}
+
+    served = []
+    clk = _Clock(steps=[(150, -3600)])
+    gw, notes = _drive_gateway(rollup, cycles=12, interval=120, clock=clk)
+    states = [st for st, _a in gw]
+    check("steady: one gateway publish per cycle", len(states) == 12)
+    check("steady: the run reads five rtpmon publishes and spans the wall-clock step",
+          len(set(served)) == 5 and clk.time() < clk.start_wall)
+    check("steady: every cycle reads ok with all eight ports up, none unknown",
+          states == ["ok"] * 12 and all(a.get("ports_up") == 8 for _st, a in gw))
+    check("steady: no notification", notes == [])
 
 
 def test_blind_gateway_publishes_unknown_not_silence() -> None:

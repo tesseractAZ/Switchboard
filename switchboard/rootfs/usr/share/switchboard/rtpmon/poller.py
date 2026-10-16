@@ -993,8 +993,10 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
     # an AMI-down cycle wrote `wired_down: []` twice over. The first row after
     # that day's second restart read `ami: unreachable, reachable: null,
     # wired_down: []`, and the rows 15 s and 30 s later named all eight ports
-    # down. The key is still on every row; it is null exactly when nothing was
-    # measured, like `reachable`.
+    # down. The key is still on every row; it is null when nothing was
+    # measured, like `reachable`, or when a direct caller (the tests) passed a
+    # summary without saying. run() always passes the list, or None on a cycle
+    # with no summary.
     rec["wired_down"] = list(wired_down) if summ and wired_down is not None else None
     # What Asterisk logged while this poller was asleep: every reachability
     # line since the previous row OF THIS PROCESS. The first row after a
@@ -1293,9 +1295,9 @@ def run() -> int:
         # first is the only caller that sees anything.
         trans = endpoint_transitions()
         # ★ PHONES ONLY. `trans` also carries the outside line — the rows after a
-        # restart usually open with {"ext": "trunk", "state": "Reachable"}, unless
-        # Asterisk logged it before this process's first cycle set the watermark
-        # (one of two restarts on 2026-10-14) — and is_mass_drop
+        # restart can open with {"ext": "trunk", "state": "Reachable"} (one of two
+        # restarts on 2026-10-14; the other logged it before this process's first
+        # cycle set the watermark) — and is_mass_drop
         # compares this list against a threshold computed from the PHONE count
         # (summ["total"] is the configured extensions, trunk filtered out). A
         # trunk dropping alongside four phones would count as the fifth of ten
