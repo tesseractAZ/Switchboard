@@ -81,7 +81,11 @@ def cmd_set(ext: str, on: bool) -> int:
         print(f"{head} (store + Asterisk)" if changed
               else f"{head} (store unchanged; Asterisk re-asserted)")
         return 0
-    print(f"{head} in store; Asterisk MWI update failed (replay later)")
+    # Only a SET is replayed (cmd_replay re-asserts the flags that are set), so a
+    # failed clear is not retried: say what the phone is left with instead.
+    print(f"{head} in store; Asterisk MWI update failed (replay later)" if on
+          else f"{head} in store; Asterisk MWI update failed — the phone may keep "
+               "its stutter tone until MWI is cleared again")
     return 1
 
 

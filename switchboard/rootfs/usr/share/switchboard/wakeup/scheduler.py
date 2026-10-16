@@ -73,6 +73,8 @@ RETRY_CONFIGURED = int(_RETRY_RAW) if _RETRY_RAW else RING + 30
 # judgement exactly at RING could still catch the last of the ring. main() says
 # so when it clamps.
 RETRY_AFTER = max(RETRY_CONFIGURED, RING + POLL)
+# config.yaml schema: wakeup_retry_seconds int(30,600)
+RETRY_OPTION_MAX = 600
 # The notify service an unanswered wake-up escalates to, WITHOUT the `notify.`
 # prefix. Empty disables the push and leaves only the second ring.
 PUSH_TARGET = os.environ.get("WAKEUP_PUSH_TARGET", "mobile_app_iphone").strip()
@@ -1031,11 +1033,17 @@ def _log_wakeup_bounds() -> None:
     log(f"scheduler started (poll {POLL}s, ring {RING}s, retry {RETRY_AFTER}s, "
         f"store {store.PATH})")
     if RETRY_AFTER != RETRY_CONFIGURED:
+        # The advice must be one the options form accepts: with a ring within one
+        # poll of the retry option's maximum, no allowed retry clears the clamp.
+        advice = (f"Set wakeup_retry_seconds to at least wakeup_ring_seconds + {POLL}."
+                  if RING + POLL <= RETRY_OPTION_MAX else
+                  f"wakeup_retry_seconds cannot go above {RETRY_OPTION_MAX}s, so with "
+                  f"this ring the clamp is expected; a ring of "
+                  f"{RETRY_OPTION_MAX - POLL}s or less ends this warning.")
         log(f"WARNING: wake-up retry {RETRY_CONFIGURED}s is shorter than the "
             f"{RING}s ring plus one {POLL}s poll — judging rings at "
             f"{RETRY_AFTER}s instead, so a phone still ringing is never judged "
-            f"unanswered. Set wakeup_retry_seconds to at least "
-            f"wakeup_ring_seconds + {POLL}.")
+            f"unanswered. {advice}")
 
 
 def _log_retry_bounds() -> None:

@@ -396,8 +396,8 @@ def test_the_announce_token_never_reaches_the_log():
             sent, lines, reached = _drive(_http(host, path, "POST", headers))
             assert not reached and sent[0]["status"] == 403
             assert len(lines) == 1 and lines[0].endswith(
-                f"from {host}: {reason} (further refusals from this address are "
-                f"counted for 10 min)"), lines
+                f"from {host}: {reason} (further refusals from this address for "
+                f"this reason are counted for 10 min)"), lines
             for secret in (configured, guess, "0123456789abcde", "tok-"):
                 assert secret not in lines[0], (secret, lines[0])
         # The right token from the LAN is admitted, and admission writes nothing.
@@ -412,6 +412,46 @@ def test_the_announce_token_never_reaches_the_log():
         assert app.REFUSED_LAN_ANNOUNCE_OFF in lines[0] and guess not in lines[0], lines
     finally:
         app._announce_token = saved
+        _reset_refusal_log()
+
+
+def test_a_new_reason_from_the_same_address_gets_its_own_line():
+    """A missing token, then a mistyped one, from one address: the second reason
+    is named on a line of its own instead of being counted under the first, and
+    the summary says which reason it counted."""
+    _reset_refusal_log()
+    try:
+        _, out = _printed(app._log_refusal, "192.168.1.80", "POST", "/api/announce/19",
+                          app.REFUSED_HEADER_MISSING, now=1000.0)
+        assert len(out) == 1 and app.REFUSED_HEADER_MISSING in out[0], out
+        _, out = _printed(app._log_refusal, "192.168.1.80", "POST", "/api/announce/19",
+                          app.REFUSED_HEADER_WRONG, now=1001.0)
+        assert len(out) == 1 and app.REFUSED_HEADER_WRONG in out[0], out
+        _, out = _printed(app._log_refusal, "192.168.1.80", "POST", "/api/announce/19",
+                          app.REFUSED_HEADER_WRONG, now=1002.0)
+        assert out == [], out
+        _, out = _printed(app._flush_refusal_summaries, now=1001.0 + app._REFUSAL_LOG_WINDOW_S)
+        assert len(out) == 1, out
+        assert f"refused 1 more request(s) from 192.168.1.80 ({app.REFUSED_HEADER_WRONG})" in out[0], out
+    finally:
+        _reset_refusal_log()
+
+
+def test_a_window_still_open_at_exit_is_summarised():
+    """The housekeeping tick closes only windows that have run their 10 minutes;
+    the exit flush closes every one, so a restart does not lose the count."""
+    _reset_refusal_log()
+    try:
+        for i in range(4):
+            _printed(app._log_refusal, "192.168.1.81", "GET", "/", "not from ingress",
+                     now=2000.0 + i)
+        _, out = _printed(app._flush_refusal_summaries, now=2100.0)
+        assert out == [], "the tick must not close an open window"
+        _, out = _printed(app._flush_refusal_summaries, now=2100.0, force=True)
+        assert len(out) == 1 and "refused 3 more request(s) from 192.168.1.81" in out[0] \
+            and "(stopping)" in out[0], out
+        assert app._refusals == {}
+    finally:
         _reset_refusal_log()
 
 

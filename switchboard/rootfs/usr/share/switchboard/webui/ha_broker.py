@@ -180,7 +180,11 @@ def check(method: str, path: str, body) -> str | None:
                 return "bad play_media body"
             # This add-on's own clip, from this host's web UI port only.
             u = urlsplit(body["media_content_id"])
-            if u.hostname != _lan_ip() or str(u.port) != str(WEBUI_PORT):
+            try:
+                port = u.port        # raises for a port above 65535
+            except ValueError:
+                return "clip URL is not this add-on's"
+            if u.hostname != _lan_ip() or str(port) != str(WEBUI_PORT):
                 return "clip URL is not this add-on's"
             return None
     return "POST not allowed"
@@ -375,7 +379,10 @@ def handle_line(line: bytes, forward=None) -> dict:
         return {"refused": "not an object"}
     method, path, body = req.get("method"), req.get("path"), req.get("body")
     route = route_class(method, path)
-    reason = check(method, path, body)
+    try:
+        reason = check(method, path, body)
+    except Exception:  # noqa: BLE001 — a parser error is a refusal, never a dropped connection
+        reason = "malformed request"
     if reason:
         _log(f"refused {str(method)[:8]} {str(path)[:120]}: {reason}")
         TRAFFIC.count(route, "refused")

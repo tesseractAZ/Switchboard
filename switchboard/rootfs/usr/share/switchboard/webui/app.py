@@ -15,6 +15,7 @@ works unmodified behind Home Assistant Ingress, whatever path it is mounted on.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import datetime
 import hashlib
 import hmac
@@ -567,7 +568,9 @@ _REFUSAL_LOG_WINDOW_S = 600.0
 _REFUSAL_LOG_HOSTS = 256
 _REFUSAL_LOG_PATH_MAX = 96
 _refusal_lock = threading.Lock()
-# address -> [window start (monotonic), refusals counted but not logged]
+# (address, reason) -> [window start (monotonic), refusals counted but not
+# logged]. Keyed on the reason too, so a new reason from the same address (a
+# missing token, then a mistyped one) gets a line of its own.
 _refusals: dict = {}
 # [window start, count] for refusals from addresses that found the table full.
 _refusals_overflow = [0.0, 0]
@@ -597,20 +600,24 @@ def _log_path(path) -> str:
                      _REFUSAL_LOG_PATH_MAX)
 
 
-def _refusal_summaries(now: float) -> list:
-    """Close every window that has run its course and return the summary lines
-    of those that counted anything. The caller holds _refusal_lock."""
+def _refusal_summaries(now: float, force: bool = False) -> list:
+    """Close every window that has run its course (every window, with `force`)
+    and return the summary lines of those that counted anything. The caller
+    holds _refusal_lock."""
     minutes = int(_REFUSAL_LOG_WINDOW_S // 60)
     out = []
-    for host, (start, count) in list(_refusals.items()):
-        if now - start < _REFUSAL_LOG_WINDOW_S:
+    for (host, reason), (start, count) in list(_refusals.items()):
+        if not force and now - start < _REFUSAL_LOG_WINDOW_S:
             continue
-        del _refusals[host]
+        del _refusals[(host, reason)]
         if count:
+            span = (f"in the {minutes} min after the one logged"
+                    if now - start >= _REFUSAL_LOG_WINDOW_S else
+                    f"in the {int(now - start)} s since the one logged (stopping)")
             out.append(f"[switchboard-webui] refused {count} more request(s) from "
-                       f"{host} in the {minutes} min after the one logged")
+                       f"{host} ({reason}) {span}")
     start, count = _refusals_overflow
-    if count and now - start >= _REFUSAL_LOG_WINDOW_S:
+    if count and (force or now - start >= _REFUSAL_LOG_WINDOW_S):
         out.append(f"[switchboard-webui] refused {count} request(s) from addresses "
                    f"past the first {_REFUSAL_LOG_HOSTS} in {minutes} min, not "
                    "logged one by one")
@@ -629,7 +636,7 @@ def _log_refusal(host: str, method: str, path: str, reason: str,
     minutes = int(_REFUSAL_LOG_WINDOW_S // 60)
     with _refusal_lock:
         lines = _refusal_summaries(now)
-        entry = _refusals.get(host)
+        entry = _refusals.get((host, reason))
         if entry is not None:
             entry[1] += 1
             logged = False
@@ -639,23 +646,24 @@ def _log_refusal(host: str, method: str, path: str, reason: str,
             _refusals_overflow[1] += 1
             logged = False
         else:
-            _refusals[host] = [now, 0]
+            _refusals[(host, reason)] = [now, 0]
             lines.append(f"[switchboard-webui] refused {_log_safe(method, 16)} "
                          f"{_log_path(path)} from {host}: "
-                         f"{reason} (further refusals from this address are "
-                         f"counted for {minutes} min)")
+                         f"{reason} (further refusals from this address for this "
+                         f"reason are counted for {minutes} min)")
             logged = True
     for line in lines:
         print(line, flush=True)
     return logged
 
 
-def _flush_refusal_summaries(now: float | None = None) -> None:
+def _flush_refusal_summaries(now: float | None = None, force: bool = False) -> None:
     """Write the summary of every window that has closed. The housekeeping tick
-    calls this, so a burst that simply stops is still summarised."""
+    calls this, so a burst that simply stops is still summarised; at exit it runs
+    with `force`, so a window still open when the web UI stops is not lost."""
     now = time.monotonic() if now is None else now
     with _refusal_lock:
-        lines = _refusal_summaries(now)
+        lines = _refusal_summaries(now, force)
     for line in lines:
         print(line, flush=True)
 
@@ -1010,6 +1018,8 @@ def _housekeeping_loop(interval: float = _HOUSEKEEPING_INTERVAL_S) -> None:
 if _HAVE_FASTAPI:
     threading.Thread(target=_housekeeping_loop, name="switchboard-housekeeping",
                      daemon=True).start()
+    # uvicorn exits normally on SIGTERM, so this runs on every stop and restart.
+    atexit.register(_flush_refusal_summaries, None, True)
 
 
 def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:
@@ -1657,7 +1667,10 @@ def api_mwi(ext: str, state: str) -> JSONResponse:
     # store writes nothing when a flag is already in the state asked for, so the
     # file's mtime cannot. Asterisk is told either way (its MWI is in-memory and
     # may have drifted from the store).
-    if stored and not changed:
+    if not stored and not ok:
+        head = f"could not {'set' if on else 'clear'} MWI for {ext}"
+        tail = ": neither the store nor Asterisk was updated"
+    elif stored and not changed:
         head = f"MWI for {ext} already {'set' if on else 'clear'}"
         tail = (" (store unchanged; Asterisk re-asserted)" if ok
                 else " in store; Asterisk MWI update failed")
@@ -1665,8 +1678,7 @@ def api_mwi(ext: str, state: str) -> JSONResponse:
         head = f"{'set' if on else 'cleared'} MWI for {ext}"
         tail = (" (store + Asterisk)" if stored and ok
                 else " in store; Asterisk MWI update failed" if stored
-                else " in Asterisk; store not updated" if ok
-                else ": neither the store nor Asterisk was updated")
+                else " in Asterisk; store not updated")
     print(f"[switchboard-webui] web: {head}{tail}", flush=True)
     return JSONResponse({"ok": True, "mwi": on})
 

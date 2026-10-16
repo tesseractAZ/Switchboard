@@ -210,8 +210,7 @@ configuration:
       re-checked and, if the handset is registered and idle, rung a second time.
       If it is not there the second ring is skipped and recorded rather than
       placed into nothing. At least the ring time plus 20 seconds; a shorter
-      value is raised to that and a warning is logged at start-up. Default 90;
-      left empty, the ring time plus 30.
+      value is raised to that and a warning is logged at start-up. Default 90.
   wakeup_push_target:
     name: Wake-up Failure Push Target
     description: >-

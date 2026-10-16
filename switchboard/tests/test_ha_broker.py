@@ -353,6 +353,32 @@ def test_a_clip_must_come_from_this_host_and_port():
     assert broker.check("POST", path, body("http://attacker.example.net:8099/announce/a1.wav"))
 
 
+def test_a_clip_port_past_65535_is_refused_not_a_dropped_connection():
+    """urlsplit's .port raises for a port above 65535, which the URL pattern lets
+    through; check() must answer it, and handle_line must count it."""
+    body = {"entity_id": "media_player.k", "media_content_type": "music",
+            "media_content_id": "http://192.0.2.10:99999/announce/a1.wav"}
+    path = "/services/media_player/play_media"
+    assert broker.check("POST", path, body) == "clip URL is not this add-on's"
+    key = ("media_player.play_media", "refused")
+    before = broker.TRAFFIC._counts.get(key, 0)
+    reply = broker.handle_line(json.dumps({"method": "POST", "path": path, "body": body}).encode(),
+                               forward=lambda *a: (_ for _ in ()).throw(AssertionError("forwarded")))
+    assert reply == {"refused": "clip URL is not this add-on's"}, reply
+    assert broker.TRAFFIC._counts.get(key, 0) == before + 1, broker.TRAFFIC._counts
+
+
+def test_a_check_that_raises_is_a_counted_refusal():
+    real = broker.check
+    broker.check = lambda *a: (_ for _ in ()).throw(ValueError("parser fault"))
+    try:
+        reply = broker.handle_line(b'{"method": "GET", "path": "/states"}',
+                                   forward=lambda *a: (_ for _ in ()).throw(AssertionError("forwarded")))
+    finally:
+        broker.check = real
+    assert reply == {"refused": "malformed request"}, reply
+
+
 def test_the_broker_never_forwards_to_itself():
     # Importing the broker turns ha_client's broker route off in its own process.
     assert ha_client.BROKER_SOCKET == "", ha_client.BROKER_SOCKET

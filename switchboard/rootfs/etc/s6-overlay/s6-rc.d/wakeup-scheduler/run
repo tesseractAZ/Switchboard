@@ -21,7 +21,9 @@ export WAKEUP_RING_SECONDS="${WRS:-60}"
 WRT="$(switchboard-opt wakeup_retry_seconds)"
 export WAKEUP_RETRY_SECONDS="${WRT}"
 # ...but an EMPTY read leaves it UNSET rather than filling in a number here. The
-# scheduler derives the delay from the ring it was actually given (ring + 30 s)
+# options form always stores a value (a cleared field reverts to its default), so
+# this is the transient-read case: the scheduler then derives the delay from the
+# ring it was actually given (ring + 30 s)
 # and clamps any value to at least ring + one poll; a fixed `:-90` written here
 # made that fallback unreachable, and 90 is too short for any ring above 70 s.
 [ -n "$WRT" ] || unset WAKEUP_RETRY_SECONDS

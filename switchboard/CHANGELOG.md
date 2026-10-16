@@ -12,9 +12,11 @@ that stay honest across a restart, and two web-UI hardenings.**
   - Refused requests on the web UI port are now logged with the client address, the
     method, the path and a reason (not from ingress, missing token, bad token, or
     LAN announce off), never the token, the headers or the query string. Only the
-    first refusal per address in each 10 minutes is logged in full; the rest are
-    counted into one summary line, so a LAN host cannot use up the journal rate
-    limit that every container shares.
+    first refusal per address and reason in each 10 minutes is logged in full; the
+    rest are counted into one summary line (also written when the web UI stops), so
+    these lines cannot use up the journal rate limit every container shares. The
+    web server's own line for each refused WebSocket handshake or malformed request
+    is unchanged and still written once per attempt.
   - The announce token is compared in constant time.
   - Speaker announcement clips are named from 64 random bits instead of the speaker
     script's process id and the clock, and are deleted five to six minutes after
@@ -28,8 +30,9 @@ that stay honest across a restart, and two web-UI hardenings.**
     logged whatever the outcome.
   - `wakeup_retry_seconds` is raised to at least `wakeup_ring_seconds` plus one 20 s
     poll, with a WARNING naming both values at every start, and the start-up line
-    shows the effective retry. Left empty it is the ring time plus 30 s instead of
-    a fixed 90 s.
+    shows the effective retry. With a ring within 20 s of the retry option's
+    600 s maximum the clamp is expected, and the WARNING says so instead of asking
+    for a value the form refuses.
   - While the handset is busy, the announcement-retry line says the replay is
     deferred because the handset is busy, instead of "is waiting for the handset".
   - The retry's `ActiveChannels` check stays. Asterisk 20.11.1 always reports that
@@ -56,7 +59,8 @@ that stay honest across a restart, and two web-UI hardenings.**
     contrary to a 0.110.0 note; the hourly line and `sensor_status` now cover it.
   - `switchboard-mwi` says when nothing changed (`MWI for 13 already clear ...`)
     instead of `cleared MWI for 13 (store + Asterisk)`.
-  - The operator's and the voice menus' `rec` lines give the recording's length and
+  - The `rec` lines of the operator and of the status, directory and speaker-announce
+    menus give the recording's length and
     how it ended (`bytes=... secs=... end=<reason>`), and end in `no-speech` when
     the phone sent nothing above the silence threshold, so "said nothing" can be
     told from "spoke briefly".
@@ -68,12 +72,14 @@ that stay honest across a restart, and two web-UI hardenings.**
     trimmed to its newest half once it passes 256 KiB.
 - **Documentation and comments**
   - `backup-window.jsonl` brackets the Supervisor's copy of this add-on's own image
-    and `/data`; `/share` is archived separately, seconds later, with its writers
-    still appending.
+    and `/data`. When a backup includes `/share`, the Supervisor archives it after
+    every add-on in that backup, with its writers still appending.
   - The telnet console and the web terminal listen on the host's loopback, which
     every host-network add-on and process shares.
   - With `log_level` `info` or more verbose, the add-on journal also records the
-    host's global IPv6 address at every Asterisk start.
+    host's LAN IPv4 address and its IPv6 address at every Asterisk start, and at
+    every level the web UI's refused-request lines (the requester's address,
+    method and path).
   - Heartbeat `transitions` are per poller process. Corrected comments on silent
     recordings (about 16 kB, 1.02 s), the low-MOS ledger (no comparison set is
     kept), the call-quality jitter fields and leg identity, and the durable log's

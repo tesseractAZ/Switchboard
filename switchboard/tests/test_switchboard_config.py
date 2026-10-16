@@ -2218,10 +2218,16 @@ def test_the_mwi_helper_says_when_nothing_changed() -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             rc, line = run("clear", "13")
         check("mwi: a no-op with Asterisk down still fails, and says both",
-              rc == 1 and line == "MWI for 13 already clear in store; "
-                                  "Asterisk MWI update failed (replay later)")
+              rc == 1 and line == "MWI for 13 already clear in store; Asterisk MWI "
+                                  "update failed — the phone may keep its stutter tone "
+                                  "until MWI is cleared again")
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, line = run("set", "13")
+        check("mwi: only a failed SET promises a replay (replay re-asserts set flags)",
+              rc == 1 and line == "set MWI for 13 in store; Asterisk MWI update failed (replay later)")
         check("mwi: Asterisk was told every time, change or not",
-              sent == [("13", False), ("13", True), ("13", True), ("13", False), ("13", False)])
+              sent == [("13", False), ("13", True), ("13", True), ("13", False), ("13", False),
+                       ("13", True)])
     finally:
         store.PATH, mwi.ami.set_mwi = saved_path, saved_ami
         import shutil

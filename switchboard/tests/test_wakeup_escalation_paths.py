@@ -500,6 +500,20 @@ def test_a_clamped_retry_is_said_out_loud(tmp_path, monkeypatch):
     assert "90s" in warn[0] and "140s" in warn[0] and "wakeup_retry_seconds" in warn[0]
 
 
+def test_the_clamp_advice_is_one_the_options_form_accepts(tmp_path, monkeypatch):
+    """With a ring within one poll of the retry option's maximum (600 s), no
+    allowed retry clears the clamp; the WARNING must not ask for one."""
+    sched, *_ = _load_with(tmp_path / "long", monkeypatch, ring=590, retry=600)
+    sched._log_wakeup_bounds()
+    warn = [m for m in sched.LOGGED if m.startswith("WARNING: wake-up retry")]
+    assert len(warn) == 1 and "Set wakeup_retry_seconds" not in warn[0], warn
+    assert "cannot go above 600s" in warn[0] and "580s or less" in warn[0], warn
+    sched, *_ = _load_with(tmp_path / "short", monkeypatch, ring=120, retry=90)
+    sched._log_wakeup_bounds()
+    warn = [m for m in sched.LOGGED if m.startswith("WARNING: wake-up retry")]
+    assert "Set wakeup_retry_seconds to at least wakeup_ring_seconds + 20." in warn[-1], warn
+
+
 def test_the_run_script_leaves_an_empty_retry_unset(tmp_path):
     """Runs the run script's own lines under bash with the option reader stubbed.
     An empty read must leave the variable UNSET — not empty, and not a number

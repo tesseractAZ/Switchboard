@@ -2310,6 +2310,12 @@ def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
               lines == ["[switchboard-webui] web: mwi flag 19 failed: read-only file system",
                         "[switchboard-webui] web: set MWI for 19 in Asterisk; "
                         "store not updated"])
+        # Neither updated: the line must not open with a success verb.
+        app.set_mwi = lambda ext, on: False
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a total failure says it could not, not that it cleared",
+              lines[-1:] == ["[switchboard-webui] web: could not clear MWI for 19: "
+                             "neither the store nor Asterisk was updated"])
         # AMI unreachable: the failure line carries the source as well.
         app.mwi_store = _Store
 
