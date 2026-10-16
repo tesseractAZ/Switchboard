@@ -5,7 +5,7 @@ Invoked from the [operator] dialplan context (dial 0). Runs as the ``asterisk``
 user, talks AGI over stdin/stdout (stdlib only — no pyst2), and:
 
   1. greets the caller and records a short utterance (rotary-safe: no DTMF, the
-     prompt plays fully and a 2 s silence ends the recording),
+     prompt plays fully and 4 s of silence, SILENCE_S, ends the recording),
   2. shells out to ``switchboard-stt`` for offline recognition + room matching,
   3. on a match, sets channel vars OP_TARGET (ext) + OP_RESULT=connect and
      returns — the *dialplan* does the validated Dial (this AGI never dials).
@@ -18,8 +18,10 @@ falls through to goodbye + hangup.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import wave
 
 # A single whisper pass now handles both jobs: switchboard-stt --mode rooms
 # resolves a room extension OR prints the literal token 'automation' when the
@@ -42,6 +44,11 @@ _FEATURE_TOKENS = ("wakeup", "automation", "clock", "status", "directory", "anno
 # wordy one.
 RECORD_MS = 10000         # hard cap on a single utterance
 SILENCE_S = 4             # stop recording after this much (also leading) silence
+# RECORD's leading-silence remainder. With s=N, res_agi stops once N s of
+# consecutive frames have stayed under the DSP silence threshold, then rewinds
+# N-1 s, so a recording in which nothing ever crossed the threshold keeps only
+# the last 1.02 s (16364 bytes) WHATEVER N is; any speech adds its own length.
+SILENT_REMAINDER_S = (0.95, 1.1)
 
 
 def read_env() -> dict:
@@ -129,6 +136,39 @@ def _stt_finish(proc) -> str:
     return (out or "").strip()
 
 
+def _rec_summary(reply: str, wav: str) -> str:
+    """The `bytes=B secs=S end=E [no-speech]` part of the rec breadcrumb.
+
+    Twin of agi_speech.rec_summary (this AGI imports nothing of ours);
+    test_operator_agi.py holds the two to the same output. `secs` comes from
+    the WAV header, else from the size (8 kHz 16-bit mono: 16000 B/s behind a
+    44-byte header). `end` is the reason in Asterisk's RECORD reply, and it says
+    "timeout" both for the silence cutoff and for the RECORD_MS cap; secs tells
+    them apart. `no-speech` marks a file that is only the silence remainder:
+    nothing crossed the silence threshold, which a silent caller and a muted or
+    dead microphone produce alike. A hang-up or a key is not that remainder."""
+    try:
+        size = os.path.getsize(wav)
+    except OSError:
+        return "bytes=-1"                 # RECORD wrote nothing
+    secs = None
+    try:
+        with wave.open(wav, "rb") as w:
+            if w.getframerate() > 0 and w.getnframes() > 0:
+                secs = w.getnframes() / w.getframerate()
+    except Exception:  # noqa: BLE001  (a breadcrumb must never end the call)
+        pass           # a short or odd header: the size below still answers
+    if secs is None:
+        secs = max(size - 44, 0) / 16000
+    m = re.search(r"\((hangup|dtmf|timeout)\)", reply or "")
+    end = m.group(1) if m else ""
+    out = f"bytes={size} secs={secs:.2f}" + (f" end={end}" if end else "")
+    lo, hi = SILENT_REMAINDER_S
+    if end in ("", "timeout") and lo <= secs <= hi:
+        out += " no-speech"
+    return out
+
+
 def recognize(attempt: int) -> tuple[str, str]:
     """Record one utterance. Return (kind, value):
       (<feature>, '')     — caller asked for a feature; <feature> is one of
@@ -148,18 +188,18 @@ def recognize(attempt: int) -> tuple[str, str]:
     # No offset arg and no BEEP keyword: the offset position makes res_agi try to
     # play the (absent) 'beep' sound and abort the recording before it writes the
     # file. 's=N' contains '=', so res_agi correctly skips the beep path.
-    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    reply = agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     wav = rec + ".wav"
-    # Diagnostic breadcrumb: the WAV is deleted after transcription, so its size
-    # is the only after-the-fact evidence of what RECORD captured. A silent
-    # recording that hit the s=<SILENCE_S> leading-silence cutoff is ~64 kB/s of
-    # near-silence for SILENCE_S seconds — instantly distinguishable in the log
-    # from "spoke but STT missed it" (longer file) or "RECORD failed" (missing).
-    try:
-        size = os.path.getsize(wav)
-    except OSError:
-        size = -1
-    sys.stderr.write(f"[operator] rec attempt={attempt} bytes={size}\n")
+    # Diagnostic breadcrumb: the WAV is deleted after transcription, so this line
+    # is the only after-the-fact evidence of what RECORD captured. The file is
+    # 8 kHz 16-bit mono, 16 kB/s. A recording that hit the s=<SILENCE_S> cutoff
+    # without ever hearing speech is NOT SILENCE_S seconds long: RECORD keeps
+    # only the last 1.02 s of the silence window (16364 bytes) for any
+    # SILENCE_S, and the line flags it `no-speech`. A longer file that ended on
+    # silence heard something above the threshold, usually speech, even if STT
+    # then missed it; end=hangup is a caller who hung up mid-recording, and
+    # bytes=-1 means RECORD wrote nothing.
+    sys.stderr.write(f"[operator] rec attempt={attempt} {_rec_summary(reply, wav)}\n")
     # Start transcribing NOW, then play "one moment": the prompt audio plays OVER
     # the inference (the STT child never touches this AGI channel), hiding the
     # recognition latency instead of adding it as dead air after the prompt.

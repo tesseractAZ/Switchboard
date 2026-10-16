@@ -2165,6 +2165,69 @@ def test_the_mwi_helper_takes_only_an_extension() -> None:
     check("mwi: a real extension still goes through", mwi.main(["clear", "11"]) == 0 and touched == ["11"])
 
 
+def test_the_mwi_helper_says_when_nothing_changed() -> None:
+    """The store writes only on a change, and the CLI used to print
+    "(store + Asterisk)" either way. Every dial-0 from a room with no message
+    runs a clear, so the journal claimed store writes that never happened and a
+    log review went looking for them. A no-op now says so; a real change keeps
+    the old line, and Asterisk is re-asserted in both cases."""
+    import io
+    import contextlib
+    import os
+    import sys
+    import tempfile
+    webui = str(SBC_PATH.parents[1] / "share" / "switchboard" / "webui")
+    if webui not in sys.path:
+        sys.path.append(webui)
+    mwi = SourceFileLoader("sbmwi_nochange", str(SBC_PATH.parent / "switchboard-mwi")).load_module()
+    store = mwi.mwi_store
+    saved_path, saved_ami = store.PATH, mwi.ami.set_mwi
+    tmp = tempfile.mkdtemp()
+    store.PATH = os.path.join(tmp, "mwi.json")
+    sent = []
+    ami_ok = {"v": True}
+
+    def _set_mwi(ext, on):
+        sent.append((ext, on))
+        return ami_ok["v"]
+
+    def run(*argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = mwi.main(list(argv))
+        return rc, out.getvalue().strip()
+
+    mwi.ami.set_mwi = _set_mwi
+    try:
+        rc, line = run("clear", "13")
+        check("mwi: a clear with no flag says it was already clear",
+              rc == 0 and line == "MWI for 13 already clear (store unchanged; Asterisk re-asserted)")
+        check("mwi: and the store file was never written", not os.path.exists(store.PATH))
+        rc, line = run("set", "13")
+        check("mwi: a real set keeps the old line",
+              rc == 0 and line == "set MWI for 13 (store + Asterisk)" and store.is_set("13"))
+        mtime = os.stat(store.PATH).st_mtime_ns
+        rc, line = run("set", "13")
+        check("mwi: a second set says it was already set",
+              rc == 0 and line == "MWI for 13 already set (store unchanged; Asterisk re-asserted)")
+        check("mwi: and did not rewrite the store", os.stat(store.PATH).st_mtime_ns == mtime)
+        rc, line = run("clear", "13")
+        check("mwi: a real clear keeps the old line",
+              rc == 0 and line == "cleared MWI for 13 (store + Asterisk)" and not store.is_set("13"))
+        ami_ok["v"] = False
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, line = run("clear", "13")
+        check("mwi: a no-op with Asterisk down still fails, and says both",
+              rc == 1 and line == "MWI for 13 already clear in store; "
+                                  "Asterisk MWI update failed (replay later)")
+        check("mwi: Asterisk was told every time, change or not",
+              sent == [("13", False), ("13", True), ("13", True), ("13", False), ("13", False)])
+    finally:
+        store.PATH, mwi.ami.set_mwi = saved_path, saved_ami
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 
 def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
     """The HA-pushed announcement's Originate target must exist AND carry the
