@@ -22,13 +22,82 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import stat
+import time
 
 # Under /run (container-local, discarded when the Supervisor recreates the
 # container at every add-on start): clips are ephemeral by design and never durable
 # — they are rendered household speech, and this add-on does not persist that.
-# The same path inside the same container for the webui and the scheduler.
+# The same path inside the same container for the webui, the scheduler and the
+# speaker-announce AGI.
 ANNOUNCE_DIR = "/run/switchboard/announce"
+
+# ★ HOW LONG A CLIP LIVES. Every clip older than this is deleted by sweep(): at
+# the top of each announcement of either kind, and once a minute by the web UI
+# whether or not anything is announced, so a clip is gone between five and six
+# minutes after it was written.
+#
+# Before the timed sweep the only sweeps were the per-announcement ones, so the
+# last clip of the day stayed on disk until the next announcement or the next
+# restart — and a speaker clip is fetchable from the LAN without credentials
+# (the media player cannot present any), so "until the next announcement" could
+# mean days.
+#
+# The floor is the time a clip can still be in use, and it binds on the HANDSET
+# side: a retry may start 150 s after the original send, ring for 30 s and play
+# a 90 s clip (tests/test_announce_retry.py pins 150 + 30 + 90 < this). A
+# speaker clip is a chime, the words recognised from a recording of at most
+# twelve seconds, and a chime, and the speaker fetches it as play_media is
+# called; a fetch already running when its file is unlinked keeps reading the
+# open file to the end. app.py's _cleanup_announce_dir carries the same number
+# as its default, pinned equal by tests/test_app.py.
+CLIP_MAX_AGE_S = 300
+
+
+def speaker_clip_name() -> str:
+    """A fresh name for a SPEAKER clip: `a` + 20 random digits + `.wav`.
+
+    The name is the only thing between the clip and the LAN — the guard exempts
+    `/announce/a<digits>.wav` from authentication because a media player cannot
+    authenticate — so it is drawn from `secrets`: 64 bits, written as decimal so
+    the digits-only form the guard (app.py), the name check (app.py) and the
+    play_media allowlist (ha_broker.py) all accept is unchanged. It used to be
+    the AGI's pid followed by the epoch second modulo 100000, which anyone who
+    knew roughly when an announcement was made could enumerate."""
+    return f"a{secrets.randbits(64):020d}.wav"
+
+
+def sweep(directory: str | None = None, max_age: float = CLIP_MAX_AGE_S,
+          now: float | None = None) -> int:
+    """Delete every clip in `directory` (default ANNOUNCE_DIR) last written more
+    than `max_age` seconds ago; return how many went. Best-effort: it never
+    raises, so neither an announcement nor the web UI's timer can be stopped by
+    a file that vanished or could not be removed. lstat, so a planted link is
+    judged and removed as itself and its target is never touched."""
+    directory = directory or ANNOUNCE_DIR
+    # Wall clock, because mtime is: a forward step of more than max_age while a
+    # clip is in use would delete it early. HAOS sets the clock before add-ons
+    # start, so the step this could meet is a small NTP correction.
+    now = time.time() if now is None else now
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            if now - st.st_mtime > max_age:
+                os.unlink(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
 
 # 8 kHz mono 16-bit PCM — what Asterisk Playback reads, and all the arithmetic a
 # duration needs. One definition: app.py's _announce_seconds() delegates here.

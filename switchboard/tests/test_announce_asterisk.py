@@ -118,6 +118,115 @@ def test_decode_audio() -> None:
           aa._ffmpeg_to_8k_wav(b"\x00\x01\x02") is None or isinstance(aa._ffmpeg_to_8k_wav(b""), (bytes, type(None))))
 
 
+# --------------------------------------------------------------------------- #
+# The speaker-announce AGI's clip: a random name, the shared sweep (2026-10-14).
+#
+# The AGI named its clip a<pid><epoch mod 100000>.wav, and the guard lets any LAN
+# client fetch /announce/a<digits>.wav without credentials, so anyone who knew
+# roughly when an announcement was made could enumerate it — and it stayed there
+# until the next announcement. The name now comes from announce_clip, and the
+# web UI sweeps on a timer; this file drives the AGI itself with its speech, Home
+# Assistant and audio dependencies stubbed.
+# --------------------------------------------------------------------------- #
+_AGI = (Path(__file__).resolve().parents[1] / "rootfs" / "var" / "lib" / "asterisk"
+        / "agi-bin" / "switchboard-announce.agi")
+
+
+def _run_speaker_agi(clip_dir: str, runs: int = 1):
+    """Run the AGI's main() `runs` times. Returns (play_media payloads, spoken)."""
+    import os
+    import types
+
+    played, spoken = [], []
+
+    sp = types.ModuleType("agi_speech")
+    sp.PROMPT_BEEP = "switchboard/sw-beep"
+    sp.read_env = lambda: {"agi_channel": "PJSIP/11-00000001"}
+    sp.load_features = lambda: {"announce": {"players": ["media_player.kitchen"]}}
+    sp.say_or = lambda text, *a: spoken.append(text)
+    sp.listen = lambda tag, attempt, **k: "dinner is ready"
+    sp.log = lambda *a, **k: None
+
+    ha = types.ModuleType("ha_client")
+    ha.resolve_entities = lambda players: (list(players), [], True)
+    ha.call_service = lambda dom, svc, data: played.append((dom, svc, data)) or True
+
+    audio = types.ModuleType("announce_audio")
+    audio.lan_ip = lambda: "192.0.2.10"
+
+    def build(text, out):
+        with open(out, "wb") as fh:
+            fh.write(b"RIFF" + b"\0" * 60)
+        return True
+    audio.build_announcement = build
+
+    clips = SourceFileLoader("announce_clip_agi", str(_WEBUI / "announce_clip.py")).load_module()
+    clips.ANNOUNCE_DIR = clip_dir
+
+    names = ("agi_speech", "ha_client", "announce_audio", "announce_clip")
+    saved_mods = {k: sys.modules.get(k) for k in names}
+    saved_path = list(sys.path)
+    saved_port = os.environ.pop("INGRESS_PORT", None)
+    sys.modules.update({"agi_speech": sp, "ha_client": ha,
+                        "announce_audio": audio, "announce_clip": clips})
+    try:
+        mod = SourceFileLoader("switchboard_announce_agi", str(_AGI)).load_module()
+        for _ in range(runs):
+            mod.main()
+    finally:
+        sys.path[:] = saved_path
+        if saved_port is not None:
+            os.environ["INGRESS_PORT"] = saved_port
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+    return played, spoken
+
+
+def test_the_speaker_agi_names_its_clip_at_random_and_sweeps() -> None:
+    import os
+    import re
+    import tempfile
+    import time
+    with tempfile.TemporaryDirectory() as d:
+        now = time.time()
+        stale, fresh = os.path.join(d, "a42.wav"), os.path.join(d, "a43.wav")
+        for p, age in ((stale, 400), (fresh, 60)):
+            with open(p, "wb") as fh:
+                fh.write(b"\0")
+            os.utime(p, (now - age, now - age))
+        played, spoken = _run_speaker_agi(d, runs=2)
+        check("speaker agi: both announcements went to the speakers",
+              len(played) == 2 and all((dom, svc) == ("media_player", "play_media")
+                                        for dom, svc, _ in played))
+        urls = [data["media_content_id"] for *_, data in played]
+        m = [re.fullmatch(r"http://192\.0\.2\.10:8099/announce/(a[0-9]{20}\.wav)", u) for u in urls]
+        check(f"speaker agi: the URL names a 20-digit random clip ({urls})", all(m))
+        a, b = (x.group(1) for x in m)
+        check("speaker agi: two announcements, two unrelated names",
+              a != b and a[:8] != b[:8])
+        left = set(os.listdir(d))
+        check("speaker agi: the stale clip was swept before the new one was written",
+              "a42.wav" not in left)
+        check("speaker agi: a clip still in its life is kept, and so are the new ones",
+              {"a43.wav", a, b} <= left)
+        check("speaker agi: the caller heard the confirmation",
+              any(s.startswith("Announcing on the speakers") for s in spoken))
+
+
+def test_the_speaker_agi_has_no_name_or_sweep_of_its_own() -> None:
+    """One definition of the directory, the name and the sweep, with the web UI
+    that serves and expires the clip."""
+    src = _AGI.read_text()
+    check("speaker agi: no pid-and-clock name", "getpid" not in src and "time.time" not in src)
+    check("speaker agi: no second copy of the directory",
+          '"/run/switchboard/announce"' not in src)
+    check("speaker agi: names and sweeps through announce_clip",
+          "announce_clip.speaker_clip_name()" in src and "announce_clip.sweep()" in src)
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

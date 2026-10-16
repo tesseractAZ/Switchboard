@@ -2042,6 +2042,291 @@ def test_the_tail_reader_drops_only_the_partial_first_line(tmp_path) -> None:
         D.OUTCOME_PATH = saved
 
 
+# --------------------------------------------------------------------------- #
+# 2026-10-14 review: speaker clips expire on a clock, and dashboard actions
+# leave a line.
+# --------------------------------------------------------------------------- #
+def _lines_printed(fn, *a, **k):
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = fn(*a, **k)
+    return result, out.getvalue().splitlines()
+
+
+class _JSON:
+    """Stand-in for fastapi's JSONResponse, which is None without fastapi."""
+    def __init__(self, payload, status_code=200):
+        self.payload, self.status_code = payload, status_code
+
+
+def test_a_speaker_clip_name_is_random_and_still_admitted() -> None:
+    """The name is the only thing between a speaker clip and the LAN, so it is 64
+    random bits — written in digits, so every check that admits one still does."""
+    import re
+    clips = app.announce_clip
+    names = {clips.speaker_clip_name() for _ in range(2000)}
+    check("speaker clip: 2000 draws, 2000 names", len(names) == 2000)
+    broker_src = (_WEBUI / "ha_broker.py").read_text()
+    m = re.search(r'_CLIP_URL = re\.compile\(r"([^"]+)"\)', broker_src)
+    check("speaker clip: found the play_media allowlist pattern", m is not None)
+    clip_url = re.compile(m.group(1))
+    for name in names:
+        if not (re.fullmatch(r"a[0-9]{20}\.wav", name)
+                and app._LAN_ANNOUNCE_PATH.fullmatch(f"/announce/{name}")
+                and app._ANNOUNCE_NAME.match(name)
+                and app.safe_announce_path(name)
+                and clip_url.fullmatch(f"http://192.0.2.10:8099/announce/{name}")):
+            check(f"speaker clip: {name} is admitted everywhere it must be", False)
+    check("speaker clip: every name passes the guard, the name check and the broker", True)
+    import os as _os
+    check("speaker clip: no shared prefix (the old name led with the AGI's pid)",
+          _os.path.commonprefix(sorted(names)) == "a")
+    check("speaker clip: the low digits vary freely",
+          len({n[-6:-4] for n in names}) > 90)
+    src = (_WEBUI / "announce_clip.py").read_text()
+    check("speaker clip: drawn from secrets", "secrets.randbits(64)" in src)
+
+
+def test_the_web_ui_sweeps_clips_on_a_clock() -> None:
+    """A clip used to be pruned only when the NEXT announcement arrived, so the
+    last speaker clip of the day stayed fetchable from the LAN until morning."""
+    import os as _os
+    import tempfile
+    import time as _time
+    saved = app.ANNOUNCE_DIR
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            app.ANNOUNCE_DIR = d
+            now = _time.time()
+            old, young = _os.path.join(d, "a1.wav"), _os.path.join(d, "a2.wav")
+            for p, age in ((old, app.announce_clip.CLIP_MAX_AGE_S + 60), (young, 30)):
+                with open(p, "wb") as fh:
+                    fh.write(b"\0" * 64)
+                _os.utime(p, (now - age, now - age))
+            _os.mkdir(_os.path.join(d, "sub"))
+            _os.utime(_os.path.join(d, "sub"), (now - 9999, now - 9999))
+            app._housekeeping_once()
+            check("sweep: a clip past its life is gone", not _os.path.exists(old))
+            check("sweep: a clip still in use is kept", _os.path.exists(young))
+            check("sweep: a directory is never removed", _os.path.isdir(_os.path.join(d, "sub")))
+            # The timer must not CREATE the directory: one made by this root
+            # process is not the asterisk-owned one the speaker AGI writes into.
+            app.ANNOUNCE_DIR = _os.path.join(d, "absent")
+            app._housekeeping_once()
+            check("sweep: the timer never creates a missing clip directory",
+                  not _os.path.exists(app.ANNOUNCE_DIR))
+        finally:
+            app.ANNOUNCE_DIR = saved
+
+
+def test_the_housekeeping_clock_runs_first_and_survives_a_failed_chore() -> None:
+    import re
+
+    class _Stop(Exception):
+        pass
+
+    calls, sleeps = [], []
+
+    def once():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("disk went away")
+
+    def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 2:
+            raise _Stop
+
+    class _Time:
+        pass
+
+    import contextlib
+    import io
+    clock = _Time()
+    clock.sleep = sleep
+    out = io.StringIO()
+    saved_once, saved_time = app._housekeeping_once, app.time
+    try:
+        app._housekeeping_once = once
+        app.time = clock
+        with contextlib.redirect_stdout(out):
+            try:
+                app._housekeeping_loop(60.0)
+            except _Stop:
+                pass
+    finally:
+        app._housekeeping_once, app.time = saved_once, saved_time
+    check("housekeeping: the chores run before the first sleep, then each tick",
+          calls == [1, 1] and sleeps == [60.0, 60.0])
+    check("housekeeping: a failed chore is a line, and the clock keeps going",
+          out.getvalue().splitlines()
+          == ["[switchboard-webui] housekeeping failed: disk went away"])
+    check("housekeeping: started only under the real app, as a daemon",
+          re.search(r"^if _HAVE_FASTAPI:\n    threading\.Thread\(target=_housekeeping_loop,"
+                    r"[^)]*daemon=True\)\.start\(\)", (_WEBUI / "app.py").read_text(), re.M)
+          is not None)
+    check("housekeeping: no thread on the test box", app._HAVE_FASTAPI is False)
+
+
+def test_the_sweep_age_is_one_number() -> None:
+    """The AGI sweeps with announce_clip's default and the web UI with
+    _cleanup_announce_dir's, and the retry's age cap is pinned against the
+    latter (test_announce_retry.py §invariants). Two numbers that must agree."""
+    import ast
+    import inspect
+    tree = ast.parse((_WEBUI / "app.py").read_text())
+    default = next(int(ast.literal_eval(n.args.defaults[-1])) for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "_cleanup_announce_dir")
+    check("sweep age: the web UI and the AGI use the same number",
+          default == app.announce_clip.CLIP_MAX_AGE_S)
+    check("sweep age: the timed sweep takes the default, not a number of its own",
+          "_cleanup_announce_dir()" in inspect.getsource(app._housekeeping_once))
+    check("sweep age: the per-POST sweep also takes the default",
+          "asyncio.to_thread(_cleanup_announce_dir)" in inspect.getsource(app.api_announce))
+    # The floor binds on the handset retry (150 s + ring + the longest clip);
+    # a speaker clip is far shorter and is fetched as play_media is called.
+    D = app._delivery
+    check("sweep age: no clip can be swept while it can still be played",
+          D.ANNOUNCE_RETRY_MAX_AGE + D.ANNOUNCE_RING_SECONDS + D.ANNOUNCE_MAX_SECONDS
+          < app.announce_clip.CLIP_MAX_AGE_S)
+
+
+def test_a_test_ring_from_the_dashboard_leaves_a_line() -> None:
+    """An Application originate never enters the dialplan, so a test ring left
+    nothing but Asterisk's `Called <ext>` — four of them in one review window
+    could be attributed to the dashboard only by elimination."""
+    saved = {k: getattr(app, k) for k in ("load_options", "ring_extension", "JSONResponse")}
+    try:
+        app.JSONResponse = _JSON
+        app.load_options = lambda: {"rooms": [{"ext": "13"}]}
+        app.ring_extension = lambda ext: True
+        resp, lines = _lines_printed(app.api_ring, "13")
+        check("ring: answered ok", resp.payload == {"ok": True})
+        check("ring: one line naming the source, the action and the extension",
+              lines == ["[switchboard-webui] web: test ring to 13 queued"])
+        app.ring_extension = lambda ext: False
+        resp, lines = _lines_printed(app.api_ring, "13")
+        check("ring: a refused originate is a line too",
+              lines == ["[switchboard-webui] web: test ring to 13 not accepted by Asterisk"])
+        resp, lines = _lines_printed(app.api_ring, "99")
+        check("ring: an unknown extension rings nothing and logs nothing",
+              resp.status_code == 404 and lines == [])
+
+        def _down(ext):
+            raise OSError("connection refused")
+
+        app.ring_extension = _down
+        resp, lines = _lines_printed(app.api_ring, "13")
+        check("ring: an unreachable AMI is a web: line too, so one grep finds it",
+              resp.status_code == 502
+              and lines == ["[switchboard-webui] web: test ring to 13 failed: "
+                            "connection refused"])
+    finally:
+        for k, v in saved.items():
+            setattr(app, k, v)
+
+
+def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
+    """The store writes only when a flag changes, so mwi.json's mtime could not
+    say which clear was the dashboard's; the line can — and a no-op says it was
+    one, in switchboard-mwi's words, rather than claiming a store write."""
+    flags, state = [], set()
+
+    class _Store:
+        @staticmethod
+        def is_set(ext):
+            return ext in state
+
+        @staticmethod
+        def set_flag(ext, on):
+            flags.append((ext, on))
+            (state.add if on else state.discard)(ext)
+            return on
+
+        @staticmethod
+        def exts():
+            return sorted(state)
+
+    saved = {k: getattr(app, k) for k in ("load_options", "set_mwi", "mwi_store", "JSONResponse")}
+    try:
+        app.JSONResponse = _JSON
+        app.load_options = lambda: {"rooms": [{"ext": "19"}]}
+        app.mwi_store = _Store
+        app.set_mwi = lambda ext, on: True
+        # A clear of a flag that was never set: the store does not change, and
+        # the line must not read as though it had.
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a no-op clear is answered ok", resp.payload == {"ok": True, "mwi": False})
+        check("mwi: a no-op clear says so, in the CLI's no-op words",
+              lines == ["[switchboard-webui] web: MWI for 19 already clear "
+                        "(store unchanged; Asterisk re-asserted)"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: set, answered ok", resp.payload == {"ok": True, "mwi": True})
+        check("mwi: one line, in the CLI's words, naming the source",
+              lines == ["[switchboard-webui] web: set MWI for 19 (store + Asterisk)"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: a second set is a no-op and says so",
+              lines == ["[switchboard-webui] web: MWI for 19 already set "
+                        "(store unchanged; Asterisk re-asserted)"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a clear is a line too",
+              lines == ["[switchboard-webui] web: cleared MWI for 19 (store + Asterisk)"])
+        # Optimistic clear: Asterisk refused, the badge still drops, and the line says so.
+        app.set_mwi = lambda ext, on: False
+        state.add("19")
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a refused clear still clears the store and says Asterisk refused",
+              resp.payload == {"ok": True, "mwi": False} and "19" not in state
+              and lines == ["[switchboard-webui] web: cleared MWI for 19 in store; "
+                            "Asterisk MWI update failed"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a refused no-op clear is the CLI's no-op failure line",
+              lines == ["[switchboard-webui] web: MWI for 19 already clear in store; "
+                        "Asterisk MWI update failed"])
+        # Honest set: refused, badge left off, 502 — and a line, which it never had.
+        before = len(flags)
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: a refused set leaves the badge off and is a line",
+              resp.status_code == 502 and len(flags) == before
+              and lines == ["[switchboard-webui] web: set MWI for 19 refused by "
+                            "Asterisk; badge left off"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "maybe")
+        check("mwi: a bad state changes nothing and logs nothing",
+              resp.status_code == 400 and lines == [])
+        # A store that cannot be written: Asterisk was told, and the line says
+        # only what happened.
+        app.set_mwi = lambda ext, on: True
+
+        class _Broken(_Store):
+            @staticmethod
+            def set_flag(ext, on):
+                raise OSError("read-only file system")
+
+        app.mwi_store = _Broken
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: a store failure is two web: lines, neither claiming a store write",
+              lines == ["[switchboard-webui] web: mwi flag 19 failed: read-only file system",
+                        "[switchboard-webui] web: set MWI for 19 in Asterisk; "
+                        "store not updated"])
+        # AMI unreachable: the failure line carries the source as well.
+        app.mwi_store = _Store
+
+        def _down(ext, on):
+            raise OSError("connection refused")
+
+        app.set_mwi = _down
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: an unreachable AMI is a web: line and a 502",
+              resp.status_code == 502
+              and lines == ["[switchboard-webui] web: clear MWI for 19 failed: "
+                            "connection refused"])
+    finally:
+        for k, v in saved.items():
+            setattr(app, k, v)
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))
