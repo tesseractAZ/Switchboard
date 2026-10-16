@@ -61,14 +61,27 @@ _EXT = re.compile(r"[0-9]{2,6}")
 
 
 def cmd_set(ext: str, on: bool) -> int:
+    # The store writes only on a change, so a clear of a room with no flag (every
+    # dial-0 from a room without a message) leaves it untouched, and the line has
+    # to say so: "(store + Asterisk)" on a no-op reads as a store write that never
+    # happened. Read before the write; set_flag takes its own lock, so a dashboard
+    # toggle landing between the two can skew only this wording, never the flag.
+    changed = mwi_store.is_set(ext) != on
     # Store is the UI source of truth — update it regardless of AMI success.
     mwi_store.set_flag(ext, on)
     ami_ok = _set_ami(ext, on)
-    verb = "set" if on else "cleared"
+    if changed:
+        verb = "set" if on else "cleared"
+        head = f"{verb} MWI for {ext}"
+    else:
+        head = f"MWI for {ext} already {'set' if on else 'clear'}"
     if ami_ok:
-        print(f"{verb} MWI for {ext} (store + Asterisk)")
+        # Asterisk is told either way: its MWI is in-memory and may have drifted
+        # from the store, so an unchanged flag is still re-asserted.
+        print(f"{head} (store + Asterisk)" if changed
+              else f"{head} (store unchanged; Asterisk re-asserted)")
         return 0
-    print(f"{verb} MWI for {ext} in store; Asterisk MWI update failed (replay later)")
+    print(f"{head} in store; Asterisk MWI update failed (replay later)")
     return 1
 
 
