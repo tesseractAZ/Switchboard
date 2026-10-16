@@ -1707,7 +1707,7 @@ ledger itself: every wake-up and announcement outcome, the only copy, and the
 record that the wake-up and announcement reconcilers, the announcement retry
 and the duplicate check read. `heartbeat.jsonl` holds one row per health cycle.
 The same folder also holds `asterisk.log` (the scrubbed readable log) and
-`backup-window.jsonl` (when each backup began and ended). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
+`backup-window.jsonl` (when the Supervisor began and finished copying this add-on's own image and `/data` in each backup; the `/share` folder is archived separately a few seconds later, with its writers still appending). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
 cycle the row ran in, and `since_prev_s` how long it actually waited. `next_sleep_s`
 is the wait that follows the row. The row that ends warm-up therefore reads
 `phase: warmup` beside `next_sleep_s: 300`. `transitions` lists every reachability

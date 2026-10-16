@@ -241,7 +241,7 @@ control.
 
   | Destination | Carries | Kept | Readable from outside the add-on |
   | --- | --- | --- | --- |
-  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below) | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's global IPv6 address, which res_pjsip logs at every Asterisk start | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
   | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
@@ -439,8 +439,9 @@ control.
   None of them carries an address, a SIP account or an unmasked telephone
   number. Together they do record a household's routine: when each room's
   wake-up is set for, and when a room placed an emergency call. A fourth file,
-  `backup-window.jsonl`, carries only the time each backup began and ended and
-  how many files were flushed before it.
+  `backup-window.jsonl`, carries only the time the Supervisor began and finished
+  copying this add-on's own data in each backup (`/share` is archived separately,
+  later in the same backup) and how many files were flushed before it.
 - **Home Assistant sensor attributes.** Each `sensor.switchboard_link_<ext>`
   carries its phone's LAN address as `contact_ip` — the cordless's IP
   auto-follow reads it back from there — and
@@ -575,6 +576,12 @@ Since v0.94.0 both listeners default to loopback (`console_bind` and
 `console_web_bind` are both `127.0.0.1`), so on a **fresh** install neither is
 reachable from the LAN. An upgrade keeps whatever binds are already stored in its
 options. This section describes what you take on if either is on the network.
+
+Loopback here is the **host's** loopback. Under `host_network`, `127.0.0.1` is
+shared with every host-network add-on and process on the machine, so neither
+listener is private to Switchboard even on the default binds: any of them can open
+`:2300`, which has no login, or an ungated `:8100`, and drive the board. That is
+why the Home Assistant broker listens on a Unix socket instead of a loopback port.
 
 Both can ring, connect, hang up,
 transfer, page, set message-waiting, and control lights. The blast radius is
