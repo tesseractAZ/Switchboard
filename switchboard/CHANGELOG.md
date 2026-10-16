@@ -1,7 +1,83 @@
 # Changelog
 
-Recent releases. Releases up to 0.106.2 are in the
+Recent releases. Releases up to 0.106.3 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.111.0
+
+**Fixes from a log review: log lines that say what actually happened, health sensors
+that stay honest across a restart, and two web-UI hardenings.**
+
+- **Web UI**
+  - Refused requests on the web UI port are now logged with the client address, the
+    method, the path and a reason (not from ingress, missing token, bad token, or
+    LAN announce off), never the token, the headers or the query string. Only the
+    first refusal per address in each 10 minutes is logged in full; the rest are
+    counted into one summary line, so a LAN host cannot use up the journal rate
+    limit that every container shares.
+  - The announce token is compared in constant time.
+  - Speaker announcement clips are named from 64 random bits instead of the speaker
+    script's process id and the clock, and are deleted five to six minutes after
+    they are written. A once-a-minute sweep removes them even when no further
+    announcement follows; handset clips are swept on the same schedule.
+  - A test ring and an MWI change from the dashboard each leave a `web:` line in the
+    log, including when the change was a no-op or Asterisk refused it.
+- **Wake-ups and announcements**
+  - `scene <id> fired for ext N` is logged only when Home Assistant accepted the
+    call; otherwise the line says the scene was NOT fired. Before, `fired` was
+    logged whatever the outcome.
+  - `wakeup_retry_seconds` is raised to at least `wakeup_ring_seconds` plus one 20 s
+    poll, with a WARNING naming both values at every start, and the start-up line
+    shows the effective retry. Left empty it is the ring time plus 30 s instead of
+    a fixed 90 s.
+  - While the handset is busy, the announcement-retry line says the replay is
+    deferred because the handset is busy, instead of "is waiting for the handset".
+  - The retry's `ActiveChannels` check stays. Asterisk 20.11.1 always reports that
+    field blank; the upstream fix (first in 20.15.0) makes it a channel count, and
+    the check already treats blank and `0` as idle.
+- **Health monitors**
+  - On a cycle where Asterisk's manager interface did not answer, `heartbeat.jsonl`
+    wrote `wired_down: []`, which on every other row means no gateway port is down.
+    It is now `null`, like `reachable`, and `down` is present and `null` too.
+  - Gateway health no longer reports the previous run's reading after a restart. A
+    link-health rollup measured before the device-health monitor started reads
+    `unknown`, which never alerts, until a new one arrives, instead of `ok` with
+    every port up while the ports were still re-registering. A real gateway alert
+    straight after a restart can come one cycle later.
+- **Logs and ledgers**
+  - Each call-quality record now says what became of the
+    `sensor.switchboard_last_call` update, as `sensor_status` (`posted`, `failed`
+    or `skipped`) next to `notify_status`. The recorder runs detached with its
+    output discarded, so a failed update used to leave no trace. Schema version 6.
+  - The Home Assistant broker writes one traffic line an hour when there was
+    traffic, counting requests by kind and outcome (`ok`, `http<code>`,
+    `unreachable`, `refused`), and the partial interval when it stops. A broker or
+    Home Assistant failure seen by the call-quality recorder never reached the log,
+    contrary to a 0.110.0 note; the hourly line and `sensor_status` now cover it.
+  - `switchboard-mwi` says when nothing changed (`MWI for 13 already clear ...`)
+    instead of `cleared MWI for 13 (store + Asterisk)`.
+  - The operator's and the voice menus' `rec` lines give the recording's length and
+    how it ended (`bytes=... secs=... end=<reason>`), and end in `no-speech` when
+    the phone sent nothing above the silence threshold, so "said nothing" can be
+    told from "spoke briefly".
+  - whisper-server's standard output is discarded. It was block-buffered, so its
+    per-request lines reached the log hours late under one timestamp, were spliced
+    into other lines, or were lost at stop. Its standard error and
+    `switchboard-stt`'s own line per request are unchanged.
+  - `backup-window.jsonl`, the one `/share/switchboard` ledger with no cap, is
+    trimmed to its newest half once it passes 256 KiB.
+- **Documentation and comments**
+  - `backup-window.jsonl` brackets the Supervisor's copy of this add-on's own image
+    and `/data`; `/share` is archived separately, seconds later, with its writers
+    still appending.
+  - The telnet console and the web terminal listen on the host's loopback, which
+    every host-network add-on and process shares.
+  - With `log_level` `info` or more verbose, the add-on journal also records the
+    host's global IPv6 address at every Asterisk start.
+  - Heartbeat `transitions` are per poller process. Corrected comments on silent
+    recordings (about 16 kB, 1.02 s), the low-MOS ledger (no comparison set is
+    kept), the call-quality jitter fields and leg identity, and the durable log's
+    growth.
 
 ## 0.110.1
 
@@ -364,35 +440,3 @@ the gateway's System Up Time, its Automatic Reboot schedule (`P21929`, `P21930`,
 `P28118`), and `P81` (Unregister On Reboot). With `P81` set to `1`, a restart
 leaves `Removed contact … due to request` in the durable log, which a stall
 never does. `P81` is added to the gateway P-code table.
-
-## 0.106.3
-
-**With wake-up calls turned off, a repeated announcement is no longer held back
-for a replay that cannot happen.**
-
-The automatic announcement retry runs inside the wake-up scheduler, and that
-service idles when wake-up calls are off. The web UI did not know that. If an
-announcement never played, it still answered an identical repeat "duplicate,
-already on its way", waiting for a replay that would never come, for up to about
-three minutes. The web UI now reads the same switch the scheduler does, and with
-wake-up calls off it treats the retry as off.
-
-**The documentation was brought up to date with the code.** An audit of the
-README, the manual (DOCS.md), PERFORMANCE.md, SECURITY.md and the configuration
-help text found statements that had fallen behind recent releases, all now
-corrected. Among them:
-- The web UI port has three narrow LAN exceptions: speaker announcement clips,
-  the cordless phonebook, and the token-gated announce API. It does not refuse
-  every non-Supervisor connection.
-- The talking clock code `41` waits for the dialling timeout, because it is also
-  the start of directory assistance `411`.
-- Call-quality alerts now cover wake-up, page and announcement calls too.
-- The console bind defaults and what they affect.
-- The announcement responses, retry limits and duplicate rules.
-- Which services read and write the shared ledgers.
-- Test counts, and several dates and version numbers.
-
-**The release manual now shows the released interface.** The manual attached to
-each release used to be built before that release's screenshots were rendered,
-so it pictured the previous version's interface. The documentation build now
-renders the screenshots itself before building the manual.

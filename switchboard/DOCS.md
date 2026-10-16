@@ -137,7 +137,7 @@ its default is fine.
 | `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
 | `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry (§6), which run in the same scheduler, and identical repeats are then not held back. |
 | `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
-| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. Must exceed `wakeup_ring_seconds`. |
+| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. At least `wakeup_ring_seconds` + 20 (one scheduler poll); a shorter value is raised to that and a WARNING naming both values is logged at every start. Left empty, it is `wakeup_ring_seconds` + 30. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
 | `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
 | `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
@@ -589,7 +589,7 @@ that was a real source of six-in-the-morning false alarms. The scheduler joins o
 those two, not on the pickup:
 
 1. The phone rings for `wakeup_ring_seconds` (default 60).
-2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
+2. `wakeup_retry_seconds` after the ring started (default 90; empty means `wakeup_ring_seconds` + 30), if nothing
    answered, the scheduler re-checks the room and — if the handset is registered
    and idle — **rings it a second time**. The second attempt gets the same check
    the first one does, because an origination reports "queued" the moment
@@ -635,8 +635,9 @@ for when the handset itself is the problem. Set `wakeup_push_target` to empty an
 the escalation falls back to a Home Assistant notification card instead — the
 signal is not lost, it just stops sounding through Do Not Disturb.
 
-`wakeup_retry_seconds` must exceed `wakeup_ring_seconds`, or a call still ringing
-would be judged unanswered.
+If `wakeup_retry_seconds` is shorter than `wakeup_ring_seconds` plus one 20 s poll,
+the scheduler judges rings at ring + 20 s instead and logs a WARNING at start-up
+naming both values, so a call still ringing is never judged unanswered.
 
 **Snoozing from the ringing phone.** If the room's own phone sets a new wake-up or
 cancels one while its wake-up is ringing — or in the short gap before the
@@ -1565,6 +1566,13 @@ recorder runs detached from the call with nowhere to write an error, so until
 2026-09-14 a card that failed to post left no trace at all. The field is in the
 `/share` mirror too; records carrying it are schema version `4` or later.
 
+**Whether the sensor was updated** is recorded the same way, as `sensor_status`:
+`posted` (Home Assistant accepted the state), `failed` (the update was refused or
+could not be made) or `skipped` (the leg does not drive the sensor: not the dial
+plan's record, a playback leg, or no credible score). Before v0.111.0 a failed
+update left no trace. The field is in the `/share` mirror too; records carrying it
+are schema version `6`.
+
 **Two spellings of the time, on purpose.** Each record's `ts` is plain epoch
 seconds, and has to stay that way because the cordless health monitor reads it as
 a number on every line. But every *other* ledger in `/share/switchboard` writes
@@ -1690,8 +1698,11 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 > `measured_at` (when the value was measured) and `poll_interval_s` (the poller's
 > steady interval). Compare the two against the current time before trusting the
 > state. Gateway health does this itself: it publishes `unknown` when the
-> link-health rollup is missing or more than 2.5 poll intervals old (at least
-> 60 s).
+> link-health rollup is missing, more than 2.5 poll intervals old (at least
+> 60 s), or measured before the device-health monitor last started. That last case
+> covers the rollup a previous run left behind across an add-on restart; it reads
+> `unknown` until the link-health poller publishes again, and `unknown` never
+> raises an alert.
 
 ---
 
@@ -1707,11 +1718,19 @@ ledger itself: every wake-up and announcement outcome, the only copy, and the
 record that the wake-up and announcement reconcilers, the announcement retry
 and the duplicate check read. `heartbeat.jsonl` holds one row per health cycle.
 The same folder also holds `asterisk.log` (the scrubbed readable log) and
-`backup-window.jsonl` (when the Supervisor began and finished copying this add-on's own image and `/data` in each backup; the `/share` folder is archived separately a few seconds later, with its writers still appending). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
+`backup-window.jsonl` (when the Supervisor began and finished copying this add-on's own image and `/data` in each backup; the `/share` folder is archived separately a few seconds later, with its writers still appending; trimmed to its newest half past 256 KiB). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
 cycle the row ran in, and `since_prev_s` how long it actually waited. `next_sleep_s`
 is the wait that follows the row. The row that ends warm-up therefore reads
 `phase: warmup` beside `next_sleep_s: 300`. `transitions` lists every reachability
-change Asterisk logged since the previous row, the outside line included.
+change Asterisk logged since the previous row written by the same poller process,
+the outside line included. The first row after a restart starts fresh, so a change
+logged between the old process's last row and the new one's first cycle does not
+appear there (the durable Asterisk log still holds it). With `remove_existing`, a
+phone re-registering from a new contact logs Unreachable and then Reachable a few
+milliseconds apart; an entry carries no time, so that pair reads like a real drop.
+On a row with `ami: unreachable` nothing was measured, so `reachable`, `down` and
+`wired_down` are `null`; an empty list on any other row means the cycle measured
+and found nothing down.
 The assistant's own ledger is deliberately **not** mirrored — see
 [§4](#4-the-voice-operator--directory-assistance).
 
@@ -1802,13 +1821,13 @@ stay: they are the editable source, and a build check fails if a prompt and its
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
 | Investigating something that happened **before** a restart/reboot | Asterisk's notices, warnings and errors, plus endpoint reachability (`Endpoint <n> is now Unreachable`, since v0.84.0) and each phone's registration being added or removed, are written durably to `/data/state/asterisk.log` on the persistent data volume, so registration flaps, trunk timeouts and RTP errors from before a crash are there. Since v0.107.0 each line carries the full date, milliseconds and UTC offset, so it can be placed against `heartbeat.jsonl` (UTC) and the gateway's own clock. That file is private to the add-on (it also carries the dialplan trace) and is trimmed at boot to its newest half once it passes 8 MB. The copy readable from the host is `/share/switchboard/asterisk.log`: notices, warnings and errors only, with SIP accounts and private LAN addresses scrubbed out. The add-on's Log tab reaches back about two days, across a host reboot. |
 | Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting: on the reference GXW4216 V2 a restart takes about a minute. Without `P81` (below), a gateway that is back within its registration window renews most registrations instead of re-creating them, so "most phones stayed registered" does **not** rule a restart out. To tell: the gateway's status page shows its **System Up Time**; with `P81` (Unregister On Reboot, §7.3) set to `1` the gateway clears its old registrations as it boots, which `/data/state/asterisk.log` records as `Removed contact … due to request` followed by `Added contact` in the same second. The pair comes at the **end** of the outage, as the phones come back, not when they drop, and a power cut leaves it too. A network stall never produces the `due to request` line. The gateway's own **Automatic Reboot** schedule is `P21929` (`0` off, `1` daily, `2` weekly, `3` monthly) at hour `P21930`, on day of the week `P21931` when weekly (`1` is Monday) or day of the month `P28118` when monthly. The reference gateway reboots weekly, Monday at 01:00 (`P21929` `2`, `P21930` `1`, `P21931` `1`), so an all-port drop of about a minute at that time, ending with the `due to request` pair, is that reboot, not a fault. |
-| LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. |
+| LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. The **Log** tab names the reason on a `[switchboard-webui] refused POST /api/announce/<ext> from <address>: ...` line (missing token, bad token, or LAN announce is off); further refusals from the same address are counted for 10 minutes and then summarised in one line. |
 | No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
 | Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
 | Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
 | Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
 | Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. If Switchboard itself was not running at the set time (the add-on or the host was down, e.g. after a power cut), the wake-up still rings if Switchboard is back within that 10-minute grace window, under the same registered-and-idle rule; if it comes back later, the wake-up is dropped as soon as it starts again. Since 0.108.2 that miss is recorded in the delivery ledger (`outcome: missed`, `reason: not-running`) and the notification says so, retried until Home Assistant has finished starting and accepts it. |
-| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the **Log** tab shows `[ha-broker] refused` | Since 0.110.0 those features reach Home Assistant through the add-on's broker, which accepts only the requests they make. A `refused` line names the request and the rule it failed. One you did not cause by hand is a bug: report it with that line. A broker that is not running shows instead as `[ha_client] Home Assistant unreachable through the broker` or `[ha_client] no Home Assistant token and no broker`, and calls themselves are unaffected. On a line transferred in from outside (or a `*2` consult), those features are refused by design: dial `0` or the feature code directly from a room phone. |
+| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the **Log** tab shows `[ha-broker] refused` | Since 0.110.0 those features reach Home Assistant through the add-on's broker, which accepts only the requests they make. A `refused` line names the request and the rule it failed. One you did not cause by hand is a bug: report it with that line. A broker that is not running shows instead as `[ha_client] Home Assistant unreachable through the broker` or `[ha_client] no Home Assistant token and no broker`, and calls themselves are unaffected. On a line transferred in from outside (or a `*2` consult), those features are refused by design: dial `0` or the feature code directly from a room phone. Once an hour, when there was traffic, the broker also writes `[ha-broker] traffic over <N> s: <kind> ok=<n> http<code>=<n> unreachable=<n> refused=<n>; ...` (and the partial interval, marked `(stopping)`, when it stops); a count under `unreachable` or `http<code>` means Home Assistant failed requests the broker had accepted. |
 | A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Since v0.109.0 it also refuses writes to the Asterisk configuration (`/etc/asterisk`, `/etc/localtime`, `/etc/timezone`), Asterisk's spool (`/var/spool/asterisk`) and the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`); only the config generator may write the first three, under a child profile named `<slug>//switchboard_config`, whose own refusals carry that name. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
 
 **Useful Asterisk CLI** (from the add-on's shell, if you have one):
@@ -1849,7 +1868,8 @@ essentials:
   without authentication. `/phonebook.xml` lets the cordless fetch its remote
   phonebook and exposes room names and internal extensions only
   ([§8](#8-the-wp826-wifi-cordless-optional)). `/announce/a<digits>.wav` is the
-  speaker announcement clip a Home Assistant media player fetches. Handset
+  speaker announcement clip a Home Assistant media player fetches; its name is
+  random and it is deleted five to six minutes after it is written. Handset
   announcement clips are not served to the LAN (since v0.106.0).
   `POST /api/announce/{ext}` is accepted from the LAN only with a matching
   `X-Announce-Token`, and never while `announce_token` is blank.

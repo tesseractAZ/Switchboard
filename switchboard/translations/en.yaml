@@ -209,8 +209,9 @@ configuration:
       Seconds after a wake-up starts ringing before an unanswered call is
       re-checked and, if the handset is registered and idle, rung a second time.
       If it is not there the second ring is skipped and recorded rather than
-      placed into nothing. Must be longer than the ring time, or a call still
-      ringing would be judged unanswered. Default 90.
+      placed into nothing. At least the ring time plus 20 seconds; a shorter
+      value is raised to that and a warning is logged at start-up. Default 90;
+      left empty, the ring time plus 30.
   wakeup_push_target:
     name: Wake-up Failure Push Target
     description: >-

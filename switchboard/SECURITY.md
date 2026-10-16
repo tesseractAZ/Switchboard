@@ -130,7 +130,11 @@ phonebook (`/phonebook.xml`, which exposes only the internal extension directory
 The handset announcement clips (`ann-<ext>-<hex>.wav`) are NOT exempt: Asterisk
 plays them from disk, and their names are written to the shared-folder ledger, so
 exempting them (as before v0.106.0) let anything that could read `/share` fetch the
-audio of what was said.
+audio of what was said. A speaker clip is named from 64 random bits (before
+v0.111.0, from the speaker script's process id and the clock, a small space a LAN
+device could walk) and is deleted five to six minutes after it is written; the
+sweep runs at each announcement and once a minute from the web UI, and covers the
+handset clips too.
 `POST /api/announce/*` is exempt **only** when it carries a valid announce token
 (see [below](#5-the-announce-endpoint)).
 
@@ -139,6 +143,16 @@ Every operator action validates its extension against both the configured room s
 containing CR/LF — so the JSON API cannot be used to inject Manager protocol lines
 or smuggle a dial string. Client-facing errors are generic (`forbidden`,
 `unreachable`); detail is logged server-side only.
+
+Each refused HTTP request is logged server-side with the client address, the
+method, the path (control characters and spaces replaced, truncated, and a
+speaker-clip name written as `a<digits>.wav`) and a reason: not from ingress,
+missing token, bad token, or LAN announce is off. The token, the headers and the
+query string are never logged. So that one LAN host cannot use up the journal rate
+limit every container shares, only the first refusal per address in each 10
+minutes is logged in full; the rest are counted and reported in one summary line.
+A refused WebSocket handshake is logged by the web server itself, once per
+handshake.
 
 ### 2. The Asterisk Manager (AMI) is loopback-only, split into two accounts
 
@@ -361,7 +375,7 @@ control.
 
   | Writer | Runs as | What it does there |
   | --- | --- | --- |
-  | Backup hooks (`backup_pre`, `backup_post`) | root | append to `backup-window.jsonl` |
+  | Backup hooks (`backup_pre`, `backup_post`) | root | append to `backup-window.jsonl`; the pre-backup hook also trims it to its newest half once it passes 256 KiB |
   | Boot pass (`switchboard-config`) | root | add group-write and hand ownership to `asterisk` on every file; trim and scrub `asterisk.log` |
   | Call-quality script (`switchboard-callqos`) | `asterisk` | append to and trim `callqos-outcomes.jsonl`; append to `delivery-outcomes.jsonl` |
   | Link-health poller (`rtpmon`) | root | scrub `asterisk.log`; append to and trim `heartbeat.jsonl` |
@@ -503,7 +517,7 @@ for anyone who speaks to it.
 
 `POST /api/announce/{ext}` speaks a clip onto a room handset. Over the LAN it is
 allowed **only** when the `X-Announce-Token` header equals your configured
-`announce_token`. If that option is blank (the default), **LAN announce is disabled**
+`announce_token` (compared in constant time). If that option is blank (the default), **LAN announce is disabled**
 and only the Supervisor can call it. The extension must be a configured room; the
 `{text}` is capped at 500 characters; the `{url}` branch accepts only `http`/`https`,
 rejects loopback / link-local / reserved hosts (SSRF guard), does not follow
