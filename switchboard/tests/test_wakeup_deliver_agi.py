@@ -31,8 +31,13 @@ def check(name: str, cond: bool) -> None:
     assert cond, name
 
 
-def _load(mode_argv, *, scene="scene.wakeup_master_bedroom", weather=True):
+def _load(mode_argv, *, scene="scene.wakeup_master_bedroom", weather=True,
+          scene_result=True, logs=None):
     """Load the AGI with its dependencies stubbed and run main() once.
+
+    `scene_result` is what the stand-in call_service() returns, the way the real
+    one reports whether Home Assistant accepted the call, or an exception for it
+    to raise; `logs`, when given, collects every line the AGI logs.
 
     Returns (services_called, spoken_lines, delivery_records)."""
     services, spoken, recorded = [], [], []
@@ -43,10 +48,16 @@ def _load(mode_argv, *, scene="scene.wakeup_master_bedroom", weather=True):
     sp.channel_ext = lambda env: "19"
     sp.wakeup_scene_for = lambda wk, ext: scene
     sp.say = lambda text: spoken.append(text) or True
-    sp.log = lambda *a, **k: None
+    sp.log = lambda tag, msg: logs.append(msg) if logs is not None else None
 
     ha = types.ModuleType("ha_client")
-    ha.call_service = lambda dom, svc, data: services.append((dom, svc, data))
+
+    def _call_service(dom, svc, data):
+        services.append((dom, svc, data))
+        if isinstance(scene_result, BaseException):
+            raise scene_result
+        return scene_result
+    ha.call_service = _call_service
 
     # The AGI writes delivery milestones. Stubbing it here rather than letting
     # `import delivery` fall through to the real module is what makes the
@@ -112,6 +123,46 @@ def test_scene_mode_is_a_no_op_when_no_scene_is_configured() -> None:
     services, spoken, _ = _load(["scene"], scene="")
     check("scene mode: no scene configured -> no service call", services == [])
     check("scene mode: and still says nothing", spoken == [])
+
+
+def test_fired_is_logged_only_when_home_assistant_accepted_the_scene() -> None:
+    """★ The line is the only trace the detached scene leaves, so it must be true.
+
+    call_service() never raises for a refusal: HA unreachable, the broker timing
+    out or refusing, and a non-2xx reply all return False. The AGI used to drop
+    that bool and log "fired" whatever it was, so a rejected scene was followed
+    in the log by a line saying it had worked."""
+    logs = []
+    services, _, _ = _load(["scene"], scene_result=True, logs=logs)
+    check("scene accepted: the call was made", len(services) == 1)
+    check("scene accepted: logged as fired",
+          "scene scene.wakeup_master_bedroom fired for ext 19" in logs)
+    check("scene accepted: nothing says it was not fired",
+          not [m for m in logs if "NOT fired" in m])
+
+    for result in (False, None):
+        logs = []
+        services, _, _ = _load(["scene"], scene_result=result, logs=logs)
+        check(f"scene refused ({result!r}): the call was still made", len(services) == 1)
+        check(f"scene refused ({result!r}): never logged as fired",
+              not [m for m in logs if " fired for ext" in m and "NOT fired" not in m])
+        check(f"scene refused ({result!r}): logged as NOT fired, with the room",
+              [m for m in logs
+               if m.startswith("scene scene.wakeup_master_bedroom NOT fired for ext 19")
+               and "rejected" in m and "could not be reached" in m])
+
+
+def test_a_scene_call_that_raises_is_still_logged_as_failed() -> None:
+    """The third outcome keeps its own line: a call that raises is reported as
+    failed, with the reason, and as neither fired nor rejected."""
+    logs = []
+    services, _, _ = _load(["scene"], scene_result=RuntimeError("socket closed"),
+                           logs=logs)
+    check("scene raised: the call was attempted", len(services) == 1)
+    check("scene raised: logged as failed, with the reason",
+          "scene failed: socket closed" in logs)
+    check("scene raised: never logged as fired or NOT fired",
+          not [m for m in logs if "fired" in m])
 
 
 def test_the_milestones_say_what_actually_happened() -> None:

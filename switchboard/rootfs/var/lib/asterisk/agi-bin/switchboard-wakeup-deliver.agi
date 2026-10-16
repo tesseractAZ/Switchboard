@@ -142,9 +142,20 @@ def main() -> None:
         scene = None
     if scene and ha_client:
         def _fire_scene() -> None:
+            # ★ "fired" ONLY ON A True. call_service() never raises for a refusal:
+            # Home Assistant unreachable, the broker timing out or refusing, and a
+            # non-2xx reply all come back as False, after ha_client has logged its
+            # own line. This used to drop the bool and log "fired" regardless, so
+            # a refused scene left two lines contradicting each other and the
+            # second one claimed success. True is still only "HA accepted the
+            # call": HA answers 200 for a scene that does not exist.
             try:
-                ha_client.call_service("scene", "turn_on", {"entity_id": scene})
-                sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
+                if ha_client.call_service("scene", "turn_on", {"entity_id": scene}):
+                    sp.log("wakeup-deliver", f"scene {scene} fired for ext {ext or '?'}")
+                else:
+                    sp.log("wakeup-deliver",
+                           f"scene {scene} NOT fired for ext {ext or '?'} — Home "
+                           f"Assistant rejected the call or could not be reached")
             except Exception as exc:  # noqa: BLE001
                 sp.log("wakeup-deliver", f"scene failed: {exc}")
         if detach:

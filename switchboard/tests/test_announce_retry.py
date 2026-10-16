@@ -640,13 +640,59 @@ def test_an_endpoint_missing_from_the_read_is_not_green(tmp_path):
 
 
 def test_an_endpoint_with_an_active_channel_is_not_green(tmp_path):
-    """ActiveChannels is SECONDARY and fail-closed: nothing in this repo
-    establishes what it holds during a playback, so it may only ever make the
-    retry more conservative."""
+    """ActiveChannels is SECONDARY and fail-closed: it may only ever make the
+    retry more conservative. On Asterisk 20.11.1, which this image ships, the
+    field is always blank (upstream active_channels_to_str() returns early for
+    any endpoint with a snapshot), so this clause cannot fire there. From 20.15.0
+    (upstream commit 0f5ea4797e) it is a channel COUNT, and "1" is what a
+    handset with a call on it reports."""
     b = _Bench(tmp_path, channels="1")
     b.queue(ago=40)
     b.ticks(5)
     assert b.originated == []
+
+
+def test_a_zero_channel_count_on_an_idle_endpoint_is_green(tmp_path):
+    """The other half of the fixed format: from Asterisk 20.15.0 an idle handset
+    reports ActiveChannels "0", not blank. Read as busy, that would defer every
+    replay forever the day the base image moves past Alpine 3.22."""
+    b = _Bench(tmp_path, state="Not in use", channels="0")
+    b.queue(ago=40)
+    b.tick(NOW)
+    assert b.originated == [], "replayed on a single observation"
+    b.tick(NOW + POLL)
+    assert [e for e, _s in b.originated] == ["19"], b.originated
+
+
+def test_a_busy_handset_is_logged_as_busy_not_as_missing(tmp_path):
+    """★ The deferral line must say WHY. An announcement longer than the retry's
+    minimum age is still playing when the first tick reads its handset 'In use',
+    and the line used to say the retry was "waiting for the handset" — a stalled
+    delivery, in the journal, on every such clip. A handset that is busy defers
+    the replay; one that is not there is what is waited for. Both keep the
+    state."""
+    for state, channels, busy in (("In use", "", True), ("Ringing", "", True),
+                                  ("Ring+Inuse", "", True),
+                                  ("Not in use", "1", True),
+                                  ("Unavailable", "", False), ("", "", False),
+                                  ("Unknown", "0", False)):
+        b = _Bench(tmp_path / f"w{abs(hash((state, channels)))}", state=state,
+                   channels=channels)
+        b.queue(ago=25)
+        b.tick(NOW)
+        lines = [m for m in b.sched.LOGGED if SOUND in m]
+        assert b.originated == [] and len(lines) == 1, (state, channels, b.sched.LOGGED)
+        line = lines[0]
+        if busy:
+            assert "deferred — the handset is busy" in line, (state, line)
+            assert "waiting for the handset" not in line, (state, line)
+            assert f"state '{state}'" in line, (state, line)
+        else:
+            assert "waiting for the handset" in line, (state, line)
+            assert "busy" not in line, (state, line)
+            assert f"state '{state or 'unknown'}'" in line, (state, line)
+        # The channel count is named only when the field said something.
+        assert ("channels '" in line) == bool(channels), (state, channels, line)
 
 
 def test_an_unreadable_ami_is_a_deferral_and_never_a_verdict(tmp_path):

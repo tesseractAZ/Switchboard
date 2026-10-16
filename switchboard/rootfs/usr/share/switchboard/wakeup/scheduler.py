@@ -55,8 +55,24 @@ except Exception:  # noqa: BLE001 — HA integration is optional; never break th
 POLL = int(os.environ.get("WAKEUP_POLL_SECONDS", "20"))
 RING = int(os.environ.get("WAKEUP_RING_SECONDS", "60"))
 # v0.70.0 — how long after a ring STARTS before we decide it went unanswered.
-# Must exceed RING or we would judge a call that is still ringing.
-RETRY_AFTER = int(os.environ.get("WAKEUP_RETRY_SECONDS", str(RING + 30)))
+# Must exceed RING or we would judge a call that is still ringing. Unset, or
+# EMPTY, derives it from the ring this process was actually given; the run script
+# leaves it unset when the option read comes back empty, so that this fallback
+# is reachable at all.
+_RETRY_RAW = os.environ.get("WAKEUP_RETRY_SECONDS", "").strip()
+RETRY_CONFIGURED = int(_RETRY_RAW) if _RETRY_RAW else RING + 30
+# ★ ...AND NOTHING ENFORCED THAT. The two options have independent schema ranges
+# (10-600 and 30-600), the manual states the rule, and this read the raw value.
+# A ring raised past the retry, with the retry left at its default, had the
+# verdict fall due while the Originate was still ringing: the room read
+# 'Ringing', which is not on a call (no hold) and not 'Not in use' (no re-ring),
+# so a critical push said the handset was not available, about a phone ringing
+# in the room — and dropped the entry, so the answer that followed was never
+# read. Clamped to the ring plus one POLL: the verdict is taken on a tick, and
+# the Originate's own timeout starts a little after `started` is stamped, so a
+# judgement exactly at RING could still catch the last of the ring. main() says
+# so when it clamps.
+RETRY_AFTER = max(RETRY_CONFIGURED, RING + POLL)
 # The notify service an unanswered wake-up escalates to, WITHOUT the `notify.`
 # prefix. Empty disables the push and leaves only the second ring.
 PUSH_TARGET = os.environ.get("WAKEUP_PUSH_TARGET", "mobile_app_iphone").strip()
@@ -692,19 +708,43 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
         state = str((ep or {}).get("state") or "")
         seen["state"] = state
         # ActiveChannels from the same EndpointList event, SECONDARY and
-        # fail-closed. What this field holds while a clip is playing is not
-        # established by anything in this repo (the captured fixture has it empty
-        # for an idle endpoint and no in-use endpoint at all), so it can only ever
-        # make the retry more conservative, never less — and if a live probe shows
-        # it empty during a playback it should be deleted rather than kept as a
-        # check that cannot discriminate.
+        # fail-closed: "" and "0" read as idle, anything else defers. It can only
+        # ever make the retry more conservative, never less.
+        #
+        # ★ ON THE ASTERISK THIS IMAGE SHIPS (20.11.1) IT IS ALWAYS BLANK, and
+        # that is an upstream defect, not a property of playback. Upstream
+        # active_channels_to_str() (res/res_pjsip/pjsip_configuration.c,
+        # 20.11.1 lines 1713-1715) returns early whenever the endpoint HAS a
+        # snapshot — an inverted test — and every configured endpoint has one, so
+        # the field is empty idle, ringing and in use alike. Live on 2026-10-14,
+        # all four reads taken while a clip was still playing to ext 19 came back
+        # blank, and the device state alone deferred every one of them.
+        #
+        # KEPT rather than deleted, because the fix turns the field into exactly
+        # what this test already reads. Upstream commit 0f5ea4797e, first in
+        # 20.15.0 (20.14.x still has the inverted test), prints the channel
+        # COUNT, "0" when idle. Alpine ships 20.15.x only from 3.23, and this
+        # image is built on 3.21; from that base bump on, this is a real second
+        # check with no change here.
         chans = str((ep or {}).get("channels", "") or "").strip()
         if ep is None or not ami.device_idle(state) or chans not in ("", "0"):
             seen["clean"] = 0
             seen["defers"] += 1
-            log(f"announcement {cand['sound']} to ext {cand['ext']} is waiting for "
-                f"the handset — state '{state or 'unknown'}', channels "
-                f"'{chans}', {int(now - cand['queued_ts'])}s old")
+            age = int(now - cand["queued_ts"])
+            note = f", channels '{chans}'" if chans else ""
+            # Busy and absent are different journal lines. An ordinary
+            # announcement longer than the retry's minimum age is still PLAYING
+            # when the first tick reads its handset 'In use'; "waiting for the
+            # handset" read like a delivery stuck behind a phone that was not
+            # there, on every such clip.
+            if ami.device_busy(state) or chans not in ("", "0"):
+                log(f"replay of announcement {cand['sound']} to ext {cand['ext']} "
+                    f"deferred — the handset is busy (state '{state}'{note}), "
+                    f"{age}s old")
+            else:
+                log(f"announcement {cand['sound']} to ext {cand['ext']} is waiting "
+                    f"for the handset — state '{state or 'unknown'}'{note}, "
+                    f"{age}s old")
             continue
         seen["clean"] += 1
         if seen["clean"] < clean_ticks:
@@ -978,6 +1018,25 @@ def tick() -> None:
                 log(f"could not clear wake-up for ext {ext}: {exc}")
 
 
+def _log_wakeup_bounds() -> None:
+    """The startup line, with BOTH timings a ring's verdict depends on.
+
+    It used to print the poll and the ring and not the retry, so the one number
+    that decides when a still-ringing phone could be judged unanswered was the
+    one the journal never showed. A clamped retry is said out loud, with the
+    value that was asked for: an option silently replaced by another number is
+    a setting nobody can see is not in force.
+    """
+    log(f"scheduler started (poll {POLL}s, ring {RING}s, retry {RETRY_AFTER}s, "
+        f"store {store.PATH})")
+    if RETRY_AFTER != RETRY_CONFIGURED:
+        log(f"WARNING: wake-up retry {RETRY_CONFIGURED}s is shorter than the "
+            f"{RING}s ring plus one {POLL}s poll — judging rings at "
+            f"{RETRY_AFTER}s instead, so a phone still ringing is never judged "
+            f"unanswered. Set wakeup_retry_seconds to at least "
+            f"wakeup_ring_seconds + {POLL}.")
+
+
 def _log_retry_bounds() -> None:
     """Print the retry's bounds at startup, and WARN when they cannot fire.
 
@@ -1023,7 +1082,7 @@ def _log_retry_bounds() -> None:
 def main() -> None:
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
-    log(f"scheduler started (poll {POLL}s, ring {RING}s, store {store.PATH})")
+    _log_wakeup_bounds()
     _log_retry_bounds()
     while not _stop:
         try:

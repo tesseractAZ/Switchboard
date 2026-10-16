@@ -19,7 +19,12 @@ export WAKEUP_RING_SECONDS="${WRS:-60}"
 # script exports it: the scheduler reads os.environ, and a value that only
 # reaches config.yaml never arrives.
 WRT="$(switchboard-opt wakeup_retry_seconds)"
-export WAKEUP_RETRY_SECONDS="${WRT:-90}"
+export WAKEUP_RETRY_SECONDS="${WRT}"
+# ...but an EMPTY read leaves it UNSET rather than filling in a number here. The
+# scheduler derives the delay from the ring it was actually given (ring + 30 s)
+# and clamps any value to at least ring + one poll; a fixed `:-90` written here
+# made that fallback unreachable, and 90 is too short for any ring above 70 s.
+[ -n "$WRT" ] || unset WAKEUP_RETRY_SECONDS
 # The notify service an undelivered wake-up escalates to, without the `notify.`
 # prefix. Empty disables the PUSH; the escalation still posts a Home Assistant
 # notification card, so the signal is not lost — it just stops sounding through
