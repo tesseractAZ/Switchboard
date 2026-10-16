@@ -670,14 +670,13 @@ def test_a_busy_handset_is_logged_as_busy_not_as_missing(tmp_path):
     and the line used to say the retry was "waiting for the handset" — a stalled
     delivery, in the journal, on every such clip. A handset that is busy defers
     the replay; one that is not there is what is waited for. Both keep the
-    state."""
-    for state, channels, busy in (("In use", "", True), ("Ringing", "", True),
-                                  ("Ring+Inuse", "", True),
-                                  ("Not in use", "1", True),
-                                  ("Unavailable", "", False), ("", "", False),
-                                  ("Unknown", "0", False)):
-        b = _Bench(tmp_path / f"w{abs(hash((state, channels)))}", state=state,
-                   channels=channels)
+    state, and a blank state read is printed as 'unknown' in either — a
+    non-zero channel count is busy beside a state that came back empty."""
+    for i, (state, channels, busy) in enumerate((
+            ("In use", "", True), ("Ringing", "", True), ("Ring+Inuse", "", True),
+            ("Not in use", "1", True), ("", "1", True),
+            ("Unavailable", "", False), ("", "", False), ("Unknown", "0", False))):
+        b = _Bench(tmp_path / f"w{i}", state=state, channels=channels)
         b.queue(ago=25)
         b.tick(NOW)
         lines = [m for m in b.sched.LOGGED if SOUND in m]
@@ -686,7 +685,7 @@ def test_a_busy_handset_is_logged_as_busy_not_as_missing(tmp_path):
         if busy:
             assert "deferred — the handset is busy" in line, (state, line)
             assert "waiting for the handset" not in line, (state, line)
-            assert f"state '{state}'" in line, (state, line)
+            assert f"state '{state or 'unknown'}'" in line, (state, line)
         else:
             assert "waiting for the handset" in line, (state, line)
             assert "busy" not in line, (state, line)

@@ -736,11 +736,12 @@ def _retry_announcements(now: float, recs: list | None = None) -> None:
             # announcement longer than the retry's minimum age is still PLAYING
             # when the first tick reads its handset 'In use'; "waiting for the
             # handset" read like a delivery stuck behind a phone that was not
-            # there, on every such clip.
+            # there, on every such clip. A non-zero channel count is busy on its
+            # own, with a state read that may have come back blank beside it.
             if ami.device_busy(state) or chans not in ("", "0"):
                 log(f"replay of announcement {cand['sound']} to ext {cand['ext']} "
-                    f"deferred — the handset is busy (state '{state}'{note}), "
-                    f"{age}s old")
+                    f"deferred — the handset is busy (state "
+                    f"'{state or 'unknown'}'{note}), {age}s old")
             else:
                 log(f"announcement {cand['sound']} to ext {cand['ext']} is waiting "
                     f"for the handset — state '{state or 'unknown'}'{note}, "

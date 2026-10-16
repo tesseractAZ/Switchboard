@@ -22,10 +22,12 @@ arm. Wording had been written, reviewed, and fixed once (v0.84.0) for a case tha
 never got as far as being said out loud — and the test covering it reached that
 arm by writing the impossible pair into the fixture by hand.
 """
+import itertools
 import json
 import os
 import re
 import stat
+import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -36,9 +38,14 @@ SCHED_SRC = ROOT / "rootfs" / "usr" / "share" / "switchboard" / "wakeup" / "sche
 T0 = 1_000_000.0
 
 
-def _load(tmp_path):
-    """Load the scheduler with a temp ledger and recording stand-ins."""
-    delivery = SourceFileLoader("delivery_esc", str(
+def _load(tmp_path, tag=""):
+    """Load the scheduler with a temp ledger and recording stand-ins.
+
+    load_module() on a name that is already loaded re-runs the source INSIDE the
+    module object it finds, so two loads under one name are one module, and the
+    second silently replaces the first's state. A test that needs two schedulers
+    side by side passes a distinct `tag`."""
+    delivery = SourceFileLoader(f"delivery_esc{tag}", str(
         ROOT / "rootfs" / "usr" / "share" / "switchboard" / "webui"
         / "delivery.py")).load_module()
     delivery.OUTCOME_PATH = str(tmp_path / "d.jsonl")
@@ -60,7 +67,7 @@ def _load(tmp_path):
         sys.modules[k] = _Pre
     sys.modules["delivery"] = delivery
     try:
-        sched = SourceFileLoader("sched_esc", str(SCHED_SRC)).load_module()
+        sched = SourceFileLoader(f"sched_esc{tag}", str(SCHED_SRC)).load_module()
     finally:
         for k, v in saved.items():
             if v is None:
@@ -383,11 +390,13 @@ def test_a_ledger_replaced_by_a_link_is_not_written_through_and_not_judged(tmp_p
 # room reads 'Ringing' — no hold, no re-ring — and a critical push said the
 # handset was not available.
 _RUN = ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "wakeup-scheduler" / "run"
+_LOADS = itertools.count(1)
 
 
 def _load_with(tmp_path, monkeypatch, ring=None, retry=None):
     """_load() with the two options as the run script would export them. None
-    leaves the variable unset."""
+    leaves the variable unset. Every call is its own module, read with its own
+    environment, so an earlier scheduler keeps the timings it was loaded with."""
     monkeypatch.delenv("WAKEUP_POLL_SECONDS", raising=False)
     for name, value in (("WAKEUP_RING_SECONDS", ring), ("WAKEUP_RETRY_SECONDS", retry)):
         if value is None:
@@ -395,7 +404,7 @@ def _load_with(tmp_path, monkeypatch, ring=None, retry=None):
         else:
             monkeypatch.setenv(name, str(value))
     tmp_path.mkdir(parents=True, exist_ok=True)
-    sched, delivery, pushes, cards = _load(tmp_path)
+    sched, delivery, pushes, cards = _load(tmp_path, tag=f"_w{next(_LOADS)}")
     sched.LOGGED = []
     sched.log = sched.LOGGED.append
     sched.store = type("S", (), {"PATH": str(tmp_path / "wakeups.json")})
@@ -465,6 +474,8 @@ def test_a_phone_still_ringing_is_not_judged_unanswered(tmp_path, monkeypatch):
     _ring(sched2)
     sched2._reconcile_rings(T0 + 100)
     assert len(pushes2) == 1, "the fixture cannot see the false push it exists to stop"
+    assert sched2 is not sched and sched.RETRY_AFTER == 140, (
+        "the second load replaced the clamped scheduler in place")
 
 
 def test_the_startup_line_names_the_ring_and_the_retry(tmp_path, monkeypatch):
@@ -493,7 +504,6 @@ def test_the_run_script_leaves_an_empty_retry_unset(tmp_path):
     """Runs the run script's own lines under bash with the option reader stubbed.
     An empty read must leave the variable UNSET — not empty, and not a number
     chosen here — even when the environment already carries one."""
-    import subprocess
     run = _RUN.read_text()
     start = run.index('WRT="$(switchboard-opt wakeup_retry_seconds)"')
     end = run.index("\n", run.index("unset WAKEUP_RETRY_SECONDS")) + 1
