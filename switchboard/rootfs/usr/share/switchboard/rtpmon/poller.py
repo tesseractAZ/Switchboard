@@ -735,9 +735,14 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 _TRANSITION_RE = re.compile(r"Endpoint (\S+) is now (Unreachable|Reachable)")
 # Bound a single read so a huge backlog cannot balloon the poller's memory.
 _TRANSITION_MAX_READ = 512 * 1024
-# Byte watermark. Starts at the file's CURRENT size so a fresh process does not
-# replay history as if it just happened; a restart is itself a transition and is
-# already visible as the reachable=null cycle.
+# Byte watermark, PER PROCESS. Starts at the file's CURRENT size so a fresh
+# process does not replay history as if it just happened. The restart itself is
+# visible as the row with `since_prev_s: null` and `poller_started: true` (not
+# necessarily `reachable: null`: whether AMI answers that first cycle is a race).
+# The cost is a blind gap: anything logged between the old process's last row and
+# the new one's first cycle is never harvested. On 2026-10-14 the outside line's
+# boot-time "is now Reachable" fell into that gap on one of two restarts. The
+# forensic log still holds it.
 _transition_offset = None
 
 
@@ -756,6 +761,15 @@ def endpoint_transitions() -> list:
     slept through. A byte watermark over the forensic log turns 299 seconds of
     blindness per cycle into a complete record, without an AMI event
     subscription or any change to how often anything is polled.
+
+    Complete WITHIN ONE PROCESS. The first call of a process only sets the
+    watermark, so the first heartbeat row after a restart starts fresh (see
+    _transition_offset). And a transition is a log line, not an outage: with
+    `remove_existing = yes` a phone re-registering from a new contact logs
+    "Unreachable" and then "Reachable" a few milliseconds apart (2 ms and 8 ms
+    for ext 19 on 2026-10-14) while the old contact is swapped out. An entry
+    carries no time, so that pair reads exactly like a real drop of up to one
+    interval; the forensic log has the timestamps.
 
     Best-effort: any error yields [] and the poll continues."""
     global _transition_offset
@@ -920,9 +934,11 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
     }
     _last_heartbeat_mono = now_mono
     if first:
-        # The poller's OWN first cycle. Precisely the rows that carry
-        # `ami: unreachable` after a restart, so a reader no longer has to join
-        # timestamps by hand to tell convergence from a fault.
+        # The poller's OWN first cycle, so a reader no longer has to join
+        # timestamps by hand to tell convergence from a fault. Often, not always,
+        # the row that carries `ami: unreachable` after a restart: whether AMI
+        # answers this first poll is a race (on 2026-10-14 one restart's first
+        # cycle reached it and the next restart's did not).
         rec["poller_started"] = True
     if summ:
         # Key names must match summarize() EXACTLY. The first shipped version of
@@ -959,9 +975,11 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
         rec["wired_count"] = summ.get("wired_count")
     else:
         # AMI unreachable this cycle: say so rather than omitting the fields,
-        # so a reader can tell "no data" from "zero phones up".
+        # so a reader can tell "no data" from "zero phones up". `down` is null
+        # for the same reason as `wired_down` below: nobody looked.
         rec["reachable"] = None
         rec["ami"] = "unreachable"
+        rec["down"] = None
     # ★ v0.95.0 — ALWAYS emitted, even empty.
     #
     # This was `if wired_down:`, so the one field that names which gateway ports
@@ -969,10 +987,21 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
     # key on it unconditionally; it had to infer meaning from a missing key, and
     # "absent" read identically to "not measured". An empty list is a positive
     # statement — nothing is down — and is worth the eighteen bytes.
-    rec["wired_down"] = list(wired_down or [])
-    # Everything Asterisk saw while this poller was asleep. An empty list means
-    # "nothing changed", which is a far stronger statement than a point-sample
-    # that merely found everything up at one instant.
+    #
+    # ★ ...SO IT MUST NOT BE MADE ON A CYCLE THAT MEASURED NOTHING (2026-10-14).
+    # This line was `list(wired_down or [])` and run() passed `phones or []`, so
+    # an AMI-down cycle wrote `wired_down: []` twice over. The first row after
+    # that day's second restart read `ami: unreachable, reachable: null,
+    # wired_down: []`, and the rows 15 s and 30 s later named all eight ports
+    # down. The key is still on every row; it is null exactly when nothing was
+    # measured, like `reachable`.
+    rec["wired_down"] = list(wired_down) if summ and wired_down is not None else None
+    # What Asterisk logged while this poller was asleep: every reachability
+    # line since the previous row OF THIS PROCESS. The first row after a
+    # restart starts fresh, and a remove_existing contact swap shows up as an
+    # Unreachable/Reachable pair milliseconds apart; see endpoint_transitions().
+    # A quiet cycle omits the keys, which says more than a point-sample that
+    # merely found everything up at one instant.
     # Exactly ONE call per cycle: endpoint_transitions() advances a byte
     # watermark over asterisk.log, so a second call in the same cycle returns
     # nothing. run() passes the list it already harvested; a direct caller (the
@@ -1263,8 +1292,10 @@ def run() -> int:
         # endpoint_transitions() advances a byte watermark, so whoever calls it
         # first is the only caller that sees anything.
         trans = endpoint_transitions()
-        # ★ PHONES ONLY. `trans` also carries the outside line — every restart's
-        # rows open with {"ext": "trunk", "state": "Reachable"} — and is_mass_drop
+        # ★ PHONES ONLY. `trans` also carries the outside line — the rows after a
+        # restart usually open with {"ext": "trunk", "state": "Reachable"}, unless
+        # Asterisk logged it before this process's first cycle set the watermark
+        # (one of two restarts on 2026-10-14) — and is_mass_drop
         # compares this list against a threshold computed from the PHONE count
         # (summ["total"] is the configured extensions, trunk filtered out). A
         # trunk dropping alongside four phones would count as the fifth of ten
@@ -1307,9 +1338,12 @@ def run() -> int:
         # signal that separates "the PBX is idle" from "the poller stopped": the
         # forensic log went 19 h 42 m with no entry while perfectly healthy,
         # because steady-state contact refreshes do not log.
+        # `wired_down` is None, not [], on a cycle that measured nothing: an
+        # empty list would tell the row that no gateway port is down.
         _heartbeat(summ, trunk_status,
-                   wired_down=[p["ext"] for p in (phones or [])
-                               if p.get("ext") in set(wired) and not p.get("reachable")],
+                   wired_down=(None if phones is None else
+                               [p["ext"] for p in phones
+                                if p.get("ext") in set(wired) and not p.get("reachable")]),
                    settled=settled, first=(polls == 1), transitions=trans,
                    next_sleep_s=next_sleep)
         settled = next_settled
