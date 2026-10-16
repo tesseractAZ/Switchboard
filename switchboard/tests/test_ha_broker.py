@@ -386,3 +386,193 @@ def test_a_broker_that_is_down_is_logged():
         _restore(env, old)
     assert "no Home Assistant token and no broker" in err.getvalue(), err.getvalue()
 
+
+# --- the traffic summary (2026-10-14) -----------------------------------------
+#
+# A successful forward, an upstream 4xx/5xx and Home Assistant out of reach left
+# no broker line, and switchboard-callqos discards its own stdio, so its sensor
+# and card traffic could not even be counted. One line per interval now can.
+
+_CLASSES = ({"ping", "states", "config", "state", "calendar", "template",
+             "set_state", "service", "other"}
+            | {f"{d}.{s}" for d, s in broker._SERVICE_CLASSES})
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _fresh_traffic():
+    clock = _Clock()
+    broker.TRAFFIC = broker.Traffic(clock=clock)
+    return clock
+
+
+def test_every_request_the_asterisk_user_makes_has_a_named_class():
+    for method, path, body in record_calls():
+        cls = broker.route_class(method, path)
+        assert cls not in ("other", "service"), (method, path, cls)
+    assert broker.route_class("POST", "/states/sensor.switchboard_last_call") == "set_state"
+    assert broker.route_class("POST", "/services/persistent_notification/create") \
+        == "persistent_notification.create"
+    assert broker.route_class("GET", "/states/light.kitchen") == "state"
+
+
+def test_a_class_never_carries_text_from_the_request():
+    """The summary is written to the log, and the path is the caller's. Every
+    class comes from a fixed vocabulary, whatever was sent, and a path that makes
+    urlsplit() raise is `other` rather than a crash."""
+    odd = [("POST", "/services/homeassistant/x\r\ninjected", {}),
+           ("GET", "//[x", None), ("GET", "/states/a/b/c", None), (7, None, None)]
+    for method, path, _ in REFUSED + odd:
+        assert broker.route_class(method, path) in _CLASSES, (method, path)
+    assert broker.route_class("POST", "/services/shell_command/anything") == "service"
+
+
+def test_each_outcome_is_counted_and_summarised_once():
+    clock = _fresh_traffic()
+    replies = {"/states/light.kitchen": (200, json.dumps({"entity_id": "light.kitchen", "state": "on"})),
+               "/states/sensor.switchboard_last_call": (201, ""),
+               "/services/persistent_notification/create": (500, "boom"),
+               "/states/light.den": (None, None),
+               "/states": (200, "<html>proxy error</html>")}
+    fwd = lambda m, p, b: replies[p]
+    line = lambda m, p, b=None: json.dumps({"method": m, "path": p, "body": b}).encode()
+    broker.handle_line(line("GET", "/states/light.kitchen"), fwd)
+    broker.handle_line(line("POST", "/states/sensor.switchboard_last_call", {"state": "88.0"}), fwd)
+    broker.handle_line(line("POST", "/services/persistent_notification/create",
+                            {"message": "x", "title": "t"}), fwd)
+    broker.handle_line(line("GET", "/states/light.den"), fwd)
+    broker.handle_line(line("GET", "/states"), fwd)          # withheld: 502 to the caller
+    broker.handle_line(line("POST", "/services/homeassistant/restart text", {}), fwd)
+    broker.handle_line(b"not json", fwd)
+    clock.t += 3600
+    got = broker.TRAFFIC.summary()
+    assert got == ("traffic over 3600 s: other refused=1; persistent_notification.create http500=1; "
+                   "service refused=1; set_state ok=1; state ok=1 unreachable=1; states http502=1"), got
+    assert "restart" not in got and "text" not in got
+    # The interval starts again, and a quiet one writes nothing at all.
+    clock.t += 3600
+    assert broker.TRAFFIC.summary() is None
+    broker.handle_line(line("GET", "/states/light.kitchen"), fwd)
+    clock.t += 60
+    assert broker.TRAFFIC.summary(" (stopping)") == "traffic over 60 s (stopping): state ok=1"
+
+
+def test_a_refused_peer_is_counted_as_well_as_logged():
+    _fresh_traffic()
+    tmp = Path(tempfile.mkdtemp())
+    server, path = _serve(tmp, lambda m, p, b: (200, "{}"), allowed_uids=set())
+    env, old = _client(path)
+    try:
+        assert ha_client.get_state("light.kitchen") is None
+    finally:
+        _restore(env, old)
+        server.shutdown()
+        server.server_close()
+    assert broker.TRAFFIC.summary() == "traffic over 0 s: connection refused=1"
+
+
+def test_the_summary_runs_hourly_and_only_logs_traffic():
+    """The loop serve() starts: one summary per interval, a line only when there
+    was something to count."""
+    import io
+    import contextlib
+    _fresh_traffic()
+    rounds = {"n": 0}
+
+    def fake_sleep(s):
+        assert s == broker.SUMMARY_INTERVAL_S == 3600
+        rounds["n"] += 1
+        if rounds["n"] == 2:
+            broker.TRAFFIC.count("set_state", "ok")
+        if rounds["n"] > 3:
+            raise KeyboardInterrupt            # leave the endless loop
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try:
+            broker._summarize_forever(sleep=fake_sleep)
+        except KeyboardInterrupt:
+            pass
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 1 and lines[0].startswith("[ha-broker] traffic over ") \
+        and lines[0].endswith(": set_state ok=1"), lines
+
+
+def test_serve_starts_the_summary_and_installs_the_stop_handler(monkeypatch):
+    """A summary loop nothing starts is a comment, not a mechanism: check that
+    serve(), the program's entry point, starts it and hooks SIGTERM."""
+    import signal as _signal
+    import types
+    started, handlers = [], {}
+
+    class _Thread:
+        def __init__(self, target=None, daemon=None):
+            self.target, self.daemon = target, daemon
+
+        def start(self):
+            started.append((self.target, self.daemon))
+
+    class _Server:
+        def serve_forever(self):
+            started.append(("serve_forever", None))
+
+    monkeypatch.setattr(broker, "make_server", lambda path: _Server())
+    monkeypatch.setattr(broker, "threading", types.SimpleNamespace(Thread=_Thread, Lock=threading.Lock))
+    monkeypatch.setattr(broker, "signal", types.SimpleNamespace(
+        SIGTERM=_signal.SIGTERM, signal=lambda sig, fn: handlers.__setitem__(sig, fn)))
+    monkeypatch.setenv("HA_BASE_URL", "http://192.0.2.10:8123/api")
+    broker.serve("/nonexistent/ha.sock")
+    assert (broker._summarize_forever, True) in started, started
+    assert (broker._warm, True) in started, started
+    assert started[-1] == ("serve_forever", None), "the threads start before serving"
+    assert handlers.get(_signal.SIGTERM) is broker._stop, handlers
+
+
+def test_sigterm_writes_the_partial_interval_before_the_broker_exits():
+    """The whole program, as s6 runs and stops it. A restart must not drop up to
+    an hour of counts, and the handler has to be installed by serve() itself.
+
+    Off Linux there is no SO_PEERCRED and a non-root CI runner is neither root
+    nor asterisk, so the request is usually refused at the door; as root it is
+    forwarded to an address where nothing listens. Either way exactly one
+    request is counted and must appear in the line written at SIGTERM."""
+    import signal
+    import subprocess
+    tmp = Path(tempfile.mkdtemp())
+    sock_path = str(tmp / "ha.sock")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONDONTWRITEBYTECODE": "1",
+           "SWITCHBOARD_HA_BROKER": sock_path, "HA_BASE_URL": "http://127.0.0.1:9"}
+    proc = subprocess.Popen([sys.executable, "-B", str(WEBUI / "ha_broker.py")], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    killer = threading.Timer(60, proc.kill)               # never hang the suite
+    killer.start()
+    try:
+        seen = []
+        while not any("listening on" in l for l in seen):
+            l = proc.stderr.readline()
+            assert l, f"the broker exited before listening: {seen}"
+            seen.append(l)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(20)
+            s.connect(sock_path)
+            s.sendall(b'{"method": "GET", "path": "/", "body": null}\n')
+            while s.recv(65536):
+                pass                                       # until the broker closes it
+        proc.send_signal(signal.SIGTERM)
+        rc = proc.wait(timeout=20)
+        rest = proc.stderr.read()
+    finally:
+        killer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+        proc.stderr.close()
+    assert rc == 0, (rc, rest)
+    summary = [l for l in rest.splitlines() if "traffic over" in l]
+    assert len(summary) == 1 and "(stopping)" in summary[0], rest
+    assert summary[0].endswith((": connection refused=1", ": ping unreachable=1")), summary
+

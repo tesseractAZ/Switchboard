@@ -592,6 +592,149 @@ def test_main_records_what_became_of_the_card(tmp_path) -> None:
         sys.modules.pop("ha_client", None)
 
 
+def test_main_records_what_became_of_the_sensor_push() -> None:
+    """★ 2026-10-14 — WHETHER THE SENSOR WAS UPDATED COULD NOT BE KNOWN.
+
+    push_ha() ran after both writes and threw set_state()'s result away, in a
+    process whose stdio is /dev/null, so a broker or Home Assistant failure on
+    sensor.switchboard_last_call left no trace. A review that expected 12 pushes
+    in one window could prove 2. The answer now rides on the leg as
+    `sensor_status`, the way `notify_status` does for the card, so this drives
+    main(), the only caller, and reads both the ledger and the /share mirror.
+    """
+    pushes = []
+    mode = {"result": True}
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            pushes.append(eid)
+            if mode["result"] == "raise":
+                raise OSError("broker could not reach Home Assistant")
+            return mode["result"]
+
+        @staticmethod
+        def notify(msg, title="", notification_id=""):
+            return True
+
+    good_call = ["--source", "dialplan", "--tag", "rooms",
+                 "--chan", "PJSIP/11-00000003", "--cid", "11",
+                 "--billsec", "40", "--hcause", "16", "--rxcount", "2000",
+                 "--txcount", "2000", "--rxmes", "88", "--txmes", "88"]
+    announce = ["--source", "dialplan", "--tag", "announce",
+                "--chan", "PJSIP/19-0000000a", "--cid", "19", "--billsec", "5",
+                "--hcause", "16", "--stage", "complete", "--rxcount", "250",
+                "--txcount", "250", "--rxmes", "88", "--txmes", "88"]
+    unanswered = ["--source", "dialplan", "--tag", "rooms",
+                  "--chan", "PJSIP/11-00000004", "--cid", "11", "--nomedia",
+                  "--billsec", "0", "--hcause", "16"]
+    poll = ["--source", "poll"] + good_call[2:]
+    d = tempfile.mkdtemp()
+    saved = (cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES)
+
+    def run(argv, result=True):
+        pushes.clear()
+        mode["result"] = result
+        sub = tempfile.mkdtemp(dir=d)
+        cq.PATH = os.path.join(sub, "callqos.jsonl")
+        cq.SHARE_OUTCOME_PATH = os.path.join(sub, "callqos-outcomes.jsonl")
+        cq.FEATURES = os.path.join(sub, "features.json")      # absent: defaults
+        assert cq.main(list(argv)) == 0
+        ledger = json.loads(open(cq.PATH).read().splitlines()[-1])
+        mirror = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+        return ledger, mirror, list(pushes)
+
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        led, mir, p = run(good_call, result=True)
+        check("sensor: an accepted push is recorded as posted, in the ledger",
+              led.get("sensor_status") == "posted" and led.get("v") == 6)
+        check("sensor: ...and in the /share mirror, the only view from outside",
+              mir.get("sensor_status") == "posted")
+        check(f"sensor: exactly one push per leg ({p})",
+              p == ["sensor.switchboard_last_call"])
+
+        led, mir, p = run(good_call, result=False)
+        check("sensor: a refused push is recorded as failed",
+              led.get("sensor_status") == "failed"
+              and mir.get("sensor_status") == "failed" and len(p) == 1)
+
+        led, _, p = run(good_call, result="raise")
+        check("sensor: a push that raised is recorded as failed, and the leg "
+              "is still written", led.get("sensor_status") == "failed"
+              and led.get("chan") == "PJSIP/11-00000003")
+
+        for name, argv in (("a playback leg", announce),
+                           ("a leg with no MES", unanswered),
+                           ("a poll-source leg", poll)):
+            led, mir, p = run(argv)
+            check(f"sensor: {name} does not drive the sensor, says so, pushes nothing",
+                  led.get("sensor_status") == "skipped"
+                  and mir.get("sensor_status") == "skipped" and p == [])
+
+        # ha_client that will not import (the webui dir missing or broken).
+        sys.modules["ha_client"] = None
+        led, _, p = run(good_call)
+        check("sensor: an ha_client that would not load is recorded as failed",
+              led.get("sensor_status") == "failed" and p == [])
+        led, _, _ = run(announce)
+        check("sensor: ...but a leg that never needed it is still skipped",
+              led.get("sensor_status") == "skipped")
+    finally:
+        cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES = saved
+        sys.modules.pop("ha_client", None)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rows_written_before_sensor_status_stay_readable() -> None:
+    """The v6 field is additive. A ledger written before it holds v5 rows with no
+    `sensor_status`; the rolling rewrite must keep them, and the one in-container
+    reader, devhealth's load_callqos_legs(), must read old and new alike."""
+    _dh_src = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+               / "switchboard" / "devhealth" / "poller.py")
+    dh = SourceFileLoader("devhealth_poller_v6", str(_dh_src)).load_module()
+    old = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
+                                cid="12", billsec="30", rxcount="1500",
+                                txcount="1500", rxmes="88", txmes="88"))
+    old["v"] = 5
+    old["notify_status"] = "skipped"                 # a v5 row, as main() wrote it
+    d = tempfile.mkdtemp()
+    saved = (cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES)
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            return True
+
+        @staticmethod
+        def notify(*a, **k):
+            return True
+
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        cq.PATH = os.path.join(d, "callqos.jsonl")
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        cq.FEATURES = os.path.join(d, "features.json")
+        with open(cq.PATH, "w") as fh:
+            fh.write(json.dumps(old) + "\n")
+        assert cq.main(["--source", "dialplan", "--tag", "rooms",
+                        "--chan", "PJSIP/11-2", "--cid", "11", "--billsec", "40",
+                        "--hcause", "16", "--rxcount", "2000", "--txcount", "2000",
+                        "--rxmes", "88", "--txmes", "88"]) == 0
+        rows = [json.loads(l) for l in open(cq.PATH).read().splitlines()]
+        check("v6: the older row survives the rewrite unchanged",
+              len(rows) == 2 and rows[0] == old and "sensor_status" not in rows[0])
+        check("v6: the new row carries the field",
+              rows[1]["v"] == 6 and rows[1]["sensor_status"] == "posted")
+        legs = dh.load_callqos_legs(cq.PATH)
+        check("v6: devhealth reads both rows as legs",
+              [lg["ext"] for lg in legs] == [rows[0]["ext"], rows[1]["ext"]])
+    finally:
+        cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES = saved
+        sys.modules.pop("ha_client", None)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_a_playback_leg_keeps_its_shape_exemption_but_not_its_silence() -> None:
     """Every leg the system carries belongs in the ledger, and a playback leg is
     exempt from the checks about a leg's SHAPE — not from the ones about its LINK.
@@ -1144,14 +1287,14 @@ def test_every_record_says_which_schema_it_is() -> None:
     rec = cq.build_record(_Args(source="dialplan", tag="rooms",
                                 chan="PJSIP/12-1", rxcount="100",
                                 txcount="100", rxmes="88", txmes="88"))
-    check("F54: the ledger record is versioned", rec.get("v") == 5)
+    check("F54: the ledger record is versioned", rec.get("v") == 6)
     d = tempfile.mkdtemp()
     try:
         cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
         cq.append_outcome(rec)
         line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
         check("F54: and so is the /share mirror, which is the only view an "
-              "outside audit gets", line.get("v") == 5)
+              "outside audit gets", line.get("v") == 6)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1520,7 +1663,7 @@ def test_the_ledger_timestamp_carries_an_iso_twin() -> None:
     check("iso: the twin is UTC", twin.utcoffset() == datetime.timedelta(0))
     check("iso: the two are the same instant, to the second",
           int(twin.timestamp()) == rec["ts"])
-    check("iso: the schema says the shape changed", rec["v"] == 5)
+    check("iso: the schema says the shape changed (v5, or a later one)", rec["v"] >= 5)
 
     # The two readers that matter, on a file that was actually written: the
     # /share mirror an outside audit reads, and the devhealth matcher in the

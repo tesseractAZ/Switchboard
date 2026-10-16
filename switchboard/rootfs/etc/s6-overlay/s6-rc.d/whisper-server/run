@@ -64,6 +64,25 @@ bashio::log.info "Starting resident whisper-server on 127.0.0.1:${PORT} (model $
 # always win that contention. STT latency is the callqos read-timeout's problem
 # (24 s budget), not the scheduler's.
 # env -u: like Asterisk, the recognizer runs without the Supervisor token.
+#
+# ★ STDOUT GOES TO /dev/null; STDERR STAYS (2026-10-14). The server's stdout is a
+# pipe, so musl's stdio buffers it in 1 KiB blocks and never flushes per line.
+# Its printf lines (the "listening" banner, then "Received request", "Successfully
+# loaded" and "Running whisper.cpp inference" for each request) reached the
+# journal only when a block filled: the 02:41:39Z banner and eleven requests
+# from 04:40Z to 12:40Z all arrived stamped 12:40:37.846Z, a partial line was
+# spliced onto the next Asterisk line on the same pipe, and an instance's whole
+# stdout was lost when it stopped. Lines that arrive hours late with the wrong
+# time are worse than none: they invite a timeline that is off by up to the
+# whole uptime.
+#
+# Line-buffering would keep them, but the image has no tool for it: stdbuf ships
+# in coreutils, which neither this Dockerfile nor the base image installs (the
+# userland is BusyBox). Nothing reads these lines. Readiness is the HTTP probe in
+# webui/stthealth.py, and every request is already logged on time by
+# switchboard-stt and by the server's own stderr ("processing ..."), which is
+# unbuffered and is kept, as are its errors and its model load.
+# tests/test_run_gates.py pins this.
 exec env -u SUPERVISOR_TOKEN -u HASSIO_TOKEN nice -n 10 s6-setuidgid asterisk \
     /usr/bin/whisper-server \
         --model "${MODEL}" \
@@ -71,4 +90,5 @@ exec env -u SUPERVISOR_TOKEN -u HASSIO_TOKEN nice -n 10 s6-setuidgid asterisk \
         --port "${PORT}" \
         --threads "${THREADS}" \
         --beam-size 1 \
-        --language en
+        --language en \
+        >/dev/null

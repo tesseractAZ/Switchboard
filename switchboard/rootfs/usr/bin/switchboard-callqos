@@ -21,15 +21,22 @@ to test and tune. Everything is wrapped so this can NEVER take down a call leg: 
 dialplan invokes us backgrounded via TrySystem, and we always exit 0.
 
 Outputs:
-  * /data/state/callqos.jsonl  — the last MAX_RECORDS legs (readers dedupe by
-    channel, preferring source=dialplan). The "record everything" ledger, within
-    that window: it is a ROLLING cap, rewritten whole and os.replace()d on every
-    write, not an append-only file. It was sitting at exactly 300 rows reaching
-    back about seven weeks on 2026-09-15.
+  * /data/state/callqos.jsonl  — the last MAX_RECORDS legs. The "record
+    everything" ledger, within that window: it is a ROLLING cap, rewritten whole
+    and os.replace()d on every write, not an append-only file. It was sitting at
+    exactly 300 rows reaching back about seven weeks on 2026-09-15.
+    A leg is identified by `chan` AND `ts` together, never by `chan` alone:
+    Asterisk restarts its channel counter at every boot, so a channel name
+    recurs after each restart (on 2026-10-14 `PJSIP/19-0000000a` named two
+    different announce legs, one either side of a restart). A reader that
+    deduplicates must key on both, as post_alert() does, and prefer
+    source=dialplan if a second producer ever reports the same leg.
   * sensor.switchboard_last_call (dialplan source only) — numeric worst-leg MES so
-    HA's Recorder graphs the trend; all metrics ride along as attributes.
+    HA's Recorder graphs the trend; all metrics ride along as attributes. What
+    became of each push is recorded on the leg as `sensor_status`.
   * a persistent notification (bell menu) when a call scores poorly — keyed by
-    channel so a dialplan+poll double-report can't double-notify.
+    channel and timestamp so a repeat report of one leg can't double-notify.
+    What became of it is recorded on the leg as `notify_status`.
 
 Usage (all metric flags optional; missing/"unknown"/"unavailable" -> null):
     switchboard-callqos --source dialplan --tag rooms --chan PJSIP/12-00000000 \
@@ -646,6 +653,9 @@ def build_record(a) -> dict:
         #   v4  2026-09-14 -- `notify_status`: what became of the alert this leg
         #       called for, added by main() once it has been attempted
         #   v5  2026-09-15 -- `ts_iso`, the ISO-8601 twin of `ts`.
+        #   v6  2026-10-14 -- `sensor_status`: what became of this leg's
+        #       sensor.switchboard_last_call push, added by main() the same way.
+        #       Older rows simply lack it; no reader requires it.
         #
         # ★ TWO TIMESTAMP TYPES IN ONE /share FOLDER READ AS "NO CALLS".
         # `ts` here is EPOCH SECONDS (an int). Every sibling ledger in
@@ -663,7 +673,7 @@ def build_record(a) -> dict:
         #   ts      epoch seconds, int -- what code reads
         #   ts_iso  the same instant in UTC ISO-8601 to the second -- what a
         #           person or a cross-ledger filter reads
-        "v": 5,
+        "v": 6,
         "ts": _now,
         "ts_iso": datetime.datetime.fromtimestamp(
             _now, datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -691,15 +701,32 @@ def build_record(a) -> dict:
         "stage": (a.stage or "").strip(),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
-        # ★ DO NOT BUILD A RECEIVE-JITTER ALARM ON jitter_rx_last_ms.
-        # On announce-tagged legs it is the degenerate constant 0.019875 s in
-        # 7 of 7 observed records, across durations from 5 s to 72 s -- pinned a
-        # hair under the 20 ms ulaw packet interval, i.e. the estimator is not
-        # converging rather than reporting a real measurement. Wake-up legs sit
-        # in the same narrow band (0.019000-0.019750). A threshold on this field
-        # would read permanently green while measuring nothing, which is worse
-        # than having no check at all. jitter_tx_last_ms DOES vary
-        # (0.001000-0.008375) and is the usable direction.
+        # ★ DO NOT BUILD A JITTER ALARM ON EITHER *_last_ms FIELD.
+        # jitter_rx_last_ms: on announce-tagged legs it is the degenerate
+        # constant 0.019875 s in 7 of 7 observed records, across durations from
+        # 5 s to 72 s -- pinned a hair under the 20 ms ulaw packet interval, i.e.
+        # the estimator is not converging rather than reporting a real
+        # measurement. Wake-up legs sit in the same narrow band
+        # (0.019000-0.019750). A threshold there would read permanently green
+        # while measuring nothing, which is worse than having no check at all.
+        #
+        # ★ CORRECTED 2026-10-14 — AND ON AGI LEGS IT SPIKES. Talking-clock and
+        # assistant legs read 44.88, 136.38 and 36.0 ms here while
+        # jitter_rx_peak_local_ms on the same legs stayed at 1.88-2.38 ms. The
+        # 136 ms leg was on a wired gateway port with 0 % loss and a 1.8 ms RTT,
+        # which is not plausible as network jitter. The likely cause (not
+        # verified): these AGIs stop reading the channel while they work between
+        # prompts (transcribing, synthesising speech), and the interarrival
+        # estimate, read once at hangup, takes the stall for jitter, while the
+        # peak, sampled only at RTCP report instants, did not see it. So the
+        # field is unusable both ways: stuck on playback legs, inflated on AGI
+        # legs. A threshold on it would misfire.
+        #
+        # jitter_tx_last_ms was called "the usable direction" here because it
+        # varied (0.001000-0.008375) on those playback legs. It is not usable
+        # across the fleet either: it is the far end's own figure, from its RTCP
+        # receiver reports, and it read 0.0 on all four legs from one FXS gateway
+        # port in that same window. A zero there is not a measurement of zero.
         #
         # ★ jitter_rx_peak_local_ms, however, IS usable, and the old names were
         # steering implementers away from the one receive-jitter field that
@@ -1004,41 +1031,62 @@ def _alerts_enabled() -> bool:
         return True
 
 
-def push_ha(rec: dict) -> None:
+def push_ha(rec: dict) -> str:
+    """Update sensor.switchboard_last_call from this leg, and return what became of it.
+
+    ★ 2026-10-14 — A FAILED SENSOR PUSH LEFT NO TRACE. post_alert() had the
+    same defect until 2026-09-14: this process runs detached with its stdio on
+    /dev/null, the set_state() call sat in `try: ... except: pass`, and its
+    result was thrown away, so ha_client's failure line went nowhere and a
+    broker or Home Assistant fault on this push was silent. A review that
+    expected 12 pushes in one window could prove 2, and only from Home
+    Assistant's own timestamps.
+
+    main() stores the answer on the record as `sensor_status`, which is why it
+    runs before the ledger write:
+
+      skipped  the leg does not drive the sensor (not the dialplan source, a
+               playback leg, or no MES to report)
+      posted   Home Assistant accepted the state
+      failed   set_state() refused or raised, or ha_client would not load
+
+    WHICH legs drive the sensor is unchanged; only the result is kept.
+    """
+    # Only the authoritative dialplan leg drives the headline sensor, so the
+    # poller's slightly-stale far-leg snapshot can't flicker it.
+    if not (rec["source"] == "dialplan" and rec["mes_worst"] is not None
+            and rec["tag"] not in PLAYBACK_TAGS):
+        return "skipped"
     try:
         import ha_client  # noqa: E402
     except Exception:
-        return
-
-    # Only the authoritative dialplan leg drives the headline sensor, so the
-    # poller's slightly-stale far-leg snapshot can't flicker it.
-    if (rec["source"] == "dialplan" and rec["mes_worst"] is not None
-            and rec["tag"] not in PLAYBACK_TAGS):
-        attrs = {
-            "friendly_name": "Switchboard last call quality",
-            "unit_of_measurement": "MES",
-            "icon": "mdi:phone-check" if rec["quality"] in ("excellent", "good") else "mdi:phone-alert",
-            "quality": rec["quality"],
-            "mos": rec["mos_worst"],
-            "extension": rec["ext"],
-            "leg": rec["tag"],
-            "codec": rec["codec"],
-            "duration_s": rec["dur"],
-            "loss_rx_pct": rec["loss_rx_pct"],
-            "loss_tx_pct": rec["loss_tx_pct"],
-            "jitter_rx_last_ms": rec["jitter_rx_last_ms"],
-            "jitter_tx_last_ms": rec["jitter_tx_last_ms"],
-            # The usable receive-jitter figure — see the ★ note in build_record.
-            "jitter_rx_peak_local_ms": rec["jitter_rx_peak_local_ms"],
-            "rtt_ms": rec["rtt_ms"],
-            "rtt_max_ms": rec["rtt_max_ms"],
-            "mes_rx": rec["mes_rx"],
-            "mes_tx": rec["mes_tx"],
-        }
-        try:
-            ha_client.set_state("sensor.switchboard_last_call", rec["mes_worst"], attrs)
-        except Exception:
-            pass
+        return "failed"
+    attrs = {
+        "friendly_name": "Switchboard last call quality",
+        "unit_of_measurement": "MES",
+        "icon": "mdi:phone-check" if rec["quality"] in ("excellent", "good") else "mdi:phone-alert",
+        "quality": rec["quality"],
+        "mos": rec["mos_worst"],
+        "extension": rec["ext"],
+        "leg": rec["tag"],
+        "codec": rec["codec"],
+        "duration_s": rec["dur"],
+        "loss_rx_pct": rec["loss_rx_pct"],
+        "loss_tx_pct": rec["loss_tx_pct"],
+        "jitter_rx_last_ms": rec["jitter_rx_last_ms"],
+        "jitter_tx_last_ms": rec["jitter_tx_last_ms"],
+        # The usable receive-jitter figure — see the ★ note in build_record.
+        "jitter_rx_peak_local_ms": rec["jitter_rx_peak_local_ms"],
+        "rtt_ms": rec["rtt_ms"],
+        "rtt_max_ms": rec["rtt_max_ms"],
+        "mes_rx": rec["mes_rx"],
+        "mes_tx": rec["mes_tx"],
+    }
+    try:
+        ok = ha_client.set_state("sensor.switchboard_last_call", rec["mes_worst"], attrs)
+    except Exception:
+        return "failed"
+    return "posted" if ok else "failed"
 
 
 def post_alert(rec: dict) -> str:
@@ -1246,11 +1294,17 @@ def main(argv=None) -> int:
         # say what became of it. Only a leg that calls for an alert waits on Home
         # Assistant here; every other leg returns "skipped" without a request.
         rec["notify_status"] = post_alert(rec)
+        # The sensor push moved ahead of the write for the same reason
+        # (2026-10-14): it used to run last, after both writes, so nothing could
+        # record whether it landed. It costs the write one Home Assistant round
+        # trip on the legs that drive the sensor. When the card above has just
+        # found Home Assistant unreachable, ha_client's back-off answers this one
+        # at once; only a broker that timed out is waited on a second time.
+        rec["sensor_status"] = push_ha(rec)
         append_record(rec)
         # Readable proof this program ran and what it decided -- the dialplan's
         # trailing '&' means launch is all it can ever prove.
         append_outcome(rec)
-        push_ha(rec)
     except (Exception, SystemExit):
         # A hangup handler must never fail loudly. Swallow and move on.
         # (SystemExit too: argparse.error() raises it, and it is BaseException,
