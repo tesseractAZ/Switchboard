@@ -101,7 +101,12 @@ def check(method: str, path: str, body) -> str | None:
         return "malformed request"
     if len(path) > 512 or any(c in path for c in "\r\n\t #\\") or ".." in path:
         return "malformed path"
-    parts = urlsplit(path)
+    try:
+        parts = urlsplit(path)
+    except ValueError:
+        # "//[x" reads as an unclosed IPv6 host and raises. Uncaught, it left the
+        # connection with no reply and the request out of the traffic counts.
+        return "malformed path"
     route, query = parts.path, parts.query
     segs = route.split("/")[1:]
 

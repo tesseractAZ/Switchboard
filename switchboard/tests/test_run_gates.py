@@ -418,13 +418,6 @@ def test_whisper_server_stdout_is_discarded_and_its_stderr_kept():
           "/usr/bin/whisper-server" in block)
     check("whisper-server/run: stderr is not redirected anywhere",
           not re.search(r"(^|\s)(2>|&>|>&)", block))
-    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
-    if "stdbuf" in block:
-        # Line-buffering is the better fix, but only with the tool in the image.
-        check("whisper-server/run: stdbuf is used only with coreutils installed",
-              re.search(r"apk add[^\n]*\bcoreutils\b",
-                        dockerfile.replace("\\\n", " ")) is not None)
-        return
     with tempfile.TemporaryDirectory() as d:
         bindir = Path(d)
         # s6-setuidgid drops privileges and execs the rest of its argv.

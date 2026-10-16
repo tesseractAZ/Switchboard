@@ -686,6 +686,63 @@ def test_main_records_what_became_of_the_sensor_push() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_fault_inside_the_sensor_push_never_costs_the_row() -> None:
+    """The push now runs BEFORE the ledger write, so anything that raises inside
+    it would abort main() ahead of append_record() and lose the leg, a worse
+    outcome than the silent push it replaced. push_ha() keeps one try around the
+    whole push, the attribute dict included; this breaks that dict (a record
+    missing a key it reads) and requires `failed` on a row that was written."""
+    pushes = []
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            pushes.append(eid)
+            return True
+
+        @staticmethod
+        def notify(*a, **k):
+            return True
+
+    real_build = cq.build_record
+
+    def _build_missing_a_key(a):
+        rec = real_build(a)
+        del rec["mes_tx"]                    # read only by push_ha's attributes
+        return rec
+
+    d = tempfile.mkdtemp()
+    saved = (cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES)
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        cq.PATH = os.path.join(d, "callqos.jsonl")
+        cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
+        cq.FEATURES = os.path.join(d, "features.json")
+        cq.build_record = _build_missing_a_key
+        check("push fault: push_ha() answers rather than raising",
+              cq.push_ha(_build_missing_a_key(_Args(
+                  source="dialplan", tag="rooms", chan="PJSIP/11-1", cid="11",
+                  billsec="40", rxcount="2000", txcount="2000", rxmes="88",
+                  txmes="88"))) == "failed")
+        assert cq.main(["--source", "dialplan", "--tag", "rooms",
+                        "--chan", "PJSIP/11-00000005", "--cid", "11",
+                        "--billsec", "40", "--hcause", "16", "--rxcount", "2000",
+                        "--txcount", "2000", "--rxmes", "88", "--txmes", "88"]) == 0
+        rows = [json.loads(l) for l in open(cq.PATH).read().splitlines()]
+        check(f"push fault: the leg is still written, as failed ({rows})",
+              len(rows) == 1 and rows[0]["chan"] == "PJSIP/11-00000005"
+              and rows[0]["sensor_status"] == "failed")
+        check("push fault: ...and mirrored to /share",
+              json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[-1])
+              .get("sensor_status") == "failed")
+        check(f"push fault: no state was posted ({pushes})", pushes == [])
+    finally:
+        cq.build_record = real_build
+        cq.PATH, cq.SHARE_OUTCOME_PATH, cq.FEATURES = saved
+        sys.modules.pop("ha_client", None)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_rows_written_before_sensor_status_stay_readable() -> None:
     """The v6 field is additive. A ledger written before it holds v5 rows with no
     `sensor_status`; the rolling rewrite must keep them, and the one in-container

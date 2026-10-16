@@ -28,9 +28,12 @@ Outputs:
     A leg is identified by `chan` AND `ts` together, never by `chan` alone:
     Asterisk restarts its channel counter at every boot, so a channel name
     recurs after each restart (on 2026-10-14 `PJSIP/19-0000000a` named two
-    different announce legs, one either side of a restart). A reader that
-    deduplicates must key on both, as post_alert() does, and prefer
-    source=dialplan if a second producer ever reports the same leg.
+    different announce legs, one either side of a restart). (chan, ts)
+    identifies a row, and a reader that deduplicates must key on both, as
+    post_alert() does. Only the dialplan invokes this program today. A second
+    producer's report of the same leg would carry its own `ts` (build_record
+    stamps the reporting process's clock), so matching across producers would
+    need a time window on `chan`, preferring source=dialplan.
   * sensor.switchboard_last_call (dialplan source only) — numeric worst-leg MES so
     HA's Recorder graphs the trend; all metrics ride along as attributes. What
     became of each push is recorded on the leg as `sensor_status`.
@@ -285,10 +288,14 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
 
     `sampling` is accepted for symmetry with the record but is NOT a veto here.
     Zero completed RTCP rounds does not mean zero measurement: receive loss,
-    receive jitter and the MES are computed from LOCAL counters, so a peer that
-    never echoes an RTCP report (the VoIP.ms trunk does exactly this) still
-    yields a genuinely gradeable leg. Forcing `unknown` on `sampling == "none"`
-    was tried and reverted — it discarded real quality data on every trunk call.
+    Asterisk's own receive-jitter estimate and the MES it computes for the
+    stream it receives come from LOCAL counters, so a peer that never echoes an
+    RTCP report (the VoIP.ms trunk does exactly this) still yields a genuinely
+    gradeable leg. (Asterisk names that jitter and that MES `txjitter` and
+    `txmes`, after the reports it sends; `rxjitter` and `rxmes` are built from
+    the peer's reports and read 0 until one arrives. See the ★ jitter note in
+    build_record.) Forcing `unknown` on `sampling == "none"` was tried and
+    reverted — it discarded real quality data on every trunk call.
 
     The no-measurement case is handled where it belongs, at the source: Asterisk
     leaves the MES field at one of two constants when it has nothing to report —
@@ -464,6 +471,8 @@ def build_record(a) -> dict:
             return None
         incoherent = (mes < 40
                       and (loss is None or loss < 0.5)
+                      # jit is a *_last_ms field, not the peak: see the ★
+                      # jitter note in the record for what that can keep.
                       and (jit is None or jit < 40)
                       and (rtt_ms is None or rtt_ms < 80))
         return None if incoherent else mes
@@ -701,48 +710,69 @@ def build_record(a) -> dict:
         "stage": (a.stage or "").strip(),
         "rxcount": rxcount, "txcount": txcount,
         "loss_rx_pct": loss_rx, "loss_tx_pct": loss_tx,
-        # ★ DO NOT BUILD A JITTER ALARM ON EITHER *_last_ms FIELD.
-        # jitter_rx_last_ms: on announce-tagged legs it is the degenerate
-        # constant 0.019875 s in 7 of 7 observed records, across durations from
-        # 5 s to 72 s -- pinned a hair under the 20 ms ulaw packet interval, i.e.
-        # the estimator is not converging rather than reporting a real
-        # measurement. Wake-up legs sit in the same narrow band
-        # (0.019000-0.019750). A threshold there would read permanently green
-        # while measuring nothing, which is worse than having no check at all.
+        # ★ WHICH STREAM EACH JITTER FIELD MEASURES (CORRECTED 2026-10-14).
+        # Asterisk names these CHANNEL(rtcp,...) values after its RTCP reports,
+        # not after the stream they describe, so two of the three read the
+        # opposite way to the rx/tx in their names. From ast_rtp_get_stat() in
+        # res/res_rtp_asterisk.c (Asterisk 20.11.1):
         #
-        # ★ CORRECTED 2026-10-14 — AND ON AGI LEGS IT SPIKES. Talking-clock and
-        # assistant legs read 44.88, 136.38 and 36.0 ms here while
-        # jitter_rx_peak_local_ms on the same legs stayed at 1.88-2.38 ms. The
-        # 136 ms leg was on a wired gateway port with 0 % loss and a 1.8 ms RTT,
-        # which is not plausible as network jitter. The likely cause (not
-        # verified): these AGIs stop reading the channel while they work between
-        # prompts (transcribing, synthesising speech), and the interarrival
-        # estimate, read once at hangup, takes the stall for jitter, while the
-        # peak, sampled only at RTCP report instants, did not see it. So the
-        # field is unusable both ways: stuck on playback legs, inflated on AGI
-        # legs. A threshold on it would misfire.
+        #   jitter_rx_last_ms        rxjitter = rtcp->reported_jitter: the jitter
+        #                            the FAR END put in its last RTCP receiver
+        #                            report, i.e. its measure of the stream
+        #                            Asterisk SENDS. 0 until a report arrives.
+        #   jitter_tx_last_ms        txjitter = rtp->rxjitter: Asterisk's OWN
+        #                            RFC 3550 estimate for the stream it RECEIVES,
+        #                            updated on every packet and read here at
+        #                            hangup, in whole samples (125 us at 8 kHz).
+        #   jitter_rx_peak_local_ms  local_maxjitter = rtcp->maxrxjitter: the
+        #                            highest value that same local estimate took
+        #                            during the call, checked on every packet.
         #
-        # jitter_tx_last_ms was called "the usable direction" here because it
-        # varied (0.001000-0.008375) on those playback legs. It is not usable
-        # across the fleet either: it is the far end's own figure, from its RTCP
-        # receiver reports, and it read 0.0 on all four legs from one FXS gateway
-        # port in that same window. A zero there is not a measurement of zero.
+        # ★ DO NOT BUILD A JITTER ALARM ON jitter_rx_last_ms. On announce-tagged
+        # legs it is the constant 0.019875 s in 7 of 7 observed records, across
+        # durations from 5 s to 72 s, pinned a hair under the 20 ms ulaw packet
+        # interval; wake-up legs sit in the same narrow band (0.019000-0.019750).
+        # A figure that does not move between a 5 s call and a 72 s one is not
+        # following the link (why the far end reports it is not verified). A
+        # threshold there would read permanently green while measuring nothing,
+        # which is worse than having no check at all.
         #
-        # ★ jitter_rx_peak_local_ms, however, IS usable, and the old names were
-        # steering implementers away from the one receive-jitter field that
-        # measures something. It was `jitter_rx_max_ms`, which reads as the
-        # maximum OF jitter_rx_ms -- and in 22 of 28 records it was SMALLER than
-        # the field it appeared to bound (idx37: 19.88 vs 0.38, a 52x inversion).
-        # They are not the same quantity: one is Asterisk's interarrival estimate
-        # read once at hangup, the other its maxrxjitter, the peak of that
-        # estimate sampled at every RTCP report instant. The peak behaves like a
+        # On AGI legs it goes the other way. Talking-clock and assistant legs
+        # read 44.88, 136.38 and 36.0 ms here, the 136 ms one on a wired gateway
+        # port with 0 % loss and a 1.8 ms RTT, which is not plausible as network
+        # jitter; the operator AGI leg read 20.0, so not every AGI leg spikes.
+        # The stream Asterisk received on those legs was steady
+        # (jitter_rx_peak_local_ms 1.88-2.38 ms). Since this field is the far
+        # end's view of what Asterisk SENDS, the likely cause (not verified) is
+        # Asterisk's own sending going uneven while those AGIs work between
+        # prompts (transcribing, synthesising speech). Stuck on playback legs and
+        # inflated on some AGI legs, it would misfire under any threshold.
+        #
+        # jitter_tx_last_ms was once called "the usable direction" because it
+        # varied (0.001000-0.008375 s) on those playback legs. It is a real
+        # measurement, but a single draw: the running estimate's value at
+        # hangup. The 0.0 it read on all four legs from one wired FXS gateway
+        # port in the 2026-10-14 window means under one 125 us sample, a genuine
+        # low reading rather than a missing one.
+        #
+        # ★ jitter_rx_peak_local_ms IS the field to use, and the old names were
+        # steering implementers away from it. It was `jitter_rx_max_ms`, which
+        # reads as the maximum OF jitter_rx_ms -- and in 22 of 28 records it was
+        # SMALLER than the field it appeared to bound (idx37: 19.88 vs 0.38, a 52x
+        # inversion). It bounds nothing of the kind: jitter_rx_last_ms describes
+        # the stream Asterisk sends, as the far end saw it, and the peak the
+        # stream Asterisk receives, as Asterisk saw it. The peak behaves like a
         # real physical measurement -- 0.38 ms on the wired FXS gateway (ext 16)
         # against up to 58.25 ms on the WiFi cordless (ext 19) -- which is
         # exactly the contrast a receive-jitter check would want.
         #
         # v0.77.0 renamed all three so no name asserts a relationship that does
-        # not hold. Nothing thresholds on jitter today; this note exists so that
-        # stays a decision rather than an accident.
+        # not hold. No alarm thresholds on jitter today, but one gate reads it:
+        # _credible()'s coherence test drops a collapsed MES as a glitch only
+        # while the jitter beside it is under 40 ms, and the jitter it is handed
+        # is jitter_rx_last_ms / jitter_tx_last_ms. A spiked rx_last on an AGI
+        # leg therefore keeps a collapsed-MES re-INVITE glitch in the score. That
+        # is latent; moving the gate to the peak is a separate code change.
         "jitter_rx_last_ms": jit_rx, "jitter_tx_last_ms": jit_tx,
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
@@ -1048,41 +1078,42 @@ def push_ha(rec: dict) -> str:
       skipped  the leg does not drive the sensor (not the dialplan source, a
                playback leg, or no MES to report)
       posted   Home Assistant accepted the state
-      failed   set_state() refused or raised, or ha_client would not load
+      failed   set_state() refused or raised, ha_client would not load, or
+               the push faulted anywhere else
 
     WHICH legs drive the sensor is unchanged; only the result is kept.
     """
-    # Only the authoritative dialplan leg drives the headline sensor, so the
-    # poller's slightly-stale far-leg snapshot can't flicker it.
-    if not (rec["source"] == "dialplan" and rec["mes_worst"] is not None
-            and rec["tag"] not in PLAYBACK_TAGS):
-        return "skipped"
+    # ONE try around all of it, the attributes included: main() writes the
+    # ledger row only after this returns, so a fault anywhere in the push must
+    # come back as "failed" and cost the push, never the row.
     try:
+        # Only the authoritative dialplan leg drives the headline sensor, so the
+        # poller's slightly-stale far-leg snapshot can't flicker it.
+        if not (rec["source"] == "dialplan" and rec["mes_worst"] is not None
+                and rec["tag"] not in PLAYBACK_TAGS):
+            return "skipped"
         import ha_client  # noqa: E402
-    except Exception:
-        return "failed"
-    attrs = {
-        "friendly_name": "Switchboard last call quality",
-        "unit_of_measurement": "MES",
-        "icon": "mdi:phone-check" if rec["quality"] in ("excellent", "good") else "mdi:phone-alert",
-        "quality": rec["quality"],
-        "mos": rec["mos_worst"],
-        "extension": rec["ext"],
-        "leg": rec["tag"],
-        "codec": rec["codec"],
-        "duration_s": rec["dur"],
-        "loss_rx_pct": rec["loss_rx_pct"],
-        "loss_tx_pct": rec["loss_tx_pct"],
-        "jitter_rx_last_ms": rec["jitter_rx_last_ms"],
-        "jitter_tx_last_ms": rec["jitter_tx_last_ms"],
-        # The usable receive-jitter figure — see the ★ note in build_record.
-        "jitter_rx_peak_local_ms": rec["jitter_rx_peak_local_ms"],
-        "rtt_ms": rec["rtt_ms"],
-        "rtt_max_ms": rec["rtt_max_ms"],
-        "mes_rx": rec["mes_rx"],
-        "mes_tx": rec["mes_tx"],
-    }
-    try:
+        attrs = {
+            "friendly_name": "Switchboard last call quality",
+            "unit_of_measurement": "MES",
+            "icon": "mdi:phone-check" if rec["quality"] in ("excellent", "good") else "mdi:phone-alert",
+            "quality": rec["quality"],
+            "mos": rec["mos_worst"],
+            "extension": rec["ext"],
+            "leg": rec["tag"],
+            "codec": rec["codec"],
+            "duration_s": rec["dur"],
+            "loss_rx_pct": rec["loss_rx_pct"],
+            "loss_tx_pct": rec["loss_tx_pct"],
+            "jitter_rx_last_ms": rec["jitter_rx_last_ms"],
+            "jitter_tx_last_ms": rec["jitter_tx_last_ms"],
+            # The usable receive-jitter figure — see the ★ note in build_record.
+            "jitter_rx_peak_local_ms": rec["jitter_rx_peak_local_ms"],
+            "rtt_ms": rec["rtt_ms"],
+            "rtt_max_ms": rec["rtt_max_ms"],
+            "mes_rx": rec["mes_rx"],
+            "mes_tx": rec["mes_tx"],
+        }
         ok = ha_client.set_state("sensor.switchboard_last_call", rec["mes_worst"], attrs)
     except Exception:
         return "failed"
@@ -1300,6 +1331,11 @@ def main(argv=None) -> int:
         # trip on the legs that drive the sensor. When the card above has just
         # found Home Assistant unreachable, ha_client's back-off answers this one
         # at once; only a broker that timed out is waited on a second time.
+        # The trade, accepted: an add-on restart kills this detached process
+        # outright (see webui/delivery.py), so a restart inside that wait now
+        # loses the leg's row along with the push, the exposure alert legs have
+        # had since 2026-09-14. A FAULT in the push cannot cost the row:
+        # push_ha() answers "failed" for anything that goes wrong inside it.
         rec["sensor_status"] = push_ha(rec)
         append_record(rec)
         # Readable proof this program ran and what it decided -- the dialplan's

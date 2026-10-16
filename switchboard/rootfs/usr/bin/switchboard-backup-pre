@@ -46,8 +46,9 @@ STAMP_PATH = os.environ.get("SWITCHBOARD_BACKUP_STAMP",
 # rows (~120 bytes) per backup, forever. Small, but unbounded is the wrong shape
 # for a file nobody prunes. 256 KiB holds about two thousand backups, years of
 # nightly ones, and a trim keeps the newest half. This hook trims before it
-# opens the window; the post-hook's closing row follows it, so the file stays
-# within one row of the cap.
+# opens the window, and only once the file is past the cap: a file at or just
+# under it takes this hook's row and then the post-hook's, so it can reach the
+# cap plus one backup's two rows (~120 bytes) before the next backup trims it.
 STAMP_MAX_BYTES = 256 * 1024
 
 

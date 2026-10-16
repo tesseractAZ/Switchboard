@@ -69,12 +69,14 @@ bashio::log.info "Starting resident whisper-server on 127.0.0.1:${PORT} (model $
 # pipe, so musl's stdio buffers it in 1 KiB blocks and never flushes per line.
 # Its printf lines (the "listening" banner, then "Received request", "Successfully
 # loaded" and "Running whisper.cpp inference" for each request) reached the
-# journal only when a block filled: the 02:41:39Z banner and eleven requests
-# from 04:40Z to 12:40Z all arrived stamped 12:40:37.846Z, a partial line was
-# spliced onto the next Asterisk line on the same pipe, and an instance's whole
-# stdout was lost when it stopped. Lines that arrive hours late with the wrong
-# time are worse than none: they invite a timeline that is off by up to the
-# whole uptime.
+# journal only when a block filled: the 02:41:39Z banner and the request lines
+# for eleven requests from 04:40Z to 12:40Z arrived in one 1 KiB burst stamped
+# 12:40:37.846Z. The burst ended mid-request; that request's last line arrived
+# at 12:40:41.310Z spliced onto an Asterisk line on the same pipe, and a 13:05Z
+# request's lines were still in the buffer when the journal ended. Whatever is
+# buffered when an instance stops is lost. Lines that arrive hours late with
+# the wrong time are worse than none: they invite a timeline that is off by up
+# to the whole uptime.
 #
 # Line-buffering would keep them, but the image has no tool for it: stdbuf ships
 # in coreutils, which neither this Dockerfile nor the base image installs (the

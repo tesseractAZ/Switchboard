@@ -433,6 +433,22 @@ def test_a_class_never_carries_text_from_the_request():
     assert broker.route_class("POST", "/services/shell_command/anything") == "service"
 
 
+def test_a_path_urlsplit_cannot_parse_is_refused_and_counted():
+    """check() let urlsplit()'s ValueError escape handle_line(): the caller's
+    connection got no reply at all, and the request was missing from the counts
+    the summary claims are complete. It is now an ordinary refusal."""
+    clock = _fresh_traffic()
+    forwarded = []
+    fwd = lambda m, p, b: forwarded.append(p) or (200, "")
+    for path in ("//[x", "//[::1/states"):
+        assert broker.check("GET", path, None) == "malformed path", path
+    reply = broker.handle_line(
+        json.dumps({"method": "GET", "path": "//[x", "body": None}).encode(), fwd)
+    assert reply == {"refused": "malformed path"} and forwarded == [], reply
+    clock.t += 5
+    assert broker.TRAFFIC.summary() == "traffic over 5 s: other refused=1"
+
+
 def test_each_outcome_is_counted_and_summarised_once():
     clock = _fresh_traffic()
     replies = {"/states/light.kitchen": (200, json.dumps({"entity_id": "light.kitchen", "state": "on"})),
