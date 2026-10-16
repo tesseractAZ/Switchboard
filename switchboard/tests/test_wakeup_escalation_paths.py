@@ -22,10 +22,12 @@ arm. Wording had been written, reviewed, and fixed once (v0.84.0) for a case tha
 never got as far as being said out loud — and the test covering it reached that
 arm by writing the impossible pair into the fixture by hand.
 """
+import itertools
 import json
 import os
 import re
 import stat
+import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -36,9 +38,14 @@ SCHED_SRC = ROOT / "rootfs" / "usr" / "share" / "switchboard" / "wakeup" / "sche
 T0 = 1_000_000.0
 
 
-def _load(tmp_path):
-    """Load the scheduler with a temp ledger and recording stand-ins."""
-    delivery = SourceFileLoader("delivery_esc", str(
+def _load(tmp_path, tag=""):
+    """Load the scheduler with a temp ledger and recording stand-ins.
+
+    load_module() on a name that is already loaded re-runs the source INSIDE the
+    module object it finds, so two loads under one name are one module, and the
+    second silently replaces the first's state. A test that needs two schedulers
+    side by side passes a distinct `tag`."""
+    delivery = SourceFileLoader(f"delivery_esc{tag}", str(
         ROOT / "rootfs" / "usr" / "share" / "switchboard" / "webui"
         / "delivery.py")).load_module()
     delivery.OUTCOME_PATH = str(tmp_path / "d.jsonl")
@@ -60,7 +67,7 @@ def _load(tmp_path):
         sys.modules[k] = _Pre
     sys.modules["delivery"] = delivery
     try:
-        sched = SourceFileLoader("sched_esc", str(SCHED_SRC)).load_module()
+        sched = SourceFileLoader(f"sched_esc{tag}", str(SCHED_SRC)).load_module()
     finally:
         for k, v in saved.items():
             if v is None:
@@ -372,3 +379,139 @@ def test_a_ledger_replaced_by_a_link_is_not_written_through_and_not_judged(tmp_p
     assert "19" not in sched._ringing, "the unjudgeable ring was left to be judged again"
     assert secret.read_bytes() == before, "an append or a trim went through the link"
     assert stat.S_IMODE(secret.stat().st_mode) == 0o600, "group-write went through the link"
+
+
+# --------------------------------------------------------------------------- #
+# The verdict window must cover the ring (log review 2026-10-14).
+# --------------------------------------------------------------------------- #
+# Nothing enforced wakeup_retry_seconds > wakeup_ring_seconds: the schema ranges
+# are independent, the manual states the rule, and the scheduler read the raw
+# value. A ring raised past the retry had the verdict fall due mid-ring, where the
+# room reads 'Ringing' — no hold, no re-ring — and a critical push said the
+# handset was not available.
+_RUN = ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "wakeup-scheduler" / "run"
+_LOADS = itertools.count(1)
+
+
+def _load_with(tmp_path, monkeypatch, ring=None, retry=None):
+    """_load() with the two options as the run script would export them. None
+    leaves the variable unset. Every call is its own module, read with its own
+    environment, so an earlier scheduler keeps the timings it was loaded with."""
+    monkeypatch.delenv("WAKEUP_POLL_SECONDS", raising=False)
+    for name, value in (("WAKEUP_RING_SECONDS", ring), ("WAKEUP_RETRY_SECONDS", retry)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, str(value))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    sched, delivery, pushes, cards = _load(tmp_path, tag=f"_w{next(_LOADS)}")
+    sched.LOGGED = []
+    sched.log = sched.LOGGED.append
+    sched.store = type("S", (), {"PATH": str(tmp_path / "wakeups.json")})
+    return sched, delivery, pushes, cards
+
+
+def test_a_retry_inside_the_ring_is_raised_to_the_ring_plus_a_poll(tmp_path, monkeypatch):
+    sched, *_ = _load_with(tmp_path, monkeypatch, ring=120, retry=90)
+    assert sched.POLL == 20, sched.POLL
+    assert sched.RETRY_CONFIGURED == 90
+    assert sched.RETRY_AFTER == 140, sched.RETRY_AFTER
+
+
+def test_the_boundary_and_the_defaults_are_left_alone(tmp_path, monkeypatch):
+    """The clamp may only ever LENGTHEN the window, and only when it is too
+    short. The shipped defaults (ring 60, retry 90) and the live install's
+    (ring 90, retry 120) are untouched; ring + one poll exactly is enough."""
+    for ring, retry, want in ((60, 90, 90), (90, 120, 120), (90, 110, 110),
+                              (90, 109, 110), (600, 600, 620), (10, 30, 30)):
+        sched, *_ = _load_with(tmp_path / f"r{ring}-{retry}", monkeypatch,
+                               ring=ring, retry=retry)
+        assert sched.RETRY_AFTER == want, (ring, retry, sched.RETRY_AFTER)
+
+
+def test_an_unset_or_empty_retry_follows_the_ring(tmp_path, monkeypatch):
+    """The scheduler's own fallback, ring + 30 s, which the run script's fixed
+    `:-90` used to make unreachable. Empty is read as unset, not as a crash."""
+    for i, retry in enumerate((None, "", "  ")):
+        sched, *_ = _load_with(tmp_path / f"e{i}", monkeypatch, ring=150, retry=retry)
+        assert sched.RETRY_CONFIGURED == 180 and sched.RETRY_AFTER == 180, (
+            retry, sched.RETRY_CONFIGURED, sched.RETRY_AFTER)
+
+
+def test_a_phone_still_ringing_is_not_judged_unanswered(tmp_path, monkeypatch):
+    """★ The failure itself, end to end through _reconcile_rings().
+
+    Ring 120 s, retry left at 90: the first tick past 90 s used to find the room
+    'Ringing', skip the re-ring and push a critical alert about a phone ringing
+    in the room. With the clamp the ring is left alone until it has had its full
+    120 s and a poll, and is then judged — and rung again — as usual."""
+    sched, delivery, pushes, cards = _load_with(tmp_path / "clamped", monkeypatch,
+                                                ring=120, retry=90)
+    rang = []
+    state = ["Ringing"]
+    sched.ami = type("A", (), {
+        "get_endpoints": staticmethod(lambda: [{"name": "19", "state": state[0]}]),
+        "originate_wakeup": staticmethod(lambda e, r: rang.append((e, r)) or True)})
+    _ring(sched)
+    sched._reconcile_rings(T0 + 100)
+    assert pushes == [] and cards == [], f"a ringing phone was escalated: {pushes}"
+    assert _rows(delivery) == [] and "19" in sched._ringing
+    sched._reconcile_rings(T0 + 139)
+    assert "19" in sched._ringing and rang == []
+
+    state[0] = "Not in use"                 # the ring timed out unanswered
+    sched._reconcile_rings(T0 + 140)
+    assert rang == [("19", 120)], rang
+    assert pushes == []
+
+    # The self-check: the unclamped window, on the same fixture, IS the defect.
+    sched2, _d2, pushes2, _c2 = _load_with(tmp_path / "raw", monkeypatch,
+                                           ring=120, retry=90)
+    sched2.RETRY_AFTER = sched2.RETRY_CONFIGURED
+    sched2.ami = type("A", (), {
+        "get_endpoints": staticmethod(lambda: [{"name": "19", "state": "Ringing"}]),
+        "originate_wakeup": staticmethod(lambda e, r: True)})
+    _ring(sched2)
+    sched2._reconcile_rings(T0 + 100)
+    assert len(pushes2) == 1, "the fixture cannot see the false push it exists to stop"
+    assert sched2 is not sched and sched.RETRY_AFTER == 140, (
+        "the second load replaced the clamped scheduler in place")
+
+
+def test_the_startup_line_names_the_ring_and_the_retry(tmp_path, monkeypatch):
+    """Driven through main() itself, with the loop already stopped."""
+    sched, *_ = _load_with(tmp_path, monkeypatch, ring=90, retry=120)
+    monkeypatch.setattr(sched, "signal", type("Sig", (), {
+        "SIGTERM": 15, "SIGINT": 2, "signal": staticmethod(lambda *a: None)}))
+    sched._stop = True
+    sched.main()
+    started = [m for m in sched.LOGGED if m.startswith("scheduler started")]
+    assert len(started) == 1, sched.LOGGED
+    assert "ring 90s" in started[0] and "retry 120s" in started[0], started[0]
+    assert not [m for m in sched.LOGGED if "wake-up retry" in m], sched.LOGGED
+
+
+def test_a_clamped_retry_is_said_out_loud(tmp_path, monkeypatch):
+    sched, *_ = _load_with(tmp_path, monkeypatch, ring=120, retry=90)
+    sched._log_wakeup_bounds()
+    assert any("ring 120s, retry 140s" in m for m in sched.LOGGED), sched.LOGGED
+    warn = [m for m in sched.LOGGED if m.startswith("WARNING: wake-up retry")]
+    assert len(warn) == 1, sched.LOGGED
+    assert "90s" in warn[0] and "140s" in warn[0] and "wakeup_retry_seconds" in warn[0]
+
+
+def test_the_run_script_leaves_an_empty_retry_unset(tmp_path):
+    """Runs the run script's own lines under bash with the option reader stubbed.
+    An empty read must leave the variable UNSET — not empty, and not a number
+    chosen here — even when the environment already carries one."""
+    run = _RUN.read_text()
+    start = run.index('WRT="$(switchboard-opt wakeup_retry_seconds)"')
+    end = run.index("\n", run.index("unset WAKEUP_RETRY_SECONDS")) + 1
+    block = run[start:end]
+    assert "${WRT:-" not in block and "${WRT-" not in block, "a fixed fallback is back"
+    for value, want in (("", "UNSET"), ("120", "120"), ("45", "45")):
+        script = (f"switchboard-opt() {{ printf '%s' '{value}'; }}\n" + block
+                  + 'printf "%s" "${WAKEUP_RETRY_SECONDS-UNSET}"\n')
+        got = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             env=dict(os.environ, WAKEUP_RETRY_SECONDS="77")).stdout
+        assert got == want, (value, got)
