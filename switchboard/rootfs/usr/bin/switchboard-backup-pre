@@ -41,6 +41,65 @@ SHARE_DIR = os.environ.get("SWITCHBOARD_SHARE", "/share/switchboard")
 # stopped being copied, so a torn ledger line could not be attributed.
 STAMP_PATH = os.environ.get("SWITCHBOARD_BACKUP_STAMP",
                             "/share/switchboard/backup-window.jsonl")
+# ★ THE ONE /share LEDGER WITH NO CAP (until 2026-10-14). Every other ledger in
+# /share/switchboard trims itself as it writes; this one was append-only, two
+# rows (~120 bytes) per backup, forever. Small, but unbounded is the wrong shape
+# for a file nobody prunes. 256 KiB holds about two thousand backups, years of
+# nightly ones, and a trim keeps the newest half. This hook trims before it
+# opens the window, and only once the file is past the cap: a file at or just
+# under it takes this hook's row and then the post-hook's, so it can reach the
+# cap plus one backup's two rows (~120 bytes) before the next backup trims it.
+STAMP_MAX_BYTES = 256 * 1024
+
+
+def _open_no_follow(path: str, flags: int) -> int:
+    """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
+
+    A copy of switchboard-callqos's helper. The Supervisor runs this hook as
+    root, and /share/switchboard can be written by `asterisk` and from the host,
+    so a name may be a link planted in place of the stamp file. O_NOFOLLOW makes
+    a link fail to open, the fstat refuses a FIFO, a device or a directory, and
+    O_NONBLOCK keeps a planted FIFO from hanging the backup at the open.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
+    """Trim an append-only ledger to its newest records. Best-effort.
+
+    A copy of switchboard-callqos's helper (see its docstring for the v0.77.0
+    zero-byte truncation it replaced), by fd and never through a symlink;
+    tests/test_ledger_rotation.py runs every copy over one input and requires
+    identical bytes, so the copies cannot drift.
+    """
+    try:
+        fd = _open_no_follow(path, os.O_RDWR)
+    except OSError:
+        return                            # absent, a link, or not a file: nothing to trim
+    try:
+        with os.fdopen(fd, "r+b") as fh:
+            if os.fstat(fh.fileno()).st_size <= max_bytes:
+                return
+            keep = max(1, int(max_bytes * keep_frac))
+            fh.seek(-keep, os.SEEK_END)
+            tail = fh.read()
+            # Everything before the first newline is half a record. Drop it: a
+            # reader must never have to guess whether the first line is complete.
+            nl = tail.find(b"\n")
+            tail = tail[nl + 1:] if nl != -1 else b""
+            # Written first and cut after, so the file is never empty.
+            fh.seek(0)
+            fh.write(tail)
+            fh.truncate()
+    except OSError:
+        pass                              # a trim must never break the write
 
 
 def _stamp(phase: str, synced: int = -1) -> None:
@@ -54,16 +113,15 @@ def _stamp(phase: str, synced: int = -1) -> None:
         rec["synced_files"] = synced
     try:
         os.makedirs(os.path.dirname(STAMP_PATH), exist_ok=True)
+        _rotate_tail(STAMP_PATH, STAMP_MAX_BYTES)
         # ★ By fd, never through a symlink (2026-09-14). The Supervisor runs this
         # hook as root inside the container, and /share/switchboard can be
         # written by `asterisk` and from the host: by name, this append followed
         # a link planted in place of the stamp file onto whatever it pointed at.
         # A link or a FIFO now fails the stamp, which is logged; the backup runs.
-        fd = os.open(STAMP_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT
-                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                raise OSError(f"{STAMP_PATH}: not a regular file")
+        with os.fdopen(_open_no_follow(STAMP_PATH, os.O_WRONLY | os.O_APPEND
+                                       | os.O_CREAT),
+                       "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
             fh.flush()
             os.fsync(fh.fileno())

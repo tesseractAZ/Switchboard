@@ -22,7 +22,9 @@ if __name__ == "__main__":
     # A hook runs via `docker exec`, whose stdout does NOT reach the add-on's log
     # stream -- so the line above is unverifiable from outside. The stamp is the
     # part an audit can actually read, and it closes the window the pre-hook
-    # opened.
+    # opened. The pre-hook caps the file (STAMP_MAX_BYTES there) just before it
+    # opens each window, which keeps it within one backup's two rows of the cap,
+    # so this hook does not trim as well.
     try:
         os.makedirs(os.path.dirname(STAMP_PATH), exist_ok=True)
         # ★ By fd, never through a symlink (2026-09-14). The Supervisor runs this
