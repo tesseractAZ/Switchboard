@@ -188,3 +188,233 @@ def test_the_console_asset_route_never_builds_a_path_from_the_request():
             break
     else:
         raise AssertionError("_CONSOLE_ASSETS not found")
+
+
+# --------------------------------------------------------------------------- #
+# A refusal leaves one line, and a flood does not leave a flood (2026-10-14).
+#
+# Until this release the guard wrote its 403 and nothing else, and uvicorn runs
+# with --no-access-log, so a LAN probe or a wrong announce token tried a thousand
+# times left no trace at all. The fix had to be rate-limited: journald limits
+# docker.service as a whole, and one looping host must not be able to push every
+# other container's lines past that limit.
+# --------------------------------------------------------------------------- #
+import asyncio  # noqa: E402
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import re  # noqa: E402
+
+
+def _reset_refusal_log():
+    with app._refusal_lock:
+        app._refusals.clear()
+        app._refusals_overflow[:] = [0.0, 0]
+
+
+def _drive(scope):
+    """Run one scope through the real middleware.
+
+    Returns (messages sent, lines printed, whether the wrapped app was reached)."""
+    sent, reached = [], []
+
+    async def inner(scope, receive, send):
+        reached.append(scope)
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        asyncio.run(app.RestrictToIngress(inner)(scope, receive, send))
+    return sent, out.getvalue().splitlines(), bool(reached)
+
+
+def _printed(fn, *a, **k):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = fn(*a, **k)
+    return result, out.getvalue().splitlines()
+
+
+def test_a_refused_request_leaves_exactly_one_line():
+    _reset_refusal_log()
+    sent, lines, reached = _drive(_http("192.168.1.50", "/api/status"))
+    assert not reached
+    assert sent[0]["status"] == 403
+    assert sent[1]["body"] == b'{"error":"forbidden"}', "the client is told nothing more"
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("[switchboard-webui] refused GET /api/status from 192.168.1.50: "), line
+    assert app.REFUSED_NOT_INGRESS in line, line
+    # ...and an admitted request writes nothing: this is not an access log.
+    _, lines, reached = _drive(_http(SUPERVISOR, "/api/status"))
+    assert reached and lines == []
+    _, lines, reached = _drive(_http("192.168.1.51", "/announce/a1234567890.wav"))
+    assert reached and lines == [], "an exempt LAN fetch is not a refusal"
+
+
+def test_an_ipv4_mapped_address_is_logged_as_the_address():
+    _reset_refusal_log()
+    _, lines, _ = _drive(_http("::ffff:192.168.1.50", "/api/status"))
+    assert len(lines) == 1 and " from 192.168.1.50: " in lines[0], lines
+
+
+def test_repeats_from_one_address_are_counted_not_logged():
+    """The first refusal per address is a line; the next ten minutes of them are
+    one summary line; after that the address is logged afresh."""
+    _reset_refusal_log()
+    host, t0 = "192.168.1.50", 1000.0
+    results, lines = [], []
+    for i in range(50):
+        r, out = _printed(app._log_refusal, host, "GET", "/api/status",
+                          app.REFUSED_NOT_INGRESS, now=t0 + i)
+        results.append(r)
+        lines += out
+    assert results.count(True) == 1 and results[0] is True, results
+    assert len(lines) == 1, lines
+    # Another address is not hidden behind the first one's window.
+    r, out = _printed(app._log_refusal, "192.168.1.60", "GET", "/", app.REFUSED_NOT_INGRESS,
+                      now=t0 + 60)
+    assert r is True and len(out) == 1 and "192.168.1.60" in out[0], out
+    # Still inside the window: nothing to summarise yet.
+    _, out = _printed(app._flush_refusal_summaries, now=t0 + 599)
+    assert out == [], out
+    # The window closes: one summary line carrying the count, then silence.
+    _, out = _printed(app._flush_refusal_summaries, now=t0 + app._REFUSAL_LOG_WINDOW_S)
+    assert len(out) == 1, out
+    assert "refused 49 more request(s) from 192.168.1.50" in out[0], out
+    _, out = _printed(app._flush_refusal_summaries, now=t0 + app._REFUSAL_LOG_WINDOW_S + 1)
+    assert out == [], "a summary is written once"
+    # The second address was refused only once, so it has nothing to summarise...
+    _, out = _printed(app._flush_refusal_summaries, now=t0 + 60 + app._REFUSAL_LOG_WINDOW_S)
+    assert out == [], out
+    # ...and the first, refused again after its window, is logged in full again.
+    r, out = _printed(app._log_refusal, host, "POST", "/api/ring/11", app.REFUSED_NOT_INGRESS,
+                      now=t0 + 2 * app._REFUSAL_LOG_WINDOW_S)
+    assert r is True and len(out) == 1 and "POST /api/ring/11" in out[0], out
+    _reset_refusal_log()
+
+
+def test_a_burst_through_the_middleware_is_one_line():
+    _reset_refusal_log()
+    total = []
+    for _ in range(25):
+        sent, lines, _ = _drive(_http("192.168.1.50", "/api/status"))
+        assert sent[0]["status"] == 403, "rate limiting the LOG must never admit anything"
+        total += lines
+    assert len(total) == 1, total
+    _reset_refusal_log()
+
+
+def test_addresses_past_the_table_share_one_counter():
+    """A scan from many addresses costs a bounded number of lines too."""
+    _reset_refusal_log()
+    saved = app._REFUSAL_LOG_HOSTS
+    try:
+        app._REFUSAL_LOG_HOSTS = 4
+        lines = []
+        for i in range(14):
+            _, out = _printed(app._log_refusal, f"192.168.1.{100 + i}", "GET", "/",
+                              app.REFUSED_NOT_INGRESS, now=1000.0)
+            lines += out
+        assert len(lines) == 4, lines
+        assert len(app._refusals) == 4, "the table grew past its bound"
+        _, out = _printed(app._flush_refusal_summaries, now=1000.0 + app._REFUSAL_LOG_WINDOW_S)
+        assert len(out) == 1, out
+        assert "refused 10 request(s) from addresses past the first 4" in out[0], out
+        assert app._refusals == {} and app._refusals_overflow == [0.0, 0]
+    finally:
+        app._REFUSAL_LOG_HOSTS = saved
+        _reset_refusal_log()
+
+
+def test_the_announce_token_never_reaches_the_log():
+    """The reason is named; the token, configured or presented, never is."""
+    configured = "tok-0123456789abcdef"
+    guess = "tok-0123456789abcdeX"
+    saved = app._announce_token
+    _reset_refusal_log()
+    try:
+        app._announce_token = lambda: configured
+        path = "/api/announce/19"
+        cases = [
+            ("192.168.1.71", [("x-announce-token", guess)], app.REFUSED_HEADER_WRONG),
+            ("192.168.1.72", [], app.REFUSED_HEADER_MISSING),
+        ]
+        for host, headers, reason in cases:
+            sent, lines, reached = _drive(_http(host, path, "POST", headers))
+            assert not reached and sent[0]["status"] == 403
+            assert len(lines) == 1 and lines[0].endswith(
+                f"from {host}: {reason} (further refusals from this address are "
+                f"counted for 10 min)"), lines
+            for secret in (configured, guess, "0123456789abcde", "tok-"):
+                assert secret not in lines[0], (secret, lines[0])
+        # The right token from the LAN is admitted, and admission writes nothing.
+        _, lines, reached = _drive(_http("192.168.1.73", path, "POST",
+                                         [("x-announce-token", configured)]))
+        assert reached and lines == []
+        # With no token configured the LAN announce path is off, and says so.
+        app._announce_token = lambda: ""
+        _, lines, reached = _drive(_http("192.168.1.74", path, "POST",
+                                         [("x-announce-token", guess)]))
+        assert not reached and len(lines) == 1, lines
+        assert app.REFUSED_LAN_ANNOUNCE_OFF in lines[0] and guess not in lines[0], lines
+    finally:
+        app._announce_token = saved
+        _reset_refusal_log()
+
+
+def test_the_announce_token_is_compared_in_constant_time():
+    """`==` returns at the first differing character, so its timing says how much
+    of a guess was right. console-web/webauth.py already used compare_digest."""
+    import ast
+    import inspect
+    body = inspect.getsource(app._refusal_reason)
+    assert "_token_matches(sent, tok)" in body
+    assert not re.search(r"==\s*tok\b|\btok\s*==", body), "a plain == on the token is back"
+    tree = ast.parse(inspect.getsource(app._token_matches))
+    calls = {f"{n.func.value.id}.{n.func.attr}" for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name)}
+    assert "hmac.compare_digest" in calls, calls
+    assert app._token_matches("same", "same") is True
+    assert app._token_matches("same", "samf") is False
+    assert app._token_matches("short", "longer-token") is False
+    # A token the str form of compare_digest would raise TypeError on.
+    assert app._token_matches("tökén", "tökén") is True
+    assert app._token_matches("tökén", "token") is False
+
+
+def test_a_logged_path_cannot_forge_a_line():
+    """scope["path"] is percent-decoded, so /%0a arrives as a real newline."""
+    _reset_refusal_log()
+    forged = "/x\n[switchboard-webui] web: test ring to 11 queued\r" + "A" * 500
+    _, lines, _ = _drive(_http("192.168.1.50", forged))
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "\r" not in line
+    assert "/x?[switchboard-webui]?web:?test?ring" in line, line
+    assert "A" * (app._REFUSAL_LOG_PATH_MAX + 1) not in line, line
+    assert "... from 192.168.1.50" in line, line
+    _reset_refusal_log()
+    _, lines, _ = _drive(_http("192.168.1.50", "/\x1b[2J‮gnp.x"))
+    assert len(lines) == 1 and "\x1b" not in lines[0] and "‮" not in lines[0], lines
+    _reset_refusal_log()
+
+
+def test_a_refused_websocket_adds_no_line_of_its_own():
+    """uvicorn already writes '<client> - "WebSocket <path>" 403' for a handshake
+    closed before accept; a second line from the guard would double it."""
+    _reset_refusal_log()
+    sent, lines, reached = _drive(_ws("192.168.1.50"))
+    assert not reached
+    assert sent == [{"type": "websocket.close", "code": 1008}], sent
+    assert lines == [], lines
+
+
+if __name__ == "__main__":
+    import _runner
+    raise SystemExit(_runner.run(globals()))
