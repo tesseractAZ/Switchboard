@@ -554,10 +554,14 @@ _LAN_ANNOUNCE_PATH = re.compile(r"/announce/a[0-9]{1,24}\.wav")
 #
 # Never the token, the query string or a header: the line names the address,
 # the method, the path (control characters replaced, truncated) and the reason.
+# Nor a speaker clip's name: only a GET is exempt, so a HEAD for a live clip is
+# refused, and its name is the one credential a LAN fetch needs — every
+# clip-shaped name in a logged path is written as `a<digits>.wav`.
 #
 # HTTP only. A refused WebSocket handshake is already logged, once per
 # handshake, by uvicorn itself ('<client> - "WebSocket <path>" 403'), and a
-# second line here would double it.
+# second line here would double it. That line is uvicorn's, so none of the
+# above bounds it: a host looping on handshakes still costs a line apiece.
 # --------------------------------------------------------------------------- #
 _REFUSAL_LOG_WINDOW_S = 600.0
 _REFUSAL_LOG_HOSTS = 256
@@ -567,7 +571,13 @@ _refusal_lock = threading.Lock()
 _refusals: dict = {}
 # [window start, count] for refusals from addresses that found the table full.
 _refusals_overflow = [0.0, 0]
+# Printable ASCII less the space, so a logged value is one token: neither a
+# newline nor a requester's own " from <address>" can forge a line or a field.
 _UNPRINTABLE = re.compile(r"[^\x21-\x7e]")
+# Searched, not matched, and before truncation: a clip name in a longer path
+# (`/announce/a<digits>.wav/`, `//announce/...`) is hidden too, and never cut
+# into a prefix that survives.
+_CLIP_NAME_IN_PATH = re.compile(r"a[0-9]{1,24}\.wav")
 
 
 def _log_safe(value, limit: int) -> str:
@@ -577,8 +587,14 @@ def _log_safe(value, limit: int) -> str:
     a second line saying whatever the requester liked."""
     s = str(value or "")
     cut = len(s) > limit
-    s = s[:limit].replace("\r", "?").replace("\n", "?")
-    return _UNPRINTABLE.sub("?", s) + ("..." if cut else "")
+    return _UNPRINTABLE.sub("?", s[:limit]) + ("..." if cut else "")
+
+
+def _log_path(path) -> str:
+    """A refused request's path for its log line: any speaker-clip name hidden,
+    then made _log_safe."""
+    return _log_safe(_CLIP_NAME_IN_PATH.sub("a<digits>.wav", str(path or "")),
+                     _REFUSAL_LOG_PATH_MAX)
 
 
 def _refusal_summaries(now: float) -> list:
@@ -625,7 +641,7 @@ def _log_refusal(host: str, method: str, path: str, reason: str,
         else:
             _refusals[host] = [now, 0]
             lines.append(f"[switchboard-webui] refused {_log_safe(method, 16)} "
-                         f"{_log_safe(path, _REFUSAL_LOG_PATH_MAX)} from {host}: "
+                         f"{_log_path(path)} from {host}: "
                          f"{reason} (further refusals from this address are "
                          f"counted for {minutes} min)")
             logged = True
@@ -1433,13 +1449,14 @@ def api_ring(ext: str) -> JSONResponse:
     try:
         ok = ring_extension(ext)
     except (AMIError, OSError) as exc:
-        print(f"[switchboard-webui] ring {ext} failed: {exc}", flush=True)
+        print(f"[switchboard-webui] web: test ring to {ext} failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
     # ★ A LINE FOR THE ONE THAT WORKED TOO (2026-10-14 review). The test ring is
     # an Application originate: it never enters the dialplan, so it leaves no
     # callqos row, no ledger row and, answered or not, nothing in the journal but
     # Asterisk's own `Called <ext>`. Four test rings in one review window could
-    # be attributed to this page only by elimination. `web` says which surface.
+    # be attributed to this page only by elimination. `web:` says which surface,
+    # on the failure line above as well, so one grep finds every outcome.
     print(f"[switchboard-webui] web: test ring to {ext} "
           f"{'queued' if ok else 'not accepted by Asterisk'}", flush=True)
     return JSONResponse({"ok": ok})
@@ -1609,32 +1626,48 @@ def api_mwi(ext: str, state: str) -> JSONResponse:
     try:
         ok = set_mwi(ext, on)
     except (AMIError, OSError) as exc:
-        print(f"[switchboard-webui] mwi {ext} {state} failed: {exc}", flush=True)
+        print(f"[switchboard-webui] web: {'set' if on else 'clear'} MWI for {ext} "
+              f"failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
     # Optimistic CLEAR, honest SET: persist the flag when AMI accepted it, or
     # always when clearing (on=False — a failed clear should still drop the
     # badge). When a SET is REFUSED (ok is False), do NOT set the badge: the
     # stutter tone never started, so claiming it did would be a lie the init
     # replay would then re-push to Asterisk on the next restart.
-    verb = "set" if on else "cleared"
-    stored = False
+    stored = changed = False
     if ok or not on:
         if mwi_store is not None:
             try:
+                # Read before the write: set_flag writes only on a change and
+                # returns the new state, not whether it moved, so this is the
+                # only way the line below can tell a clear from a no-op. The two
+                # take the lock separately, so a dial-0 clear landing between
+                # them can skew only this wording, never the flag.
+                changed = mwi_store.is_set(ext) != on
                 mwi_store.set_flag(ext, on)
                 stored = True
             except Exception as exc:
-                print(f"[switchboard-webui] mwi flag {ext} failed: {exc}", flush=True)
+                print(f"[switchboard-webui] web: mwi flag {ext} failed: {exc}", flush=True)
     elif not ok:  # a SET that Asterisk rejected — leave the badge off, report it
         print(f"[switchboard-webui] web: set MWI for {ext} refused by Asterisk; "
               "badge left off", flush=True)
         return JSONResponse({"ok": False, "error": "ami_rejected"}, status_code=502)
-    # One line per change, in the switchboard-mwi CLI's own words, so a review
-    # can tell a dashboard clear from the dial-0 one — the store writes nothing
-    # when a flag is already in the state asked for, so the file's mtime cannot.
-    where = " + ".join(w for w, done in (("store", stored), ("Asterisk", ok)) if done)
-    print(f"[switchboard-webui] web: {verb} MWI for {ext} ({where or 'nothing updated'})"
-          f"{'' if ok else '; Asterisk refused the update'}", flush=True)
+    # One line per action, in the switchboard-mwi CLI's wording — no-op form
+    # included — so a review can tell a dashboard clear from the dial-0 one: the
+    # store writes nothing when a flag is already in the state asked for, so the
+    # file's mtime cannot. Asterisk is told either way (its MWI is in-memory and
+    # may have drifted from the store).
+    if stored and not changed:
+        head = f"MWI for {ext} already {'set' if on else 'clear'}"
+        tail = (" (store unchanged; Asterisk re-asserted)" if ok
+                else " in store; Asterisk MWI update failed")
+    else:
+        head = f"{'set' if on else 'cleared'} MWI for {ext}"
+        tail = (" (store + Asterisk)" if stored and ok
+                else " in store; Asterisk MWI update failed" if stored
+                else " in Asterisk; store not updated" if ok
+                else ": neither the store nor Asterisk was updated")
+    print(f"[switchboard-webui] web: {head}{tail}", flush=True)
     return JSONResponse({"ok": True, "mwi": on})
 
 

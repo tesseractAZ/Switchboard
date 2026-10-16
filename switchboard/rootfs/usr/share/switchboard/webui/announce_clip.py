@@ -76,6 +76,9 @@ def sweep(directory: str | None = None, max_age: float = CLIP_MAX_AGE_S,
     a file that vanished or could not be removed. lstat, so a planted link is
     judged and removed as itself and its target is never touched."""
     directory = directory or ANNOUNCE_DIR
+    # Wall clock, because mtime is: a forward step of more than max_age while a
+    # clip is in use would delete it early. HAOS sets the clock before add-ons
+    # start, so the step this could meet is a small NTP correction.
     now = time.time() if now is None else now
     try:
         names = os.listdir(directory)
@@ -94,6 +97,7 @@ def sweep(directory: str | None = None, max_age: float = CLIP_MAX_AGE_S,
         except OSError:
             pass
     return removed
+
 
 # 8 kHz mono 16-bit PCM — what Asterisk Playback reads, and all the arithmetic a
 # duration needs. One definition: app.py's _announce_seconds() delegates here.

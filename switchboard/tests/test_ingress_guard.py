@@ -241,25 +241,73 @@ def _printed(fn, *a, **k):
 
 def test_a_refused_request_leaves_exactly_one_line():
     _reset_refusal_log()
-    sent, lines, reached = _drive(_http("192.168.1.50", "/api/status"))
-    assert not reached
-    assert sent[0]["status"] == 403
-    assert sent[1]["body"] == b'{"error":"forbidden"}', "the client is told nothing more"
-    assert len(lines) == 1, lines
-    line = lines[0]
-    assert line.startswith("[switchboard-webui] refused GET /api/status from 192.168.1.50: "), line
-    assert app.REFUSED_NOT_INGRESS in line, line
-    # ...and an admitted request writes nothing: this is not an access log.
-    _, lines, reached = _drive(_http(SUPERVISOR, "/api/status"))
-    assert reached and lines == []
-    _, lines, reached = _drive(_http("192.168.1.51", "/announce/a1234567890.wav"))
-    assert reached and lines == [], "an exempt LAN fetch is not a refusal"
+    try:
+        sent, lines, reached = _drive(_http("192.168.1.50", "/api/status"))
+        assert not reached
+        assert sent[0]["status"] == 403
+        assert sent[1]["body"] == b'{"error":"forbidden"}', "the client is told nothing more"
+        assert len(lines) == 1, lines
+        line = lines[0]
+        assert line.startswith(
+            "[switchboard-webui] refused GET /api/status from 192.168.1.50: "), line
+        assert app.REFUSED_NOT_INGRESS in line, line
+        # ...and an admitted request writes nothing: this is not an access log.
+        _, lines, reached = _drive(_http(SUPERVISOR, "/api/status"))
+        assert reached and lines == []
+        _, lines, reached = _drive(_http("192.168.1.51", "/announce/a1234567890.wav"))
+        assert reached and lines == [], "an exempt LAN fetch is not a refusal"
+    finally:
+        _reset_refusal_log()
 
 
 def test_an_ipv4_mapped_address_is_logged_as_the_address():
     _reset_refusal_log()
-    _, lines, _ = _drive(_http("::ffff:192.168.1.50", "/api/status"))
-    assert len(lines) == 1 and " from 192.168.1.50: " in lines[0], lines
+    try:
+        _, lines, _ = _drive(_http("::ffff:192.168.1.50", "/api/status"))
+        assert len(lines) == 1 and " from 192.168.1.50: " in lines[0], lines
+    finally:
+        _reset_refusal_log()
+
+
+def test_a_live_clip_name_never_reaches_the_log():
+    """Only a GET is exempt, so a HEAD (or anything else) for a live speaker clip
+    is refused and logged — and the clip's name is the one credential a LAN fetch
+    needs. Every clip-shaped name in a logged path is written as a placeholder."""
+    name = "a" + "09182736450918273645" + ".wav"
+    digits = name[1:-4]
+    paths = [
+        ("HEAD", f"/announce/{name}"),
+        ("POST", f"/announce/{name}"),
+        ("GET", f"/announce/{name}/"),              # not a fullmatch: refused
+        ("GET", f"//announce/{name}"),
+        # A clip name straddling the truncation point: cut first, ten of its
+        # digits would survive. It is hidden first, so none do.
+        ("GET", "/" + "x" * (app._REFUSAL_LOG_PATH_MAX - 22) + f"/announce/{name}"),
+    ]
+    try:
+        for i, (method, path) in enumerate(paths):
+            _reset_refusal_log()
+            host = f"192.168.1.{80 + i}"
+            sent, lines, reached = _drive(_http(host, path, method))
+            assert not reached and sent[0]["status"] == 403, (method, path)
+            assert len(lines) == 1, lines
+            line = lines[0]
+            assert f"from {host}: " in line, line
+            # No run of the clip's digits long enough to narrow a guess survives.
+            for k in range(len(digits) - 5):
+                assert digits[k:k + 6] not in line, (method, path, line)
+            if not path.startswith("/x"):
+                assert "a<digits>.wav" in line, line
+        # The method and the rest of the path are still there to read.
+        _reset_refusal_log()
+        _, lines, _ = _drive(_http("192.168.1.90", f"/announce/{name}", "HEAD"))
+        assert lines[0].startswith(
+            "[switchboard-webui] refused HEAD /announce/a<digits>.wav from 192.168.1.90: "), lines
+        # The exempt GET itself is still admitted, and still silent.
+        _, lines, reached = _drive(_http("192.168.1.91", f"/announce/{name}"))
+        assert reached and lines == []
+    finally:
+        _reset_refusal_log()
 
 
 def test_repeats_from_one_address_are_counted_not_logged():
@@ -391,28 +439,38 @@ def test_the_announce_token_is_compared_in_constant_time():
 def test_a_logged_path_cannot_forge_a_line():
     """scope["path"] is percent-decoded, so /%0a arrives as a real newline."""
     _reset_refusal_log()
-    forged = "/x\n[switchboard-webui] web: test ring to 11 queued\r" + "A" * 500
-    _, lines, _ = _drive(_http("192.168.1.50", forged))
-    assert len(lines) == 1, lines
-    line = lines[0]
-    assert "\r" not in line
-    assert "/x?[switchboard-webui]?web:?test?ring" in line, line
-    assert "A" * (app._REFUSAL_LOG_PATH_MAX + 1) not in line, line
-    assert "... from 192.168.1.50" in line, line
-    _reset_refusal_log()
-    _, lines, _ = _drive(_http("192.168.1.50", "/\x1b[2J‮gnp.x"))
-    assert len(lines) == 1 and "\x1b" not in lines[0] and "‮" not in lines[0], lines
-    _reset_refusal_log()
+    try:
+        forged = "/x\n[switchboard-webui] web: test ring to 11 queued\r" + "A" * 500
+        _, lines, _ = _drive(_http("192.168.1.50", forged))
+        assert len(lines) == 1, lines
+        line = lines[0]
+        assert "\r" not in line
+        assert "/x?[switchboard-webui]?web:?test?ring" in line, line
+        assert "A" * (app._REFUSAL_LOG_PATH_MAX + 1) not in line, line
+        assert "... from 192.168.1.50" in line, line
+        _reset_refusal_log()
+        _, lines, _ = _drive(_http("192.168.1.50", "/\x1b[2J‮gnp.x"))
+        assert len(lines) == 1 and "\x1b" not in lines[0] and "‮" not in lines[0], lines
+        # A space would let a path carry a " from <address>" of its own.
+        _reset_refusal_log()
+        _, lines, _ = _drive(_http("192.168.1.50", "/x from 192.0.2.1: ok"))
+        assert " from 192.0.2.1" not in lines[0] and "/x?from?192.0.2.1:?ok" in lines[0], lines
+    finally:
+        _reset_refusal_log()
 
 
 def test_a_refused_websocket_adds_no_line_of_its_own():
     """uvicorn already writes '<client> - "WebSocket <path>" 403' for a handshake
     closed before accept; a second line from the guard would double it."""
     _reset_refusal_log()
-    sent, lines, reached = _drive(_ws("192.168.1.50"))
-    assert not reached
-    assert sent == [{"type": "websocket.close", "code": 1008}], sent
-    assert lines == [], lines
+    try:
+        sent, lines, reached = _drive(_ws("192.168.1.50"))
+        assert not reached
+        assert sent == [{"type": "websocket.close", "code": 1008}], sent
+        assert lines == [], lines
+        assert app._refusals == {}, "a WebSocket refusal must not open a window"
+    finally:
+        _reset_refusal_log()
 
 
 if __name__ == "__main__":

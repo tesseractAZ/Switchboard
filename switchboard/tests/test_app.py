@@ -2213,6 +2213,16 @@ def test_a_test_ring_from_the_dashboard_leaves_a_line() -> None:
         resp, lines = _lines_printed(app.api_ring, "99")
         check("ring: an unknown extension rings nothing and logs nothing",
               resp.status_code == 404 and lines == [])
+
+        def _down(ext):
+            raise OSError("connection refused")
+
+        app.ring_extension = _down
+        resp, lines = _lines_printed(app.api_ring, "13")
+        check("ring: an unreachable AMI is a web: line too, so one grep finds it",
+              resp.status_code == 502
+              and lines == ["[switchboard-webui] web: test ring to 13 failed: "
+                            "connection refused"])
     finally:
         for k, v in saved.items():
             setattr(app, k, v)
@@ -2220,18 +2230,24 @@ def test_a_test_ring_from_the_dashboard_leaves_a_line() -> None:
 
 def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
     """The store writes only when a flag changes, so mwi.json's mtime could not
-    say which clear was the dashboard's; the line can."""
-    flags = []
+    say which clear was the dashboard's; the line can — and a no-op says it was
+    one, in switchboard-mwi's words, rather than claiming a store write."""
+    flags, state = [], set()
 
     class _Store:
         @staticmethod
+        def is_set(ext):
+            return ext in state
+
+        @staticmethod
         def set_flag(ext, on):
             flags.append((ext, on))
+            (state.add if on else state.discard)(ext)
             return on
 
         @staticmethod
         def exts():
-            return []
+            return sorted(state)
 
     saved = {k: getattr(app, k) for k in ("load_options", "set_mwi", "mwi_store", "JSONResponse")}
     try:
@@ -2239,20 +2255,36 @@ def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
         app.load_options = lambda: {"rooms": [{"ext": "19"}]}
         app.mwi_store = _Store
         app.set_mwi = lambda ext, on: True
+        # A clear of a flag that was never set: the store does not change, and
+        # the line must not read as though it had.
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a no-op clear is answered ok", resp.payload == {"ok": True, "mwi": False})
+        check("mwi: a no-op clear says so, in the CLI's no-op words",
+              lines == ["[switchboard-webui] web: MWI for 19 already clear "
+                        "(store unchanged; Asterisk re-asserted)"])
         resp, lines = _lines_printed(app.api_mwi, "19", "on")
         check("mwi: set, answered ok", resp.payload == {"ok": True, "mwi": True})
         check("mwi: one line, in the CLI's words, naming the source",
               lines == ["[switchboard-webui] web: set MWI for 19 (store + Asterisk)"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: a second set is a no-op and says so",
+              lines == ["[switchboard-webui] web: MWI for 19 already set "
+                        "(store unchanged; Asterisk re-asserted)"])
         resp, lines = _lines_printed(app.api_mwi, "19", "off")
         check("mwi: a clear is a line too",
               lines == ["[switchboard-webui] web: cleared MWI for 19 (store + Asterisk)"])
         # Optimistic clear: Asterisk refused, the badge still drops, and the line says so.
         app.set_mwi = lambda ext, on: False
+        state.add("19")
         resp, lines = _lines_printed(app.api_mwi, "19", "off")
         check("mwi: a refused clear still clears the store and says Asterisk refused",
-              resp.payload == {"ok": True, "mwi": False}
-              and lines == ["[switchboard-webui] web: cleared MWI for 19 (store); "
-                            "Asterisk refused the update"])
+              resp.payload == {"ok": True, "mwi": False} and "19" not in state
+              and lines == ["[switchboard-webui] web: cleared MWI for 19 in store; "
+                            "Asterisk MWI update failed"])
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: a refused no-op clear is the CLI's no-op failure line",
+              lines == ["[switchboard-webui] web: MWI for 19 already clear in store; "
+                        "Asterisk MWI update failed"])
         # Honest set: refused, badge left off, 502 — and a line, which it never had.
         before = len(flags)
         resp, lines = _lines_printed(app.api_mwi, "19", "on")
@@ -2263,6 +2295,33 @@ def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
         resp, lines = _lines_printed(app.api_mwi, "19", "maybe")
         check("mwi: a bad state changes nothing and logs nothing",
               resp.status_code == 400 and lines == [])
+        # A store that cannot be written: Asterisk was told, and the line says
+        # only what happened.
+        app.set_mwi = lambda ext, on: True
+
+        class _Broken(_Store):
+            @staticmethod
+            def set_flag(ext, on):
+                raise OSError("read-only file system")
+
+        app.mwi_store = _Broken
+        resp, lines = _lines_printed(app.api_mwi, "19", "on")
+        check("mwi: a store failure is two web: lines, neither claiming a store write",
+              lines == ["[switchboard-webui] web: mwi flag 19 failed: read-only file system",
+                        "[switchboard-webui] web: set MWI for 19 in Asterisk; "
+                        "store not updated"])
+        # AMI unreachable: the failure line carries the source as well.
+        app.mwi_store = _Store
+
+        def _down(ext, on):
+            raise OSError("connection refused")
+
+        app.set_mwi = _down
+        resp, lines = _lines_printed(app.api_mwi, "19", "off")
+        check("mwi: an unreachable AMI is a web: line and a 502",
+              resp.status_code == 502
+              and lines == ["[switchboard-webui] web: clear MWI for 19 failed: "
+                            "connection refused"])
     finally:
         for k, v in saved.items():
             setattr(app, k, v)
