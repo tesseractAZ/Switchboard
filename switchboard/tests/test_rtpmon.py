@@ -802,6 +802,13 @@ def test_heartbeat_records_liveness_and_the_trunk(tmp_path) -> None:
     check("heartbeat: AMI-down reports reachable as null, NOT 0 "
           "(no phones measured is not the same as no phones up)",
           recs[1]["reachable"] is None)
+    # 2026-10-14: the same row read `wired_down: []`, which says "no gateway
+    # port is down", while the next two rows named all eight. The key stays.
+    check("heartbeat: AMI-down reports wired_down as null, NOT [] "
+          "(nothing measured is not the same as nothing down)",
+          "wired_down" in recs[1] and recs[1]["wired_down"] is None)
+    check("heartbeat: ...and the all-endpoint down list is null too",
+          "down" in recs[1] and recs[1]["down"] is None)
     check("heartbeat: names the wired ports that were down",
           recs[2].get("wired_down") == ["13", "14"])
 
@@ -944,6 +951,100 @@ def test_run_loop_actually_calls_the_heartbeat_every_cycle() -> None:
           trans is not None)
     check("run loop: the row records the sleep the loop then actually took",
           len(slept) == 1 and nxt == slept[0])
+
+
+def test_an_ami_down_cycle_writes_null_wired_down_through_the_run_loop() -> None:
+    """★ 2026-10-14: the first row after the v0.110.1 restart read
+    `ami: unreachable, reachable: null, wired_down: []`, and the rows 15 s and
+    30 s later named all eight wired ports down. `[]` is the field's positive
+    "nothing is down", made on a cycle that measured nothing.
+
+    Two conversions produced it: run() built the list from `phones or []`, and
+    _heartbeat() wrote `list(wired_down or [])`. Fixing either alone leaves the
+    other, so this drives the REAL loop into the REAL heartbeat for three
+    cycles (AMI down, one port down, all up) and reads the rows back."""
+    wired = ["11", "12", "13"]
+
+    def _phone(ext, up):
+        return {"ext": ext, "name": ext, "status": "Avail" if up else "Unavail",
+                "rtt_ms": 2.5 if up else None, "reachable": up, "registered": True}
+
+    cycles = [None,
+              [_phone("11", True), _phone("12", True), _phone("13", False)],
+              [_phone("11", True), _phone("12", True), _phone("13", True)]]
+    n = {"poll": 0}
+
+    def _poll(names, w, measured, _ever=None):
+        phones = cycles[min(n["poll"], len(cycles) - 1)]
+        n["poll"] += 1
+        if phones is None:
+            return None, None                        # what poll_once returns on an AMI failure
+        return phones, pm.summarize(phones, w, measured, _ever)
+
+    class _Stop(Exception):
+        pass
+
+    def _sleep(_s):
+        if n["poll"] >= len(cycles):
+            raise _Stop()
+
+    published, handed = [], []
+    d = tempfile.mkdtemp()
+    names = ("_load_options", "room_names", "wired_exts", "poll_once", "_append_history",
+             "_publish", "trunk_enabled", "_scrub_share_log", "load_ever_registered",
+             "save_ever_registered", "HEARTBEAT_PATH", "ENDPOINT_LOG_PATH",
+             "_transition_offset", "_last_heartbeat_mono", "_heartbeat")
+    saved = {k: getattr(pm, k) for k in names}
+    real_sleep = pm.time.sleep
+    real_heartbeat = pm._heartbeat
+
+    def _recording_heartbeat(*a, **k):
+        # Pass straight through to the real writer; only note what run() handed it.
+        handed.append(k.get("wired_down", "<not passed>"))
+        return real_heartbeat(*a, **k)
+    try:
+        pm._heartbeat = _recording_heartbeat
+        pm._load_options = lambda: {"link_health_alerts": False}
+        pm.room_names = lambda o: {e: e for e in wired}
+        pm.wired_exts = lambda o: list(wired)
+        pm.poll_once = _poll
+        pm._append_history = lambda p: None
+        pm._publish = lambda p, s: published.append(p)
+        pm.trunk_enabled = lambda o: False
+        pm._scrub_share_log = lambda st: None
+        pm.load_ever_registered = lambda path=None: set()
+        pm.save_ever_registered = lambda exts, path=None: True
+        pm.HEARTBEAT_PATH = os.path.join(d, "heartbeat.jsonl")
+        pm.ENDPOINT_LOG_PATH = os.path.join(d, "absent.log")
+        pm._transition_offset = None
+        pm._last_heartbeat_mono = None
+        pm.time.sleep = _sleep
+        try:
+            pm.run()
+        except _Stop:
+            pass
+        rows = [json.loads(l) for l in open(pm.HEARTBEAT_PATH) if l.strip()]
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+        pm.time.sleep = real_sleep
+        shutil.rmtree(d, ignore_errors=True)
+
+    check("ami-down loop: one row per cycle", len(rows) == 3)
+    down, partial, healthy = rows
+    check("ami-down loop: the first row is the AMI-down one",
+          down.get("ami") == "unreachable" and down["reachable"] is None)
+    check("ami-down loop: nothing was published on it", len(published) == 2)
+    check("ami-down loop: run() hands the heartbeat None, not [] (first conversion)",
+          handed[0] is None)
+    check("ami-down loop: wired_down is present and null, not [] (second conversion)",
+          "wired_down" in down and down["wired_down"] is None)
+    check("ami-down loop: down is present and null as well",
+          "down" in down and down["down"] is None)
+    check("ami-down loop: a measured cycle still names the port that is down",
+          partial["wired_down"] == ["13"] and partial["down"] == ["13"])
+    check("ami-down loop: a measured healthy cycle still says [] (nothing down)",
+          healthy["wired_down"] == [] and healthy["down"] == [])
 
 
 def test_transitions_recover_what_the_poll_slept_through(tmp_path) -> None:
@@ -1507,9 +1608,13 @@ def test_wired_down_is_always_present_even_when_empty() -> None:
     measured'."""
     import inspect
     src = inspect.getsource(pm._heartbeat)
-    assert 'rec["wired_down"] = list(wired_down or [])' in src, (
-        "wired_down is conditional again — an empty list is a positive "
-        "statement and must be emitted")
+    # 2026-10-14: an unconditional emit, but no longer `list(wired_down or [])`,
+    # which turned a cycle that measured nothing into "nothing is down".
+    assert ('rec["wired_down"] = list(wired_down) if summ and wired_down is not None '
+            'else None') in src, (
+        "wired_down is conditional again, or an unmeasured cycle is back to "
+        "reading []; the key goes on every row, null only when nothing was "
+        "measured")
     # Scan CODE, not comments: the function's own comment quotes the removed
     # `if wired_down:` to explain why it went, so a whole-source substring test
     # matches its own explanation. Fourth self-match of this shape in this repo

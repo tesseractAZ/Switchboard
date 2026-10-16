@@ -319,8 +319,11 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 # theory (a playback leg) does not cover these, and a tempting `rxmes/40` rule
 # was refuted in August. Nothing here claims a mechanism. What it does is refuse
 # to raise an alert that NO measurement of the same leg supports, and capture
-# every low score (capture_low_mos) so the mechanism can be studied instead of
-# guessed.
+# every low score (capture_low_mos), whole, so each one can be studied instead of
+# guessed at. Only low scores are kept. The handset's record of a 4.4 call is
+# not, so the two can be compared on the PBX ledger's figures (callqos.jsonl
+# keeps every leg within its rolling window, the last 300) but not on the
+# handset's own fields.
 #
 # The thresholds come from callqos, checked against the ledger. MES 78 is
 # classify()'s floor for "good". 1.0 % is NOT one of classify()'s cut-offs (it
@@ -620,9 +623,17 @@ def capture_low_mos(judged: list[dict], mos_min: float, now: float | None = None
     the legs that raised the 2026-09-14 alerts. Each row keeps the whole
     rtpStatus record as received, the
     ledger leg it matched (ts, tag and the quality fields), the offset between
-    the two clocks and the verdict — so the 2.2 legs can be set beside the 4.4
-    legs of the same shape and the mechanism read off the data. Best-effort: a
-    failed write is reported and retried next cycle, and never stops the poll."""
+    the two clocks and the verdict, so every low score can be read off the data
+    rather than guessed at.
+
+    NO COMPARISON SET IS KEPT. A record at or above `mos_min` is skipped, so the
+    handset's own fields for a good call are written neither here nor to any
+    other ledger. A 2.2 leg can still be set beside a 4.4 leg of the same shape
+    on the PBX ledger's figures, which callqos.jsonl keeps for every leg within
+    its rolling window (the last 300), but not on the handset's.
+
+    Best-effort: a failed write is reported and retried next cycle, and never
+    stops the poll."""
     p = path or _capture_path()
     if _capture_seen["path"] != p:
         _capture_seen["path"] = p
@@ -873,8 +884,10 @@ def health_transition(level: str, st: dict, min_cycles: int = 2,
 # I/O helpers.
 # --------------------------------------------------------------------------- #
 def rollup_is_stale(attrs: dict, now: float | None = None,
-                    tolerance: float = 2.5) -> bool:
-    """True when rtpmon's rollup is too old to derive gateway health from.
+                    tolerance: float = 2.5,
+                    not_before: float | None = None) -> bool:
+    """True when rtpmon's rollup is too old to derive gateway health from, or
+    was measured before `not_before` (this poller's start).
 
     A pushed Home Assistant sensor never expires: if rtpmon dies (or its AMI
     wedges) while HA stays up, `sensor.switchboard_link_health` keeps its last
@@ -888,7 +901,35 @@ def rollup_is_stale(attrs: dict, now: float | None = None,
     (`poll_interval_s`), so changing link_health_interval cannot silently break
     this. A rollup with no timestamp is treated as fresh: an older rtpmon did
     not stamp it, and refusing to work with it would be a regression rather
-    than a safety net."""
+    than a safety net.
+
+    ★ AGE ALONE CANNOT SEE A RESTART (2026-10-14). The sensor outlives an add-on
+    restart too, so the first rollup a new devhealth reads can be the PREVIOUS
+    rtpmon's last one: young enough to pass the age test, and a picture of the
+    plant from before the restart. After the v0.110.1 restart rtpmon's first
+    cycle found AMI down and published nothing, so devhealth's first cycle read
+    the rollup measured at 02:39:36Z, two minutes before the restart, and
+    published gateway health 'ok, 8 of 8' while all eight ports were down
+    (02:41:54Z and 02:42:09Z). Had AMI stayed down, that picture would have
+    been trusted until 2.5 intervals (750 s) past its measurement. A rollup
+    measured before `not_before` therefore counts as stale until rtpmon
+    publishes again, and the caller says 'unknown'. That only ever replaces a
+    reading with 'unknown', which resets the alert counter rather than
+    advancing it, so it cannot raise an alert. `measured_at` is stamped to the
+    whole second, truncated, so a stamp counts as earlier only when its whole
+    second ended before `not_before`; one in the same second gets the benefit
+    of the doubt.
+
+    This poller's start stands in for "measured by a different rtpmon", and the
+    stand-in has two edges. Both read 'unknown', so neither can raise an alert.
+    rtpmon and devhealth start in parallel (each depends only on
+    init-switchboard), so the NEW rtpmon's first rollup can also predate this
+    process by more than that second. It reads 'unknown' until rtpmon publishes
+    again, one warm-up poll (15 s) later while the fleet is still converging,
+    which delays by one cycle the alert for a gateway that really is down. And
+    when devhealth alone restarts (s6 bringing back this service by itself)
+    while rtpmon keeps running, rtpmon's current rollup reads 'unknown' the
+    same way until its next publish, at most one link_health_interval."""
     stamped = attrs.get("measured_at")
     if not stamped:
         return False
@@ -898,6 +939,8 @@ def rollup_is_stale(attrs: dict, now: float | None = None,
         return False
     if when.tzinfo is None:
         when = when.replace(tzinfo=datetime.timezone.utc)
+    if not_before is not None and when.timestamp() + 1.0 <= not_before:
+        return True
     try:
         interval = float(attrs.get("poll_interval_s") or 300)
     except (TypeError, ValueError):
@@ -907,11 +950,13 @@ def rollup_is_stale(attrs: dict, now: float | None = None,
     return (now_ts - when.timestamp()) > max(60.0, interval * tolerance)
 
 
-def gateway_down_exts_from_rollup() -> list[str] | None:
+def gateway_down_exts_from_rollup(not_before: float | None = None) -> list[str] | None:
     """Read rtpmon's rollup sensor for the currently-down extensions (the reliable,
     already-gathered registration signal). None if unavailable (HA down / rtpmon
     off) OR if the rollup is stale — a frozen snapshot is worse than no reading,
-    because the caller republishes it as current gateway health."""
+    because the caller republishes it as current gateway health. `not_before`
+    is passed to rollup_is_stale(): run() gives its own start, so a rollup the
+    previous instance measured is not read as this one's."""
     try:
         import ha_client
         s = ha_client.get_state("sensor.switchboard_link_health")
@@ -920,9 +965,12 @@ def gateway_down_exts_from_rollup() -> list[str] | None:
     if not s:
         return None
     a = s.get("attributes", {}) if isinstance(s, dict) else {}
-    if rollup_is_stale(a):
+    if rollup_is_stale(a, not_before=not_before):
+        # Say which test it failed: "stale" alone reads oddly beside a stamp
+        # two minutes old.
+        why = "too old" if rollup_is_stale(a) else "measured before this poller started"
         sys.stderr.write("[switchboard-devhealth] link-health rollup is stale "
-                         f"(measured_at={a.get('measured_at')}); skipping gateway "
+                         f"(measured_at={a.get('measured_at')}, {why}); skipping gateway "
                          "health this cycle\n")
         return None
     exts = list(a.get("unreachable_exts", []) or []) + list(a.get("offline_exts", []) or [])
@@ -1105,7 +1153,8 @@ def run() -> None:
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
     # This service's own start, used to hold back the gateway all-down CRITICAL
     # while the GXW is merely re-registering after our restart (see
-    # GATEWAY_STARTUP_GRACE_S). monotonic: immune to wall-clock/NTP steps.
+    # GATEWAY_STARTUP_GRACE_S), and to refuse a rollup measured before it.
+    # monotonic: immune to wall-clock/NTP steps.
     _started = time.monotonic()
     cordless_pw = os.environ.get("CORDLESS_PASSWORD", "")
     cordless_cert_pin = os.environ.get("CORDLESS_CERT_SHA256", "")
@@ -1162,7 +1211,13 @@ def run() -> None:
                 print(f"[devhealth] cordless poll error: {e}", flush=True)
         # --- gateway (derived from rtpmon rollup) ---
         try:
-            down = gateway_down_exts_from_rollup()
+            # A rollup measured before this process started describes the plant
+            # before the restart (see rollup_is_stale). The start is re-expressed
+            # on the CURRENT wall clock each cycle, from the monotonic one, so a
+            # wall-clock step after start cannot make every fresh rollup look
+            # older than this process and hold the sensor at 'unknown'.
+            down = gateway_down_exts_from_rollup(
+                not_before=time.time() - (time.monotonic() - _started))
             if down is not None:
                 level, reasons = classify_gateway(down, gw_exts, time.monotonic() - _started)
                 _publish_gateway(level, reasons, down, gw_exts)
