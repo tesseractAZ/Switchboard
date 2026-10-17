@@ -337,12 +337,23 @@ def write(path: Path, content: str, mode: int = 0o640) -> None:
 # --------------------------------------------------------------------------- #
 # pjsip.conf
 # --------------------------------------------------------------------------- #
+# Private IPv4 ranges (RFC 1918) a room phone may register from.
+ROOM_NETS = ("10.0.0.0/255.0.0.0", "172.16.0.0/255.240.0.0", "192.168.0.0/255.255.0.0")
+
 def render_pjsip(opts: dict) -> str:
     rooms = opts.get("rooms", []) or []
     trunk = opts.get("trunk", {}) or {}
 
     parts = [
         _generated_header(),
+        "",
+        "[global]",
+        "type = global",
+        # Contacts are kept across a restart (astdb lives in /data/state, see
+        # the Dockerfile). Qualify every restored one within a few seconds
+        # of start-up, so a phone that is still registered is reachable straight
+        # away instead of after its own next REGISTER (about a minute).
+        "max_initial_qualify_time = 4",
         "",
         "[transport-udp]",
         "type = transport",
@@ -376,6 +387,14 @@ def render_pjsip(opts: dict) -> str:
         # over bulk LAN traffic (zero-risk if the AP doesn't honour DSCP).
         "tos_audio = ef",
         "cos_audio = 5",
+        # Room phones are on the LAN. A request from, or a contact at, any other
+        # address is refused, so a room credential (the never-registered ext 20's
+        # included) is useless from outside even where the SIP port is reachable.
+        # The trunk has its own endpoint and is not affected.
+        "deny = 0.0.0.0/0.0.0.0",
+        *(f"permit = {net}" for net in ROOM_NETS),
+        "contact_deny = 0.0.0.0/0.0.0.0",
+        *(f"contact_permit = {net}" for net in ROOM_NETS),
         "",
         "[room-aor](!)",
         "type = aor",

@@ -1,7 +1,25 @@
 # Changelog
 
-Recent releases. Releases up to 0.106.3 are in the
+Recent releases. Releases up to 0.107.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.112.0
+
+**Phones may register only from the LAN, and registrations survive a restart.**
+
+- **LAN-only room phones.** Every room endpoint now refuses a request from, or a
+  contact at, an address outside the private ranges (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`). A room secret, including the
+  never-registered test extension's, is useless from outside even where the SIP
+  port is reachable. The trunk has its own endpoint and is not affected.
+- **Registrations are kept across updates and restarts.** Asterisk's internal
+  database, which holds each phone's registered contact, moved from the container
+  layer the Supervisor discards to `/data/state/astdb.sqlite3`. Restored contacts
+  are qualified within 4 s of start-up (`max_initial_qualify_time`), so a phone
+  still registered when the add-on stopped is reachable again within seconds
+  instead of after its own next REGISTER (about a minute). The first start on
+  this version begins with an empty database. The move is made in the image
+  build: the boot pass's AppArmor profile may not write `asterisk.conf`.
 
 ## 0.111.0
 
@@ -403,46 +421,3 @@ under the write-lock each file would be refused and logged.
 - `.dockerignore` sat at the repository root, outside the `./switchboard` build
   context, so no build read it. It now lives in `switchboard/` and also
   excludes `.pytest_cache`.
-
-## 0.107.0
-
-**`log_level` now does what its documentation says.** The manual, SECURITY.md
-and the option's help text all said that a `log_level` of `notice`, `warning`,
-`error` or `critical` keeps Asterisk's verbose trace out of the add-on's Log tab.
-That trace includes every dialled and calling number. It did not: Asterisk
-always sends verbose lines to its console and drops there only the ones above
-its `-v` count, and the add-on started it with `-vvv` at every level. Those four
-levels now start Asterisk without `-v`. Asterisk still prints level-0 verbose
-lines at any `-v`, so the add-on's own per-call `[rtpqos]` summary and
-`Operator dial` lines move from level 0 to level 1: they leave the Log tab with
-the trace at those four levels and stay in the durable log. A few of
-Asterisk's own start-up and shutdown messages are level 0 and still appear.
-`info` (the default), `debug` and `trace` are unchanged. The count is decided in one place, next to the logger
-configuration, and handed to the start script through
-`/run/switchboard/asterisk-verbosity`. Verified on Asterisk 20.11.1 with a
-second, module-less instance: without `-v` its console printed none of the
-verbosity-3 lines that its log file received.
-
-**The durable log keeps its diagnostic lines at every `log_level`.**
-`/data/state/asterisk.log` is now configured `verbose(3)` (it was `verbose(2)`).
-In Asterisk 20.11.1 the number filters nothing that reaches the file. It sets
-the level Asterisk produces verbose lines at, so the file keeps its
-verbosity-3 lines — `Contact <n>/… is now Unreachable`, `Added contact` and
-`Removed contact … due to request` — when the console runs without `-v`. The
-documentation called the `Contact` line verbosity 2; it is verbosity 3.
-
-**Asterisk's log lines carry the full date, milliseconds and UTC offset.**
-`[Oct  1 01:00:17]` is now `[2026-10-01 01:00:17.289 -0700]`, in both log files
-and on the notices, warnings and errors in the Log tab. A line can now be
-placed against `heartbeat.jsonl` (UTC), the gateway's own log, and lines from
-another year. The scrub of the readable copy and the outage reader key on the
-message, not the date, and are tested with the new stamp.
-
-**The manual explains how to tell a gateway restart from a network stall.** A
-gateway that is back within its registration window renews most registrations
-instead of re-creating them, so a restart can look like a short outage in which
-most phones stayed registered. The troubleshooting table now says where to look:
-the gateway's System Up Time, its Automatic Reboot schedule (`P21929`, `P21930`,
-`P28118`), and `P81` (Unregister On Reboot). With `P81` set to `1`, a restart
-leaves `Removed contact … due to request` in the durable log, which a stall
-never does. `P81` is added to the gateway P-code table.
