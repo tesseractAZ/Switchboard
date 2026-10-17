@@ -983,7 +983,9 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   Unlike a missed wake-up, this is **recorded and not pushed**. An alarm clock has
   a deadline; an announcement does not.
 - **...and one it declines to judge** (v0.100.2). Asterisk restarts with the
-  add-on, and its handsets take up to two minutes to re-register. An announcement
+  add-on, and its handsets take up to two minutes to re-register (since v0.112.0 a
+  handset still registered when the add-on stopped is reachable again within
+  seconds of the restart, because registrations are kept). An announcement
   sent into that gap genuinely does not arrive — but `announce-undelivered` would
   be a true and useless record, because the cause is a restart you just performed.
   Anything queued within **120 seconds** of the add-on starting is recorded

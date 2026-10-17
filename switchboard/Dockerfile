@@ -178,6 +178,16 @@ RUN chmod +x /usr/bin/switchboard-config \
 # AppArmor child profile, is the only writer; it regenerates the files every boot
 # as 0640 root:asterisk. tests/test_apparmor_profile.py pins this line; the
 # AppArmor profile's /etc/asterisk write-lock and child profile assume it.
+# Registrations survive an update or restart: Asterisk's internal database
+# (astdb.sqlite3, which holds the registrar's contacts) lives in /data/state
+# instead of /var/lib/asterisk in the container layer the Supervisor discards.
+# The package ships its [directories] section as a template Asterisk ignores;
+# its values equal the compiled defaults, so it is made live with only astdbdir
+# changed. Done here, at build, because the boot pass may not write this file.
+RUN sed -i -e 's|^\[directories\](!)$|[directories]|' \
+        -e 's|^astdbdir => .*|astdbdir => /data/state|' /etc/asterisk/asterisk.conf \
+    && grep -qx '\[directories\]' /etc/asterisk/asterisk.conf \
+    && grep -qx 'astdbdir => /data/state' /etc/asterisk/asterisk.conf
 RUN chown -R root:asterisk /etc/asterisk \
     && chmod -R u=rwX,g=rX,o= /etc/asterisk
 
@@ -208,4 +218,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.111.0"
+    io.hass.version="0.112.0"

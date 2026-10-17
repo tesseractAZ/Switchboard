@@ -231,7 +231,14 @@ anonymous or guest context, and the dial plan only exists for authenticated
 endpoints. Live call audio uses the `rtp_start`–`rtp_end` UDP range. This is a
 LAN-only surface by deployment (nothing here should ever be port-forwarded);
 the per-room secrets are the authentication boundary, which is why the
-placeholder `change-me-…` secrets must actually be changed.
+placeholder `change-me-…` secrets must actually be changed. Since v0.112.0 every
+room endpoint also carries an address ACL: a request from, or a contact at, an
+address outside the private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`) is refused, so a room secret, including the never-registered
+test extension's, is useless from outside even where the port is reachable. The
+trunk has its own endpoint and is not affected. Asterisk's internal database
+(`astdb.sqlite3`, which holds each phone's registered contact) is kept in
+`/data/state`, so it is in add-on backups.
 
 The resident speech recognizer (`whisper-server`) binds `127.0.0.1:8126`
 loopback-only and runs unprivileged — with host networking, a LAN-visible bind

@@ -2235,6 +2235,44 @@ def test_the_mwi_helper_says_when_nothing_changed() -> None:
 
 
 
+def test_room_phones_may_register_only_from_the_lan() -> None:
+    """Every room endpoint inherits a deny-all with the three private ranges
+    permitted, for both the request source and the registered contact; the
+    trunk's endpoint does not inherit it."""
+    rooms = [{"ext": "11", "name": "Kitchen", "secret": "s3cret-11"},
+             {"ext": "20", "name": "Spare", "secret": "s3cret-20"}]
+    trunk = {"enabled": True, "provider_host": "sip.example.net", "username": "u", "secret": "p",
+             "from_user": "u", "from_domain": "sip.example.net", "port": 5060, "registns": True}
+    pj = sbc.render_pjsip({"rooms": rooms, "trunk": trunk})
+    tmpl = pj.split("[room-endpoint](!)", 1)[1].split("\n\n", 1)[0]
+    for key in ("deny", "contact_deny"):
+        check(f"acl: {key} denies everything first", f"\n{key} = 0.0.0.0/0.0.0.0" in tmpl)
+    for key in ("permit", "contact_permit"):
+        for net in ("10.0.0.0/255.0.0.0", "172.16.0.0/255.240.0.0", "192.168.0.0/255.255.0.0"):
+            check(f"acl: {key} {net}", f"\n{key} = {net}" in tmpl)
+    check("acl: every room inherits the template",
+          "[11](room-endpoint)" in pj and "[20](room-endpoint)" in pj)
+    check("acl: the trunk endpoint does not inherit it", "(room-endpoint)" not in pj.split("[trunk]", 1)[-1].split("\n\n", 1)[0])
+    check("qualify: restored contacts are qualified within seconds",
+          "[global]\ntype = global\nmax_initial_qualify_time = 4" in pj.replace("\n#", "\n#"))
+
+
+def test_astdb_is_kept_under_data() -> None:
+    """astdb moves to /data/state at build (the boot pass's AppArmor child may
+    not write asterisk.conf), and the build fails if the package file changed
+    shape so the edit no longer applies."""
+    df = (SBC_PATH.parents[3] / "Dockerfile").read_text()
+    i = df.index("astdbdir => /data/state")
+    check("astdb: the build activates the directories section",
+          "s|^\\[directories\\](!)$|[directories]|" in df)
+    check("astdb: and verifies both edits", "grep -qx 'astdbdir => /data/state'" in df
+          and "grep -qx '\\[directories\\]'" in df)
+    check("astdb: before the /etc/asterisk ownership pass",
+          i < df.index("RUN chown -R root:asterisk /etc/asterisk"))
+    check("astdb: the boot pass does not touch asterisk.conf",
+          "asterisk.conf" not in SBC_PATH.read_text())
+
+
 def test_announce_play_context_is_emitted_with_the_qos_hook() -> None:
     """The HA-pushed announcement's Originate target must exist AND carry the
     hangup hook -- the whole point of routing it through the dialplan.
