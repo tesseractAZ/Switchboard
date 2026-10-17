@@ -1365,9 +1365,11 @@ def render_rtpqos_context() -> list:
         f' --rxmes {q("rxmes")} --txmes {q("txmes")}'
         # Extended fields the sink has always accepted but never received (null
         # in 100% of records until v0.48.0). local_maxjitter is Asterisk's
-        # maxrxjitter: the max of the interarrival estimate sampled at RTCP
-        # report instants — NOT a bound on --rxjitter, which is read once at
-        # hangup, so it can legitimately be the smaller number.
+        # maxrxjitter: the per-packet peak of its own jitter estimate for the
+        # stream it RECEIVES — NOT a bound on --rxjitter, which is the far end's
+        # last RTCP report on the stream Asterisk SENDS (--txjitter is that local
+        # estimate at hangup), so it can legitimately be the smaller number. See
+        # the ★ jitter note in switchboard-callqos build_record().
         #
         # NO OCTET COUNTERS: v0.48.0 also passed --rxoctet/--txoctet as
         # CHANNEL(rtcp,rxoctetcount)/txoctetcount, but PJSIP in Asterisk
@@ -2644,17 +2646,39 @@ def ensure_state_dir() -> None:
         # longer tries. A new store that needs group access must say so here.
         # ★ BOUND THE DURABLE LOG, and do it HERE specifically.
         #
-        # /data/state/asterisk.log has never been capped or rotated by anything.
-        # It sat at 116 KB over 26 days while carrying notice/warning/error only;
-        # v0.84.0 added verbose(2) so it finally records endpoint reachability,
-        # which roughly triples that to ~6 MB a year. That is nothing against the
-        # free space on this volume, and unbounded is still the wrong shape for a
-        # file nobody prunes.
+        # Until this trim, /data/state/asterisk.log was never capped or rotated by
+        # anything. It sat at 116 KB over 26 days while carrying
+        # notice/warning/error only.
+        #
+        # ★ CORRECTED 2026-10-14 — THE GROWTH FIGURE WAS THE verbose(2) ESTIMATE.
+        # This said v0.84.0's verbose(2) "roughly triples that to ~6 MB a year",
+        # i.e. reachability lines only. The channel never filtered that way (see
+        # render_logger): it has carried the level-3 dial-plan trace since
+        # v0.84.0, first because Asterisk ran -vvv at every log_level and, since
+        # v0.107.0, because of the channel's own verbose(3); v0.107.0 also
+        # lengthened every line's stamp to the full date. The trace grows with
+        # every call, so the rate follows call volume. Two measurements bracket it:
+        #
+        #   ~74 KB a day, ~27 MB a year: the file's own history, 116 KB on
+        #     2026-09-06 to 3.0 MB on 2026-10-15, never trimmed in those 39 days.
+        #     v0.107.0's longer stamps (2026-10-03) put today's rate above that
+        #     average.
+        #   ~150 KB a day, ~55 MB a year: 159,102 bytes in one 26-hour window on
+        #     2026-10-14 that held about 20 call legs. An upper bound, not the
+        #     rate: about 113 KB of it came from two deploy boots and test calls.
+        #
+        # Either way it is tens of MB a year, not ~6. The trim below runs only
+        # here, at add-on start, so nothing bounds the file between restarts: at
+        # those rates it passes the 8 MiB cap roughly four to eight weeks after a
+        # trim has left it at 4 MiB, and keeps growing until the next start. That
+        # is still small against the free space on this volume; the cap exists
+        # because unbounded is the wrong shape for a file nothing else prunes.
         #
         # Trimming happens in this oneshot because this oneshot runs BEFORE
-        # Asterisk starts. Asterisk holds the log open with its own write offset;
-        # rewriting the file underneath that fd is how you get a sparse file and
-        # lost lines. With no process holding it, a keep-the-tail rewrite is safe.
+        # Asterisk starts. Asterisk opens its log channels in append mode
+        # (fopen "a", main/logger.c) and flushes every line, so a keep-the-tail
+        # rewrite under its open fd would lose whatever it wrote between the read
+        # and the truncate. With no process holding the file, the rewrite is safe.
         _trim_durable_log()
 
         SHARED_0664 = {"wakeups.json", "mwi.json", "callqos.jsonl"}

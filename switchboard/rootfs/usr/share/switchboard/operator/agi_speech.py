@@ -10,13 +10,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import wave
 
 STT = "/usr/bin/switchboard-stt"
 TTS = "/usr/bin/switchboard-tts"
 ASR_DIR = "/run/switchboard/asr"
 FEATURES = "/run/switchboard/features.json"
+
+# RECORD's leading-silence remainder. With s=N, res_agi stops once N s of
+# consecutive frames have stayed under the DSP silence threshold, then rewinds
+# N-1 s, so a recording in which nothing ever crossed the threshold keeps only
+# the last 1.02 s (16364 bytes) WHATEVER N is; any speech adds its own length.
+SILENT_REMAINDER_S = (0.95, 1.1)
 
 PROMPT_BEEP = "switchboard/sw-beep"
 PROMPT_ONEMOMENT = "switchboard/sw-onemoment"
@@ -158,16 +166,60 @@ def _stt_finish(proc) -> str:
     return (out or "").strip()
 
 
+def rec_summary(reply: str, wav: str) -> str:
+    """The `bytes=B secs=S end=E [no-speech]` part of a rec breadcrumb.
+
+    `secs` comes from the WAV header, else from the size (8 kHz 16-bit mono:
+    16000 B/s behind a 44-byte header). `end` is the bracketed word in
+    Asterisk's RECORD reply, whichever it is: "timeout" for both the silence
+    cutoff and the record_ms cap (secs tells them apart), "hangup", "dtmf", or
+    a failure such as "waitfor" or "writefile". A reply without one (an empty
+    read) logs no `end`. `no-speech` marks a file that is only the silence
+    remainder: nothing crossed the silence threshold, which a silent caller and
+    a muted or dead microphone produce alike. Only the silence cutoff leaves
+    that remainder, so no reply but "timeout" earns the flag, whatever the
+    size. switchboard-operator.agi keeps a twin."""
+    # Letters only: Asterisk's own reason word, never free text in the journal.
+    m = re.search(r"\(([a-z]+)\)", reply or "")
+    end = m.group(1) if m else ""
+    tail = f" end={end}" if end else ""
+    try:
+        size = os.path.getsize(wav)
+    except OSError:
+        return "bytes=-1" + tail          # RECORD wrote nothing
+    secs = None
+    try:
+        with wave.open(wav, "rb") as w:
+            if w.getframerate() > 0 and w.getnframes() > 0:
+                secs = w.getnframes() / w.getframerate()
+    except Exception:  # noqa: BLE001  (a breadcrumb must never end the call)
+        pass           # a short or odd header: the size below still answers
+    if secs is None:
+        secs = max(size - 44, 0) / 16000
+    out = f"bytes={size} secs={secs:.2f}{tail}"
+    lo, hi = SILENT_REMAINDER_S
+    if end == "timeout" and lo <= secs <= hi:
+        out += " no-speech"
+    return out
+
+
 def listen(tag: str, attempt: int = 0, record_ms: int = 6000, silence_s: int = 2,
            bias: str = "") -> str:
     """Record one utterance (beep -> record -> 'one moment') and return the
     transcript ('' on nothing / STT failure). The transcription runs CONCURRENTLY
     with the 'one moment' prompt — started just before it, collected just after —
-    so the recognition latency hides behind audio instead of being added after."""
+    so the recognition latency hides behind audio instead of being added after.
+
+    Each recording leaves a `[<tag>] rec` line (see rec_summary) before STT
+    runs: the WAV is deleted afterwards, and an empty transcript alone cannot
+    tell a caller who said nothing from one whose words STT missed. A hang-up
+    while recording usually leaves no line at all rather than end=hangup:
+    Asterisk SIGHUPs the AGI once it has replied, and no caller handles it."""
     rec = f"{ASR_DIR}/{tag}-{os.getpid()}-{attempt}"
     stream(PROMPT_BEEP)
-    agi(f'RECORD FILE {rec} wav "" {record_ms} s={silence_s}')
+    reply = agi(f'RECORD FILE {rec} wav "" {record_ms} s={silence_s}')
     wav = rec + ".wav"
+    log(tag, f"rec attempt={attempt} {rec_summary(reply, wav)}")
     cmd = [STT, "--in", wav, "--mode", "transcribe"]
     if bias:
         cmd += ["--bias", bias]

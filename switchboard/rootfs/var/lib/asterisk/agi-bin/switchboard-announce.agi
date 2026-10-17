@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 
 sys.path.insert(0, "/usr/share/switchboard/operator")
 sys.path.insert(0, "/usr/share/switchboard/webui")
@@ -29,23 +28,14 @@ try:
     import announce_audio  # noqa: E402
 except Exception:  # noqa: BLE001
     announce_audio = None
+# Where clips live, what a speaker clip is called and how long one lives — one
+# definition with the web UI that serves the clip and sweeps it on a timer.
+try:
+    import announce_clip  # noqa: E402
+except Exception:  # noqa: BLE001
+    announce_clip = None
 
-ANNOUNCE_DIR = "/run/switchboard/announce"
 WEBUI_PORT = os.environ.get("INGRESS_PORT") or "8099"
-
-
-def _cleanup_old(max_age: int = 300) -> None:
-    try:
-        now = time.time()
-        for f in os.listdir(ANNOUNCE_DIR):
-            p = os.path.join(ANNOUNCE_DIR, f)
-            try:
-                if now - os.path.getmtime(p) > max_age:
-                    os.unlink(p)
-            except OSError:
-                pass
-    except OSError:
-        pass
 
 
 def _record() -> str:
@@ -65,7 +55,7 @@ def main() -> None:
     sp.read_env()
     ann = (sp.load_features() or {}).get("announce", {}) or {}
     players = [p for p in (ann.get("players") or []) if isinstance(p, str)]
-    if ha_client is None or announce_audio is None or not players:
+    if ha_client is None or announce_audio is None or announce_clip is None or not players:
         sp.say_or("No speakers are set up for announcements. Goodbye.")
         return
 
@@ -75,9 +65,14 @@ def main() -> None:
         return
 
     # Build the chime + message + chime WAV and hand a LAN URL to the media players.
-    _cleanup_old()
-    name = f"a{os.getpid()}{int(time.time()) % 100000}.wav"
-    out = os.path.join(ANNOUNCE_DIR, name)
+    # The URL is fetched without credentials (a media player has none to give),
+    # so the name is random rather than derived from the pid and the clock, and
+    # nothing here deletes the clip: this script exits as soon as play_media
+    # returns, before the speaker has necessarily fetched it. The web UI's timed
+    # sweep removes it once it is CLIP_MAX_AGE_S old.
+    announce_clip.sweep()
+    name = announce_clip.speaker_clip_name()
+    out = os.path.join(announce_clip.ANNOUNCE_DIR, name)
     ip = announce_audio.lan_ip()
     if not announce_audio.build_announcement(text, out) or not ip:
         sp.say_or("Sorry, I couldn't prepare the announcement. Goodbye.")

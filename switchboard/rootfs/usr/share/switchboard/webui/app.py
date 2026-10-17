@@ -15,6 +15,7 @@ works unmodified behind Home Assistant Ingress, whatever path it is mounted on.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import datetime
 import hashlib
 import hmac
@@ -444,16 +445,47 @@ def _scope_allowed(scope) -> bool:
 
     So the guard is now structural: it sits at the ASGI layer, dispatches on the
     scope type, and a future WebSocket route cannot forget to call it.
+
+    The decision itself is _refusal_reason(), which also says WHY, for the log
+    line; this is that decision as a yes or no.
     """
+    return not _refusal_reason(scope)
+
+
+# Why a connection was refused. For the server-side log line ONLY: the client
+# is answered the same generic `forbidden` whatever the cause, so a prober learns
+# nothing from the response about which of these it tripped.
+REFUSED_NOT_INGRESS = "not from ingress"
+REFUSED_HEADER_MISSING = "missing token"
+REFUSED_HEADER_WRONG = "bad token"
+REFUSED_LAN_ANNOUNCE_OFF = "LAN announce is off (no announce_token set)"
+
+
+def _token_matches(sent: str, expected: str) -> bool:
+    """Constant-time comparison of the presented announce token.
+
+    `==` on two strings returns at the first differing character, so its timing
+    says how much of a guess was right. compare_digest is given bytes so that a
+    non-ASCII token compares instead of raising TypeError; UTF-8 is one-to-one,
+    so the answer is the one `==` gave."""
+    return hmac.compare_digest(sent.encode("utf-8", "surrogatepass"),
+                               expected.encode("utf-8", "surrogatepass"))
+
+
+def _refusal_reason(scope) -> str:
+    """"" when this connection may reach the app, otherwise why it may not."""
     stype = scope.get("type")
     if stype not in ("http", "websocket"):
-        return True                       # lifespan MUST pass through
+        return ""                         # lifespan MUST pass through
 
     client = scope.get("client")
     host = client[0] if client else ""    # None (a test client, or a UNIX
     if host.startswith("::ffff:"):        # socket) -> "" -> denied
         host = host[7:]
 
+    # Set only on the announce POST, whose refusal from the LAN has a more
+    # useful name than "not from ingress".
+    announce_refusal = ""
     # The exemptions are HTTP-only, and that ordering is load-bearing: a
     # websocket scope carries no "method" key, so a `.get("method", "GET")`
     # workaround plus the /announce/ prefix test would exempt WebSockets
@@ -475,9 +507,11 @@ def _scope_allowed(scope) -> bool:
         # (`ann-<ext>-<32hex>.wav`) are played by Asterisk straight from disk and
         # never fetched over the LAN — and their names are written into the
         # shared-folder ledger, so exempting them let anything that could read
-        # /share download what was said.
+        # /share download what was said. A speaker clip's name is 64 random
+        # bits, and the clip is deleted five to six minutes after it is written
+        # (announce_clip.speaker_clip_name, CLIP_MAX_AGE_S).
         if method == "GET" and (_LAN_ANNOUNCE_PATH.fullmatch(path) or path == "/phonebook.xml"):
-            return True
+            return ""
         # The HA media_player custom-component triggers announcements over the
         # LAN from the Core container — allow POST /api/announce ONLY when it
         # carries the shared announce token. Disabled unless a token is
@@ -485,13 +519,153 @@ def _scope_allowed(scope) -> bool:
         # ext (never an outside call).
         if method == "POST" and path.startswith("/api/announce/"):
             tok = _announce_token()
-            if tok and headers.get("x-announce-token") == tok:
-                return True
+            sent = headers.get("x-announce-token") or ""
+            if tok and sent and _token_matches(sent, tok):
+                return ""
+            announce_refusal = (REFUSED_LAN_ANNOUNCE_OFF if not tok
+                                else REFUSED_HEADER_MISSING if not sent
+                                else REFUSED_HEADER_WRONG)
 
-    return _client_allowed(host)
+    if _client_allowed(host):
+        return ""
+    return announce_refusal or REFUSED_NOT_INGRESS
 
 
 _LAN_ANNOUNCE_PATH = re.compile(r"/announce/a[0-9]{1,24}\.wav")
+
+# --------------------------------------------------------------------------- #
+# ★ THE REFUSAL LOG LINE, AND WHY IT IS RATE-LIMITED (2026-10-14 review).
+#
+# A refused HTTP request used to leave nothing behind: the guard wrote its 403
+# straight to the socket, and uvicorn runs with --no-access-log (which keeps the
+# 4 s status poll out of the journal). A LAN probe of this port, or a wrong
+# announce token tried a thousand times, was indistinguishable from silence, and
+# a review reading zero refusals could not tell "nobody tried" from "nobody
+# could see".
+#
+# One line per refusal would be the obvious fix and is the wrong one. journald
+# rate-limits docker.service AS A WHOLE, so one host on the LAN looping on this
+# port could push every other container's lines past the limit — including the
+# lines that would explain what it was doing. So the first refusal from an
+# address is logged in full, the rest from that address for the next ten
+# minutes are only counted, and the count comes out as one summary line when
+# the window closes (at the next refusal from anyone, or at the housekeeping
+# tick). The table is bounded, and addresses past the bound share one counter,
+# so even a scan from many addresses costs a fixed number of lines per window.
+#
+# Never the token, the query string or a header: the line names the address,
+# the method, the path (control characters replaced, truncated) and the reason.
+# Nor a speaker clip's name: only a GET is exempt, so a HEAD for a live clip is
+# refused, and its name is the one credential a LAN fetch needs — every
+# clip-shaped name in a logged path is written as `a<digits>.wav`.
+#
+# HTTP only. A refused WebSocket handshake is already logged, once per
+# handshake, by uvicorn itself ('<client> - "WebSocket <path>" 403'), and a
+# second line here would double it. That line is uvicorn's, so none of the
+# above bounds it: a host looping on handshakes still costs a line apiece.
+# --------------------------------------------------------------------------- #
+_REFUSAL_LOG_WINDOW_S = 600.0
+_REFUSAL_LOG_HOSTS = 256
+_REFUSAL_LOG_PATH_MAX = 96
+_refusal_lock = threading.Lock()
+# (address, reason) -> [window start (monotonic), refusals counted but not
+# logged]. Keyed on the reason too, so a new reason from the same address (a
+# missing token, then a mistyped one) gets a line of its own.
+_refusals: dict = {}
+# [window start, count] for refusals from addresses that found the table full.
+_refusals_overflow = [0.0, 0]
+# Printable ASCII less the space, so a logged value is one token: neither a
+# newline nor a requester's own " from <address>" can forge a line or a field.
+_UNPRINTABLE = re.compile(r"[^\x21-\x7e]")
+# Searched, not matched, and before truncation: a clip name in a longer path
+# (`/announce/a<digits>.wav/`, `//announce/...`) is hidden too, and never cut
+# into a prefix that survives.
+_CLIP_NAME_IN_PATH = re.compile(r"a[0-9]{1,24}\.wav")
+
+
+def _log_safe(value, limit: int) -> str:
+    """`value` fit for one journal line: truncated, then every character outside
+    printable ASCII replaced. scope["path"] is percent-DECODED, so a request for
+    /%0a... arrives with a real newline in it, and printed raw that would forge
+    a second line saying whatever the requester liked."""
+    s = str(value or "")
+    cut = len(s) > limit
+    return _UNPRINTABLE.sub("?", s[:limit]) + ("..." if cut else "")
+
+
+def _log_path(path) -> str:
+    """A refused request's path for its log line: any speaker-clip name hidden,
+    then made _log_safe."""
+    return _log_safe(_CLIP_NAME_IN_PATH.sub("a<digits>.wav", str(path or "")),
+                     _REFUSAL_LOG_PATH_MAX)
+
+
+def _refusal_summaries(now: float, force: bool = False) -> list:
+    """Close every window that has run its course (every window, with `force`)
+    and return the summary lines of those that counted anything. The caller
+    holds _refusal_lock."""
+    minutes = int(_REFUSAL_LOG_WINDOW_S // 60)
+    out = []
+    for (host, reason), (start, count) in list(_refusals.items()):
+        if not force and now - start < _REFUSAL_LOG_WINDOW_S:
+            continue
+        del _refusals[(host, reason)]
+        if count:
+            span = (f"in the {minutes} min after the one logged"
+                    if now - start >= _REFUSAL_LOG_WINDOW_S else
+                    f"in the {int(now - start)} s since the one logged (stopping)")
+            out.append(f"[switchboard-webui] refused {count} more request(s) from "
+                       f"{host} ({reason}) {span}")
+    start, count = _refusals_overflow
+    if count and (force or now - start >= _REFUSAL_LOG_WINDOW_S):
+        out.append(f"[switchboard-webui] refused {count} request(s) from addresses "
+                   f"past the first {_REFUSAL_LOG_HOSTS} in {minutes} min, not "
+                   "logged one by one")
+        _refusals_overflow[:] = [0.0, 0]
+    return out
+
+
+def _log_refusal(host: str, method: str, path: str, reason: str,
+                 now: float | None = None) -> bool:
+    """Log this refusal, or count it against its address's window. True when it
+    was written out as a line of its own."""
+    now = time.monotonic() if now is None else now
+    if host.startswith("::ffff:"):
+        host = host[7:]
+    host = _log_safe(host, 64) or "unknown"
+    minutes = int(_REFUSAL_LOG_WINDOW_S // 60)
+    with _refusal_lock:
+        lines = _refusal_summaries(now)
+        entry = _refusals.get((host, reason))
+        if entry is not None:
+            entry[1] += 1
+            logged = False
+        elif len(_refusals) >= _REFUSAL_LOG_HOSTS:
+            if not _refusals_overflow[1]:
+                _refusals_overflow[0] = now
+            _refusals_overflow[1] += 1
+            logged = False
+        else:
+            _refusals[(host, reason)] = [now, 0]
+            lines.append(f"[switchboard-webui] refused {_log_safe(method, 16)} "
+                         f"{_log_path(path)} from {host}: "
+                         f"{reason} (further refusals from this address for this "
+                         f"reason are counted for {minutes} min)")
+            logged = True
+    for line in lines:
+        print(line, flush=True)
+    return logged
+
+
+def _flush_refusal_summaries(now: float | None = None, force: bool = False) -> None:
+    """Write the summary of every window that has closed. The housekeeping tick
+    calls this, so a burst that simply stops is still summarised; at exit it runs
+    with `force`, so a window still open when the web UI stops is not lost."""
+    now = time.monotonic() if now is None else now
+    with _refusal_lock:
+        lines = _refusal_summaries(now, force)
+    for line in lines:
+        print(line, flush=True)
 
 
 class RestrictToIngress:
@@ -507,13 +681,17 @@ class RestrictToIngress:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if _scope_allowed(scope):
+        reason = _refusal_reason(scope)
+        if not reason:
             await self.app(scope, receive, send)
             return
         if scope.get("type") == "websocket":
             await receive()               # drain the initial websocket.connect
             await send({"type": "websocket.close", "code": 1008})
             return
+        client = scope.get("client")
+        _log_refusal(client[0] if client else "", scope.get("method", ""),
+                     scope.get("path") or "", reason)
         await send({"type": "http.response.start", "status": 403,
                     "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": b'{"error":"forbidden"}'})
@@ -792,19 +970,56 @@ def _announce_name(ext: str) -> str:
 
 def _cleanup_announce_dir(max_age: int = 300) -> None:
     """Prune announcement WAVs older than max_age seconds. Best-effort; never raises
-    into a request, so the ephemeral clips under /run don't accumulate."""
+    into a request, so the ephemeral clips under /run don't accumulate.
+
+    Runs at the top of every announce POST and once a minute from the
+    housekeeping thread below. The default is announce_clip.CLIP_MAX_AGE_S,
+    kept as a literal here because the retry's age cap is pinned against THIS
+    signature (tests/test_announce_retry.py); test_app.py pins the two equal."""
     try:
         os.makedirs(ANNOUNCE_DIR, exist_ok=True)
-        now = time.time()
-        for f in os.listdir(ANNOUNCE_DIR):
-            p = os.path.join(ANNOUNCE_DIR, f)
-            try:
-                if now - os.path.getmtime(p) > max_age:
-                    os.unlink(p)
-            except OSError:
-                pass
     except OSError:
-        pass
+        return
+    announce_clip.sweep(ANNOUNCE_DIR, max_age)
+
+
+# ★ ONE CLOCK FOR THE CHORES THAT MUST NOT WAIT FOR TRAFFIC (2026-10-14 review).
+# Both of these used to happen only when something else did: a clip was pruned
+# when the NEXT announcement arrived, so the last speaker clip stayed fetchable
+# from the LAN until then, however many days that was; and a refusal window's
+# summary would come out only at the next refusal. This process is the one
+# long-lived owner of both, so the tick lives here. Started only under the real
+# app — the test box imports this module without FastAPI and must not grow a
+# thread per import.
+_HOUSEKEEPING_INTERVAL_S = 60.0
+
+
+def _housekeeping_once() -> None:
+    # Sweep only a directory that exists. _cleanup_announce_dir creates it,
+    # which is right before a POST writes a clip and wrong on a timer: a
+    # directory this root process made would not be the asterisk-owned one
+    # switchboard-config prepares, and the speaker AGI could not write into it.
+    if os.path.isdir(ANNOUNCE_DIR):
+        _cleanup_announce_dir()
+    _flush_refusal_summaries()
+
+
+def _housekeeping_loop(interval: float = _HOUSEKEEPING_INTERVAL_S) -> None:
+    """Run the chores now (a web-UI restart inside a running container finds
+    whatever the last process left) and then every `interval` seconds."""
+    while True:
+        try:
+            _housekeeping_once()
+        except Exception as exc:  # noqa: BLE001 — a failed chore must not end the clock
+            print(f"[switchboard-webui] housekeeping failed: {exc}", flush=True)
+        time.sleep(interval)
+
+
+if _HAVE_FASTAPI:
+    threading.Thread(target=_housekeeping_loop, name="switchboard-housekeeping",
+                     daemon=True).start()
+    # uvicorn exits normally on SIGTERM, so this runs on every stop and restart.
+    atexit.register(_flush_refusal_summaries, None, True)
 
 
 def _record_delivery(ext: str, kind: str, outcome: str, **extra) -> None:
@@ -1244,8 +1459,16 @@ def api_ring(ext: str) -> JSONResponse:
     try:
         ok = ring_extension(ext)
     except (AMIError, OSError) as exc:
-        print(f"[switchboard-webui] ring {ext} failed: {exc}", flush=True)
+        print(f"[switchboard-webui] web: test ring to {ext} failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
+    # ★ A LINE FOR THE ONE THAT WORKED TOO (2026-10-14 review). The test ring is
+    # an Application originate: it never enters the dialplan, so it leaves no
+    # callqos row, no ledger row and, answered or not, nothing in the journal but
+    # Asterisk's own `Called <ext>`. Four test rings in one review window could
+    # be attributed to this page only by elimination. `web:` says which surface,
+    # on the failure line above as well, so one grep finds every outcome.
+    print(f"[switchboard-webui] web: test ring to {ext} "
+          f"{'queued' if ok else 'not accepted by Asterisk'}", flush=True)
     return JSONResponse({"ok": ok})
 
 
@@ -1413,21 +1636,50 @@ def api_mwi(ext: str, state: str) -> JSONResponse:
     try:
         ok = set_mwi(ext, on)
     except (AMIError, OSError) as exc:
-        print(f"[switchboard-webui] mwi {ext} {state} failed: {exc}", flush=True)
+        print(f"[switchboard-webui] web: {'set' if on else 'clear'} MWI for {ext} "
+              f"failed: {exc}", flush=True)
         return JSONResponse({"ok": False, "error": "unreachable"}, status_code=502)
     # Optimistic CLEAR, honest SET: persist the flag when AMI accepted it, or
     # always when clearing (on=False — a failed clear should still drop the
     # badge). When a SET is REFUSED (ok is False), do NOT set the badge: the
     # stutter tone never started, so claiming it did would be a lie the init
     # replay would then re-push to Asterisk on the next restart.
+    stored = changed = False
     if ok or not on:
         if mwi_store is not None:
             try:
+                # Read before the write: set_flag writes only on a change and
+                # returns the new state, not whether it moved, so this is the
+                # only way the line below can tell a clear from a no-op. The two
+                # take the lock separately, so a dial-0 clear landing between
+                # them can skew only this wording, never the flag.
+                changed = mwi_store.is_set(ext) != on
                 mwi_store.set_flag(ext, on)
+                stored = True
             except Exception as exc:
-                print(f"[switchboard-webui] mwi flag {ext} failed: {exc}", flush=True)
+                print(f"[switchboard-webui] web: mwi flag {ext} failed: {exc}", flush=True)
     elif not ok:  # a SET that Asterisk rejected — leave the badge off, report it
+        print(f"[switchboard-webui] web: set MWI for {ext} refused by Asterisk; "
+              "badge left off", flush=True)
         return JSONResponse({"ok": False, "error": "ami_rejected"}, status_code=502)
+    # One line per action, in the switchboard-mwi CLI's wording — no-op form
+    # included — so a review can tell a dashboard clear from the dial-0 one: the
+    # store writes nothing when a flag is already in the state asked for, so the
+    # file's mtime cannot. Asterisk is told either way (its MWI is in-memory and
+    # may have drifted from the store).
+    if not stored and not ok:
+        head = f"could not {'set' if on else 'clear'} MWI for {ext}"
+        tail = ": neither the store nor Asterisk was updated"
+    elif stored and not changed:
+        head = f"MWI for {ext} already {'set' if on else 'clear'}"
+        tail = (" (store unchanged; Asterisk re-asserted)" if ok
+                else " in store; Asterisk MWI update failed")
+    else:
+        head = f"{'set' if on else 'cleared'} MWI for {ext}"
+        tail = (" (store + Asterisk)" if stored and ok
+                else " in store; Asterisk MWI update failed" if stored
+                else " in Asterisk; store not updated")
+    print(f"[switchboard-webui] web: {head}{tail}", flush=True)
     return JSONResponse({"ok": True, "mwi": on})
 
 

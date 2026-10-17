@@ -2,12 +2,14 @@
 
     python3 -m pytest switchboard/tests/test_ledger_rotation.py
 
-Switchboard writes four unbounded JSONL ledgers, each with its own byte cap:
+Switchboard writes five unbounded JSONL ledgers, each with its own byte cap:
 
-    heartbeat.jsonl          rtpmon/poller.py            4 MiB
-    delivery-outcomes.jsonl  webui/delivery.py           2 MiB
-    callqos-outcomes.jsonl   usr/bin/switchboard-callqos 4 MiB
-    cordless-mos.jsonl       devhealth/poller.py         512 KiB
+    heartbeat.jsonl          rtpmon/poller.py               4 MiB
+    delivery-outcomes.jsonl  webui/delivery.py              2 MiB
+    callqos-outcomes.jsonl   usr/bin/switchboard-callqos    4 MiB
+    cordless-mos.jsonl       devhealth/poller.py            512 KiB
+    backup-window.jsonl      usr/bin/switchboard-backup-pre 256 KiB (since 2026-10-14;
+                                                            it had no cap at all)
 
 Through v0.76.0 all three "enforced" the cap with `open(path, "w")` followed by
 `pass` — which truncates the file to ZERO BYTES. The comment above the poller's
@@ -37,13 +39,18 @@ SOURCES = {
     "callqos": ROOT / "usr/bin/switchboard-callqos",
     # The private low-MOS capture (cordless-mos.jsonl, 512 KiB).
     "devhealth": ROOT / "usr/share/switchboard/devhealth/poller.py",
+    # The Supervisor's backup hook (backup-window.jsonl, 256 KiB). Its program
+    # runs only under __main__, so loading it here runs nothing.
+    "backup_pre": ROOT / "usr/bin/switchboard-backup-pre",
 }
 
 
 ROTATORS = {}
+MODULES = {}
 for _n, _p in SOURCES.items():
     _mod = SourceFileLoader(f"switchboard_rot_{_n}", str(_p)).load_module()
     ROTATORS[_n] = _mod._rotate_tail
+    MODULES[_n] = _mod
 
 CAP = 4096
 
@@ -192,3 +199,60 @@ def test_a_ledger_between_the_kept_half_and_the_cap_is_not_touched(tmp_path, imp
     before = p.read_bytes()
     ROTATORS[impl](str(p), CAP)
     assert p.read_bytes() == before
+
+
+def test_the_backup_window_ledger_is_trimmed_where_the_hook_writes_it(tmp_path, monkeypatch):
+    """backup-window.jsonl was the one /share ledger with no cap (2026-10-14).
+
+    Driven through the hook's main(), the function the Supervisor runs, so the
+    trim is shown to be on the production path and not merely present in the
+    file. The new row is appended after the trim, so the window it opens is
+    never the record a trim takes.
+    """
+    bp = MODULES["backup_pre"]
+    state, share = tmp_path / "state", tmp_path / "share"
+    state.mkdir()
+    share.mkdir()
+    p = _ledger(share, 400)
+    assert p.stat().st_size > CAP, "fixture must actually exceed the cap"
+    monkeypatch.setattr(bp, "STATE_DIR", str(state))
+    monkeypatch.setattr(bp, "SHARE_DIR", str(share))
+    monkeypatch.setattr(bp, "STAMP_PATH", str(p))
+    monkeypatch.setattr(bp, "STAMP_MAX_BYTES", CAP)
+    assert bp.main() == 0
+    lines = p.read_text().splitlines()
+    recs = [json.loads(l) for l in lines]          # every line a whole record
+    assert recs[-1]["phase"] == "pre" and recs[-1]["synced_files"] >= 0, recs[-1]
+    seqs = [r["seq"] for r in recs[:-1]]
+    assert seqs and seqs[-1] == 399 and seqs == list(range(seqs[0], 400)), seqs[:3]
+    assert seqs[0] > 0, "the trim should have taken the oldest records"
+    assert p.stat().st_size <= CAP + len(lines[-1]) + 1
+
+
+def test_the_backup_window_cap_is_a_real_bound():
+    """No larger than any sibling ledger's cap, and not zero (a zero cap would
+    trim the file to its newest half-byte on every backup)."""
+    cap = MODULES["backup_pre"].STAMP_MAX_BYTES
+    assert isinstance(cap, int) and 64 * 1024 <= cap <= 4 * 1024 * 1024, cap
+
+
+def test_the_backup_window_trim_does_not_follow_a_planted_link(tmp_path, monkeypatch):
+    """The hook runs as root in a folder `asterisk` and the host can write. With
+    the cap shrunk below the target's size, a trim that followed a link planted
+    in place of the stamp file would rewrite the target."""
+    bp = MODULES["backup_pre"]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "options.json"
+    secret.write_text('{"secret": "x"}\n' * 400)
+    os.chmod(secret, 0o600)
+    before = secret.read_bytes()
+    share = tmp_path / "share"
+    share.mkdir()
+    link = share / "backup-window.jsonl"
+    link.symlink_to(secret)
+    monkeypatch.setattr(bp, "STAMP_PATH", str(link))
+    monkeypatch.setattr(bp, "STAMP_MAX_BYTES", 64)
+    bp._stamp("pre", 1)                            # logs the refusal; never raises
+    assert secret.read_bytes() == before, "a trim or an append went through the link"
+    assert link.is_symlink()

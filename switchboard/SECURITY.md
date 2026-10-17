@@ -130,7 +130,11 @@ phonebook (`/phonebook.xml`, which exposes only the internal extension directory
 The handset announcement clips (`ann-<ext>-<hex>.wav`) are NOT exempt: Asterisk
 plays them from disk, and their names are written to the shared-folder ledger, so
 exempting them (as before v0.106.0) let anything that could read `/share` fetch the
-audio of what was said.
+audio of what was said. A speaker clip is named from 64 random bits (before
+v0.111.0, from the speaker script's process id and the clock, a small space a LAN
+device could walk) and is deleted five to six minutes after it is written; the
+sweep runs at each announcement and once a minute from the web UI, and covers the
+handset clips too.
 `POST /api/announce/*` is exempt **only** when it carries a valid announce token
 (see [below](#5-the-announce-endpoint)).
 
@@ -139,6 +143,17 @@ Every operator action validates its extension against both the configured room s
 containing CR/LF — so the JSON API cannot be used to inject Manager protocol lines
 or smuggle a dial string. Client-facing errors are generic (`forbidden`,
 `unreachable`); detail is logged server-side only.
+
+Each refused HTTP request is logged server-side with the client address, the
+method, the path (control characters and spaces replaced, truncated, and a
+speaker-clip name written as `a<digits>.wav`) and a reason: not from ingress,
+missing token, bad token, or LAN announce is off. The token, the headers and the
+query string are never logged. So that these lines cannot use up the journal rate
+limit every container shares, only the first refusal per address and reason in
+each 10 minutes is logged in full; the rest are counted and reported in one summary
+line, which is also written when the web UI stops. The web server itself (uvicorn)
+logs a refused WebSocket handshake and a malformed request once per attempt, with
+the request's path and query string; those lines are not rate-limited.
 
 ### 2. The Asterisk Manager (AMI) is loopback-only, split into two accounts
 
@@ -241,7 +256,7 @@ control.
 
   | Destination | Carries | Kept | Readable from outside the add-on |
   | --- | --- | --- | --- |
-  | Add-on journal: Asterisk's console, plus the stderr of every service and voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below) | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | Add-on journal: Asterisk's console, plus the stdout and stderr of every service and the stderr of every voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's LAN IPv4 address and its IPv6 address, which res_pjsip logs at every Asterisk start (`Local IPv4/IPv6 address determined to be`). At every level, the web UI's refused-request lines: the address, method and path (speaker-clip names masked) of the first refused HTTP request per address and reason in each 10 minutes, then a count | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
   | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
@@ -361,7 +376,7 @@ control.
 
   | Writer | Runs as | What it does there |
   | --- | --- | --- |
-  | Backup hooks (`backup_pre`, `backup_post`) | root | append to `backup-window.jsonl` |
+  | Backup hooks (`backup_pre`, `backup_post`) | root | append to `backup-window.jsonl`; the pre-backup hook also trims it to its newest half once it passes 256 KiB |
   | Boot pass (`switchboard-config`) | root | add group-write and hand ownership to `asterisk` on every file; trim and scrub `asterisk.log` |
   | Call-quality script (`switchboard-callqos`) | `asterisk` | append to and trim `callqos-outcomes.jsonl`; append to `delivery-outcomes.jsonl` |
   | Link-health poller (`rtpmon`) | root | scrub `asterisk.log`; append to and trim `heartbeat.jsonl` |
@@ -439,8 +454,10 @@ control.
   None of them carries an address, a SIP account or an unmasked telephone
   number. Together they do record a household's routine: when each room's
   wake-up is set for, and when a room placed an emergency call. A fourth file,
-  `backup-window.jsonl`, carries only the time each backup began and ended and
-  how many files were flushed before it.
+  `backup-window.jsonl`, carries only the time the Supervisor began and finished
+  copying this add-on's own data in each backup (when a backup includes `/share`,
+  it is archived after every add-on in that backup) and how many files were
+  flushed before it.
 - **Home Assistant sensor attributes.** Each `sensor.switchboard_link_<ext>`
   carries its phone's LAN address as `contact_ip` — the cordless's IP
   auto-follow reads it back from there — and
@@ -502,7 +519,7 @@ for anyone who speaks to it.
 
 `POST /api/announce/{ext}` speaks a clip onto a room handset. Over the LAN it is
 allowed **only** when the `X-Announce-Token` header equals your configured
-`announce_token`. If that option is blank (the default), **LAN announce is disabled**
+`announce_token` (compared in constant time). If that option is blank (the default), **LAN announce is disabled**
 and only the Supervisor can call it. The extension must be a configured room; the
 `{text}` is capped at 500 characters; the `{url}` branch accepts only `http`/`https`,
 rejects loopback / link-local / reserved hosts (SSRF guard), does not follow
@@ -575,6 +592,12 @@ Since v0.94.0 both listeners default to loopback (`console_bind` and
 `console_web_bind` are both `127.0.0.1`), so on a **fresh** install neither is
 reachable from the LAN. An upgrade keeps whatever binds are already stored in its
 options. This section describes what you take on if either is on the network.
+
+Loopback here is the **host's** loopback. Under `host_network`, `127.0.0.1` is
+shared with every host-network add-on and process on the machine, so neither
+listener is private to Switchboard even on the default binds: any of them can open
+`:2300`, which has no login, or an ungated `:8100`, and drive the board. That is
+why the Home Assistant broker listens on a Unix socket instead of a loopback port.
 
 Both can ring, connect, hang up,
 transfer, page, set message-waiting, and control lights. The blast radius is

@@ -32,6 +32,9 @@ callers did not change.
 
 Protocol: one JSON line {"method", "path", "body"} in, one JSON line
 {"status": int|null, "text": str} or {"refused": reason} out.
+
+Logging: the start, each refused request shape with its reason, a withheld
+reply, and an hourly traffic summary (``Traffic``). Never a line per forward.
 """
 
 from __future__ import annotations
@@ -40,10 +43,13 @@ import json
 import os
 import pwd
 import re
+import signal
 import socket
 import socketserver
 import struct
 import sys
+import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,7 +101,12 @@ def check(method: str, path: str, body) -> str | None:
         return "malformed request"
     if len(path) > 512 or any(c in path for c in "\r\n\t #\\") or ".." in path:
         return "malformed path"
-    parts = urlsplit(path)
+    try:
+        parts = urlsplit(path)
+    except ValueError:
+        # "//[x" reads as an unclosed IPv6 host and raises. Uncaught, it left the
+        # connection with no reply and the request out of the traffic counts.
+        return "malformed path"
     route, query = parts.path, parts.query
     segs = route.split("/")[1:]
 
@@ -169,7 +180,11 @@ def check(method: str, path: str, body) -> str | None:
                 return "bad play_media body"
             # This add-on's own clip, from this host's web UI port only.
             u = urlsplit(body["media_content_id"])
-            if u.hostname != _lan_ip() or str(u.port) != str(WEBUI_PORT):
+            try:
+                port = u.port        # raises for a port above 65535
+            except ValueError:
+                return "clip URL is not this add-on's"
+            if u.hostname != _lan_ip() or str(port) != str(WEBUI_PORT):
                 return "clip URL is not this add-on's"
             return None
     return "POST not allowed"
@@ -195,6 +210,128 @@ def _allowed_uids() -> set:
 def _log(msg: str) -> None:
     sys.stderr.write(f"[ha-broker] {msg}\n")
     sys.stderr.flush()
+
+
+# ★ A SUMMARY LINE, NOT A LINE PER REQUEST (2026-10-14). The broker logged its
+# start, its refusals and a withheld reply, and nothing else: a forward that
+# succeeded, Home Assistant answering 4xx/5xx, and Home Assistant out of reach
+# all left no line here. Most callers log their own failures, but
+# switchboard-callqos runs detached with its stdio on /dev/null, so for it a
+# broker or Home Assistant fault was invisible, and a review could not count the
+# broker's traffic at all. So every request is counted by route class and
+# outcome, and ONE line per interval reports the counts, only when there were any:
+#
+#   [ha-broker] traffic over 3600 s: set_state ok=12; state ok=40 unreachable=2
+#
+#   ok           forwarded; Home Assistant answered below 400
+#   http<code>   forwarded; Home Assistant answered <code>, or (http502) the
+#                broker withheld a reply it could not parse
+#   unreachable  forwarded; Home Assistant could not be reached
+#   refused      never forwarded. A refused request shape also has its own line
+#                with the reason, and so does a peer outside root and asterisk
+#                (class `connection`); a line that is not JSON, or is too large,
+#                is only counted (class `other`)
+#
+# The class is a name from route_class(), never text from the request, so a
+# caller cannot write into the log through it. On SIGTERM the partial interval is
+# written before the broker exits, so a restart does not drop it.
+SUMMARY_INTERVAL_S = 3600
+
+# The service pairs a caller may name, each its own class; any other is `service`.
+_SERVICE_CLASSES = SERVICES | {("conversation", "process"),
+                               ("persistent_notification", "create")}
+
+
+def route_class(method, path) -> str:
+    """A fixed, short name for what a request asks for, for the traffic summary.
+    Pure, total and bounded: an unrecognised shape is `other`."""
+    if not isinstance(method, str) or not isinstance(path, str):
+        return "other"
+    try:
+        route = urlsplit(path).path
+    except ValueError:
+        return "other"
+    segs = route.split("/")[1:]
+    if method == "GET":
+        if route == "/":
+            return "ping"
+        if route in ("/states", "/config"):
+            return route[1:]
+        if len(segs) == 2 and segs[0] == "states":
+            return "state"
+        if len(segs) == 2 and segs[0] == "calendars":
+            return "calendar"
+    elif method == "POST":
+        if route == "/template":
+            return "template"
+        if len(segs) == 2 and segs[0] == "states":
+            return "set_state"
+        if len(segs) == 3 and segs[0] == "services":
+            pair = (segs[1], segs[2])
+            return ".".join(pair) if pair in _SERVICE_CLASSES else "service"
+    return "other"
+
+
+def _outcome(status) -> str:
+    if status is None:
+        return "unreachable"
+    return "ok" if status < 400 else f"http{status}"
+
+
+def _outcome_order(outcome: str):
+    return {"ok": (0, ""), "unreachable": (2, ""), "refused": (3, "")}.get(outcome, (1, outcome))
+
+
+class Traffic:
+    """Request counts by (route class, outcome) since the last summary. The
+    server handles each connection on its own thread, so every touch is locked."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._counts: dict = {}
+        self._since = clock()
+
+    def count(self, route: str, outcome: str) -> None:
+        with self._lock:
+            self._counts[(route, outcome)] = self._counts.get((route, outcome), 0) + 1
+
+    def summary(self, note: str = "") -> str | None:
+        """The line for everything counted since the last call, which starts a new
+        interval. None when nothing was counted: a quiet hour writes nothing."""
+        with self._lock:
+            counts, self._counts = self._counts, {}
+            now = self._clock()
+            since, self._since = self._since, now
+        if not counts:
+            return None
+        routes: dict = {}
+        for (route, outcome), n in counts.items():
+            routes.setdefault(route, {})[outcome] = n
+        parts = [route + " " + " ".join(f"{o}={outs[o]}" for o in sorted(outs, key=_outcome_order))
+                 for route, outs in sorted(routes.items())]
+        return f"traffic over {int(now - since)} s{note}: " + "; ".join(parts)
+
+
+TRAFFIC = Traffic()
+
+
+def _summarize(note: str = "") -> None:
+    line = TRAFFIC.summary(note)
+    if line:
+        _log(line)
+
+
+def _summarize_forever(interval: float = SUMMARY_INTERVAL_S, sleep=time.sleep) -> None:
+    while True:
+        sleep(interval)
+        _summarize()
+
+
+def _stop(signum, frame) -> None:
+    """SIGTERM from s6: write the partial interval, then exit."""
+    _summarize(" (stopping)")
+    raise SystemExit(0)
 
 
 def _trim_state(st):
@@ -230,21 +367,29 @@ def filter_reply(method: str, path: str, status, text: str):
 
 def handle_line(line: bytes, forward=None) -> dict:
     """One request line in, one reply dict out. ``forward`` is ha_client._request
-    in production and a fake in the tests."""
+    in production and a fake in the tests. Every outcome is counted in TRAFFIC."""
     forward = forward or ha_client._request
     try:
         req = json.loads(line)
     except (ValueError, UnicodeDecodeError):
+        TRAFFIC.count("other", "refused")
         return {"refused": "not JSON"}
     if not isinstance(req, dict):
+        TRAFFIC.count("other", "refused")
         return {"refused": "not an object"}
     method, path, body = req.get("method"), req.get("path"), req.get("body")
-    reason = check(method, path, body)
+    route = route_class(method, path)
+    try:
+        reason = check(method, path, body)
+    except Exception:  # noqa: BLE001 — a parser error is a refusal, never a dropped connection
+        reason = "malformed request"
     if reason:
         _log(f"refused {str(method)[:8]} {str(path)[:120]}: {reason}")
+        TRAFFIC.count(route, "refused")
         return {"refused": reason}
     status, text = forward(method, path, body)
     status, text = filter_reply(method, path, status, text or "")
+    TRAFFIC.count(route, _outcome(status))
     return {"status": status, "text": text}
 
 
@@ -253,9 +398,11 @@ class _Handler(socketserver.StreamRequestHandler):
         uid = self.server.peer_uid(self.request)
         if uid not in self.server.allowed_uids:
             _log(f"refused a connection from uid {uid}")
+            TRAFFIC.count("connection", "refused")
             return
         line = self.rfile.readline(MAX_REQUEST + 1)
         if len(line) > MAX_REQUEST:
+            TRAFFIC.count("other", "refused")
             reply = {"refused": "request too large"}
         else:
             reply = handle_line(line, self.server.forward)
@@ -300,7 +447,6 @@ def make_server(path: str = SOCKET_PATH) -> _Server:
 def _warm(stop_after: float = 300.0) -> None:
     """Find the working Home Assistant address once, before any caller waits on
     it: a cold forward may try both candidates (twice the client's timeout)."""
-    import time
     deadline = time.monotonic() + stop_after
     while time.monotonic() < deadline:
         if ha_client.available():
@@ -312,9 +458,10 @@ def serve(path: str = SOCKET_PATH) -> None:
     if not os.environ.get("SUPERVISOR_TOKEN") and not os.environ.get("HA_BASE_URL"):
         _log("WARNING: no Supervisor token; every forwarded request will report HA unreachable")
     server = make_server(path)
+    signal.signal(signal.SIGTERM, _stop)
     _log(f"listening on {path}")
-    import threading
     threading.Thread(target=_warm, daemon=True).start()
+    threading.Thread(target=_summarize_forever, daemon=True).start()
     server.serve_forever()
 
 

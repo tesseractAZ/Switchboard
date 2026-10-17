@@ -389,6 +389,57 @@ def test_the_uvicorn_ws_flag_and_the_installed_package_agree() -> None:
             "console would depend on uvicorn's autodetection")
 
 
+def _whisper_exec_block() -> str:
+    """The whisper-server run script's exec statement, continuation lines included."""
+    lines = (_S6 / "whisper-server" / "run").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("exec env "))
+    end = start
+    while lines[end].rstrip().endswith("\\"):
+        end += 1
+    return "\n".join(lines[start:end + 1])
+
+
+def test_whisper_server_stdout_is_discarded_and_its_stderr_kept():
+    """2026-10-14: whisper-server's stdout is block-buffered on a pipe.
+
+    musl buffers a non-tty stdout in 1 KiB blocks, so the server's printf lines
+    reached the journal when a block filled: eleven requests over eight hours all
+    stamped with one instant, a partial line spliced onto an Asterisk line, and a
+    stopped instance's output never written at all. The image has no stdbuf
+    (coreutils is not installed), so the run script discards stdout and keeps
+    stderr, which carries the timely lines.
+
+    Runs the script's REAL exec statement with stand-ins for the binaries it
+    names, rather than grepping it: the property is where each stream ends up.
+    """
+    import tempfile
+    block = _whisper_exec_block()
+    check("whisper-server/run: the exec statement starts the server",
+          "/usr/bin/whisper-server" in block)
+    check("whisper-server/run: stderr is not redirected anywhere",
+          not re.search(r"(^|\s)(2>|&>|>&)", block))
+    with tempfile.TemporaryDirectory() as d:
+        bindir = Path(d)
+        # s6-setuidgid drops privileges and execs the rest of its argv.
+        (bindir / "s6-setuidgid").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        server = bindir / "whisper-server"
+        server.write_text("#!/bin/sh\n"
+                          'echo "whisper server listening at http://127.0.0.1:8126"\n'
+                          'echo "operator(): processing a.wav" >&2\n')
+        for p in (bindir / "s6-setuidgid", server):
+            p.chmod(0o755)
+        body = block.replace("/usr/bin/whisper-server", str(server))
+        r = subprocess.run(
+            ["bash", "-c", body],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bindir}:/usr/bin:/bin", "MODEL": "/m.bin",
+                 "PORT": "8126", "THREADS": "2"})
+    check(f"whisper-server/run: the stand-in ran (rc={r.returncode}, err={r.stderr!r})",
+          r.returncode == 0 and "processing" in r.stderr)
+    check(f"whisper-server/run: nothing it prints on stdout reaches the log ({r.stdout!r})",
+          r.stdout == "")
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))
