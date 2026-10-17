@@ -602,9 +602,14 @@ def test_sigterm_writes_the_partial_interval_before_the_broker_exits():
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(20)
             s.connect(sock_path)
-            s.sendall(b'{"method": "GET", "path": "/", "body": null}\n')
-            while s.recv(65536):
-                pass                                       # until the broker closes it
+            try:
+                s.sendall(b'{"method": "GET", "path": "/", "body": null}\n')
+                while s.recv(65536):
+                    pass                                   # until the broker closes it
+            except (ConnectionResetError, BrokenPipeError):
+                # Refused at the door (SO_PEERCRED, a non-root runner): the broker
+                # closes with the request unread, which resets the connection.
+                pass
         proc.send_signal(signal.SIGTERM)
         rc = proc.wait(timeout=20)
         rest = proc.stderr.read()
