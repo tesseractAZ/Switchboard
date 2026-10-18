@@ -60,6 +60,12 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
 # to boot; the legacy stacks those samples would enable (IAX2/UNISTIM/DUNDi/
 # AEL/Lua) are noloaded by the generated modules.conf. libstdc++ is the only
 # extra runtime dep whisper-cli needs (built static, OpenMP off).
+#
+# py3-asyncssh is the SSH server in front of the operator console
+# (console-ssh/server.py). It comes from apk, not pip, so its compiled
+# dependency (py3-cryptography) is Alpine's musl build. The import check runs in
+# the same layer as the install: without the package the SSH service would exit
+# at start and s6 would restart it for ever, leaving the console unreachable.
 # --------------------------------------------------------------------------- #
 FROM ${SWITCHBOARD_BASE_IMAGE}
 
@@ -68,8 +74,10 @@ RUN apk add --no-cache \
         asterisk-sample-config \
         python3 \
         py3-pip \
+        py3-asyncssh \
         libstdc++ \
         tzdata \
+    && python3 -c "import asyncssh" \
     && pip install --no-cache-dir --break-system-packages \
         "fastapi==0.115.*" \
         "uvicorn==0.32.*" \
@@ -160,6 +168,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /var/lib/asterisk/agi-bin/switchboard-assistant.agi \
     && chmod +x /usr/share/switchboard/console/console.py \
     && chmod +x /usr/share/switchboard/console-web/server.py \
+    && chmod +x /usr/share/switchboard/console-ssh/server.py \
     && chmod +x /usr/share/switchboard/wakeup/scheduler.py \
     && chmod +x /etc/s6-overlay/s6-rc.d/init-switchboard/up \
     && chmod +x /etc/s6-overlay/s6-rc.d/asterisk/run \
@@ -168,6 +177,7 @@ RUN chmod +x /usr/bin/switchboard-config \
     && chmod +x /etc/s6-overlay/s6-rc.d/ha-broker/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/operator-console/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/console-web/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/console-ssh/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/wakeup-scheduler/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/devhealth/run \
     && chmod +x /usr/share/switchboard/devhealth/poller.py
