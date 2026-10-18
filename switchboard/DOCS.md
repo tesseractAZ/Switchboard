@@ -1369,7 +1369,7 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 ![The full-screen operator console](docs/img/console.png)
 
 - **In the Home Assistant sidebar** *(recommended, added in 0.93.0)* — open the
-  **Switchboard** panel and press **🖥️ Console**, or go straight to `/console/`
+  **Switchboard** panel and press **Console**, or go straight to `/console/`
   under the panel's URL. This is the same board, served from the Ingress port, so
   **Home Assistant's own login is the only login** — there is no separate
   password to configure, forget, or leave switched off. The port does listen on
