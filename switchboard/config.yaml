@@ -82,7 +82,7 @@ options:
   announce_token: ""
   console_enabled: true
   console_port: 2300
-  console_bind: "127.0.0.1"
+  console_bind: "0.0.0.0"
   console_web_enabled: true
   console_web_port: 8100
   console_web_bind: "127.0.0.1"

@@ -8,9 +8,11 @@ Run with plain Python (no deps):
 Covers the side-effect-free pieces: the RFC 6455 handshake key, WebSocket frame
 encode (server->client, unmasked) and decode (client->server, masked), the
 telnet NAWS subnegotiation, and stripping the operator console's IAC negotiation
-out of the console->browser stream. The socket plumbing in server.py is not
-exercised here (same split as console.py's pure parser vs. its socket server).
+out of the console->browser stream. Of server.py's socket plumbing, only the
+bridge to the operator console's Unix socket is driven here, against a fake
+board; the HTTP side is test_console_web_auth.py's.
 """
+import contextlib
 import os
 import sys
 import struct
@@ -228,51 +230,38 @@ def test_bridge_write_is_bounded() -> None:
           "sock.setblocking(True)" not in src)
 
 
-def test_env_int_tolerates_empty_port() -> None:
-    """Regression: a config-derived port env arriving *empty* must not crash the
-    service. bashio::config can hand back "" during a config reload / options.json
-    rewrite (seen live on the v0.29.0 schema migration); the old
-    ``int(os.environ.get("CONSOLE_WEB_PORT", "8100"))`` threw ``ValueError`` on ""
-    because the 2-arg default only covers the *absent* key, not a set-but-empty one.
-    server.py's CONSOLE_PORT is parsed at *import* (module top), so loading the
-    module with the env set empty exercises the real crash site end-to-end.
+SERVER_PATH = (Path(__file__).resolve().parents[1]
+               / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "server.py")
+
+
+@contextlib.contextmanager
+def _server_module(env: dict):
+    """Load server.py fresh with ``env`` set, and undo everything it leaks.
+
+    server.py does its own sys.path.insert and imports its siblings by BARE
+    name, so loading it here leaks both into the session. Snapshot the WHOLE
+    list (one .remove() is not enough) and the bare names. Caught by the autouse
+    tripwire in conftest.py — and note it only ERRORED when this file ran ALONE:
+    in the full suite an earlier test had already put that path there, so it was
+    inside the "before" snapshot and invisible. That masking is exactly what
+    makes a leak like this survive.
+
+    Yields the module, or None when importing it raised.
     """
-    server_path = (Path(__file__).resolve().parents[1]
-                   / "rootfs" / "usr" / "share" / "switchboard" / "console-web" / "server.py")
-    saved = {k: os.environ.get(k)
-             for k in ("CONSOLE_WEB_TARGET_PORT", "CONSOLE_WEB_PORT",
-                       "T_BLANK", "T_VAL", "T_PAD")}
-    # server.py:39 does its own sys.path.insert and imports its siblings by BARE
-    # name, so loading it here leaks both into the session. Snapshot the WHOLE
-    # list (one .remove() is not enough) and the bare names. Caught by the
-    # autouse tripwire in conftest.py — and note it only ERRORED when this file
-    # ran ALONE: in the full suite an earlier test had already put that path
-    # there, so it was inside the "before" snapshot and invisible. That masking
-    # is exactly what makes a leak like this survive.
+    saved = {k: os.environ.get(k) for k in env}
     saved_path = list(sys.path)
     saved_mods = {n: sys.modules.get(n) for n in ("consoleproto", "webauth")}
     try:
-        os.environ["CONSOLE_WEB_TARGET_PORT"] = ""   # the exact crashy case
-        os.environ["CONSOLE_WEB_PORT"] = ""
+        os.environ.update(env)
         srv = None
         try:
-            srv = SourceFileLoader("switchboard_console_web_server",
-                                   str(server_path)).load_module()
+            loader = SourceFileLoader("switchboard_console_web_server", str(SERVER_PATH))
+            srv = module_from_spec(spec_from_loader(loader.name, loader))
+            loader.exec_module(srv)
         except Exception as exc:  # noqa: BLE001 — a raise here IS the regression
+            srv = None
             print("  import raised:", repr(exc))
-        check("server.py imports with empty CONSOLE_WEB_TARGET_PORT (no ValueError)",
-              srv is not None)
-        if srv is not None:
-            check("_env_int: import-time empty port falls back to 2300",
-                  srv.CONSOLE_PORT == 2300)
-            check("_env_int: empty -> default", srv._env_int("CONSOLE_WEB_PORT", 8100) == 8100)
-            os.environ["T_BLANK"] = "   "
-            check("_env_int: whitespace-only -> default", srv._env_int("T_BLANK", 8100) == 8100)
-            check("_env_int: absent key -> default", srv._env_int("T_UNSET_ZZ", 8100) == 8100)
-            os.environ["T_VAL"] = "9000"
-            check("_env_int: a real value wins", srv._env_int("T_VAL", 8100) == 9000)
-            os.environ["T_PAD"] = "  9000  "
-            check("_env_int: surrounding whitespace tolerated", srv._env_int("T_PAD", 8100) == 9000)
+        yield srv
     finally:
         sys.path[:] = saved_path
         for n, m in saved_mods.items():
@@ -286,6 +275,134 @@ def test_env_int_tolerates_empty_port() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_env_int_tolerates_empty_port() -> None:
+    """Regression: a config-derived port env arriving *empty* must not crash the
+    service. bashio::config can hand back "" during a config reload / options.json
+    rewrite (seen live on the v0.29.0 schema migration); the old
+    ``int(os.environ.get("CONSOLE_WEB_PORT", "8100"))`` threw ``ValueError`` on ""
+    because the 2-arg default only covers the *absent* key, not a set-but-empty one.
+
+    The import-time crash site this used to exercise (the TCP target port) is
+    gone with the TCP target; the socket path that replaced it is read the same
+    tolerant way, so an empty export must fall back to the default rather than
+    point the bridge at "".
+    """
+    with _server_module({"CONSOLE_SOCKET": "", "CONSOLE_WEB_PORT": "",
+                         "T_BLANK": "", "T_VAL": "", "T_PAD": ""}) as srv:
+        check("server.py imports with an empty CONSOLE_SOCKET (no crash)", srv is not None)
+        if srv is None:
+            return
+        check("an empty CONSOLE_SOCKET falls back to the board's socket",
+              srv.CONSOLE_SOCKET == "/run/switchboard/console.sock")
+        check("_env_int: empty -> default", srv._env_int("CONSOLE_WEB_PORT", 8100) == 8100)
+        os.environ["T_BLANK"] = "   "
+        check("_env_int: whitespace-only -> default", srv._env_int("T_BLANK", 8100) == 8100)
+        check("_env_int: absent key -> default", srv._env_int("T_UNSET_ZZ", 8100) == 8100)
+        os.environ["T_VAL"] = "9000"
+        check("_env_int: a real value wins", srv._env_int("T_VAL", 8100) == 9000)
+        os.environ["T_PAD"] = "  9000  "
+        check("_env_int: surrounding whitespace tolerated", srv._env_int("T_PAD", 8100) == 9000)
+
+
+def _sock_dir() -> str:
+    """A temp dir short enough for a Unix socket path (macOS caps it at 104)."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="sbcw-")
+    if len(d) > 80:
+        d = tempfile.mkdtemp(prefix="sbcw-", dir="/tmp")
+    return d
+
+
+def _recv_until(sock, marker: bytes, limit: float = 5.0) -> bytes:
+    import time
+    buf, end = b"", time.monotonic() + limit
+    sock.settimeout(limit)
+    while marker not in buf and time.monotonic() < end:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def test_the_bridge_reaches_the_board_over_its_unix_socket() -> None:
+    """★ The real _bridge_ws against a fake board on a real Unix socket.
+
+    The board no longer listens on TCP at all, so a bridge still dialling
+    127.0.0.1:2300 would show "unavailable" on every connect. What the board
+    receives is pinned byte for byte: the client preamble, the resize as NAWS
+    (never as typed text) and the keystroke. What the browser receives is the
+    board's output with its telnet negotiation stripped.
+    """
+    import socket
+    import threading
+    path = os.path.join(_sock_dir(), "console.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+    got, done = bytearray(), threading.Event()
+
+    def board():
+        conn, _ = listener.accept()
+        with conn:
+            conn.sendall(bytes([ws.IAC, ws.WILL, ws.OPT_ECHO, ws.IAC, ws.WILL, ws.OPT_SGA,
+                                ws.IAC, ws.DO, ws.OPT_SGA, ws.IAC, ws.DO, ws.OPT_NAWS])
+                         + b"BOARD")
+            conn.settimeout(5)
+            try:
+                while not got.endswith(b"j"):
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    got.extend(chunk)
+            finally:
+                done.set()
+            conn.recv(1)          # hold the board open until the bridge closes it
+
+    bt = threading.Thread(target=board, daemon=True)
+    bt.start()
+    try:
+        with _server_module({"CONSOLE_SOCKET": path, "CONSOLE_WEB_USERS": ""}) as srv:
+            check("server.py loads", srv is not None)
+            check("the bridge targets the socket it was given", srv.CONSOLE_SOCKET == path)
+            browser, ours = socket.socketpair()
+            t = threading.Thread(target=srv._bridge_ws, args=(ours, b""), daemon=True)
+            t.start()
+            first = _recv_until(browser, b"BOARD")
+            check(f"the browser gets the board's output, telnet stripped ({first!r})",
+                  first == ws.encode_frame(b"BOARD", ws.OP_BIN))
+            browser.sendall(_mask(b'{"type":"resize","cols":100,"rows":30}'))
+            browser.sendall(_mask(b"j"))
+            done.wait(5)
+            want = bytes([ws.IAC, ws.DO, ws.OPT_ECHO, ws.IAC, ws.DO, ws.OPT_SGA,
+                          ws.IAC, ws.WILL, ws.OPT_SGA, ws.IAC, ws.WILL, ws.OPT_NAWS]) \
+                + ws.naws_subnegotiation(100, 30) + b"j"
+            check(f"the board gets preamble + NAWS + keystroke ({bytes(got)!r})",
+                  bytes(got) == want)
+            browser.close()       # the browser goes away
+            t.join(5)
+            check("the bridge exits when the browser goes away", not t.is_alive())
+            ours.close()
+    finally:
+        listener.close()
+        bt.join(5)
+
+
+def test_a_missing_board_socket_says_unavailable() -> None:
+    """The board idles (both console switches off) or is still starting: no socket
+    file at all. The browser must get the notice, not a silent dead terminal."""
+    import socket
+    path = os.path.join(_sock_dir(), "absent.sock")
+    with _server_module({"CONSOLE_SOCKET": path, "CONSOLE_WEB_USERS": ""}) as srv:
+        check("server.py loads", srv is not None)
+        browser, ours = socket.socketpair()
+        with browser, ours:
+            srv._bridge_ws(ours, b"")
+            got = _recv_until(browser, b"unavailable")
+        check(f"the browser is told the console is unavailable ({got!r})",
+              b"Operator console unavailable" in got)
 
 
 def test_the_startup_line_reports_reachability_not_just_the_gate():
