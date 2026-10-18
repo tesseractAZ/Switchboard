@@ -9,6 +9,7 @@ action key handling (navigation + mode transitions + guarded actions). The AMI
 side effects (ring/connect/hangup) are exercised only on their guard paths,
 which never open a socket.
 """
+import contextlib
 import os
 import re
 import tempfile
