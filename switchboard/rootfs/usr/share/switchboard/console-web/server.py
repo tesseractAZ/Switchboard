@@ -6,6 +6,7 @@ A small stdlib-only HTTP + WebSocket server (no pip deps; the add-on is musl):
 
   * GET /            → the xterm.js terminal page (static/index.html).
   * GET /static/*    → vendored xterm.js / xterm.css (committed, no CDN).
+  * GET /fonts/*     → the two shared typefaces, by exact name (no CDN).
   * GET /healthz     → "ok" (liveness).
   * WS  /ws          → one TCP connection to the operator console per browser
                        socket. We act as the telnet CLIENT: answer/ignore the
@@ -103,6 +104,17 @@ _STATIC_FILES = {
 # Served by "/" only, after the session check.
 _INDEX_FILE = ("index.html", "text/html; charset=utf-8")
 
+# The add-on's shared typefaces (/usr/share/switchboard/fonts/), by exact URL
+# path → (filesystem name, content type). Same shape and the same treatment as
+# _STATIC_FILES: an exact-match table, never a directory listing and never a
+# name taken from the request, so anything else under /fonts/ is a 404. The page
+# asks for "../fonts/<name>", which a browser resolves to /fonts/<name> here.
+FONTS_DIR = os.path.join(os.path.dirname(HERE), "fonts")
+_FONT_FILES = {
+    "/fonts/CutiveMono-Regular.ttf": ("CutiveMono-Regular.ttf", "font/ttf"),
+    "/fonts/Federo-Regular.ttf": ("Federo-Regular.ttf", "font/ttf"),
+}
+
 
 def log(msg: str) -> None:
     print(f"[switchboard-console-web] {msg}", flush=True)
@@ -129,9 +141,9 @@ def _read_http_head(sock: socket.socket):
     return head + b"\r\n\r\n", rest
 
 
-def _serve_static(sock: socket.socket, path: str, entry=None) -> None:
+def _serve_static(sock: socket.socket, path: str, entry=None, base: str = "") -> None:
     name, ctype = entry if entry is not None else _STATIC_FILES[path]
-    full = os.path.join(STATIC_DIR, name)
+    full = os.path.join(base or STATIC_DIR, name)
     try:
         with open(full, "rb") as fh:
             body = fh.read()
@@ -528,6 +540,11 @@ def _dispatch_http(sock, method, path, headers, leftover: bytes = b"") -> None:
         # Vendored xterm.js/css only — public, harmless, and needed by the page
         # the moment the login redirect lands.
         _serve_static(sock, path)
+        return
+    if path in _FONT_FILES:
+        # Public OFL font files, ungated exactly like xterm.js/css above: the
+        # terminal page requests them as it loads. Absent file → 404.
+        _serve_static(sock, path, _FONT_FILES[path], FONTS_DIR)
         return
     if path in ("/healthz", "/health"):
         _send_simple(sock, 200, "OK", "ok")
