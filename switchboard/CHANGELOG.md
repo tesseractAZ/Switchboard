@@ -1,7 +1,17 @@
 # Changelog
 
-Recent releases. Releases up to 0.108.1 are in the
+Recent releases. Releases up to 0.108.2 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.114.1
+
+**The dashboard keeps the wake-up time you entered.**
+
+- The dashboard rebuilds every line each 4 s, and held off only while a wake-up
+  time box had focus. Safari moves focus off the box when Set is clicked, so a
+  completed time could be wiped back to empty before the click landed, and Set
+  answered "pick a time" without saving anything. A completed time is now kept
+  for its line across rebuilds until Set or Cancel succeeds.
 
 ## 0.114.0
 
@@ -356,20 +366,3 @@ second wave locks the Asterisk configuration, its spool and the s6 init trees.**
 - **Smaller corrections:** a stale section reference; PERFORMANCE.md's test
   count (980); the cordless firmware note in the WP826 tool notes; a CI comment
   that renaming the CI workflow would switch off the Dependabot auto-merge.
-
-## 0.108.2
-
-**A wake-up missed while Switchboard was down is now recorded and reported.**
-On 2026-10-04 a power cut took the host down from 01:46 to 08:15, and an 08:00
-wake-up did not ring. When Switchboard started again it dropped the wake-up as
-too late, which is right, but it left no record except one log line. Its single
-notification attempt was made while Home Assistant was still starting, and went
-nowhere.
-
-- **The miss is recorded in the delivery ledger** as `missed`, with a `reason`:
-  - `not-running`: the wake-up was due before Switchboard started;
-  - `grace-expired`: the phone stayed busy or offline through its grace window.
-- **The notification names the cause.** It no longer blames a busy phone for an
-  outage.
-- **The notification is retried every tick until Home Assistant accepts it,** for
-  up to an hour (`WAKEUP_MISSED_NOTIFY_RETRY_SECONDS`).

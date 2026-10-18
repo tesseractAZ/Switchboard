@@ -2194,6 +2194,13 @@ function pendingHHMM(wakeups, ext) {
 // Keep a "Ringing…" button disabled across the 4s auto-refreshes for ~one ring
 // cycle, so clicking Test ring gives durable feedback.
 const ringingUntil = {};
+// A wake-up time the user has finished entering but not yet Set, per line.
+// refresh() rebuilds every line each 4 s; the focus guard below only holds while
+// the time box has focus, and Safari moves focus off it when Set is clicked (a
+// button there takes no focus), so a completed time was wiped back to the
+// server's value and Set answered "pick a time". A completed value IS readable,
+// so it is kept here until Set or Cancel succeeds.
+const wakeDrafts = {};
 
 // Operator "connect" is a two-click gesture: click Connect on room A (arms it),
 // then click Connect on room B to patch them together. connectArm holds A's ext
@@ -2362,7 +2369,7 @@ async function refresh() {
       // Per-room wake-up setter: a small time input + Set. fill the input with
       // any pending time so it round-trips.
       const wkPending = pendingHHMM(data.wakeups, r.ext);
-      const wkVal = esc(wkPending);
+      const wkVal = esc(wakeDrafts[r.ext] || wkPending);
       // A typed "Wake" label so the time box reads as "set a wake-up", not a stray field.
       const wakeRow = '<div class="wakerow">' +
         '<span class="wklab" title="Set a wake-up for this room">Wake</span>' +
@@ -2465,6 +2472,14 @@ function busy(btn, label) {
 // All per-room actions are delegated off the grid, which is rebuilt on most
 // refreshes but deliberately NOT while a field inside it holds focus — so no
 // handler here may depend on that rebuild to undo its own button state.
+// Keep a completed wake-up time across rebuilds (see wakeDrafts).
+['input', 'change'].forEach((type) => document.getElementById('rooms').addEventListener(type, (e) => {
+  const t = e.target;
+  if (!t || !t.matches || !t.matches('input[data-waketime]')) return;
+  const x = t.getAttribute('data-waketime');
+  if (t.value) wakeDrafts[x] = t.value; else delete wakeDrafts[x];
+}));
+
 document.getElementById('rooms').addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn || btn.disabled) return;
@@ -2541,7 +2556,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
   if (ext) {
     const done = busy(btn);
     try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/cancel', {});
-          done('Cancelled ✓'); refresh(); }
+          delete wakeDrafts[ext]; done('Cancelled ✓'); refresh(); }
     catch (err) { done('Failed'); }
     return;
   }
@@ -2556,7 +2571,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     // Confirm out loud. A silent success is why a dead button and a working one
     // were indistinguishable here.
     try { await postJSON('./api/wakeup/' + encodeURIComponent(ext) + '/set', {hhmm: hhmm});
-          done('Set ✓'); refresh(); }
+          delete wakeDrafts[ext]; done('Set ✓'); refresh(); }
     catch (err) { done('Failed'); }
     return;
   }
