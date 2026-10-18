@@ -1748,6 +1748,32 @@ def index() -> str:
     return INDEX_HTML
 
 
+# The dashboard's two typefaces, self-hosted. The page runs under Ingress, has to
+# render with the WAN down, and must not tell a font CDN which household opened
+# it, so the files ship in the image and are served from here, by the page's
+# RELATIVE `fonts/<name>` (a page under /console/ would say `../fonts/<name>`).
+# Same shape as _CONSOLE_ASSETS, for the same CodeQL reason: an exact-name table
+# whose values are literal paths, so the request parameter never reaches a file
+# operation. No exemption in _refusal_reason: these are ingress-only, like the
+# page that asks for them.
+FONTS_DIR = "/usr/share/switchboard/fonts"
+_FONT_ASSETS = {
+    "Federo-Regular.ttf": f"{FONTS_DIR}/Federo-Regular.ttf",
+    "CutiveMono-Regular.ttf": f"{FONTS_DIR}/CutiveMono-Regular.ttf",
+}
+
+
+@app.get("/fonts/{name}")
+def font_asset(name: str):
+    """One of the two dashboard fonts, or a 404. A listed file that is missing
+    (the test box, a slimmed image) is a 404 too, not FileResponse's 500 at send
+    time: the page declares fallbacks, so the cost is the typeface, not the page."""
+    path = _FONT_ASSETS.get(name)
+    if path is None or not os.path.isfile(path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="font/ttf")
+
+
 # --------------------------------------------------------------------------- #
 # The operator console, in the browser, through Ingress.
 #
@@ -1841,42 +1867,177 @@ INDEX_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>Switchboard</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
-         margin: 0; padding: 1.25rem; background: var(--bg, #f6f7f9); }
-  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
-  .sub { color: #888; font-size: .85rem; margin-bottom: 1rem; }
-  .grid { display: grid; gap: .6rem;
+  /* ★ Self-hosted faces, by RELATIVE url (font_asset serves them). The page runs
+     under Ingress, must render with the WAN down, and must not tell a font CDN
+     which household opened it. Either file may be absent (the test box): every
+     stack ends in a generic family, and swap keeps text visible meanwhile. */
+  @font-face { font-family: "Federo"; src: url("fonts/Federo-Regular.ttf") format("truetype");
+               font-display: swap; }
+  @font-face { font-family: "Cutive Mono"; src: url("fonts/CutiveMono-Regular.ttf") format("truetype");
+               font-display: swap; }
+  /* The cord board after hours: ONE theme, walnut and brass, whatever HA's own
+     theme is. State is shown by LAMPS (unlit unknown, white ok, amber in use /
+     ringing / attention, red fault), and every lamp has its state in words on
+     its designation strip, so nothing is told by colour alone. Contrast: enamel,
+     brass, lamp and muted text all clear 4.5:1 on every walnut; fault red does
+     not, so it is only ever a lamp or a rule, never text. */
+  :root {
+    color-scheme: dark;
+    --walnut-0: #120c08; --walnut-1: #1d140e; --walnut-2: #2a1d14;
+    --brass: #c8a24a; --brass-dim: #7a6230;
+    --enamel: #efe6cf; --ink: #241a12;
+    --lamp: #ffb547; --lamp-idle: #5b4a36; --ok: #e9dfc4; --fault: #c0392b;
+    --muted: #9b8a72;
+    --rule: rgba(122, 98, 48, .55);
+    --bezel: inset 0 -2px 3px rgba(0, 0, 0, .45), 0 0 0 2px var(--walnut-0), 0 0 0 3px var(--brass-dim);
+    --display: "Federo", "Didot", serif;
+    --mono: "Cutive Mono", "Courier Prime", ui-monospace, monospace;
+  }
+  /* Walnut grain from layered stripes, and under it a faint field of brass jack
+     holes. No images. The side padding keeps a 16px gutter on a phone and
+     centres a 1240px board on anything wider. */
+  body { margin: 0; padding: 1.5rem max(1rem, calc((100% - 1240px) / 2)) 2.5rem;
+         font-family: var(--mono); line-height: 1.4; color: var(--enamel);
+         background-color: var(--walnut-0);
+         background-image:
+           radial-gradient(circle, rgba(200, 162, 74, .035) 0 2px, transparent 2.5px),
+           repeating-linear-gradient(91deg, rgba(42, 29, 20, .55) 0 1px, transparent 1px 9px,
+             rgba(29, 20, 14, .6) 9px 11px, transparent 11px 29px),
+           repeating-linear-gradient(89.3deg, rgba(0, 0, 0, .2) 0 2px, transparent 2px 17px,
+             rgba(42, 29, 20, .4) 17px 18px, transparent 18px 47px),
+           linear-gradient(180deg, var(--walnut-1), var(--walnut-0) 24rem);
+         background-size: 24px 24px, auto, auto, auto;
+         background-repeat: repeat, repeat, repeat, no-repeat; }
+  /* The board's images are sized against the root box: at least a viewport
+     tall, or a short page tiles the grain again below its content (a seam). */
+  html { min-height: 100%; }
+  :focus-visible { outline: 2px solid var(--lamp); outline-offset: 2px; }
+
+  /* The masthead: an engraved brass nameplate, two slotted screws. The one bold
+     element on the page. */
+  .masthead { text-align: center; margin-bottom: 1.25rem; }
+  .nameplate { position: relative; display: inline-block; margin: 0;
+         padding: .5rem 2.2rem .42rem calc(2.2rem + .18em);
+         font-family: var(--display); font-weight: normal; font-size: clamp(1.3rem, 5vw, 1.8rem);
+         letter-spacing: .18em; text-transform: uppercase; color: var(--walnut-0);
+         background: var(--brass);
+         background: linear-gradient(180deg, color-mix(in srgb, var(--brass), white 28%) 0%,
+                     var(--brass) 48%, color-mix(in srgb, var(--brass), black 18%) 100%);
+         border: 1px solid var(--brass-dim); border-radius: 3px;
+         text-shadow: 0 1px 0 rgba(255, 244, 214, .45);
+         box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), inset 0 -2px 4px rgba(36, 26, 18, .3),
+                     0 1px 0 rgba(0, 0, 0, .6), 0 8px 22px rgba(0, 0, 0, .5); }
+  .nameplate::before, .nameplate::after { content: ""; position: absolute; top: 50%;
+         width: .5rem; height: .5rem; margin-top: -.25rem; border-radius: 50%;
+         background: linear-gradient(45deg, transparent 42%, rgba(36, 26, 18, .75) 42% 58%, transparent 58%),
+                     radial-gradient(circle at 35% 35%, var(--enamel), var(--brass-dim) 75%);
+         box-shadow: 0 0 0 1px rgba(36, 26, 18, .35); }
+  .nameplate::before { left: .75rem; }
+  .nameplate::after { right: .75rem; }
+  .sub { color: var(--muted); font-size: .85rem; margin-top: .8rem; }
+  /* Status words in the summary line carry a small lamp of their own. */
+  .st::before { content: ""; display: inline-block; width: .55em; height: .55em; margin-right: .35em;
+         border-radius: 50%; background: var(--lamp-idle); vertical-align: .06em; }
+  .st-ok { color: var(--ok); }
+  .st-ok::before { background: var(--ok); box-shadow: 0 0 6px rgba(233, 223, 196, .5); }
+  .st-unk { color: var(--muted); }
+  .st-bad { color: var(--enamel); }
+  .st-bad::before { background: var(--fault); box-shadow: 0 0 6px rgba(192, 57, 43, .7); }
+  .st-warn { color: var(--lamp); }
+  .st-warn::before { background: var(--lamp); box-shadow: 0 0 6px rgba(255, 181, 71, .6); }
+
+  .banner { display: flex; align-items: center; gap: .65rem; margin-bottom: 1.25rem;
+            padding: .65rem .85rem; font-size: .85rem; color: var(--enamel);
+            border: 1px solid var(--fault); border-left-width: 4px; border-radius: 2px;
+            background: rgba(192, 57, 43, .14); }
+  .banner::before { content: ""; flex: 0 0 auto; width: .8rem; height: .8rem; border-radius: 50%;
+            background: var(--fault); box-shadow: 0 0 10px 2px rgba(192, 57, 43, .5); }
+
+  /* Keys. Typewritten labels on bakelite; amber means armed. */
+  .ringbtn { margin-top: .6rem; width: 100%; font-family: var(--mono); font-size: .74rem;
+             line-height: 1.2; letter-spacing: .06em; text-transform: uppercase;
+             padding: .42rem .5rem; border-radius: 2px; border: 1px solid var(--brass-dim);
+             background: var(--walnut-2); color: var(--enamel); cursor: pointer;
+             box-shadow: inset 0 1px 0 rgba(239, 230, 207, .07), 0 1px 0 rgba(0, 0, 0, .45); }
+  a.ringbtn { display: inline-block; text-align: center; text-decoration: none; }
+  .ringbtn:hover:not(:disabled) { border-color: var(--brass); color: var(--brass); }
+  .ringbtn:disabled { opacity: .45; cursor: default; }
+  .ringbtn.armed, .ringbtn.armed:hover:not(:disabled) { background: var(--lamp);
+             border-color: var(--lamp); color: var(--ink); }
+  .toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+             margin-bottom: 1.5rem; padding: .7rem 0; border-top: 1px solid var(--rule);
+             border-bottom: 1px solid var(--rule); }
+  .toolbar .ringbtn { width: auto; margin-top: 0; padding: .5rem .9rem; font-size: .8rem; }
+  .hint { color: var(--lamp); font-size: .85rem; }
+
+  /* Section nameplates: Federo in brass, with a rule run out to the edge. */
+  section { margin-top: 2rem; }
+  h2 { display: flex; align-items: center; gap: .8rem; margin: 0 0 .85rem;
+       font-family: var(--display); font-weight: normal; font-size: .95rem;
+       letter-spacing: .18em; text-transform: uppercase; color: var(--brass); }
+  h2::after { content: ""; flex: 1 1 auto; border-top: 1px solid var(--brass-dim); }
+  .muted { color: var(--muted); font-size: .85rem; }
+
+  /* The jack field. Each line is a POSITION: a lamp cap over a brass jack ring,
+     beside a cream designation strip typed with its number, name and state. */
+  .grid { display: grid; gap: .9rem;
           grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
-  .card { background: var(--card, #fff); border-radius: 12px; padding: .8rem .9rem;
-          box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; flex-direction: column; }
-  .card .ext { font-size: .75rem; color: #999; }
-  .card .name { font-weight: 600; font-size: 1rem; margin: .1rem 0 .4rem; }
-  .pill { display: inline-block; font-size: .72rem; padding: .15rem .5rem;
-          border-radius: 999px; font-weight: 600; align-self: flex-start; }
-  .up { background: #e3f7e8; color: #1a7f37; }
-  .down { background: #fde7e7; color: #b42318; }
-  .busy { background: #fff4e0; color: #b25e00; }
-  .conn { font-size: .75rem; color: #b25e00; margin-top: .4rem; }
-  .conn .codec { color: #888; font-weight: 600; }
-  .conn.linkinfo { color: #888; margin-top: .25rem; }  /* idle link health (RTT), not a call */
-  .ringbtn { margin-top: .6rem; width: 100%; font-size: .75rem; font-weight: 600;
-             padding: .35rem .5rem; border-radius: 8px; border: 1px solid var(--bd, #d4d7dd);
-             background: var(--btn, #f3f4f6); color: inherit; cursor: pointer; }
-  .ringbtn:hover:not(:disabled) { background: var(--btnh, #e8eaed); }
-  .ringbtn:disabled { opacity: .5; cursor: default; }
-  /* Per-card action row: a tidy 2-up grid so every button is the same width and
-     the row never wraps unevenly. Each button is fully labelled (no bare icons);
-     an over-long label ellipsises rather than blowing out the column. */
-  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem; margin-top: .6rem; }
-  .actions .ringbtn { margin-top: 0; width: auto; padding: .35rem .4rem;
+  .pos { display: flex; flex-direction: column; min-width: 0; padding: .75rem .7rem .8rem;
+         border: 1px solid var(--rule); border-radius: 2px;
+         background: linear-gradient(180deg, var(--walnut-2), var(--walnut-1));
+         box-shadow: inset 0 1px 0 rgba(200, 162, 74, .08), 0 2px 6px rgba(0, 0, 0, .35); }
+  .pos.trunk { grid-column: 1 / -1; }
+  .pos-head { display: flex; align-items: center; gap: .65rem; }
+  .jack { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: .5rem;
+          padding: 0 .1rem; }
+  .lamp { display: block; width: 1.05rem; height: 1.05rem; border-radius: 50%;
+          background-color: var(--lamp-idle);
+          background-image: radial-gradient(circle at 34% 30%, rgba(255, 255, 255, .38), rgba(255, 255, 255, 0) 55%);
+          box-shadow: var(--bezel); }
+  .lamp.lit-ok { background-color: var(--ok);
+          box-shadow: var(--bezel), 0 0 12px 2px rgba(233, 223, 196, .28); }
+  .lamp.lit-busy, .lamp.lit-ring { background-color: var(--lamp);
+          box-shadow: var(--bezel), 0 0 14px 3px rgba(255, 181, 71, .45); }
+  .lamp.lit-fault { background-color: var(--fault);
+          box-shadow: var(--bezel), 0 0 12px 2px rgba(192, 57, 43, .45); }
+  .jackring { display: block; width: 1.25rem; height: 1.25rem; border-radius: 50%;
+          background: radial-gradient(circle, var(--walnut-0) 0 32%, var(--brass-dim) 36% 44%,
+                      var(--brass) 48% 62%, var(--brass-dim) 68% 100%);
+          box-shadow: 0 1px 0 rgba(0, 0, 0, .6), inset 0 1px 1px rgba(255, 240, 200, .25); }
+  .strip { flex: 1 1 auto; min-width: 0; padding: .35rem .55rem .32rem; border-radius: 1px;
+           background: var(--enamel); color: var(--ink);
+           box-shadow: inset 0 0 0 1px rgba(36, 26, 18, .18), 0 1px 0 rgba(0, 0, 0, .5); }
+  .strip .ext { display: flex; align-items: center; gap: .45rem; font-size: .78rem; letter-spacing: .08em; }
+  .strip .name { font-size: 1.05rem; letter-spacing: .05em; text-transform: uppercase;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .strip .state { margin-top: .22rem; padding-top: .18rem; border-top: 1px dashed rgba(36, 26, 18, .35);
+                  font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; }
+  .trunk .strip .ext { letter-spacing: .18em; text-transform: uppercase; }
+  .trunk .strip .name { font-size: .95rem; text-transform: none; }
+  /* Wide enough, the trunk's strip types on one line; on a phone it stacks like
+     the others, so the provider is not cut to a few letters. */
+  @media (min-width: 560px) {
+    .trunk .strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+                    align-items: baseline; column-gap: 1rem; }
+    .trunk .strip .state { margin: 0; padding: 0; border: 0; }
+  }
+  .mwibadge { padding: .05rem .3rem; border-radius: 2px; background: var(--lamp); color: var(--ink);
+              font-size: .62rem; line-height: 1.3; letter-spacing: .1em; text-transform: uppercase; }
+  .conn { margin-top: .55rem; font-size: .78rem; color: var(--lamp); overflow-wrap: anywhere; }
+  .conn .codec { color: var(--muted); }
+  .conn.linkinfo { color: var(--muted); margin-top: .45rem; }  /* idle link health (RTT), not a call */
+  /* Per-position action row: a tidy 2-up grid so every key is the same width and
+     the row never wraps unevenly. Each key is fully labelled (no bare icons); an
+     over-long label ellipsises rather than blowing out the column. */
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem; margin-top: .65rem; }
+  .actions .ringbtn { margin-top: 0; width: auto; padding: .42rem .35rem;
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mwibadge { font-size: .9rem; line-height: 1; margin-left: .35rem; }
-  .ringbtn.armed { background: #fff4e0; border-color: #e2a23a; color: #b25e00; }
-  .wakerow { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; align-items: center; }
-  .wakerow .wklab { font-size: .9rem; flex: 0 0 auto; opacity: .8; }
+  .wakerow { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .45rem; align-items: center; }
+  .wakerow .wklab { flex: 0 0 auto; color: var(--muted); font-size: .68rem; letter-spacing: .1em;
+             text-transform: uppercase; }
   /* ★ The time field must not be shrunk below the width of a time.
      It had `flex: 1 1 auto; min-width: 0` while the Set button beside it
      inherited `.ringbtn { width: 100% }` with no override — so the button
@@ -1887,89 +2048,108 @@ INDEX_HTML = """<!doctype html>
      So: the input takes its natural size and never shrinks, and the button
      takes whatever is left. min-width fits "12:30 PM" plus the stepper Safari
      draws inside the field. */
-  .wakerow input[type=time] { flex: 0 0 auto; min-width: 7rem; font: inherit;
-             font-size: .8rem; padding: .3rem .4rem; border-radius: 8px;
-             border: 1px solid var(--bd, #d4d7dd);
-             background: var(--card, #fff); color: inherit; }
-  .wakerow .ringbtn { flex: 1 1 auto; width: auto; margin-top: 0; min-width: 3rem; }
-  /* ★ Cancel takes a line of its own. The clock, a time field that must not
-     shrink (above) and Set already fill a card at the grid's narrowest; a
-     fourth control on that line ran past the card's edge and read "Ca". The
-     row wraps as a fallback at any width, and Cancel always starts the next
-     line at full width, so a card with a pending wake-up looks the same at
-     every size instead of depending on which browser draws the wider field. */
+  .wakerow input[type=time] { flex: 0 0 auto; min-width: 7rem; font-family: var(--mono);
+             font-size: .8rem; padding: .3rem .4rem; border-radius: 2px;
+             border: 1px solid var(--brass-dim); background: var(--walnut-0); color: var(--enamel); }
+  .wakerow .ringbtn { flex: 1 1 auto; width: auto; margin-top: 0; min-width: 2.75rem; }
+  /* ★ Cancel takes a line of its own. The label, a time field that must not
+     shrink (above) and Set already fill a position at the grid's narrowest; a
+     fourth control on that line ran past the edge and read "Ca". The row wraps
+     as a fallback at any width, and Cancel always starts the next line at full
+     width, so a position with a pending wake-up looks the same at every size
+     instead of depending on which browser draws the wider field. */
   .wakerow .wkcancel { flex: 1 0 100%; }
+
+  /* Lamps warm up ONCE, on the first paint of the field: each fades from an
+     unlit cap to its state, staggered by position (the delay is set inline).
+     A ringing line flickers. Reduced motion: final state, no animation. */
+  @keyframes warm { from { background-color: var(--lamp-idle); box-shadow: var(--bezel); } }
+  @keyframes flicker { 50% { opacity: .55; } }
+  .lamp.warm { animation: warm 600ms ease-out both; }
+  .lamp.lit-ring { animation: flicker 900ms steps(1, end) infinite; }
+  .lamp.warm.lit-ring { animation: warm 600ms ease-out both, flicker 900ms steps(1, end) infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .lamp, .lamp.warm, .lamp.lit-ring, .lamp.warm.lit-ring { animation: none; }
+  }
+
+  /* Cords up: the active-call list. */
+  .calllist { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--rule); }
+  .calllist li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem .8rem;
+                 align-items: baseline; padding: .55rem .15rem; border-bottom: 1px solid var(--rule);
+                 font-size: .95rem; }
+  .calllist .detail { color: var(--enamel); }
+  .calllist .detail::before { display: inline-block; margin-right: .6rem; padding: .05rem .35rem;
+                 border: 1px solid var(--brass-dim); border-radius: 2px; color: var(--brass);
+                 font-size: .64rem; letter-spacing: .12em; text-transform: uppercase; vertical-align: .12em; }
+  .calllist .meta { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+  .kind-outside .detail::before { content: "Trunk"; }
+  .kind-operator .detail::before { content: "Operator"; }
+  .kind-internal .detail::before { content: "House"; }
+
   /* Wake-up list: one clean "Room — time · when [Cancel]" row per pending call. */
   .wakelist { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
-  .wakeitem { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;
-              background: var(--card, #fff); border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  .wakeitem .wkname { font-weight: 600; }
-  .wakeitem .wkwhen { margin-left: auto; font-variant-numeric: tabular-nums; }
-  .wakeitem .wkday { color: #888; font-weight: 500; font-size: .85em; margin-left: .25rem; }
-  .wakeitem .wkcancel { width: auto; margin: 0; padding: .2rem .6rem; flex: 0 0 auto; }
-  .toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
-  .toolbar .ringbtn { width: auto; margin-top: 0; padding: .45rem .8rem; font-size: .82rem; }
-  .lightgrid { display: grid; gap: .6rem;
+  .wakeitem { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; padding: .55rem .7rem;
+              border: 1px solid var(--rule); border-radius: 2px; background: var(--walnut-1); }
+  .wakeitem .wkname { min-width: 0; letter-spacing: .05em; text-transform: uppercase; overflow-wrap: anywhere; }
+  .wakeitem .wkwhen { margin-left: auto; color: var(--brass); font-variant-numeric: tabular-nums; }
+  .wakeitem .wkday { margin-left: .3rem; color: var(--muted); font-size: .8em; letter-spacing: .08em;
+              text-transform: uppercase; }
+  .wakeitem .wkcancel { width: auto; margin: 0; padding: .25rem .6rem; flex: 0 0 auto; }
+
+  /* Lights: a panel per area; each toggle carries a small lamp, lit when on. */
+  .lightgrid { display: grid; gap: .9rem;
           grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
-  .areacard { background: var(--card, #fff); border-radius: 12px; padding: .8rem .9rem;
-          box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  .areacard h3 { font-size: .8rem; margin: 0 0 .5rem; color: #888; text-transform: uppercase;
-          letter-spacing: .03em; }
+  .areacard { padding: .7rem .8rem; border: 1px solid var(--rule); border-radius: 2px;
+          background: linear-gradient(180deg, var(--walnut-2), var(--walnut-1)); }
+  .areacard h3 { margin: 0 0 .45rem; padding-bottom: .35rem; border-bottom: 1px solid var(--rule);
+          font-family: var(--mono); font-weight: normal; font-size: .72rem; color: var(--brass);
+          letter-spacing: .14em; text-transform: uppercase; }
   .lightrow { display: flex; justify-content: space-between; align-items: center;
-          gap: .5rem; padding: .25rem 0; }
-  .lightrow .lname { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .toggle { font-size: .72rem; font-weight: 600; padding: .25rem .6rem; border-radius: 999px;
-          border: 1px solid var(--bd, #d4d7dd); background: var(--btn, #f3f4f6); color: inherit;
-          cursor: pointer; flex: 0 0 auto; }
-  .toggle.on { background: #e3f7e8; color: #1a7f37; border-color: #a8e0b8; }
+          gap: .5rem; padding: .28rem 0; }
+  .lightrow .lname { font-size: .88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toggle { display: inline-flex; align-items: center; gap: .4rem; flex: 0 0 auto;
+          padding: .25rem .55rem; border-radius: 2px; border: 1px solid var(--brass-dim);
+          background: var(--walnut-0); color: var(--muted); cursor: pointer;
+          font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; }
+  .toggle::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%;
+          background: var(--lamp-idle); box-shadow: 0 0 0 1px var(--walnut-0), 0 0 0 2px var(--brass-dim); }
+  .toggle.on { color: var(--ok); border-color: var(--brass); }
+  .toggle.on::before { background: var(--ok);
+          box-shadow: 0 0 0 1px var(--walnut-0), 0 0 0 2px var(--brass-dim), 0 0 8px 1px rgba(233, 223, 196, .4); }
+  .toggle:hover:not(:disabled) { border-color: var(--brass); }
   .toggle:disabled { opacity: .5; cursor: default; }
-  section { margin-top: 1.5rem; }
-  .muted { color: #999; font-size: .85rem; }
-  .calllist { list-style: none; padding: 0; margin: 0; }
-  .calllist li { display: flex; justify-content: space-between; gap: .6rem; align-items: baseline;
-                 padding: .5rem .2rem; border-bottom: 1px solid var(--bd, #eee); font-size: .95rem; }
-  .calllist .detail { font-weight: 600; }
-  .calllist .meta { color: #888; font-size: .8rem; white-space: nowrap; }
-  .kind-outside .detail::before { content: "📞 "; }
-  .kind-operator .detail::before { content: "🎧 "; }
-  .kind-internal .detail::before { content: "🏠 "; }
-  .banner { background: #fde7e7; color: #b42318; padding: .6rem .8rem;
-            border-radius: 8px; margin-bottom: 1rem; font-size: .85rem; }
-  @media (prefers-color-scheme: dark) {
-    /* Set --card on body so EVERY card-like surface inherits it — the room cards
-       (.card), the lights area cards (.areacard), and the wake-up time input all
-       paint from var(--card). Scoping it to .card alone left the lights section
-       white with light text on it (unreadable) in dark mode. */
-    body { --bg:#111418; color:#e6e6e6; --card:#1b1f24; }
-    :root { --bd:#2a2f36; --btn:#262b31; --btnh:#2f353c; }
-  }
 </style>
 </head>
 <body>
-  <h1>☎️ Switchboard</h1>
-  <div class="sub" id="sub">Loading…</div>
+  <header class="masthead">
+    <h1 class="nameplate">Switchboard</h1>
+    <div class="sub" id="sub">Loading…</div>
+  </header>
   <div id="banner"></div>
 
   <div class="toolbar">
-    <a class="ringbtn" href="console/" style="text-decoration:none">🖥️ Console</a>
-    <button class="ringbtn" id="pageall">📢 Page all</button>
-    <span class="muted" id="connecthint"></span>
+    <a class="ringbtn" href="console/">Console</a>
+    <button class="ringbtn" id="pageall">Page all</button>
+    <span class="hint" id="connecthint" aria-live="polite"></span>
   </div>
 
-  <div class="grid" id="rooms"></div>
+  <section>
+    <h2>Lines</h2>
+    <div class="grid" id="rooms"></div>
+  </section>
 
   <section>
-    <h2 style="font-size:1rem;">Active calls</h2>
+    <h2>Active calls</h2>
     <div id="calls"><div class="muted">—</div></div>
   </section>
 
   <section>
-    <h2 style="font-size:1rem;">⏰ Wake-up calls</h2>
+    <h2>Wake-up calls</h2>
     <div id="wakeups"><div class="muted">—</div></div>
   </section>
 
   <section>
-    <h2 style="font-size:1rem;">💡 Lights</h2>
+    <h2>Lights</h2>
     <div id="lights"><div class="muted">—</div></div>
   </section>
 
@@ -2029,6 +2209,25 @@ const roomPeers = {};
 // [{ext,label,registered}] snapshot of all rooms, used to offer transfer targets.
 let roomDirectory = [];
 
+// The lamps warm up once, on the first paint of the field — not on every 4 s
+// rebuild, or the board would flash on each poll.
+let lampsWarmed = false;
+
+// One position's head: a lamp cap over a brass jack ring, beside the cream
+// designation strip. ext/name/state are ALREADY-ESCAPED HTML. The lamp is
+// decoration (aria-hidden): the state is in words on the strip. `i` staggers
+// the first-paint warm-up, 60 ms a position, capped at 1 s.
+function positionHead(lamp, i, ext, name, state) {
+  const warm = lampsWarmed ? '' : ' warm';
+  const delay = lampsWarmed ? '' : ' style="animation-delay:' + Math.min(i * 60, 1000) + 'ms"';
+  return '<div class="pos-head"><div class="jack" aria-hidden="true">' +
+         '<span class="lamp' + (lamp ? ' ' + lamp : '') + warm + '"' + delay + '></span>' +
+         '<span class="jackring"></span></div>' +
+         '<div class="strip"><div class="ext">' + ext + '</div>' +
+         '<div class="name">' + name + '</div>' +
+         '<div class="state">' + state + '</div></div></div>';
+}
+
 function updateConnectHint() {
   const el = document.getElementById('connecthint');
   if (!el) return;
@@ -2050,16 +2249,16 @@ async function refresh() {
     if (data.trunk.enabled) {
       subHtml += ' · trunk: ' + esc(data.trunk.provider || 'on');
       const tr = data.trunk.registration || '';
-      if (tr) {  // green Registered, grey Unknown, red anything else (Rejected/Unregistered)
-        const col = (tr === 'Registered') ? '#1a8f3c' : (tr === 'Unknown' ? '#888' : '#c0392b');
-        subHtml += ' <span style="color:' + col + '">(' + esc(tr) + ')</span>';
+      if (tr) {  // white lamp Registered, unlit Unknown, red anything else (Rejected/Unregistered)
+        const st = (tr === 'Registered') ? 'st-ok' : (tr === 'Unknown' ? 'st-unk' : 'st-bad');
+        subHtml += ' <span class="st ' + st + '">(' + esc(tr) + ')</span>';
       }
     } else {
       subHtml += ' · no trunk';
     }
     // Resident STT: quiet when up/disabled, amber when it fell back to slow per-call CLI.
-    if (data.stt === 'up') subHtml += ' · <span style="color:#888">STT resident</span>';
-    else if (data.stt === 'down') subHtml += ' · <span style="color:#c77f00">STT: CLI fallback</span>';
+    if (data.stt === 'up') subHtml += ' · STT resident';
+    else if (data.stt === 'down') subHtml += ' · <span class="st st-warn">STT: CLI fallback</span>';
     document.getElementById('sub').innerHTML = subHtml;
 
     const now = Date.now();
@@ -2094,16 +2293,26 @@ async function refresh() {
     const typingInGrid = !!(active && grid.contains(active) &&
                             /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
 
-    const gridHtml = data.rooms.map(r => {
-      // "Not in use" means registered-and-idle (green) — only an active call
-      // state ("In use", "Ringing", "Busy", "On Hold") is busy (orange).
+    // The trunk is its own, wider position at the head of the field. Its lamp is
+    // its registration: white Registered, unlit Unknown or no trunk, red else.
+    const tk = data.trunk || {};
+    const tkReg = tk.registration || 'Unknown';
+    const tkLamp = !tk.enabled ? '' :
+                   (tkReg === 'Registered' ? 'lit-ok' : (tkReg === 'Unknown' ? '' : 'lit-fault'));
+    const trunkHtml = '<div class="pos trunk" role="group" aria-label="Trunk">' +
+      positionHead(tkLamp, 0, 'Trunk', tk.enabled ? esc(tk.provider || 'on') : '—',
+                   tk.enabled ? esc(tkReg) : 'No trunk') + '</div>';
+
+    const gridHtml = trunkHtml + data.rooms.map((r, i) => {
+      // "Not in use" means registered-and-idle (white lamp) — only an active call
+      // state ("In use", "Ringing", "Busy", "On Hold") lights amber; ringing flickers.
       const ds = (r.device_state||'').toLowerCase();
       const active = (ds.includes('use') && ds !== 'not in use') ||
                      ds.includes('ring') || ds === 'busy' || ds === 'on hold';
       let cls, txt;
-      if (active) { cls = 'busy'; txt = r.call_state || r.device_state; }
-      else if (r.registered) { cls = 'up'; txt = 'Registered'; }
-      else { cls = 'down'; txt = 'Offline'; }
+      if (active) { cls = ds.includes('ring') ? 'lit-ring' : 'lit-busy'; txt = r.call_state || r.device_state; }
+      else if (r.registered) { cls = 'lit-ok'; txt = 'Registered'; }
+      else { cls = 'lit-fault'; txt = 'Offline'; }
       // Who this phone is talking to / ringing, when known — plus the live codec.
       const conn = r.call_peer
         ? '<div class="conn">↔ ' + esc(r.call_peer) +
@@ -2121,25 +2330,25 @@ async function refresh() {
       const ex = esc(r.ext);
       const ringing = (ringingUntil[r.ext] || 0) > now;
       const ringDis = (!r.registered || ringing) ? ' disabled' : '';
-      const ringLbl = ringing ? 'Ringing…' : '🔔 Test ring';
+      const ringLbl = ringing ? 'Ringing…' : 'Test ring';
       const ringBtn = '<button class="ringbtn" data-ring="' + ex + '"' + ringDis + '>' + ringLbl + '</button>';
 
-      // Connect: arm this room, then pick another to patch them. The armed card
-      // highlights; offline rooms can't start/receive a patch.
+      // Connect: arm this room, then pick another to patch them. The armed key
+      // lights amber; offline rooms can't start/receive a patch.
       const armed = connectArm === r.ext;
       const connDis = (!r.registered) ? ' disabled' : '';
-      const connLbl = armed ? '✖ Cancel' : '🔗 Connect';
+      const connLbl = armed ? 'Cancel' : 'Connect';
       const connBtn = '<button class="ringbtn' + (armed ? ' armed' : '') +
                       '" data-connect="' + ex + '"' + connDis + '>' + connLbl + '</button>';
 
       // Hang up: only meaningful when this room has an active call leg.
       const hangBtn = active
-        ? '<button class="ringbtn" data-hangup="' + ex + '" title="Hang up">📵 Hang up</button>' : '';
+        ? '<button class="ringbtn" data-hangup="' + ex + '" title="Hang up">Hang up</button>' : '';
 
       // Transfer: only when there's a far party to hand off (peer_channel set).
       // Sends the OTHER party to a room you pick, dropping this leg out.
       const xferBtn = (active && r.peer_channel)
-        ? '<button class="ringbtn" data-transfer="' + ex + '" title="Transfer call">↪ Transfer</button>' : '';
+        ? '<button class="ringbtn" data-transfer="' + ex + '" title="Transfer call">Transfer</button>' : '';
 
       // Message-waiting (stutter dial tone): toggle on/off, badge when set. Labelled
       // so it doesn't read as a stray icon — "Message" sets it, "Clear" removes it.
@@ -2147,16 +2356,16 @@ async function refresh() {
       const mwiTitle = r.mwi ? 'Clear message-waiting' : 'Set message-waiting (stutter tone)';
       const mwiBtn = '<button class="ringbtn" data-mwi="' + ex +
                      '" data-state="' + mwiState + '" title="' + mwiTitle + '">' +
-                     (r.mwi ? '✉ Clear' : '✉ Message') + '</button>';
-      const mwiBadge = r.mwi ? '<span class="mwibadge" title="message waiting">✉️</span>' : '';
+                     (r.mwi ? 'Clear' : 'Message') + '</button>';
+      const mwiBadge = r.mwi ? '<span class="mwibadge" title="message waiting">Msg</span>' : '';
 
       // Per-room wake-up setter: a small time input + Set. fill the input with
       // any pending time so it round-trips.
       const wkPending = pendingHHMM(data.wakeups, r.ext);
       const wkVal = esc(wkPending);
-      // Clock prefix so the time box reads as "set a wake-up", not a stray field.
+      // A typed "Wake" label so the time box reads as "set a wake-up", not a stray field.
       const wakeRow = '<div class="wakerow">' +
-        '<span class="wklab" title="Set a wake-up for this room">⏰</span>' +
+        '<span class="wklab" title="Set a wake-up for this room">Wake</span>' +
         '<input type="time" data-waketime="' + ex + '" value="' + wkVal + '" title="Wake-up time">' +
         '<button class="ringbtn" data-wakeset="' + ex + '" title="Set wake-up">Set</button>' +
         // ★ 2026-09-21: cancel where you set it. The only Cancel used to live in
@@ -2165,14 +2374,14 @@ async function refresh() {
         (wkPending ? '<button class="ringbtn wkcancel" data-wakecancel="' + ex +
                      '" title="Cancel this wake-up">Cancel</button>' : '') + '</div>';
 
-      return '<div class="card"><div class="ext">ext ' + ex + mwiBadge + '</div>' +
-             '<div class="name">' + esc(r.label) + '</div>' +
-             '<span class="pill ' + cls + '">' + esc(txt) + '</span>' +
+      return '<div class="pos" role="group" aria-label="ext ' + ex + ' ' + esc(r.label) + '">' +
+             positionHead(cls, i + 1, ex + mwiBadge, esc(r.label), esc(txt)) +
              conn + linkInfo +
              '<div class="actions">' + ringBtn + connBtn + hangBtn + xferBtn + mwiBtn + '</div>' +
              wakeRow + '</div>';
     }).join('');
     if (!typingInGrid) grid.innerHTML = gridHtml;
+    if (!typingInGrid) lampsWarmed = true;
     updateConnectHint();
 
     const callsEl = document.getElementById('calls');
@@ -2191,7 +2400,7 @@ async function refresh() {
     const wakeEl = document.getElementById('wakeups');
     const wk = data.wakeups || [];
     if (!wk.length) {
-      wakeEl.innerHTML = '<div class="muted">No wake-ups set. Use the ⏰ time box on a room card, ' +
+      wakeEl.innerHTML = '<div class="muted">No wake-ups set. Use the Wake time box on a line above, ' +
         'or dial 42 from a phone and say a time.</div>';
     } else {
       wakeEl.innerHTML = '<ul class="wakelist">' + wk.map(w => {
@@ -2290,7 +2499,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     if (!ch) { flash(btn, '—'); return; }
     const done = busy(btn);
     try { await postJSON('./api/hangup', {channel: ch}); done(); refresh(); }
-    catch (err) { done('✖'); }
+    catch (err) { done('Failed'); }
     return;
   }
 
@@ -2312,7 +2521,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     const done = busy(btn);
     // postJSON throws on a non-ok response (bad target / Redirect failed).
     try { await postJSON('./api/transfer', {channel: ch, target: target}); done(); refresh(); }
-    catch (err) { done('✖'); }
+    catch (err) { done('Failed'); }
     return;
   }
 
@@ -2322,7 +2531,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
     const state = btn.getAttribute('data-state');
     const done = busy(btn);
     try { await post('./api/mwi/' + encodeURIComponent(ext) + '/' + state); done(); refresh(); }
-    catch (err) { done('✖'); }
+    catch (err) { done('Failed'); }
     return;
   }
 
@@ -2357,7 +2566,7 @@ document.getElementById('rooms').addEventListener('click', async (e) => {
 document.getElementById('pageall').addEventListener('click', async (e) => {
   const btn = e.currentTarget;
   btn.disabled = true; const prev = btn.textContent; btn.textContent = 'Paging…';
-  try { await post('./api/page'); btn.textContent = '📢 Paging…'; }
+  try { await post('./api/page'); btn.textContent = 'Paging ✓'; }
   catch (err) { flash(btn, 'Failed'); }
   finally { setTimeout(() => { btn.disabled = false; btn.textContent = prev; }, 2500); }
 });
@@ -2414,7 +2623,7 @@ document.getElementById('lights').addEventListener('click', async (e) => {
   btn.textContent = wantOn ? 'On' : 'Off';
   btn.setAttribute('data-target', wantOn ? 'off' : 'on');
   try { await post('./api/lights/' + encodeURIComponent(id) + '/' + target); }
-  catch (err) { flash(btn, '✖'); }
+  catch (err) { flash(btn, 'Failed'); }
   finally { btn.disabled = false; setTimeout(refreshLights, 600); }
 });
 

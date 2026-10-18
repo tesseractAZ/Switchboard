@@ -358,6 +358,53 @@ def test_the_terminal_always_announces_its_size_on_a_new_socket():
         "the ResizeObserver is constructed but never attached to anything")
 
 
+def test_the_terminal_wears_the_tokens_and_fits_after_its_font():
+    """The web terminal's look, pinned to the page's own design tokens.
+
+    Source-structure, like the test above: the theme literals must equal the
+    :root tokens they name, the typewriter face must be first in the stack,
+    the page must make no external request, and the terminal must open and fit
+    only after the font wait — measuring the fallback face and then swapping to
+    Cutive Mono would size the grid, and the NAWS sent to the console, for the
+    wrong glyphs.
+    """
+    import re
+    html = (Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+            / "switchboard" / "console-web" / "static" / "index.html").read_text()
+    tok = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-f]{6});", html))
+    for want in ("walnut-0", "enamel", "lamp", "brass"):
+        assert want in tok, f"--{want} is not declared on :root"
+
+    assert f'background: "{tok["walnut-0"]}"' in html, "terminal ground is not --walnut-0"
+    assert f'foreground: "{tok["enamel"]}"' in html, "terminal text is not --enamel"
+    assert f'cursor: "{tok["lamp"]}"' in html, "cursor is not the amber --lamp"
+    r, g, b = (int(tok["brass"][i:i + 2], 16) for i in (1, 3, 5))
+    assert f'selectionBackground: "rgba({r}, {g}, {b}, 0.3)"' in html, (
+        "selection is not --brass at 30 %")
+    assert "minimumContrastRatio: 4.5" in html, "terminal text may fall under 4.5:1"
+    assert re.search(r"fontFamily: \"'Cutive Mono',", html), (
+        "Cutive Mono is not first in the terminal's font stack")
+
+    # Self-hosted only: no absolute or protocol-relative URL in any src, href
+    # or url(); every face swaps rather than blocking the first paint.
+    refs = re.findall(r'(?:src|href)="([^"]*)"|url\("([^"]*)"\)', html)
+    for ref in (a or b for a, b in refs):
+        assert not re.match(r"(?:[a-z]+:)?//", ref, re.I), f"external request: {ref}"
+    faces = re.findall(r"@font-face\s*{[^}]*}", html)
+    assert len(faces) == 2 and all("font-display: swap" in f for f in faces)
+
+    # Open + fit only inside the font wait, and the wait is capped.
+    gate = html.index("whenFontsReady(function")
+    assert html.index("term.open(") > gate, "the terminal opens before the font wait"
+    assert html.index("applySize(false);") > gate, "the first fit runs before the font wait"
+    assert html.index("connect();") > gate, "the socket opens before the font wait"
+    assert "document.fonts.ready" in html and "setTimeout(once," in html, (
+        "the font wait is uncapped or no longer waits on document.fonts")
+
+    # The element ids the script hooks are unchanged.
+    assert 'id="term"' in html and 'id="status"' in html
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

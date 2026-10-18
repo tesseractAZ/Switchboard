@@ -218,3 +218,81 @@ def test_users_with_blank_fields_disable_the_gate():
     # parser so it can never claim "gate ACTIVE" over an open terminal.
     mod = _load_server("sbserver_blank", '[{"username":"","password":"pw"}]')
     assert mod.AUTH_REQUIRED is False
+
+
+# ── shared typefaces ─────────────────────────────────────────────────────────
+
+def _font_tree(root: Path) -> Path:
+    """A stand-in for /usr/share/switchboard/fonts, with decoys around it."""
+    fonts = root / "fonts"
+    fonts.mkdir()
+    (fonts / "CutiveMono-Regular.ttf").write_bytes(b"\x00\x01\x00\x00cutive")
+    (fonts / "Federo-Regular.ttf").write_bytes(b"\x00\x01\x00\x00federo")
+    (fonts / "notes.txt").write_text("in the directory, not in the table")
+    (root / "secret.txt").write_text("one level up")
+    return fonts
+
+
+def test_fonts_are_an_exact_allowlist_in_both_modes():
+    """The two font files and nothing else: exact names, 404 otherwise.
+
+    Ungated like xterm.js/css — the terminal page requests them as it loads —
+    so the gate-ON pass below sends no cookie. Traversal spellings must not
+    reach the file system: the table is keyed by the whole URL path and the
+    file name comes from the table, never from the request.
+    """
+    import tempfile
+    for name, users in (("sbserver_fonts_gated", USERS_JSON),
+                        ("sbserver_fonts_open", "[]")):
+        mod = _load_server(name, users)
+        # In the image this is /usr/share/switchboard/fonts — the shared
+        # directory beside console-web/, not a copy inside static/.
+        assert Path(mod.FONTS_DIR) == CONSOLE_WEB.parent / "fonts"
+        with tempfile.TemporaryDirectory() as tmp:
+            mod.FONTS_DIR = str(_font_tree(Path(tmp)))
+            srv = _Server(mod)
+            try:
+                st, hdrs, body = srv.req("GET", "/fonts/CutiveMono-Regular.ttf")
+                assert st == 200 and body.endswith(b"cutive"), (name, st)
+                assert hdrs.get("Content-Type") == "font/ttf"
+                st, _, body = srv.req("GET", "/fonts/Federo-Regular.ttf?v=2")
+                assert st == 200 and body.endswith(b"federo"), (name, st)
+                for bad in ("/fonts", "/fonts/", "/fonts/notes.txt",
+                            "/fonts/cutivemono-regular.ttf",
+                            "/fonts/CutiveMono-Regular.ttf/",
+                            "/fonts//CutiveMono-Regular.ttf",
+                            "/fonts/../secret.txt", "/fonts/%2e%2e/secret.txt",
+                            "/fonts/..%2fsecret.txt",
+                            "/static/../fonts/CutiveMono-Regular.ttf",
+                            "/static/fonts/CutiveMono-Regular.ttf"):
+                    assert srv.req("GET", bad)[0] == 404, (name, bad)
+                assert srv.req("POST", "/fonts/Federo-Regular.ttf", "x")[0] == 405
+            finally:
+                srv.stop()
+        # The files are optional (tests, an image built without them): an
+        # allowlisted name whose file is absent is a plain 404, not a crash.
+        with tempfile.TemporaryDirectory() as empty:
+            mod.FONTS_DIR = empty
+            srv = _Server(mod)
+            try:
+                assert srv.req("GET", "/fonts/CutiveMono-Regular.ttf")[0] == 404
+                assert srv.req("GET", "/healthz")[0] == 200
+            finally:
+                srv.stop()
+
+
+def test_the_page_asks_for_exactly_the_fonts_the_server_serves():
+    """One page, two hosts. server.py serves it at "/", the webui at
+    "/console/" under Ingress; "../fonts/<name>" must land on /fonts/<name>
+    from the first and on the add-on root's fonts/ from the second."""
+    import re
+    from urllib.parse import urljoin, urlsplit
+    html = (CONSOLE_WEB / "static" / "index.html").read_text()
+    urls = re.findall(r'url\("([^"]+)"\)', html)
+    assert len(urls) == 2, urls
+    mod = _load_server("sbserver_font_hrefs", "[]")
+    served = {urlsplit(urljoin("http://h/", u)).path for u in urls}
+    assert served == set(mod._FONT_FILES), served
+    ingress = "http://ha/api/hassio_ingress/TOKEN/"
+    for u in urls:
+        assert urljoin(ingress + "console/", u).startswith(ingress + "fonts/"), u

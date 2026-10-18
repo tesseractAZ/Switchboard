@@ -10,6 +10,7 @@ side effects (ring/connect/hangup) are exercised only on their guard paths,
 which never open a socket.
 """
 import os
+import re
 import tempfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -91,8 +92,8 @@ def test_render() -> None:
                                   "duration": "00:02:14", "kind": "internal"}])
     sess = {"sel": 0, "mode": "normal", "w": 80}
     text = "\n".join(console.render(board.get(), sess, 0.0))
-    check("render: registered room", "Registered" in text and "Kitchen" in text)
-    check("render: offline room", "Offline" in text and "Garage" in text)
+    check("render: registered room", "READY" in text and "Kitchen" in text)
+    check("render: offline room", "OFFLINE" in text and "Garage" in text)
     check("render: on-call peer shown", "↔ Kitchen" in text)
     check("render: active calls section", "ACTIVE CALLS" in text and "Kitchen ↔ Office" in text)
     check("render: duration trimmed of leading 00:", "02:14" in text)
@@ -257,7 +258,7 @@ def test_render_signals() -> None:
            "trunk_reg": "", "stt": "disabled", "ts": 0.0})
     text = "\n".join(console.render(b.get(), {"sel": 0, "mode": "normal", "w": 100, "h": 30}, 0.0))
     check("signals: disabled STT hidden", "CLI fallback" not in text and "resident" not in text)
-    check("signals: no trunk line when trunk_reg empty", "trunk ●" not in text)
+    check("signals: no trunk line when trunk_reg empty", "trunk" not in text)
     # µs -> ms helper.
     check("rtt: 2800us -> 2.8ms", console._rtt_ms("2800") == 2.8)
     check("rtt: ''/0/neg/NaN -> None",
@@ -567,9 +568,9 @@ def test_lights_entry_and_unavailable() -> None:
         console.apply_key(sess, "l", board, lambda m: None)
         check("lights: L enters lights mode + stashes the fetched list",
               sess["mode"] == "lights" and len(sess.get("lights", [])) == 2 and sess.get("lsel") == 0)
-        text = "\n".join(console.render(board.get(), sess, 0.0))
+        text = "\n".join(_plain(console.render(board.get(), sess, 0.0)))
         check("render: lights view shows names + on/off",
-              "LIGHTS" in text and "Kitchen Main" in text and "● on" in text and "○ off" in text)
+              "LIGHTS" in text and "Kitchen Main" in text and "◉ on" in text and "○ off" in text)
     finally:
         console.ha_client.get_lights = orig
 
@@ -794,9 +795,9 @@ def test_a_scrolled_list_says_what_is_hidden_and_which_area_it_is_in():
     # happens to open ON that area's heading, or the heading is repeated. Only
     # asserting "(cont.)" would fail whenever the window lands on a boundary,
     # which is a property of the fixture rather than of the code.
-    body = [ln for ln in txt if "○ off" in ln or "● on" in ln]
+    body = [ln for ln in txt if "○ off" in ln or "◉ on" in ln]
     first_light_at = txt.index(body[0])
-    assert any(("(cont.)" in ln) or (ln.strip() and "○" not in ln and "●" not in ln
+    assert any(("(cont.)" in ln) or (ln.strip() and "○" not in ln and "◉" not in ln
                                      and "LIGHTS" not in ln and "─" not in ln)
                for ln in txt[:first_light_at]), (
         "the first visible light has no area heading above it — the operator can "
@@ -922,6 +923,162 @@ def test_a_console_wakeup_change_is_recorded_and_is_not_a_snooze(tmp_path):
                 _sys.modules[k] = v
         d.OUTCOME_PATH = saved_out
         console.wakeup_store.cancel("11")
+
+
+# ── The cord-board presentation ──────────────────────────────────────────────── #
+# State is shown by LAMPS — ◉ white-lit ready, ◉ amber in use / ringing, ✕ red
+# offline, ○ unlit unknown — with the state word typed beside every one, under a
+# brass nameplate. These pin the presentation rules, not the wording of a row.
+_RINGING = {"ext": "14", "label": "Hall", "registered": True, "device_state": "Ringing",
+            "call_state": "Ringing", "peer": "", "channel": ""}
+
+
+def _views(w: int, h: int):
+    """Every screen the console draws, at w×h."""
+    board = _board(ROOMS + [_RINGING], calls=[
+        {"detail": "Kitchen ↔ Office", "state": "Talking", "duration": "00:02:14", "kind": "internal"}])
+    board.get().update(trunk_reg="Registered", stt="up",
+                       wakeups=[{"ext": "11", "label": "Kitchen", "hhmm": "06:30", "target_epoch": 0}])
+    lights = [dict(li) for li in _FAKE_LIGHTS]
+    for mode, extra in (("normal", {}), ("help", {}), ("connect", {"connect_from_label": "Kitchen"}),
+                        ("pageconfirm", {}), ("lights", {"lights": lights, "lsel": 0})):
+        sess = {"sel": 0, "mode": mode, "w": w, "h": h, **extra}
+        yield mode, console.render(board.get(), sess, 0.0)
+
+
+def test_the_palette_is_the_board_palette() -> None:
+    """The terminal mapping of the shared design tokens, and nothing else: a
+    16-colour code left behind renders terminal green on a walnut board."""
+    want = {"BRASS": 178, "LAMP": 214, "CREAM": 230, "BRASS_DIM": 94,
+            "IDLE": 58, "FAULT": 160, "MUTED": 137}
+    for name, n in want.items():
+        check(f"palette: {name} is 256-colour {n}", getattr(console, name) == f"\x1b[38;5;{n}m")
+    legacy = re.compile(r"\x1b\[(?:3[0-7]|9[0-7])m")
+    stray = [(mode, ln) for mode, lines in _views(80, 30) for ln in lines if legacy.search(ln)]
+    check("palette: no view still emits a 16-colour foreground", not stray)
+
+
+def test_every_view_wears_the_nameplate_and_it_fits() -> None:
+    """The masthead is the one bold element, so it must survive every width —
+    and never run past the rule under it, or center() loses the margin and the
+    frame shifts a column."""
+    for w in (40, 60, 80, 120):
+        for mode, lines in _views(w, 30):
+            plain = [ln.strip() for ln in _plain(lines)]
+            first = next(ln for ln in plain if ln)
+            check(f"nameplate: {mode} at {w} opens with the brass plate",
+                  first.startswith("═══ ") and "SWITCHBOARD" in first.replace(" ", ""))
+            rule = next(ln for ln in plain[plain.index(first) + 1:] if ln)
+            check(f"nameplate: {mode} at {w} is no wider than its rule ({len(first)} vs {len(rule)})",
+                  console.vis_width(first) <= console.vis_width(rule))
+            check(f"nameplate: {mode} at {w} fits the terminal",
+                  all(console.vis_width(ln) <= w for ln in lines))
+    wide = _plain([console._nameplate(78, "", "3/3 online · 1 on call · 07:00:00")])[0]
+    check("nameplate: letter-spaced with the whole tally when it fits",
+          wide.startswith("═══ S W I T C H B O A R D ═══") and wide.endswith("07:00:00 ═══")
+          and console.vis_width(wide) == 78)
+    narrow = _plain([console._nameplate(38, "", "3/3 online · 1 on call · 07:00:00")])[0]
+    check("nameplate: a narrow plate drops the clock before the room count",
+          "3/3 online" in narrow and "07:00" not in narrow and console.vis_width(narrow) == 38)
+    check("nameplate: never wider than asked, however narrow",
+          all(console.vis_width(console._nameplate(n, "LIGHTS", "1/2 on")) <= n for n in range(1, 90)))
+
+
+def test_each_position_has_a_lamp_and_a_word() -> None:
+    """Colour is never the only signal: every row carries its lamp AND its state
+    word, the lamp is the right colour for the state, and the lamps form one
+    column the eye can run down."""
+    board = _board(ROOMS + [_RINGING])
+    lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": 80, "h": 30}, 0.0)
+    rows = {ext: ln for ln in lines for ext in ("11", "12", "13", "14")
+            if re.search(rf"[◉○✕]\S*\s+(?:\x1b\[[0-9;]*m)*{ext}\b", ln)}
+    expect = {"11": ("◉", console.CREAM, "READY"), "12": ("◉", console.LAMP, "TALKING"),
+              "13": ("✕", console.FAULT, "OFFLINE"), "14": ("◉", console.LAMP, "RINGING")}
+    check("lamp: every position is on the board", set(rows) == set(expect))
+    for ext, (glyph, col, word) in expect.items():
+        ln = rows.get(ext, "")
+        check(f"lamp: ext {ext} shows {glyph} in its state colour", (col + glyph) in ln)
+        check(f"lamp: ext {ext} says {word} beside it", word in _plain([ln])[0])
+    plain = {ext: _plain([ln])[0] for ext, ln in rows.items()}
+    check("lamp: the lamps line up in one column",
+          len({plain[x].index(expect[x][0]) for x in plain}) == 1)
+    check("lamp: the state words line up in one column",
+          len({plain[x].index(expect[x][2]) for x in plain}) == 1)
+
+
+def test_a_ringing_lamp_flickers_but_its_word_does_not() -> None:
+    """Amber, then unlit, on the console's existing once-a-second redraw. The
+    word stays put so a ringing room is never read from the lamp alone, and the
+    row keeps its width so nothing beside it jitters."""
+    board = _board([_RINGING])
+    a, b = (console.render(board.get(), {"sel": 1, "mode": "normal", "w": 80, "h": 24}, t)
+            for t in (100.0, 101.0))
+    row_a = next(ln for ln in a if "RINGING" in ln)
+    row_b = next(ln for ln in b if "RINGING" in ln)
+    check("flicker: the lamp is amber one second and unlit the next",
+          (console.LAMP + "◉") in row_a and (console.IDLE + "◉") in row_b)
+    check("flicker: the word is amber both times",
+          (console.LAMP + "RINGING") in row_a and (console.LAMP + "RINGING") in row_b)
+    check("flicker: the row does not change width", console.vis_width(row_a) == console.vis_width(row_b))
+    steady = _board([ROOMS[0]])
+    still = [console.render(steady.get(), {"sel": 1, "mode": "normal", "w": 80, "h": 24}, t)
+             for t in (100.0, 101.0)]
+    check("flicker: an idle room's lamp holds steady",
+          next(ln for ln in still[0] if "READY" in ln) == next(ln for ln in still[1] if "READY" in ln))
+
+
+def test_the_board_holds_at_40_80_and_120_columns() -> None:
+    """The narrow/ambiguous-glyph width rule still holds with the new glyphs:
+    every line within the terminal, the roster complete, the keys on screen."""
+    for w in (40, 80, 120):
+        for mode, lines in _views(w, 30):
+            text = "\n".join(_plain(lines))
+            check(f"width: {mode} at {w} cols stays inside the terminal",
+                  all(console.vis_width(ln) <= w for ln in lines) and len(lines) <= 30)
+            if mode == "normal":
+                check(f"width: every room is on the board at {w}",
+                      all(lbl in text for lbl in ("Kitchen", "Office", "Garage", "Hall")))
+                check(f"width: the keys are on the board at {w}", "R ring" in text and "Q quit" in text)
+    check("width: the lamps and leaders are one column each",
+          console.vis_width("◉○✕═─·") == 6)
+
+
+def test_a_narrow_board_keeps_the_calls_state_word() -> None:
+    """Below 64 columns the call's KIND column gives way, so the state word
+    is not the part of the row that falls off the edge."""
+    board = _board(ROOMS, calls=[
+        {"detail": "Kitchen ↔ Office", "state": "Talking", "duration": "00:02:14", "kind": "internal"}])
+    for w, kind_shown in ((40, False), (80, True)):
+        lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": w, "h": 30}, 0.0)
+        row = next(ln for ln in _plain(lines) if "Kitchen ↔ Office" in ln)
+        check(f"calls: the state word is whole at {w} cols", "Talking" in row)
+        check(f"calls: the kind column is {'shown' if kind_shown else 'dropped'} at {w} cols",
+              ("INTERNAL" in row) == kind_shown)
+
+
+def test_the_help_card_dismiss_hint_fits_21_rows() -> None:
+    """The lamp legend is set into a rule rather than added as a row, so the
+    help card is still 21 rows and its dismiss hint is on a 21-row terminal."""
+    check("help: the card is 21 rows", len(console._help_lines(80)) == 21)
+    lines = _plain(console.render(_board(ROOMS).get(), {"sel": 0, "mode": "help", "w": 80, "h": 21}, 0.0))
+    check("help: the dismiss hint is on a 21-row terminal",
+          any("Press any key to return to the board." in ln for ln in lines))
+    check("help: the lamp legend is still there",
+          any("LAMPS" in ln and "ready" in ln and "offline" in ln for ln in lines))
+
+
+def test_a_lights_badge_colours_only_its_lamp() -> None:
+    """The on/off word stays in the terminal's own foreground; only the lamp
+    glyph carries the colour, as on the roster."""
+    lights = [dict(li) for li in _FAKE_LIGHTS]
+    lines = console.render(_board(ROOMS).get(),
+                           {"sel": 0, "mode": "lights", "w": 80, "h": 30, "lights": lights, "lsel": 0}, 0.0)
+    on = [ln for ln in lines if "◉" in ln and ln.endswith(" on")]
+    off = [ln for ln in lines if "○" in ln and ln.endswith(" off")]
+    check("lights: a lit light's word is uncoloured", bool(on) and all(
+        ln.endswith(console.CREAM + "◉" + console.RESET + " on") for ln in on))
+    check("lights: an unlit light's word is uncoloured", bool(off) and all(
+        ln.endswith(console.MUTED + "○" + console.RESET + " off") for ln in off))
 
 
 if __name__ == "__main__":

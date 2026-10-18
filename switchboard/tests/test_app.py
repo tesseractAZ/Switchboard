@@ -195,7 +195,7 @@ def test_index_html_controls() -> None:
     check("ui: wake-up Set control present", "data-wakeset=" in html)
     check("ui: MWI toggle present", "data-mwi=" in html)
     check("ui: MWI badge rendered when set", "mwibadge" in html)
-    check("ui: Lights section present", "id=\"lights\"" in html and "💡 Lights" in html)
+    check("ui: Lights section present", "id=\"lights\"" in html and "<h2>Lights</h2>" in html)
     check("ui: light toggle hook present", "data-light=" in html)
     check("ui: calls the new endpoints",
           "./api/connect/" in html and "./api/hangup" in html and
@@ -211,11 +211,13 @@ def test_card_action_buttons_labeled() -> None:
     # Every per-card action button carries a text label (not a bare emoji), and the
     # action row is an even 2-column grid — so the controls read clearly instead of
     # wrapping into an uneven, cluttered stack of mystery icons.
+    # (Since the walnut redesign the labels are typed words on the keys, with no
+    # emoji, so this pins the words.)
     html = app.INDEX_HTML
-    check("ui: hang-up button labelled", "📵 Hang up" in html)
-    check("ui: transfer button labelled", "↪ Transfer" in html)
+    check("ui: hang-up button labelled", 'title="Hang up">Hang up</button>' in html)
+    check("ui: transfer button labelled", 'title="Transfer call">Transfer</button>' in html)
     check("ui: message-waiting button labelled (set + clear)",
-          "✉ Message" in html and "✉ Clear" in html)
+          "(r.mwi ? 'Clear' : 'Message')" in html)
     check("ui: MWI is no longer a bare envelope", "'✉ on' : '✉'" not in html)
     check("ui: action row is an even 2-col grid", "grid-template-columns: 1fr 1fr" in html)
 
@@ -266,19 +268,32 @@ def test_announce_serve_guard() -> None:
         check("announce: rejects traversal/absolute/ext/case/overlong names", True)
 
 
-def test_dark_mode_covers_light_cards() -> None:
-    # The room cards (.card), the lights area cards (.areacard) and the wake-up time
-    # input all paint their background from var(--card). In dark mode, --card MUST be
-    # set at a scope they ALL inherit (body) — scoping it to .card alone leaves the
-    # lights section white with light text on it (unreadable), which is what shipped.
+def test_every_surface_paints_from_the_one_board_theme() -> None:
+    # What shipped once: the room cards, the lights area cards and the wake-up time
+    # input painted from a token that dark mode set on .card ALONE, so the lights
+    # section stayed white under light text (unreadable). The page now has ONE
+    # theme, the walnut board, whatever HA's own theme is: the tokens live on
+    # :root, which every surface inherits, and no media query can flip half of
+    # them. (Replaces the dark-mode pin of the two-theme page.)
     import re
     html = app.INDEX_HTML
-    check("ui: lights area cards paint from --card", ".areacard" in html and "var(--card" in html)
-    dark = html[html.index("prefers-color-scheme: dark"):]
-    check("ui: dark mode sets --card on body (so lights cards darken too)",
-          bool(re.search(r"body\s*\{[^}]*--card\s*:", dark)))
-    check("ui: dark mode does NOT scope --card to .card only",
-          not re.search(r"\.card\s*\{\s*--card\s*:", dark))
+    style = html[html.index("<style>"):html.index("</style>")]
+    root = style[style.index(":root {"):]
+    root = root[:root.index("}")]
+    for tok, val in (("--walnut-0", "#120c08"), ("--walnut-1", "#1d140e"), ("--walnut-2", "#2a1d14"),
+                     ("--brass", "#c8a24a"), ("--brass-dim", "#7a6230"), ("--enamel", "#efe6cf"),
+                     ("--ink", "#241a12"), ("--lamp", "#ffb547"), ("--lamp-idle", "#5b4a36"),
+                     ("--ok", "#e9dfc4"), ("--fault", "#c0392b"), ("--muted", "#9b8a72")):
+        check(f"ui: :root defines {tok}", f"{tok}: {val};" in root)
+    check("ui: native controls are drawn dark", "color-scheme: dark;" in root)
+    check("ui: no second theme can flip some surfaces and not others",
+          "prefers-color-scheme" not in style)
+    for sel in (".pos {", ".areacard {", ".wakerow input[type=time] {", ".wakeitem {"):
+        rule = style[style.index(sel):]
+        rule = rule[:rule.index("}")]
+        check(f"ui: {sel[:-2]} paints from the board's tokens", "var(--walnut-" in rule)
+    check("ui: no light-only literal surface left behind",
+          not re.search(r"background:\s*(#fff\b|#ffffff\b|white\b)", style))
 
 
 def test_index_html_js_parses() -> None:
@@ -2331,6 +2346,112 @@ def test_an_mwi_change_from_the_dashboard_leaves_a_line() -> None:
     finally:
         for k, v in saved.items():
             setattr(app, k, v)
+
+
+def test_the_font_route_serves_exactly_the_two_listed_faces() -> None:
+    """The dashboard's typefaces are self-hosted: the page must render with the
+    WAN down and must not tell a font CDN which household opened it. The route
+    answers the two listed names with font/ttf and NOTHING else — a traversal, an
+    absolute path, a case or whitespace variant, a sibling asset's name — and a
+    listed file that is missing is a 404, not FileResponse's 500 at send time.
+
+    Driven through the real handler with the response classes stubbed (no
+    FastAPI on this box) and the table pointed at a scratch directory, next to a
+    decoy file that must never be reachable."""
+    import tempfile
+
+    class _Resp:
+        def __init__(self, payload, status_code=200):
+            self.payload, self.status_code = payload, status_code
+
+    class _File:
+        def __init__(self, path, media_type=None, **_k):
+            self.path, self.media_type, self.status_code = path, media_type, 200
+
+    names = list(app._FONT_ASSETS)
+    check("fonts: exactly the two faces are listed",
+          names == ["Federo-Regular.ttf", "CutiveMono-Regular.ttf"])
+    saved = {k: getattr(app, k) for k in ("JSONResponse", "FileResponse", "_FONT_ASSETS")}
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            app.JSONResponse, app.FileResponse = _Resp, _File
+            app._FONT_ASSETS = {n: str(Path(td) / "absent" / n) for n in names}
+            for n in names:
+                r = app.font_asset(n)
+                check(f"fonts: a listed but missing {n} is a 404, not a 500",
+                      isinstance(r, _Resp) and r.status_code == 404)
+
+            files = {}
+            for n in names:
+                (Path(td) / n).write_bytes(b"\x00\x01\x00\x00")
+                files[n] = str(Path(td) / n)
+            (Path(td) / "decoy.txt").write_text("not a font")
+            app._FONT_ASSETS = files
+            for n, path in files.items():
+                r = app.font_asset(n)
+                check(f"fonts: {n} is served from its table path",
+                      isinstance(r, _File) and r.path == path)
+                check(f"fonts: {n} goes out as font/ttf", r.media_type == "font/ttf")
+
+            bad = ["../app.py", "..%2Fapp.py", "../../../etc/passwd", "/etc/passwd",
+                   "decoy.txt", "../decoy.txt", "fonts/Federo-Regular.ttf",
+                   "federo-regular.ttf", "Federo-Regular.TTF", "Federo-Regular.ttf/",
+                   " Federo-Regular.ttf", "Federo-Regular.ttf\x00", "Federo-Regular",
+                   "xterm.js", "", ".", "..", str(Path(td) / "decoy.txt"),
+                   files["Federo-Regular.ttf"]]
+            served = [b for b in bad if not (isinstance(app.font_asset(b), _Resp)
+                                             and app.font_asset(b).status_code == 404)]
+            check(f"fonts: every unlisted name is a 404 ({served})", not served)
+        finally:
+            for k, v in saved.items():
+                setattr(app, k, v)
+
+
+def test_the_page_asks_only_for_fonts_the_route_serves() -> None:
+    """Wired to the route, by relative url, and nothing fetched from anywhere
+    else. A face named in @font-face that the route does not list is a typeface
+    that silently never loads; an absolute url would drop the Ingress prefix;
+    an external one is the request this page exists not to make."""
+    import re
+    html = app.INDEX_HTML
+    urls = re.findall(r'url\("([^"]+)"\)', html)
+    check(f"fonts: the page declares exactly the listed faces ({urls})",
+          sorted(urls) == sorted("fonts/" + n for n in app._FONT_ASSETS))
+    check("fonts: every face swaps in, so text shows while it loads",
+          html.count("@font-face") == html.count("font-display: swap") == 2)
+    check("fonts: each stack ends in a generic family (the files may be absent)",
+          '"Federo", "Didot", serif' in html
+          and '"Cutive Mono", "Courier Prime", ui-monospace, monospace' in html)
+    check("fonts: nothing is fetched from off the box",
+          "http://" not in html and "https://" not in html
+          and "@import" not in html and "<link" not in html)
+
+
+def test_every_lamp_says_its_state_in_words_and_warms_up_once() -> None:
+    """State is shown by lamps (unlit, white, amber, red), and never by colour
+    alone: the lamp is aria-hidden decoration and the strip beside it carries the
+    state word. The warm-up is ONE moment — it must not replay on every 4 s
+    rebuild — and reduced motion gets the final state with no animation.
+
+    Source-structure assertions (the JS lives in a Python string, no DOM here)."""
+    html = app.INDEX_HTML
+    head = html[html.index("function positionHead("):]
+    head = head[:head.index("\n}\n")]
+    check("lamps: the lamp is hidden from assistive tech", 'aria-hidden="true"' in head)
+    check("lamps: the strip carries the state in words", '<div class="state">' in head)
+    for cls in ("lit-ok", "lit-busy", "lit-ring", "lit-fault"):
+        check(f"lamps: .lamp.{cls} is styled", f".lamp.{cls}" in html)
+    check("lamps: ringing flickers", ".lamp.lit-ring { animation: flicker" in html)
+    check("lamps: the warm-up stagger is 60 ms a position, capped at 1 s",
+          "Math.min(i * 60, 1000)" in head)
+    refresh = html[html.index("async function refresh()"):html.index("async function post(")]
+    assign = refresh.index("if (!typingInGrid) grid.innerHTML = gridHtml;")
+    check("lamps: the warm-up is spent only once the field is actually painted",
+          refresh.index("if (!typingInGrid) lampsWarmed = true;") > assign)
+    motion = html[html.index("@media (prefers-reduced-motion: reduce)"):]
+    motion = motion[:motion.index("}\n  }") + 1]
+    check("lamps: reduced motion stops both animations",
+          ".lamp.warm" in motion and ".lamp.lit-ring" in motion and "animation: none" in motion)
 
 
 if __name__ == "__main__":

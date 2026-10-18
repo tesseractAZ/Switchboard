@@ -76,3 +76,117 @@ def test_the_dashboard_screenshot_serves_the_page_python_serves() -> None:
         time.tzset()
     assert r"/^\d{1,2}:\d{2}$/" in html, "the wake-up time regex is not served as Python serves it"
     assert "\\\\d" not in html, "the page still carries source-text escapes"
+
+
+# The committed preview of the dashboard: the screenshot fixture, written to disk
+# so the page can be opened in a browser with no PBX behind it. Its font urls are
+# RELATIVE to the fixtures directory (never a checkout's absolute path), so it
+# shows the real faces when opened from a checkout that has them.
+PREVIEW = ROOT / "switchboard/tests/fixtures/dashboard_preview.html"
+PREVIEW_FONT_BASE = "../../rootfs/usr/share/switchboard/fonts/"
+
+
+def _dashboard_html(**kw) -> str:
+    """build_dashboard_html(ROOT, **kw), leaving no trace of the script's
+    sys.path, module cache or TZ behind."""
+    saved_path, saved_mods = list(sys.path), dict(sys.modules)
+    saved_tz = os.environ.get("TZ")
+    try:
+        bs = SourceFileLoader("build_screenshots_preview",
+                              str(ROOT / "scripts/build-screenshots.py")).load_module()
+        return bs.build_dashboard_html(ROOT, **kw)
+    finally:
+        sys.path[:] = saved_path
+        for k in set(sys.modules) - set(saved_mods):
+            del sys.modules[k]
+        sys.modules.update(saved_mods)
+        if saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved_tz
+        time.tzset()
+
+
+def _served_page() -> str:
+    """INDEX_HTML as Python serves it (evaluated, not copied: see above)."""
+    import ast
+    src = (ROOT / "switchboard/rootfs/usr/share/switchboard/webui/app.py").read_text()
+    m = re.search(r'^INDEX_HTML = ("""(?:.*?)^""")', src, re.S | re.M)
+    assert m, "INDEX_HTML not found"
+    return ast.literal_eval(m.group(1))
+
+
+def test_the_dashboard_screenshot_does_not_restyle_the_page() -> None:
+    """★ The builder pinned a light theme: it made the page's dark block
+    unmatchable and appended a <style> forcing a light body. Once the page had
+    one theme (the walnut board), that pin would have painted a grey body under
+    it, and the docs would have pictured a page nobody is served. The fixture may
+    add its stub script; it may not add or change a style."""
+    html = _dashboard_html(font_base="fonts/")      # "fonts/" -> "fonts/": no-op
+    page = _served_page()
+    styles = re.findall(r"<style>.*?</style>", html, re.S)
+    assert styles == re.findall(r"<style>.*?</style>", page, re.S), (
+        "the screenshot fixture restyles the dashboard")
+    assert html.count("<script>") == page.count("<script>") + 1, (
+        "the fixture adds more than its one API stub")
+
+
+def test_the_screenshot_loads_the_shipped_fonts_not_the_ingress_route() -> None:
+    """The page asks for `fonts/<name>`, which only the web UI's route answers. A
+    file:// screenshot has no route, so the builder points the faces at the
+    repo's font directory instead; otherwise the docs would picture the fallback
+    faces."""
+    html = _dashboard_html()
+    fonts = (ROOT / "switchboard/rootfs/usr/share/switchboard/fonts").as_uri() + "/"
+    assert 'url("fonts/' not in html
+    assert html.count('url("' + fonts) == 2
+
+
+def test_the_committed_dashboard_preview_is_the_page_as_served() -> None:
+    """The preview is checked, not trusted: a stale copy pictures a page nobody
+    is served, which is the failure this file exists for. Regenerate with
+
+        SWITCHBOARD_WRITE_PREVIEW=1 python3 -m pytest switchboard/tests/test_screenshot_fixtures.py
+    """
+    html = _dashboard_html(font_base=PREVIEW_FONT_BASE)
+    if os.environ.get("SWITCHBOARD_WRITE_PREVIEW") == "1":
+        PREVIEW.parent.mkdir(parents=True, exist_ok=True)
+        PREVIEW.write_text(html, encoding="utf-8")
+    assert PREVIEW.is_file() and PREVIEW.read_text(encoding="utf-8") == html, (
+        "tests/fixtures/dashboard_preview.html is stale; regenerate it with "
+        "SWITCHBOARD_WRITE_PREVIEW=1 python3 -m pytest "
+        "switchboard/tests/test_screenshot_fixtures.py")
+    assert "file://" not in html and str(ROOT) not in html, (
+        "the preview carries a checkout's absolute path")
+
+
+def test_the_console_screenshot_keeps_the_board_colours() -> None:
+    """★ The console speaks xterm 256-colour (`ESC[38;5;Nm`). The HTML
+    translator read that code by code — 38, 5, N — recognised none of them, and
+    console.png went out with no colour at all. Every palette colour the board
+    uses must reach the picture."""
+    saved_path, saved_mods = list(sys.path), dict(sys.modules)
+    saved_tz = os.environ.get("TZ")
+    try:
+        bs = SourceFileLoader("build_screenshots_colour",
+                              str(ROOT / "scripts/build-screenshots.py")).load_module()
+        html = bs.build_console_html(ROOT)
+        one = bs.ansi_to_html("\x1b[1m\x1b[38;5;178mR\x1b[0m \x1b[38;5;94m─\x1b[0m")
+    finally:
+        sys.path[:] = saved_path
+        for k in set(sys.modules) - set(saved_mods):
+            del sys.modules[k]
+        sys.modules.update(saved_mods)
+        if saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved_tz
+        time.tzset()
+    assert one == ('<span style="font-weight:700"><span style="color:#d7af00">R</span></span>'
+                   ' <span style="color:#875f00">─</span>'), one
+    used = set(re.findall(r'<span style="color:(#[0-9a-f]{6})">', html))
+    # brass, amber, cream, dim brass, muted: on every board the fixture draws.
+    for name, hexv in (("brass", "#d7af00"), ("amber", "#ffaf00"), ("cream", "#ffffd7"),
+                       ("dim brass", "#875f00"), ("muted", "#af875f")):
+        assert hexv in used, f"console.png would lose the {name} colour"
+    assert "38;5" not in html, "a 256-colour code leaked into the picture as text"
