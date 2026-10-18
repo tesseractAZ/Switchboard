@@ -1,7 +1,35 @@
 # Changelog
 
-Recent releases. Releases up to 0.108.0 are in the
+Recent releases. Releases up to 0.108.1 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.114.0
+
+**The operator console is reached over SSH instead of telnet, and the board no
+longer listens on the network at all.**
+
+- **SSH on `console_port` (2300):** `ssh -p 2300 <user>@<ha-host>`, as a
+  `console_users` entry. Password login only, with the web terminal's
+  per-address lockout (counted separately); while `console_users` has no valid
+  entry, every login is refused. Commands, sftp/scp and all forwarding are
+  refused. The ed25519 host key is created on first start in `/data` (0600) and
+  its fingerprint is logged at every start. No username, password or command
+  line is logged.
+- **The board listens only on a 0600 root Unix socket**,
+  `/run/switchboard/console.sock`, which SSH, the web terminal and the sidebar
+  console all connect to. It stops only when `console_enabled` and
+  `console_web_enabled` are both `false`.
+- **Upgrading:** telnet on 2300 is gone; that port now speaks SSH. An existing
+  install keeps its saved `console_bind`, probably `127.0.0.1`, so set it to
+  `0.0.0.0` for SSH from the LAN (the new default). SSH needs at least one
+  `console_users` entry (now labelled "Console Users"). A blank
+  `console_web_bind` now means `127.0.0.1`. `console_enabled: false` no longer
+  turns off the web terminal. Sessions: SSH 16 connections (4 per address),
+  web terminal 5, sidebar 5; the board's own cap rose from 5 to 32.
+- Lines a stranger can cause on the SSH port (a failed or throttled login, the
+  no-users warning) are written at most once per address per minute, with a
+  count of those held back; a password that SSH's text preparation reduces to
+  nothing is skipped, so it can never accept an empty password.
 
 ## 0.113.0
 
@@ -345,37 +373,3 @@ nowhere.
   outage.
 - **The notification is retried every tick until Home Assistant accepts it,** for
   up to an hour (`WAKEUP_MISSED_NOTIFY_RETRY_SECONDS`).
-
-## 0.108.1
-
-**Documentation brought in line with the AppArmor review.** No change to how the
-add-on runs.
-
-- **The manual's troubleshooting table has a row for a profile refusal.** A feature
-  that fails with `Permission denied` after an update leaves a `DENIED` record in
-  the host's audit journal (`journalctl _TRANSPORT=audit`), not in the Log tab or
-  `dmesg`. The row says how to find the record for this add-on and what its
-  fields mean. It also notes that `apk add`, `pip install` and editing a shipped
-  file in place now fail inside the container by design.
-- **The restart-or-stall row describes the verified gateway behaviour.** With
-  `P81` set, the gateway clears its registrations as it boots. So
-  `Removed contact … due to request` and `Added contact` appear together, in the
-  same second, at the end of the outage, and a power cut leaves them too.
-- **SECURITY.md describes the profile exactly:**
-  - no execute is ever refused, and no read outside `/root`, `/home` and the
-    secret and kernel paths it lists;
-  - what a write-lock refuses (writes, create, delete, rename, `mkdir`,
-    truncation, hardlinks, `chmod`, `chown`);
-  - that `/run` and `/tmp` are deliberately left unlocked;
-  - how it was checked after deployment.
-  The 0.108.0 notes said no read is ever refused, which was not true of those
-  paths; that entry is corrected.
-- **The profile's header gives the test procedure:** the CI job, the tests that
-  pin the profile, and the isolated boot test under a test name that a release
-  must pass.
-- **The README and the manual's summaries mention** that Asterisk runs unprivileged
-  and that the profile refuses unused capabilities and writes to shipped code.
-- **Corrections:**
-  - PERFORMANCE.md's test count is 979, not 960.
-  - Asterisk's `Unable to install capabilities` start-up warning was confirmed
-    gone after the 0.108.0 deploy.

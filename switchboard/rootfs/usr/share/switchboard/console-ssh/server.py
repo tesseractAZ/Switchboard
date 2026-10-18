@@ -81,8 +81,8 @@ CONSOLE_SOCKET = "/run/switchboard/console.sock"
 
 # Connection caps, applied when the TCP connection arrives (before the SSH
 # version exchange), so an unauthenticated flood cannot pile up key exchanges.
-# The console behind this has its own, smaller, session cap; a shell over it
-# gets the console's "busy" line and ends.
+# The console behind this has its own session cap (32, shared by every front
+# end); a shell over it past that gets the console's "busy" line and ends.
 MAX_CONNECTIONS = 16
 MAX_PER_ADDRESS = 4
 # Seconds an unauthenticated connection may take to log in (OpenSSH's
@@ -97,7 +97,7 @@ MAX_AUTH_ATTEMPTS = 3
 # closed — the console's own idle reclaim, applied here too, so a session that
 # never opened a shell (ssh -N) cannot hold a slot for ever.
 IDLE_SECONDS = 900
-# TCP-level liveness: a client that vanished without a FIN is detected after
+# SSH-level liveness: a client that vanished without a FIN is detected after
 # KEEPALIVE_INTERVAL * KEEPALIVE_COUNT_MAX seconds.
 KEEPALIVE_INTERVAL = 60
 KEEPALIVE_COUNT_MAX = 3
@@ -130,6 +130,31 @@ _MAX_KEY_BYTES = 65536
 
 def log(msg: str) -> None:
     print(f"[switchboard-console-ssh] {msg}", flush=True)
+
+
+# Lines an unauthenticated client can cause (a failed or throttled login, the
+# no-users warning) are written at most once per address and kind each
+# QUIET_SECONDS, with the count of those held back; journald rate-limits every
+# container's output together, so one host must not be able to spend it.
+QUIET_SECONDS = 60.0
+_QUIET_MAX = 256
+_quiet: dict = {}
+
+
+def quiet_log(addr: str, kind: str, msg: str, now: float | None = None) -> bool:
+    """log(msg) unless (addr, kind) was logged in the last QUIET_SECONDS; True
+    when written."""
+    now = time.monotonic() if now is None else now
+    key = (addr, kind)
+    start, held = _quiet.get(key, (None, 0))
+    if start is not None and now - start < QUIET_SECONDS:
+        _quiet[key] = (start, held + 1)
+        return False
+    if len(_quiet) >= _QUIET_MAX and key not in _quiet:
+        _quiet.pop(next(iter(_quiet)))
+    _quiet[key] = (now, 0)
+    log(msg + (f" (+{held} more in the {int(QUIET_SECONDS)} s before)" if held else ""))
+    return True
 
 
 def _env_int(name: str, default: int) -> int:
@@ -167,9 +192,16 @@ def ssh_users(rows):
     usable, skipped = [], 0
     for name, password in rows or []:
         try:
-            usable.append((saslprep(name), saslprep(password)))
+            name, password = saslprep(name), saslprep(password)
         except SASLPrepError:
             skipped += 1
+            continue
+        # SASLprep maps some characters to nothing (U+00AD, say): a row it
+        # empties would accept an empty password, so it is skipped too.
+        if not name or not password:
+            skipped += 1
+            continue
+        usable.append((name, password))
     return usable, skipped
 
 
@@ -460,6 +492,7 @@ class _ConnectionServer(asyncssh.SSHServer):
         self._addr = "?"
         self._admitted = False
         self._attempts = 0
+        self._authed = False
         self._warned_no_users = False
         self._sessions = 0
         self._last_input = 0.0
@@ -481,7 +514,6 @@ class _ConnectionServer(asyncssh.SSHServer):
         self._admitted = True
         self._app.connections.add(conn)
         self._last_input = time.monotonic()
-        log(f"connection from {self._addr}")
 
     def connection_lost(self, exc) -> None:
         if self._idle_handle is not None:
@@ -492,7 +524,8 @@ class _ConnectionServer(asyncssh.SSHServer):
         self._admitted = False
         self._app.limits.release(self._addr)
         self._app.connections.discard(self._conn)
-        log(f"connection from {self._addr} closed")
+        if self._authed:
+            log(f"connection from {self._addr} closed")
 
     # -- authentication -----------------------------------------------------
     def begin_auth(self, username: str) -> bool:
@@ -515,9 +548,10 @@ class _ConnectionServer(asyncssh.SSHServer):
         if not self._app.users:
             if not self._warned_no_users:
                 self._warned_no_users = True
-                log(f"WARNING: refused a login from {self._addr}: console_users has "
-                    "no valid entry, so every SSH login is refused. Add a username "
-                    "and password under console_users.")
+                quiet_log(self._addr, "no-users",
+                          f"WARNING: refused a login from {self._addr}: console_users has "
+                          "no valid entry, so every SSH login is refused. Add a username "
+                          "and password under console_users.")
             # Charged all the same: whether users exist must not change how
             # quickly an address runs out of attempts.
             self._app.throttle.charge(self._addr)
@@ -525,14 +559,15 @@ class _ConnectionServer(asyncssh.SSHServer):
         # Charge BEFORE verifying, as the web terminal does: a refused attempt
         # is never free to retry.
         if not self._app.throttle.charge(self._addr):
-            log(f"login throttled for {self._addr}")
+            quiet_log(self._addr, "throttled", f"login throttled for {self._addr}")
             return False
         if webauth.check_credentials(self._app.users, username, password):
             self._app.throttle.clear(self._addr)
+            self._authed = True
             log(f"login ok from {self._addr}")
             self._arm_idle()
             return True
-        log(f"login FAILED from {self._addr}")
+        quiet_log(self._addr, "failed", f"login FAILED from {self._addr}")
         return False
 
     # -- idle watchdog --------------------------------------------------------

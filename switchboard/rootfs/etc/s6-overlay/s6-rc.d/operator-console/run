@@ -5,7 +5,7 @@
 # this script reads no port or bind option: console_port and console_bind belong
 # to the SSH service in front of it. Its clients are the SSH console
 # (console_enabled), the browser terminal (console_web_enabled) and the console
-# in the Switchboard sidebar, and each one authenticates before it connects.
+# in the Switchboard sidebar, and each applies its own login before it connects.
 #
 # Idle only when BOTH front doors with a switch are explicitly off. Turning SSH
 # off must not take the board away from the browser terminal or the sidebar,

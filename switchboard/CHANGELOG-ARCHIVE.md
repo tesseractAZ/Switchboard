@@ -3,6 +3,39 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.108.1
+
+**Documentation brought in line with the AppArmor review.** No change to how the
+add-on runs.
+
+- **The manual's troubleshooting table has a row for a profile refusal.** A feature
+  that fails with `Permission denied` after an update leaves a `DENIED` record in
+  the host's audit journal (`journalctl _TRANSPORT=audit`), not in the Log tab or
+  `dmesg`. The row says how to find the record for this add-on and what its
+  fields mean. It also notes that `apk add`, `pip install` and editing a shipped
+  file in place now fail inside the container by design.
+- **The restart-or-stall row describes the verified gateway behaviour.** With
+  `P81` set, the gateway clears its registrations as it boots. So
+  `Removed contact … due to request` and `Added contact` appear together, in the
+  same second, at the end of the outage, and a power cut leaves them too.
+- **SECURITY.md describes the profile exactly:**
+  - no execute is ever refused, and no read outside `/root`, `/home` and the
+    secret and kernel paths it lists;
+  - what a write-lock refuses (writes, create, delete, rename, `mkdir`,
+    truncation, hardlinks, `chmod`, `chown`);
+  - that `/run` and `/tmp` are deliberately left unlocked;
+  - how it was checked after deployment.
+  The 0.108.0 notes said no read is ever refused, which was not true of those
+  paths; that entry is corrected.
+- **The profile's header gives the test procedure:** the CI job, the tests that
+  pin the profile, and the isolated boot test under a test name that a release
+  must pass.
+- **The README and the manual's summaries mention** that Asterisk runs unprivileged
+  and that the profile refuses unused capabilities and writes to shipped code.
+- **Corrections:**
+  - PERFORMANCE.md's test count is 979, not 960.
+  - Asterisk's `Unable to install capabilities` start-up warning was confirmed
+    gone after the 0.108.0 deploy.
 ## 0.108.0
 
 **The AppArmor profile is narrowed.** It granted every capability, and every file,

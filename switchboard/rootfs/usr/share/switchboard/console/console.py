@@ -2,7 +2,7 @@
 
 The board listens on ONE Unix socket, /run/switchboard/console.sock (mode 0600,
 owned by root), and on no network port at all. Everything that shows the board
-connects to that socket and does its own authentication first: the SSH service
+connects to that socket and, where it has a login, authenticates first: the SSH service
 (the console_enabled / console_port / console_bind options), the browser
 terminal (console-web/server.py) and the console in the Switchboard sidebar
 (webui/console_bridge.py, behind Home Assistant's Ingress).
@@ -74,7 +74,7 @@ OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 POLL_SECONDS = 3.0
 # The one place the board listens. No TCP listener exists any more: the SSH
 # service, the browser terminal and the sidebar console all connect here, and
-# each authenticates its own users before it does. CONSOLE_SOCKET exists for the
+# each applies its own login (the web terminal's is off while console_users is empty). CONSOLE_SOCKET exists for the
 # tests, which bind a throwaway path; nothing in the add-on sets it.
 SOCKET_PATH = os.environ.get("CONSOLE_SOCKET", "").strip() or "/run/switchboard/console.sock"
 # Concurrent board sessions across EVERY client together. Each front door caps

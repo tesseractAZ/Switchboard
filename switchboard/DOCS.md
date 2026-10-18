@@ -20,7 +20,7 @@ LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
 7. [Grandstream GXW4216 V2 provisioning](#7-grandstream-gxw4216-v2-provisioning)
 8. [The WP826 WiFi cordless](#8-the-wp826-wifi-cordless-optional)
 9. [Adding an outside line (SIP trunk)](#9-adding-an-outside-line-sip-trunk)
-10. [The operator console](#10-the-operator-console-telnet--browser)
+10. [The operator console](#10-the-operator-console-ssh--browser)
 11. [Health monitoring & Home Assistant sensors](#11-health-monitoring--home-assistant-sensors)
 12. [How it's built](#12-how-its-built)
 13. [Codecs — G.711 µ-law only, on purpose](#13-codecs--g711-µ-law-only-on-purpose)
@@ -120,12 +120,12 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `console_bind` | `127.0.0.1` | Interface it listens on. `127.0.0.1` restricts it to the host. |
-| `console_enabled` | `true` | Telnet operator console (ring/connect/hang up). **No authentication of any kind** — harmless on the default loopback bind; do not move it onto an untrusted LAN. |
-| `console_port` | `2300` | TCP port for the telnet console. |
-| `console_users` | `[]` | Sign-in accounts for the **web terminal** — each entry has `username` and `password` (masked). Empty = no login (the historical open behavior). When any user is configured, the page **and the WebSocket itself** require a signed-in session; repeated wrong attempts from one address are throttled. The telnet console is unaffected — bind it to loopback if your LAN isn't fully trusted. |
-| `console_web_bind` | `127.0.0.1` | Blank = follow `console_bind`. Both default to loopback since 0.94.0: the browser console is served through the Home Assistant sidebar instead (§10), so neither listener needs to be on your network. |
-| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. Idles if `console_enabled` is off. |
+| `console_bind` | `0.0.0.0` | Interface the SSH console listens on. Every login needs a `console_users` password; `127.0.0.1` restricts it to the Home Assistant host. Only SSH uses it. An upgraded install keeps the bind it had saved, and the default from 0.94.0 to 0.113.0 was `127.0.0.1`: set `0.0.0.0` to reach SSH from the LAN. |
+| `console_enabled` | `true` | The SSH operator console (ring/connect/hang up, §10). Password login only, against `console_users`; while that list has no valid entry, **every login is refused**. Turning it off stops SSH only: the sidebar console and the web terminal keep working. With this and `console_web_enabled` both off, the board itself stops and the sidebar console shows "unavailable". |
+| `console_port` | `2300` | TCP port of the SSH console. The sidebar console and the web terminal do not use it. |
+| `console_users` | `[]` | Sign-in accounts for the **SSH console** and the **web terminal** — each entry has `username` and `password` (masked); a row missing either is ignored. SSH accepts only these accounts and refuses every login while the list is empty. The web terminal with the list empty has no login (the historical open behavior); when any user is configured, its page **and its WebSocket** require a signed-in session. Repeated wrong attempts from one address are throttled (5 per 5 minutes, counted separately by SSH and the web terminal). The sidebar console needs none of this. |
+| `console_web_bind` | `127.0.0.1` | Interface the web terminal listens on. Blank also means `127.0.0.1`; since 0.114.0 it no longer follows `console_bind`. The browser console is served through the Home Assistant sidebar instead (§10), so this terminal does not need to be on your network. |
+| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 
 ### Time, clock & wake-up
@@ -219,7 +219,8 @@ a blank read from permanently idling an enabled service (s6 treats an idle
 process as "started" and never restarts it) — but it means these keys are read
 from the **saved** options even when the overlay names them:
 
-- `console_enabled`, `console_web_enabled` (telnet console, web terminal),
+- `console_enabled`, `console_web_enabled` (SSH console, web terminal; the board
+  behind them idles only when both are `false`),
 - `link_health_enabled`, `device_health_enabled` (the two pollers),
 - `wakeup_enabled` (the wake-up scheduler, and the web UI's retry gate),
 - `stt_resident` and the seven speech-feature flags the resident recognizer gates
@@ -1355,7 +1356,7 @@ it authenticates per-INVITE). v0.48.0 closes it from three sides:
 
 ---
 
-## 10. The operator console (telnet + browser)
+## 10. The operator console (SSH + browser)
 
 A live switchboard board an operator can drive by keystroke: see every phone's
 status, **ring** a room, **connect** two rooms (patch a call), **hang up**,
@@ -1391,7 +1392,10 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   `console_users` is configured that terminal first shows a sign-in page; its
   socket also requires the signed-in session, and repeated failures from one
   address are throttled. The sidebar console above needs none of this.
-- **Telnet** — `telnet <ha-host> 2300`. Keys: **↑↓ / j k** move, **R** ring,
+- **SSH** — `ssh -p 2300 <user>@<ha-host>`, as a `console_users` entry: its
+  username, then its password at the prompt. **While `console_users` has no valid
+  entry, every login is refused**; the add-on log says so at start-up and once for
+  each connection that tries. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
   **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. The **lights**
@@ -1402,20 +1406,56 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   still, the active-call and wake-up lists collapse to a count of what they are
   hiding — but the key bar at the bottom is never given up, which is what used to
   happen first, because the page was simply cut off at the terminal's last row.
-  Toggle with `console_enabled`. **Since 0.94.0 this binds to `127.0.0.1` by
-  default** — on a *fresh* install; an upgrade keeps the `console_bind` you
-  already had, and the start-up line names the address it is actually listening
-  on, so read that rather than assuming the new default applied. Set
-  `console_bind: 0.0.0.0` to put it back on your LAN, and read the security note
-  below before you do.
+  The window size comes from your SSH terminal and follows a resize. Toggle with
+  `console_enabled`; `console_port` and `console_bind` set its port and interface.
+  **Since 0.114.0 `console_bind` defaults to `0.0.0.0`** — on a *fresh* install;
+  an upgrade keeps the `console_bind` it had saved, most likely `127.0.0.1`, which
+  leaves SSH reachable from the Home Assistant host only. The start-up line names
+  the address it is actually listening on, so read that rather than assuming the
+  new default applied, and set `console_bind: 0.0.0.0` to reach it from the LAN.
+
+  The first connection asks you to accept the server's host key. Compare the
+  fingerprint your client shows with the add-on log, which repeats it on a
+  start-up line at every start:
+
+  ```text
+  [switchboard-console-ssh] SSH operator console listening on 0.0.0.0:2300 — host key SHA256:… (ssh-ed25519) — …
+  ```
+
+  The ed25519 key is created on first start at `/data/ssh_host_ed25519_key` and
+  reused after every restart and update. If it is ever replaced (the file was
+  deleted, or was not a usable key), clients warn that the host identification has
+  changed: check the new fingerprint against the log, then drop the old one with
+  `ssh-keygen -R "[<ha-host>]:2300"`.
+
+  Only the interactive console is offered. Login is by password, never by key;
+  running a command (`ssh … <command>`), sftp and scp, port forwarding, and agent
+  or X11 forwarding are all refused, and the connection closes when the console
+  is quit. A connection has 60 s to log in and is closed after 15 minutes without
+  input. Wrong passwords are throttled per address — 5 attempts in any 5 minutes,
+  at most 3 on one connection — separately from the web terminal's count. A
+  `console_users` entry holding a character an SSH client cannot send (a control
+  character, say) cannot log in over SSH; the start-up log counts such entries.
+  Recent OpenSSH clients warn that the connection "is not using a post-quantum
+  key exchange algorithm". That is expected: the SSH library in the add-on
+  (asyncssh) offers post-quantum key exchange only with liboqs, which the image
+  does not include. `-o WarnWeakCrypto=no-pq-kex` silences the warning.
 - **Browser web terminal (the standalone one)** — the same TUI rendered with
-  xterm.js by a small stdlib HTTP + WebSocket server that bridges to the telnet
-  console. **Since 0.94.0 it binds to `127.0.0.1` by default**, so
-  `http://<ha-host>:8100/` no longer answers from another machine; it is kept as a
-  fallback reachable from the Home Assistant host itself. The sidebar console
-  above supersedes it and needs no `console_users` entry. Toggle with
-  `console_web_enabled` / `console_web_port`; it idles if `console_enabled` is off
-  (nothing to bridge to).
+  xterm.js by a small stdlib HTTP + WebSocket server that bridges to the board
+  over its Unix socket, `/run/switchboard/console.sock`. **Since 0.94.0 it binds
+  to `127.0.0.1` by default**, so `http://<ha-host>:8100/` does not answer from
+  another machine; it is kept as a fallback reachable from the Home Assistant host
+  itself. A blank `console_web_bind` also means `127.0.0.1` (since 0.114.0 it no
+  longer follows `console_bind`). The sidebar console above supersedes it and
+  needs no `console_users` entry. Toggle with `console_web_enabled` /
+  `console_web_port`; since 0.114.0 it keeps running when `console_enabled` is off.
+
+The board itself listens on no network port, only on the Unix socket
+`/run/switchboard/console.sock` (mode 0600, root), and all three front-ends
+connect to it there. The sidebar console and the web terminal work whatever
+`console_enabled` is set to. Only with `console_enabled` and `console_web_enabled`
+both `false` does the board stop, and the sidebar console then shows
+"unavailable".
 
 > **Security:** all three front-ends can ring, connect and hang up phones, and
 > they are *not* equally exposed.
@@ -1428,13 +1468,15 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 >   Supervisor is refused, apart from three narrow HTTP exceptions that never
 >   reach the console (§8), and there is no second password to configure or leave
 >   switched off.
-> - **Telnet (2300) has no authentication and never has** — no login, no
->   `console_users` equivalent; anyone who can reach the port drives the board.
->   **Since 0.94.0 it binds to `127.0.0.1` by default**, so as shipped nobody can
->   reach it but the Home Assistant host. Moving that bind puts an unauthenticated
->   switchboard on your LAN.
-> - **The standalone web terminal (8100)** also binds to `127.0.0.1` by default
->   since 0.94.0. It still supports a sign-in when `console_users` has an entry:
+> - **SSH (2300)** asks every connection for a `console_users` password and
+>   refuses every login while that list has no valid entry; there is no key,
+>   anonymous or default login. That is why `console_bind` defaults to every
+>   interface since 0.114.0. Connections are capped at 16, and 4 per address,
+>   before the SSH handshake; failed passwords are throttled per address; no log
+>   line carries a username, a password or a command line. Set
+>   `console_bind: 127.0.0.1` to keep it on the Home Assistant host.
+> - **The standalone web terminal (8100)** binds to `127.0.0.1` by default since
+>   0.94.0. It still supports a sign-in when `console_users` has an entry:
 >   the page redirects to a login form, the `/ws` upgrade re-checks the session
 >   cookie (so a saved socket URL is no way around it), sessions are 256-bit
 >   tokens with a 12-hour lifetime dropped on restart, and failed attempts are
@@ -1446,7 +1488,7 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 > at 5 and reclaim one after 15 minutes of browser idle; the sidebar console also
 > has a 12-hour absolute ceiling per session. The standalone terminal additionally
 > same-origin-gates its WebSocket upgrade, and its bind is `console_web_bind`
-> (`127.0.0.1` by default), following `console_bind` only when that is blank. See
+> (`127.0.0.1` by default, and when blank). SSH has its own caps, listed above. See
 > [SECURITY.md](SECURITY.md).
 
 ---
@@ -1751,11 +1793,12 @@ The assistant's own ledger is deliberately **not** mirrored — see
 - The **Ingress dashboard** is a small single-worker FastAPI app that reads live
   state over the loopback-only Asterisk Manager (AMI) socket.
 - **Services** run under s6-overlay: a one-shot config generator, then Asterisk,
-  the web UI, the console (telnet + web), the resident recognizer, the wake-up
-  scheduler (whose 20-second loop also files the announcement verdicts and runs
-  the announcement auto-retry), the two health pollers, and the Home Assistant
-  broker: since 0.110.0 the programs that run as the `asterisk` user hold no
-  Home Assistant token and reach Home Assistant only through it
+  the web UI, the console (the board, its SSH front end and the web terminal),
+  the resident recognizer, the wake-up scheduler (whose 20-second loop also
+  files the announcement verdicts and runs the announcement auto-retry), the two
+  health pollers, and the Home Assistant broker: since 0.110.0 the programs that
+  run as the `asterisk` user hold no Home Assistant token and reach Home
+  Assistant only through it
   ([SECURITY.md](SECURITY.md#4-home-assistant-access)). Each optional service
   idles when its feature is turned off (except the link-health poller, which
   keeps scrubbing the readable log; §11), so `wakeup_enabled: false` also stops
@@ -1861,11 +1904,12 @@ essentials:
   capabilities, and the AppArmor profile refuses raw sockets and any write to the
   shipped code or the Asterisk configuration, root included.
 - **Change the default room secrets** before your phones register.
-- Both standalone consoles bind to `127.0.0.1` by default since 0.94.0, so
-  neither is on your LAN as shipped. The telnet console has no authentication at
-  all, and the web terminal's sign-in is off until `console_users` has an entry —
-  so if you move either bind, put it on a trusted network first. The sidebar
-  console (§10) needs neither.
+- The SSH console listens on every interface by default (`console_bind`), and
+  every login needs a `console_users` password: with none configured, every
+  login is refused. The board itself has no network listener, only a root-only
+  Unix socket. The standalone web terminal binds to `127.0.0.1` by default, and
+  its sign-in is off until `console_users` has an entry — so configure one before
+  you move its bind. The sidebar console (§10) needs neither.
 - Two read-only GETs on port 8099 are deliberately reachable from the LAN
   without authentication. `/phonebook.xml` lets the cordless fetch its remote
   phonebook and exposes room names and internal extensions only

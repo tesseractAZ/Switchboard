@@ -94,6 +94,9 @@ def _mod():
             else:
                 sys.modules[n] = m
     _MOD = mod
+    # Per-connection tests count one line per refused connection; the rate
+    # limiter is off for them and has its own test, which turns it on.
+    mod.QUIET_SECONDS = 0.0
     return mod
 
 
@@ -1075,6 +1078,42 @@ def test_the_server_reads_what_the_run_script_exports():
             os.environ.pop("CONSOLE_SSH_PORT", None)
         else:
             os.environ["CONSOLE_SSH_PORT"] = old
+
+def test_a_row_saslprep_empties_is_skipped_not_an_empty_password():
+    """SASLprep maps a soft hyphen to nothing: a password made only of such
+    characters would otherwise accept an empty password."""
+    if _skip_without_asyncssh("saslprep"):
+        return
+    mod = _mod()
+    usable, skipped = mod.ssh_users([(USER, "\u00ad\u00ad"), ("\u00ad", "pw"), (USER, "ok-pass")])
+    assert skipped == 2 and usable == [(USER, "ok-pass")], (usable, skipped)
+
+
+def test_lines_a_stranger_can_cause_are_rate_limited_per_address():
+    """A failed or throttled login, and the no-users warning, are written once
+    per address and kind per QUIET_SECONDS, with the count held back: the
+    journal's rate limit is shared by every container."""
+    if _skip_without_asyncssh("quiet_log"):
+        return
+    mod = _mod()
+    mod._quiet.clear()
+    saved_quiet = mod.QUIET_SECONDS
+    mod.QUIET_SECONDS = 60.0
+    out = []
+    saved = mod.log
+    mod.log = out.append
+    try:
+        assert mod.quiet_log("192.0.2.7", "failed", "login FAILED", now=100.0)
+        assert not mod.quiet_log("192.0.2.7", "failed", "login FAILED", now=110.0)
+        assert not mod.quiet_log("192.0.2.7", "failed", "login FAILED", now=120.0)
+        assert mod.quiet_log("192.0.2.8", "failed", "login FAILED", now=121.0)
+        assert mod.quiet_log("192.0.2.7", "throttled", "login throttled", now=122.0)
+        assert mod.quiet_log("192.0.2.7", "failed", "login FAILED", now=100.0 + mod.QUIET_SECONDS)
+    finally:
+        mod.log = saved
+        mod.QUIET_SECONDS = saved_quiet
+        mod._quiet.clear()
+    assert len(out) == 4 and out[-1].endswith("(+2 more in the 60 s before)"), out
 
 
 if __name__ == "__main__":

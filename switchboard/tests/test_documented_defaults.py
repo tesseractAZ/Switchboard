@@ -31,9 +31,7 @@ PROSE_DEFAULTS = {"rooms", "trunk", "operator_synonyms", "wakeup_scenes",
 # edit it waits for: once DOCS.md shows the config.yaml default, the comparison
 # below fails until the entry is deleted. Never a way to excuse a mismatch with
 # no documentation change on its way.
-#   console_bind: the telnet console's loopback bind became the SSH console's
-#   all-interfaces bind (SSH always asks for a password).
-DOCS_PENDING = {"console_bind": ("127.0.0.1", "0.0.0.0")}
+DOCS_PENDING = {}
 
 
 def _config_options():
