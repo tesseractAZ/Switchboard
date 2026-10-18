@@ -1,9 +1,16 @@
-"""Switchboard operator console — a live telnet TUI for a switchboard operator.
+"""Switchboard operator console — a live terminal board for a switchboard operator.
 
-Connect with `telnet <host> <port>` (default 2300). A raw TCP server speaking
-just enough of the telnet protocol to put a standard client into
-character-at-a-time mode, then a live ANSI board of every room phone with
-operator actions: ring a room, connect two rooms (patch a call), and hang up.
+The board listens on ONE Unix socket, /run/switchboard/console.sock (mode 0600,
+owned by root), and on no network port at all. Everything that shows the board
+connects to that socket and does its own authentication first: the SSH service
+(the console_enabled / console_port / console_bind options), the browser
+terminal (console-web/server.py) and the console in the Switchboard sidebar
+(webui/console_bridge.py, behind Home Assistant's Ingress).
+
+Over the socket it speaks just enough of the telnet protocol (IAC negotiation
+and the NAWS window size) to put a client into character-at-a-time mode, then
+draws a live ANSI board of every room phone with operator actions: ring a room,
+connect two rooms (patch a call), and hang up.
 
 No third-party deps: stdlib socket/threading + the framework-free AMI client in
 the sibling webui module. The render + input parsing are pure and unit-tested
@@ -19,6 +26,8 @@ import re
 import signal
 import socket
 import socketserver
+import stat
+import struct
 import sys
 import threading
 import time
@@ -63,9 +72,18 @@ OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 # interval (vs the old 1.5s) keeps Asterisk's manager log from filling with
 # poll-driven logon/logoff churn. Paired with the single-session get_status_bundle.
 POLL_SECONDS = 3.0
-# This is an unauthenticated LAN service; bound the blast radius of a misbehaving
-# or hostile client.
-MAX_SESSIONS = 5
+# The one place the board listens. No TCP listener exists any more: the SSH
+# service, the browser terminal and the sidebar console all connect here, and
+# each authenticates its own users before it does. CONSOLE_SOCKET exists for the
+# tests, which bind a throwaway path; nothing in the add-on sets it.
+SOCKET_PATH = os.environ.get("CONSOLE_SOCKET", "").strip() or "/run/switchboard/console.sock"
+# Concurrent board sessions across EVERY client together. Each front door caps
+# its own sessions before it connects here (the SSH service, the browser
+# terminal's 5, the sidebar console's 5), so this is the backstop behind them,
+# sized to hold all of them at once. Smaller, and one front door's sessions
+# could lock the others out of the board: at the old 5, five sidebar tabs left
+# nothing for an SSH login. tests/test_console.py pins the sum.
+MAX_SESSIONS = 32
 IDLE_SECONDS = 900  # drop a session after 15 min with no input
 
 # ── ANSI ──────────────────────────────────────────────────────────────────── #
@@ -446,7 +464,7 @@ class ClientGate:
     nobody is watching.
 
     The operator board only changes in response to calls/registrations, which no
-    one can see unless a telnet/ttyd client is attached — and every poll is a
+    one can see unless a console client is attached — and every poll is a
     full manager login + logoff, i.e. constant SecurityEvent log churn and
     SD-card writes on a Pi already prone to card wear. So with no client
     connected there is no reason to poll AMI at all. A ``threading.Condition``
@@ -485,7 +503,7 @@ class ClientGate:
 
 def poller_loop(board: Board, stop: threading.Event, gate: ClientGate, log) -> None:
     while not stop.is_set():
-        # Idle (no telnet/ttyd client) -> park here with NO AMI traffic at all,
+        # Idle (no console client) -> park here with NO AMI traffic at all,
         # instead of logging in/out every POLL_SECONDS around the clock.
         if not gate.wait_active():
             break  # woken for shutdown
@@ -1372,35 +1390,110 @@ def serve_session(sock: socket.socket, board: Board, stop: threading.Event, log)
             pass
 
 
-def main() -> None:
-    # `or "2300"` (not just a default) so an EMPTY CONSOLE_PORT env — which crashed
-    # the console with int('') on boot until s6 restarted it — falls back cleanly.
+def clear_stale_socket(path: str) -> None:
+    """Remove a socket an earlier run left behind; refuse anything else there.
+
+    bind() on a path that already exists fails with EADDRINUSE, and a crash
+    skips server_close(), so without this one crash would keep the board down
+    until the container restarted: s6 would restart console.py forever, each
+    time into the same error. A symlink is unlinked too (the link, never its
+    target), since bind() would refuse it as well. Anything else at the path is
+    not ours, and deleting it is not this program's call: refuse loudly.
+    """
     try:
-        port = int(os.environ.get("CONSOLE_PORT") or "2300")
-    except ValueError:
-        port = 2300
-    host = os.environ.get("CONSOLE_HOST", "0.0.0.0")
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISSOCK(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        os.unlink(path)
+        return
+    raise RuntimeError(f"{path} exists and is not a socket; refusing to replace it")
 
-    def log(msg):
-        print(f"[switchboard-console] {msg}", flush=True)
 
-    board = Board()
-    stop = threading.Event()
-    gate = ClientGate()
-    threading.Thread(target=poller_loop, args=(board, stop, gate, log), daemon=True).start()
+def peer_uid(sock: socket.socket):
+    """The uid of the process at the other end, or None where the kernel has no
+    SO_PEERCRED (macOS, where only the tests run).
 
-    # Cap concurrent sessions — this is an unauthenticated LAN listener.
-    slots = threading.BoundedSemaphore(MAX_SESSIONS)
+    The socket's 0600 mode is what keeps other users out. This is a second lock
+    on the same door, so a socket that somehow ended up with a looser mode still
+    admits only this program's own user. A failed lookup returns -1, which no
+    process has, so it is refused rather than waved through.
+    """
+    opt = getattr(socket, "SO_PEERCRED", None)
+    if opt is None:
+        return None
+    try:
+        raw = sock.getsockopt(socket.SOL_SOCKET, opt, struct.calcsize("3i"))
+        return struct.unpack("3i", raw)[1]
+    except (OSError, struct.error):
+        return -1
+
+
+def bind_owner_only(sock: socket.socket, path: str) -> None:
+    """bind() a Unix socket so its inode is CREATED 0600.
+
+    The umask is set before bind(), not merely fixed with chmod afterwards:
+    bind() creates the inode as 0777 & ~umask, so with the default umask there
+    would be a window in which any local process could connect. 0o177 leaves
+    read/write for the owner and nothing else. The umask is process-wide, which
+    is why main() binds before it starts any thread.
+    """
+    old = os.umask(0o177)
+    try:
+        sock.bind(path)
+    finally:
+        os.umask(old)
+
+
+class ConsoleServer(socketserver.ThreadingUnixStreamServer):
+    """The board's only listener: one Unix socket, created 0600."""
+
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        path = self.server_address
+        clear_stale_socket(path)
+        bind_owner_only(self.socket, path)
+        os.chmod(path, 0o600)  # the inode's mode, whatever the umask did
+        st = os.stat(path)
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise RuntimeError(f"{path} has mode {stat.S_IMODE(st.st_mode):04o}, "
+                               f"not 0600; refusing to serve on it")
+        self._inode = st.st_ino
+
+    def server_close(self) -> None:
+        super().server_close()
+        # Remove OUR socket only. A successor may already have bound a new one
+        # at the same path, and unlinking that would cut its clients off.
+        try:
+            if os.lstat(self.server_address).st_ino == getattr(self, "_inode", None):
+                os.unlink(self.server_address)
+        except OSError:
+            pass
+
+
+def make_server(path: str, board: Board, stop: threading.Event, gate: ClientGate,
+                log, max_sessions: int = MAX_SESSIONS) -> ConsoleServer:
+    """Bind the board's Unix socket and return the (not yet serving) server."""
+    slots = threading.BoundedSemaphore(max_sessions)
+    me = os.geteuid()
 
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
+            uid = peer_uid(self.request)
+            if uid is not None and uid != me:
+                log(f"refused a local client running as uid {uid}; only uid {me} may connect")
+                return
             if not slots.acquire(blocking=False):
                 try:
                     self.request.sendall(b"\r\nSwitchboard console busy (too many sessions). Try later.\r\n")
                 except OSError:
                     pass
                 return
-            log(f"client connected from {self.client_address[0]}")
+            # No peer address to log: a Unix-socket client has none (the
+            # address is an empty string). The SSH service and the two browser
+            # front ends each log who connected to THEM.
+            log("client connected")
             gate.enter()  # start (or wake) the AMI poller for as long as we're attached
             try:
                 serve_session(self.request, board, stop, log)
@@ -1411,11 +1504,20 @@ def main() -> None:
                 slots.release()
                 log("client disconnected")
 
-    class Server(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
-        daemon_threads = True
+    return ConsoleServer(path, Handler)
 
-    srv = Server((host, port), Handler)
+
+def main() -> None:
+    def log(msg):
+        print(f"[switchboard-console] {msg}", flush=True)
+
+    board = Board()
+    stop = threading.Event()
+    gate = ClientGate()
+    # Bind BEFORE starting any thread: the umask the bind relies on is
+    # process-wide, so a thread creating a file meanwhile would inherit it.
+    srv = make_server(SOCKET_PATH, board, stop, gate, log)
+    threading.Thread(target=poller_loop, args=(board, stop, gate, log), daemon=True).start()
 
     def shutdown(*_):
         log("shutting down")
@@ -1426,7 +1528,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    log(f"operator console listening on {host}:{port}")
+    log(f"operator console listening on {SOCKET_PATH} (mode 0600; local clients only)")
     try:
         srv.serve_forever()
     finally:

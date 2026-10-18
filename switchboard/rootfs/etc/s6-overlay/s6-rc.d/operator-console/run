@@ -1,51 +1,27 @@
 #!/command/with-contenv bashio
-# Telnet operator console — a live switchboard board an operator drives over
-# telnet (ring a room, connect two rooms, hang up). host_network exposes the
-# port on the LAN, so `telnet <host> <port>` reaches it directly.
+# Operator console board — the live switchboard an operator drives (ring a room,
+# connect two rooms, hang up). It listens ONLY on the Unix socket
+# /run/switchboard/console.sock (mode 0600, root), never on a network port, so
+# this script reads no port or bind option: console_port and console_bind belong
+# to the SSH service in front of it. Its clients are the SSH console
+# (console_enabled), the browser terminal (console_web_enabled) and the console
+# in the Switchboard sidebar, and each one authenticates before it connects.
+#
+# Idle only when BOTH front doors with a switch are explicitly off. Turning SSH
+# off must not take the board away from the browser terminal or the sidebar,
+# which is what keying off console_enabled alone used to do.
+#
 # Idle ONLY on an explicit `false`. bashio can momentarily read blank options at
 # boot; `bashio::config.true` treats that empty read as false and would then
 # PERMANENTLY idle this enabled-by-default service (s6 never restarts an idle
 # process). Key off the literal value so an empty/transient read runs.
-if [ "$(bashio::config 'console_enabled')" = "false" ]; then
-    bashio::log.info "Operator console disabled (console_enabled: false); idling."
+if [ "$(bashio::config 'console_enabled')" = "false" ] && [ "$(bashio::config 'console_web_enabled')" = "false" ]; then
+    bashio::log.info "Operator console disabled (console_enabled and console_web_enabled are both false); idling. The console in the Switchboard sidebar shows 'unavailable' until one of them is turned back on."
     exec sleep infinity
 fi
 
-# Value reads via switchboard-opt (the post-overlay snapshot from
-# init-switchboard, a declared dependency) — bashio::config parses raw
-# options.json and would bypass an options overlay. The enable gate above
-# stays on bashio: its empty-read semantics are load-bearing.
-PORT="$(switchboard-opt console_port 2300)"
-BIND="$(switchboard-opt console_bind 0.0.0.0)"
-# v0.71.0 — is this bind address loopback-only?
-#
-# POSIX `case`, so macOS bash 3.2 and the container's ash both run it unchanged.
-# `127.*` rather than a literal 127.0.0.1: the whole 127/8 block is loopback and
-# a bind of 127.0.1.1 is just as unreachable from the LAN.
-#
-# The DEFAULT (0.0.0.0, and an empty read) deliberately falls through to "not
-# loopback", so the failure direction is a warning nobody needed rather than a
-# silence on a genuinely exposed console.
-sw_is_loopback() {
-    case "${1:-}" in
-        127.*|::1|\[::1\]|localhost) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+bashio::log.info "Starting Switchboard operator console on /run/switchboard/console.sock (local clients only) ..."
 
-bashio::log.info "Starting Switchboard operator console on ${BIND}:${PORT} ..."
-# The notice used to fire unconditionally — including when console_bind was
-# ALREADY 127.0.0.1, i.e. when the reader had done exactly what it asked. A
-# warning you cannot silence by complying trains people to ignore the channel
-# that carries the real ones.
-if sw_is_loopback "${BIND}"; then
-    bashio::log.info "The operator console is bound to ${BIND} — not reachable from the LAN directly. (The console web terminal, if enabled, may still be.)"
-else
-    bashio::log.notice "The operator console is UNAUTHENTICATED on ${BIND} and can ring/connect/hang up phones. Set console_bind to 127.0.0.1 to restrict it, or console_enabled:false to turn it off."
-fi
-
-export CONSOLE_PORT="${PORT}"
-export CONSOLE_HOST="${BIND}"
 # Timezone backstop: the init step points /etc/localtime at the resolved zone,
 # but also export TZ so the board clock is right even if the symlink didn't take.
 export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"

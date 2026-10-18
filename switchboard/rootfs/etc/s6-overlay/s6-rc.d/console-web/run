@@ -1,8 +1,9 @@
 #!/command/with-contenv bashio
 # Console web terminal — serves the operator console's TUI in the browser via
-# xterm.js, bridging WebSocket <-> the telnet console on 127.0.0.1:2300. Add it
-# to the Home Assistant sidebar with a panel_iframe pointing at this LAN port.
-# host_network exposes the port directly on the LAN.
+# xterm.js, bridging WebSocket <-> the operator console's Unix socket
+# (/run/switchboard/console.sock). Add it to the Home Assistant sidebar with a
+# panel_iframe pointing at this port. host_network exposes the port directly on
+# the LAN once its bind is moved off loopback.
 # Idle ONLY on an explicit `false`. `bashio::config.true` also returns false for an
 # EMPTY/transient read — bashio can momentarily read blank options during a config
 # reload / at boot — which would then `exec sleep infinity` and PERMANENTLY idle an
@@ -14,12 +15,9 @@ if [ "$(bashio::config 'console_web_enabled')" = "false" ]; then
     exec sleep infinity
 fi
 
-# The web terminal is a front-end for the operator console; if that's off there
-# is nothing to bridge to, so idle instead of serving a dead page.
-if [ "$(bashio::config 'console_enabled')" = "false" ]; then
-    bashio::log.info "Operator console disabled (console_enabled: false); console web terminal idling."
-    exec sleep infinity
-fi
+# No console_enabled gate here any more. console_enabled now switches the SSH
+# service only, and the operator console board this bridges to runs whenever
+# this terminal is enabled (operator-console/run idles only when BOTH are off).
 
 # Value reads go through switchboard-opt (the post-overlay snapshot written by
 # init-switchboard, which this service depends on) rather than bashio::config,
@@ -49,8 +47,12 @@ import webauth
 print(len(webauth.parse_users(os.environ.get('CONSOLE_WEB_USERS', ''))))
 " 2>/dev/null || echo 0)"
 export CONSOLE_WEB_PORT="${PORT}"
-# Bind address: explicit console_web_bind wins; otherwise follow console_bind so
-# locking the telnet console to loopback also locks the web terminal.
+# Bind address: console_web_bind, and 127.0.0.1 when it is blank.
+#
+# A blank bind no longer follows console_bind. That option is now the SSH
+# service's bind, which defaults to every interface because SSH always asks for
+# a password; this terminal has no login at all while console_users is empty,
+# so following it would put an open terminal on the LAN.
 #
 # v0.71.0 — RESOLVED BEFORE THE NOTICE BELOW, not after. The warning used to be
 # printed here-1 and BIND computed here+8, so the line claiming the terminal was
@@ -58,14 +60,11 @@ export CONSOLE_WEB_PORT="${PORT}"
 # on the LAN at all.
 BIND="$(switchboard-opt console_web_bind)"
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    BIND="$(switchboard-opt console_bind)"
-fi
-if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    # v0.94.0 — fail CLOSED. This fires only when BOTH option reads come back
-    # empty, i.e. a transient blank read during a config reload. The old
-    # fallback was 0.0.0.0, so a momentary glitch put a terminal that drives
-    # call control onto the LAN until the next restart. A terminal that is
-    # briefly reachable only from the host is the cheaper failure by far.
+    # Fail CLOSED (since v0.94.0). This fires when the option is blank, or on a
+    # transient blank read during a config reload. The old fallback was
+    # 0.0.0.0, so a momentary glitch put a terminal that drives call control
+    # onto the LAN until the next restart. A terminal that is briefly reachable
+    # only from the host is the cheaper failure by far.
     BIND="127.0.0.1"
 fi
 export CONSOLE_WEB_BIND="${BIND}"
@@ -96,13 +95,9 @@ elif [ "${VALID_USERS}" = "0" ]; then
 else
     bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s))."
 fi
-# Bridge to the operator console on loopback; mirror its configured port so a
-# non-default console_port still works.
-TARGET_PORT="$(switchboard-opt console_port 2300)"
-if [ -z "${TARGET_PORT}" ] || [ "${TARGET_PORT}" = "null" ]; then
-    TARGET_PORT="2300"
-fi
-export CONSOLE_WEB_TARGET_PORT="${TARGET_PORT}"
+# The bridge target is the operator console's Unix socket at a fixed path
+# (server.py's CONSOLE_SOCKET default). console_port is the SSH service's port
+# and has nothing to do with it, so nothing is exported for it here.
 # Timezone backstop, matching the other services (the page itself shows no
 # clock, but keep the process TZ consistent).
 export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"

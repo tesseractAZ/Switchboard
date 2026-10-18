@@ -187,23 +187,136 @@ def test_the_carry_buffer_is_threaded_back():
 
 
 # --------------------------------------------------------------------------- #
-# Wiring the port, and failing safely.
+# Wiring the socket, and failing safely.
 # --------------------------------------------------------------------------- #
-def test_the_console_port_is_2300_on_loopback():
-    """A value assertion on the imported module, not a grep of the source."""
-    assert cb.CONSOLE_PORT == 2300
-    assert cb.CONSOLE_HOST == "127.0.0.1"
+def _sock_dir():
+    """A temp dir short enough for a Unix socket path (macOS caps it at 104)."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="sbcb-")
+    if len(d) > 80:
+        d = tempfile.mkdtemp(prefix="sbcb-", dir="/tmp")
+    return d
+
+
+def test_the_console_is_reached_on_its_unix_socket():
+    """A value assertion on the imported module, not a grep of the source. The
+    TCP target is gone: the board no longer listens on 127.0.0.1:2300."""
+    assert cb.CONSOLE_SOCKET == "/run/switchboard/console.sock"
+    assert not hasattr(cb, "CONSOLE_HOST") and not hasattr(cb, "CONSOLE_PORT")
 
 
 def test_connecting_to_a_dead_console_returns_none_and_never_raises():
     """This runs inside a live WebSocket; a traceback would close it with no
     explanation. The caller needs a value it can turn into a notice."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        dead = s.getsockname()[1]
-    # ...socket closed, so nothing is listening on `dead`.
-    got = asyncio.run(cb.connect_console("127.0.0.1", dead))
-    assert got is None
+    import os
+    d = _sock_dir()
+    # No socket at all: the board is idle, or not up yet.
+    assert asyncio.run(cb.connect_console(os.path.join(d, "absent.sock"))) is None
+    # A stale socket: the file is there, nothing is listening on it.
+    stale = os.path.join(d, "stale.sock")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.bind(stale)
+    assert os.path.exists(stale)
+    assert asyncio.run(cb.connect_console(stale)) is None
+
+
+class _FakeWS:
+    """The four methods run_bridge uses, scripted. It disconnects only once the
+    board's text has reached it AND the console has seen the keystroke, so the
+    assertions below never race the pumps."""
+
+    def __init__(self, inbound, ready):
+        self.inbound = list(inbound)
+        self.ready = ready
+        self.sent = b""
+        self.closed = None
+        self.saw_board = asyncio.Event()
+
+    async def accept(self):
+        pass
+
+    async def send_bytes(self, data):
+        self.sent += data
+        if b"BOARD" in self.sent:
+            self.saw_board.set()
+
+    async def receive(self):
+        if self.inbound:
+            return self.inbound.pop(0)
+        await asyncio.wait_for(self.saw_board.wait(), 5)
+        await asyncio.wait_for(self.ready.wait(), 5)
+        return {"type": "websocket.disconnect"}
+
+    async def close(self, code=1000):
+        if self.closed is None:
+            self.closed = code
+
+
+def test_a_session_runs_end_to_end_over_the_unix_socket():
+    """The real run_bridge against a fake board on a real Unix socket.
+
+    What the board receives is pinned byte for byte: the client preamble, the
+    resize as NAWS (never as typed text) and the keystroke. What the browser
+    receives is the board's output with its telnet negotiation stripped."""
+    import os
+    path = os.path.join(_sock_dir(), "console.sock")
+    preamble = bytes([IAC, 251, 1, IAC, 251, 3, IAC, 253, 3, IAC, 253, NAWS])
+
+    async def scenario():
+        got = bytearray()
+        ready = asyncio.Event()
+
+        async def board(reader, writer):
+            writer.write(preamble + b"BOARD")
+            await writer.drain()
+            while not ready.is_set():
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                got.extend(chunk)
+                if got.endswith(b"j"):
+                    ready.set()
+            writer.close()
+
+        server = await asyncio.start_unix_server(board, path=path)
+        try:
+            ws = _FakeWS([
+                {"type": "websocket.receive", "text": '{"type":"resize","cols":100,"rows":30}'},
+                {"type": "websocket.receive", "text": "j"},
+            ], ready)
+            await asyncio.wait_for(cb.run_bridge(ws, path=path), 10)
+        finally:
+            server.close()
+            await server.wait_closed()
+        return ws, bytes(got)
+
+    # The telnet stripper is loaded from the container path, absent here; load
+    # the repo's copy by path for this test so the stripping is real.
+    import sys
+    proto = (_PATH.parents[1] / "console-web" / "consoleproto.py")
+    saved_tn, saved_mod = cb.tn, sys.modules.get("switchboard_consoleproto")
+    cb.tn = cb._load_telnet(str(proto))
+    try:
+        assert cb.tn is not None
+        ws, got = asyncio.run(scenario())
+    finally:
+        cb.tn = saved_tn
+        if saved_mod is None:
+            sys.modules.pop("switchboard_consoleproto", None)
+        else:
+            sys.modules["switchboard_consoleproto"] = saved_mod
+    assert got == cb.telnet_preamble() + cb.naws(100, 30) + b"j", got
+    assert ws.sent == b"BOARD", ws.sent
+    assert ws.closed == 1000
+
+
+def test_a_missing_console_sends_the_notice_and_closes():
+    import os
+    path = os.path.join(_sock_dir(), "absent.sock")
+    ws = _FakeWS([], asyncio.Event())
+    asyncio.run(cb.run_bridge(ws, path=path))
+    assert ws.sent == cb.unavailable_notice()
+    assert ws.closed == 1011
 
 
 def test_the_unavailable_notice_is_bytes():
@@ -220,7 +333,9 @@ def test_the_session_caps_match_the_console_and_the_idle_timer_is_on_input():
     quiet — a socket-idle timer would simply never fire, and the cap would be
     decorative. This is the single easiest thing here to get wrong.
     """
-    assert cb.MAX_SESSIONS == 5, "must match console.py's own session cap"
+    assert cb.MAX_SESSIONS == 5, (
+        "the sidebar's own share of the board; test_console.py pins that the "
+        "board's cap holds every front end's share at once")
     assert cb.IDLE_SECONDS == 900
     import inspect
     src = inspect.getsource(cb.run_bridge)

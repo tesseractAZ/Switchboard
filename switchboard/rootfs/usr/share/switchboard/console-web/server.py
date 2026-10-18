@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""Switchboard console web terminal — a browser front-end for the telnet
-operator console (console/console.py, listening on 127.0.0.1:2300).
+"""Switchboard console web terminal — a browser front-end for the operator
+console (console/console.py, listening on the Unix socket
+/run/switchboard/console.sock).
 
 A small stdlib-only HTTP + WebSocket server (no pip deps; the add-on is musl):
 
   * GET /            → the xterm.js terminal page (static/index.html).
   * GET /static/*    → vendored xterm.js / xterm.css (committed, no CDN).
   * GET /healthz     → "ok" (liveness).
-  * WS  /ws          → one TCP connection to the operator console per browser
-                       socket. We act as the telnet CLIENT: answer/ignore the
-                       console's IAC negotiation so it never reaches the
+  * WS  /ws          → one connection to the operator console's Unix socket per
+                       browser socket. We act as the telnet CLIENT: answer/ignore
+                       the console's IAC negotiation so it never reaches the
                        browser, pipe clean ANSI console→browser as binary
                        frames, and raw keystrokes browser→console. A browser
                        {"type":"resize",...} message becomes a telnet NAWS
                        subnegotiation the console already understands.
 
-This server is reachable on the LAN (host_network). It fronts what the operator
-console already exposes unauthenticated on :2300 — but on a *browser* transport,
-which the raw telnet port is not. To avoid handing a drive-by web page that
-call-control reach, the WS upgrade is same-origin-gated (see consoleproto.origin_allowed),
-the bind is configurable (CONSOLE_WEB_BIND, default follows console_bind), sessions
-are capped (MAX_SESSIONS) and browser-idle-timed-out. The pure framing/telnet
-helpers live in consoleproto.py and are unit-tested; this file is only socket plumbing.
+This server can be put on the LAN (host_network, CONSOLE_WEB_BIND). The board
+behind it has no network listener of its own, so this server IS the door, and
+on a *browser* transport. To avoid handing a drive-by web page that call-control
+reach, the WS upgrade is same-origin-gated (see consoleproto.origin_allowed),
+the bind defaults to loopback (CONSOLE_WEB_BIND; blank means 127.0.0.1), the
+console_users login gate applies when configured, sessions are capped
+(MAX_SESSIONS) and browser-idle-timed-out. The pure framing/telnet helpers live
+in consoleproto.py and are unit-tested; this file is only socket plumbing.
 """
 
 from __future__ import annotations
@@ -55,23 +57,27 @@ _THROTTLE = webauth.LoginThrottle()
 def _env_int(name: str, default: int) -> int:
     """int() of a config-derived env var, tolerating unset *or* set-but-empty.
 
-    These ports come from switchboard-opt in the s6 run script; during a config
+    The port comes from switchboard-opt in the s6 run script; during a config
     reload / options.json rewrite (e.g. an add-on schema migration) that export
     can momentarily be an empty string. The 2-arg ``os.environ.get(name, "8100")``
     default only covers the *absent* case, so ``int(get(...))`` still throws on
     ``""`` — which crash-loops this longrun until s6 restarts it. Fall back to
-    ``default`` for empty/blank too, matching console.py / rtpmon / devhealth.
+    ``default`` for empty/blank too, matching rtpmon / devhealth.
     """
     return int(os.environ.get(name, "").strip() or default)
 
 
-# The operator console we bridge to. Loopback only: the browser never connects
-# to :2300 directly, this server does, on the same host.
-CONSOLE_HOST = os.environ.get("CONSOLE_WEB_TARGET_HOST", "127.0.0.1")
-CONSOLE_PORT = _env_int("CONSOLE_WEB_TARGET_PORT", 2300)
+# The operator console we bridge to: its Unix socket, 0600 root, the only place
+# it listens. The browser never reaches the board directly; this server does, on
+# the same host. CONSOLE_SOCKET exists for the tests; the run script sets
+# nothing, so the add-on always uses the default. Blank counts as unset, like
+# _env_int above, so a set-but-empty export cannot point the bridge at "".
+CONSOLE_SOCKET = os.environ.get("CONSOLE_SOCKET", "").strip() or "/run/switchboard/console.sock"
+CONNECT_TIMEOUT = 5
 
-# Match the operator console's own session cap so the browser front-end can't be
-# used to exhaust console sessions; this is an unauthenticated LAN service.
+# This front end's own share of the board. console.py's cap is the backstop
+# behind every front end together; this one keeps the browser terminal, which
+# has no login while console_users is empty, from taking all of it.
 MAX_SESSIONS = 5
 
 # Close a browser session that has sent no input for this long. The board redraws
@@ -234,6 +240,23 @@ def _peer_ip(sock: socket.socket) -> str:
         return "?"
 
 
+def _connect_console(path: str = None) -> socket.socket:
+    """Open the operator console's Unix socket. Raises OSError on failure.
+
+    A missing socket (the board is idle or still starting) is FileNotFoundError
+    and a stale one is ConnectionRefusedError; both are OSError, so the caller's
+    single except prints the same "unavailable" notice for every way it fails.
+    """
+    console = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        console.settimeout(CONNECT_TIMEOUT)
+        console.connect(path or CONSOLE_SOCKET)
+    except OSError:
+        console.close()
+        raise
+    return console
+
+
 def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     """Pump bytes between an upgraded browser WebSocket and the operator console.
 
@@ -241,7 +264,7 @@ def _bridge_ws(sock: socket.socket, leftover: bytes, token: str = "") -> None:
     the browser sends frames only after the 101 response).
     """
     try:
-        console = socket.create_connection((CONSOLE_HOST, CONSOLE_PORT), timeout=5)
+        console = _connect_console()
     except OSError as exc:
         log(f"console connect failed: {exc}")
         try:
@@ -435,7 +458,7 @@ def main() -> None:
     else:
         gate = "NO LOGIN GATE — reachable from the LAN"
     log(f"console web terminal listening on {host}:{port} "
-        f"(bridging to {CONSOLE_HOST}:{CONSOLE_PORT}) — {gate}")
+        f"(bridging to {CONSOLE_SOCKET}) — {gate}")
     try:
         srv.serve_forever()
     finally:

@@ -8,9 +8,9 @@ plumbing lives in `server.py`.
 Frame encode/decode is the server half of RFC 6455: we never mask frames we
 send (server->client is unmasked) and we always unmask frames we receive
 (client->server is always masked). Telnet helpers let us act as a *client* to
-the operator console at 127.0.0.1:2300 — answering its IAC negotiation and
-emitting a NAWS subnegotiation on resize — so none of its IAC bytes leak to the
-browser.
+the operator console on its Unix socket (/run/switchboard/console.sock), which
+still speaks telnet there — answering its IAC negotiation and emitting a NAWS
+subnegotiation on resize — so none of its IAC bytes leak to the browser.
 """
 
 from __future__ import annotations
@@ -79,8 +79,9 @@ def origin_allowed(headers: dict, extra_allowed=()) -> bool:
     console. Browsers always send Origin; the HA panel_iframe loads the terminal
     page from this same host, so its Origin authority equals the Host header and
     is allowed. A page served from any other origin is rejected. Non-browser
-    clients (CLI, tests) send no Origin and are allowed — the same trust as the
-    raw telnet console they front. Extra origins can be whitelisted explicitly.
+    clients (CLI, tests) send no Origin and are allowed: a script is not a
+    drive-by page, and the console_users login gate, when configured, still
+    applies to it. Extra origins can be whitelisted explicitly.
     """
     origin = headers.get("origin", "").strip()
     if not origin:
