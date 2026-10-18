@@ -190,6 +190,48 @@ def test_the_console_asset_route_never_builds_a_path_from_the_request():
         raise AssertionError("_CONSOLE_ASSETS not found")
 
 
+def test_the_font_route_never_builds_a_path_from_the_request():
+    """The dashboard's font route has the console asset route's shape, for the
+    same CodeQL reason: the table stores the resolved path, so the request
+    parameter never reaches a file operation, and the table is exactly the two
+    shipped faces under the shared fonts directory."""
+    import ast
+    import re
+    src = (WEBUI / "app.py").read_text()
+    body = src[src.index("def font_asset"):]
+    body = body[:body.index("\n\n\n")]
+    assert "FileResponse(path," in body, "the served path must come from the table"
+    assert not re.search(r"FileResponse\(f?\"", body), (
+        "font_asset builds a path literal inline — if that interpolates the route "
+        "parameter it is py/path-injection")
+    assert "{name}" not in body, "the route parameter is interpolated in the handler"
+    assert '@app.get("/fonts/{name}")\ndef font_asset' in src, "the route moved or was renamed"
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "_FONT_ASSETS" for t in node.targets):
+            keys = [k.value for k in node.value.keys]
+            assert keys == ["Federo-Regular.ttf", "CutiveMono-Regular.ttf"], keys
+            break
+    else:
+        raise AssertionError("_FONT_ASSETS not found")
+    assert app.FONTS_DIR == "/usr/share/switchboard/fonts"
+    assert app._FONT_ASSETS == {n: f"{app.FONTS_DIR}/{n}" for n in app._FONT_ASSETS}
+
+
+def test_the_fonts_are_ingress_only():
+    """No LAN exemption: the faces are asked for by a page that is itself
+    ingress-only, so a LAN client gets the same refusal as for the page, and a
+    traversal-shaped path is refused before routing ever sees it."""
+    for name in ("Federo-Regular.ttf", "CutiveMono-Regular.ttf", "../app.py", "..%2Fapp.py"):
+        assert app._scope_allowed(_http("192.168.1.50", "/fonts/" + name)) is False, name
+        assert app._scope_allowed(_http(SUPERVISOR, "/fonts/" + name)) is True, name
+    assert app._scope_allowed(_ws("192.168.1.50", "/fonts/Federo-Regular.ttf")) is False
+    src = (WEBUI / "app.py").read_text()
+    body = src[src.index("def _refusal_reason"):src.index("class RestrictToIngress")]
+    assert "/fonts" not in body, (
+        "_refusal_reason special-cases the fonts; they must stay behind the guard")
+
+
 # --------------------------------------------------------------------------- #
 # A refusal leaves one line, and a flood does not leave a flood (2026-10-14).
 #

@@ -111,9 +111,14 @@ def shoot(chrome: str, url: str, out: Path, width: int, height: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 1. Dashboard — the real INDEX_HTML with a stubbed API and a forced light theme
+# 1. Dashboard — the real INDEX_HTML with a stubbed API and the repo's fonts
 # --------------------------------------------------------------------------- #
-def build_dashboard_html(repo_root: Path) -> str:
+def build_dashboard_html(repo_root: Path, font_base: str | None = None) -> str:
+    """The served page plus a stubbed API. `font_base` replaces the page's
+    relative `fonts/` (which only the web UI's own route can answer); by default
+    it is the repo's font directory as a file URI, which Chrome will load from a
+    file:// page. A committed preview passes a RELATIVE base instead, so it
+    carries no checkout's absolute path."""
     app = (repo_root / "switchboard/rootfs/usr/share/switchboard/webui/app.py").read_text()
     m = re.search(r'^INDEX_HTML = ("""(?:.*?)^""")', app, re.S | re.M)
     if not m:
@@ -150,16 +155,13 @@ def build_dashboard_html(repo_root: Path) -> str:
 })();
 </script>""" % json.dumps(status)
     html = html.replace("<head>", "<head>\n" + stub, 1)
-    # Headless Chrome reports prefers-color-scheme: dark. Pin the light theme so
-    # the committed screenshot is stable regardless of the host's appearance:
-    # make the dark block unmatchable, then restore light UA colors explicitly
-    # (the page declares `color-scheme: light dark`, which otherwise leaves the
-    # text white on the light canvas).
-    html = html.replace("@media (prefers-color-scheme: dark)",
-                        "@media (prefers-color-scheme: dark) and (min-width: 999999px)")
-    html = html.replace("</head>",
-                        '<style>:root{color-scheme:light !important;}'
-                        'body{color:#14171a !important;background:#f6f7f9 !important;}</style>\n</head>', 1)
+    if font_base is None:
+        font_base = (repo_root / "switchboard/rootfs/usr/share/switchboard/fonts").as_uri() + "/"
+    html = html.replace('url("fonts/', 'url("' + font_base)
+    # No theme pin. The page has ONE theme (the walnut board) whatever the host's
+    # prefers-color-scheme, so headless Chrome's dark default and a light desktop
+    # take the same picture. The light-theme pin that lived here painted a grey
+    # body over the board: a page nobody is served.
     return html
 
 
@@ -243,7 +245,7 @@ def main() -> int:
         (tmp / "console.html").write_text(build_console_html(repo_root), encoding="utf-8")
         # Sizes are tuned to the fixed example data above; a different font stack
         # may leave a little background padding, which is harmless.
-        shoot(chrome, (tmp / "dashboard.html").as_uri(), out_dir / "dashboard.png", 900, 1066)
+        shoot(chrome, (tmp / "dashboard.html").as_uri(), out_dir / "dashboard.png", 900, 1480)
         shoot(chrome, (tmp / "console.html").as_uri(), out_dir / "console.png", 944, 604)
 
     for name in ("dashboard.png", "console.png"):
