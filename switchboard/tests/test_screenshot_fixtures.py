@@ -76,3 +76,35 @@ def test_the_dashboard_screenshot_serves_the_page_python_serves() -> None:
         time.tzset()
     assert r"/^\d{1,2}:\d{2}$/" in html, "the wake-up time regex is not served as Python serves it"
     assert "\\\\d" not in html, "the page still carries source-text escapes"
+
+
+def test_the_console_screenshot_keeps_the_board_colours() -> None:
+    """★ The console speaks xterm 256-colour (`ESC[38;5;Nm`). The HTML
+    translator read that code by code — 38, 5, N — recognised none of them, and
+    console.png went out with no colour at all. Every palette colour the board
+    uses must reach the picture."""
+    saved_path, saved_mods = list(sys.path), dict(sys.modules)
+    saved_tz = os.environ.get("TZ")
+    try:
+        bs = SourceFileLoader("build_screenshots_colour",
+                              str(ROOT / "scripts/build-screenshots.py")).load_module()
+        html = bs.build_console_html(ROOT)
+        one = bs.ansi_to_html("\x1b[1m\x1b[38;5;178mR\x1b[0m \x1b[38;5;94m─\x1b[0m")
+    finally:
+        sys.path[:] = saved_path
+        for k in set(sys.modules) - set(saved_mods):
+            del sys.modules[k]
+        sys.modules.update(saved_mods)
+        if saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved_tz
+        time.tzset()
+    assert one == ('<span style="font-weight:700"><span style="color:#d7af00">R</span></span>'
+                   ' <span style="color:#875f00">─</span>'), one
+    used = set(re.findall(r'<span style="color:(#[0-9a-f]{6})">', html))
+    # brass, amber, cream, dim brass, muted: on every board the fixture draws.
+    for name, hexv in (("brass", "#d7af00"), ("amber", "#ffaf00"), ("cream", "#ffffd7"),
+                       ("dim brass", "#875f00"), ("muted", "#af875f")):
+        assert hexv in used, f"console.png would lose the {name} colour"
+    assert "38;5" not in html, "a 256-colour code leaked into the picture as text"

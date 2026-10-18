@@ -91,8 +91,11 @@ def _fg(n: int) -> str:
 # The board palette — a manual cord switchboard after hours. State is shown by
 # LAMPS: white-lit (ok), amber (in use / ringing / attention), red (fault),
 # unlit (unknown), and every lamp has its state word typed beside it, so colour
-# is never the only signal. Primary text stays the terminal's own foreground
-# (the cream enamel in the web terminal), which keeps it legible on any ground.
+# is never the only signal. Primary text (names, extensions, READY, a light's
+# on/off) stays the terminal's own foreground — the cream enamel in the web
+# terminal. The accents are fixed 256-colour values chosen for a dark ground such
+# as the walnut web terminal: on a light-theme telnet client the amber state
+# words, brass key caps and muted text lose contrast.
 BRASS = _fg(178)       # the nameplate, section titles, key caps, the selection
 BRASS_DIM = _fg(94)    # ink / dim brass: rules and dot leaders (decorative only)
 LAMP = _fg(214)        # amber: in use, ringing, a message waiting, a prompt
@@ -589,16 +592,21 @@ def _leader(text: str, width: int) -> str:
     return text + " " + color(BRASS_DIM, "·" * max(0, width - vis_width(text)))
 
 
-def _titled_rule(title: str, width: int) -> str:
-    """A section rule with its title set into it: "── ACTIVE CALLS ─────"."""
-    return (color(BRASS_DIM, "──") + " " + color(BOLD + BRASS, title) + " "
-            + color(BRASS_DIM, "─" * max(0, width - 4 - vis_width(title))))
+def _titled_rule(title: str, width: int, after: str = "") -> str:
+    """A section rule with its title set into it: "── ACTIVE CALLS ─────",
+    and optionally more (already coloured) text after the title:
+    "── LAMPS  ◉ ready  … ─────"."""
+    after = ("  " + after) if after else ""
+    return (color(BRASS_DIM, "──") + " " + color(BOLD + BRASS, title) + after + " "
+            + color(BRASS_DIM, "─" * max(0, width - 4 - vis_width(title) - vis_width(after))))
 
 
 def _help_lines(width: int) -> list[str]:
     """The `?` help overlay — a one-screen key reference, dismissed by any key."""
     rule = color(BRASS_DIM, "─" * min(width, 72))
     b = _cap
+    legend = (color(CREAM, "◉") + " ready  " + color(LAMP, "◉") + " in use / ringing  "
+              + color(FAULT, "✕") + " offline  " + color(IDLE, "○") + " unlit")
     return [
         _nameplate(min(width, 72), "HELP"),
         rule,
@@ -618,10 +626,9 @@ def _help_lines(width: int) -> list[str]:
         rule,
         "  " + color(BOLD + BRASS, "In the lights view:") + color(MUTED, "  ↑↓/jk move · Enter/Space toggle"),
         "  " + color(MUTED, "                     r refresh · Esc back to the board"),
-        rule,
-        "  " + color(BOLD + BRASS, "Lamps:") + "  " + color(CREAM, "◉") + " ready   "
-        + color(LAMP, "◉") + " in use / ringing   " + color(FAULT, "✕") + " offline   "
-        + color(IDLE, "○") + " unlit",
+        # The lamp legend is set into the closing rule, so the card stays one
+        # row shorter and its dismiss hint survives a 21-row terminal.
+        _titled_rule("LAMPS", min(width, 72), legend),
         "  " + color(MUTED, "Wake-ups place a spoken “good morning” call at the set time."),
         "  " + color(LAMP, "Press any key to return to the board."),
     ]
@@ -697,7 +704,7 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
         is_on = str(li.get("state", "")).lower() == "on"
         # A light that is on is a lit white lamp; off is an unlit cap, and the
         # word beside it says which either way.
-        badge = color(CREAM, "◉ on") if is_on else color(MUTED, "○ off")
+        badge = (color(CREAM, "◉") + " on") if is_on else (color(MUTED, "○") + " off")
         name = _leader((li.get("name") or li.get("entity_id") or "")[:28], 28)
         rows.append((f"    {cursor} {name} {badge}", idx, cur_area))
 
@@ -893,7 +900,10 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             cname = _codec_label(c.get("codec", ""))
             meta = c.get("state", "") + (f"  {dur}" if dur else "") + (f"  {cname}" if cname else "")
             tail = color(MUTED, meta)
-            call_rows.append(f"    {lamp} {color(MUTED, f'{kind:<8}')} {c.get('detail','')}   {tail}")
+            # Below 64 columns the kind would push the state word off the row;
+            # the amber lamp alone says "a call is up" there.
+            kcol = f"{color(MUTED, f'{kind:<8}')} " if width >= 64 else ""
+            call_rows.append(f"    {lamp} {kcol}{c.get('detail','')}   {tail}")
 
     wake_rows: list[str] = []
     for w in board.get("wakeups", []) or []:

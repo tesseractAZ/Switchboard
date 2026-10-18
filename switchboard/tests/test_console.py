@@ -568,7 +568,7 @@ def test_lights_entry_and_unavailable() -> None:
         console.apply_key(sess, "l", board, lambda m: None)
         check("lights: L enters lights mode + stashes the fetched list",
               sess["mode"] == "lights" and len(sess.get("lights", [])) == 2 and sess.get("lsel") == 0)
-        text = "\n".join(console.render(board.get(), sess, 0.0))
+        text = "\n".join(_plain(console.render(board.get(), sess, 0.0)))
         check("render: lights view shows names + on/off",
               "LIGHTS" in text and "Kitchen Main" in text and "◉ on" in text and "○ off" in text)
     finally:
@@ -1041,6 +1041,44 @@ def test_the_board_holds_at_40_80_and_120_columns() -> None:
                 check(f"width: the keys are on the board at {w}", "R ring" in text and "Q quit" in text)
     check("width: the lamps and leaders are one column each",
           console.vis_width("◉○✕═─·") == 6)
+
+
+def test_a_narrow_board_keeps_the_calls_state_word() -> None:
+    """Below 64 columns the call's KIND column gives way, so the state word
+    is not the part of the row that falls off the edge."""
+    board = _board(ROOMS, calls=[
+        {"detail": "Kitchen ↔ Office", "state": "Talking", "duration": "00:02:14", "kind": "internal"}])
+    for w, kind_shown in ((40, False), (80, True)):
+        lines = console.render(board.get(), {"sel": 0, "mode": "normal", "w": w, "h": 30}, 0.0)
+        row = next(ln for ln in _plain(lines) if "Kitchen ↔ Office" in ln)
+        check(f"calls: the state word is whole at {w} cols", "Talking" in row)
+        check(f"calls: the kind column is {'shown' if kind_shown else 'dropped'} at {w} cols",
+              ("INTERNAL" in row) == kind_shown)
+
+
+def test_the_help_card_dismiss_hint_fits_21_rows() -> None:
+    """The lamp legend is set into a rule rather than added as a row, so the
+    help card is still 21 rows and its dismiss hint is on a 21-row terminal."""
+    check("help: the card is 21 rows", len(console._help_lines(80)) == 21)
+    lines = _plain(console.render(_board(ROOMS).get(), {"sel": 0, "mode": "help", "w": 80, "h": 21}, 0.0))
+    check("help: the dismiss hint is on a 21-row terminal",
+          any("Press any key to return to the board." in ln for ln in lines))
+    check("help: the lamp legend is still there",
+          any("LAMPS" in ln and "ready" in ln and "offline" in ln for ln in lines))
+
+
+def test_a_lights_badge_colours_only_its_lamp() -> None:
+    """The on/off word stays in the terminal's own foreground; only the lamp
+    glyph carries the colour, as on the roster."""
+    lights = [dict(li) for li in _FAKE_LIGHTS]
+    lines = console.render(_board(ROOMS).get(),
+                           {"sel": 0, "mode": "lights", "w": 80, "h": 30, "lights": lights, "lsel": 0}, 0.0)
+    on = [ln for ln in lines if "◉" in ln and ln.endswith(" on")]
+    off = [ln for ln in lines if "○" in ln and ln.endswith(" off")]
+    check("lights: a lit light's word is uncoloured", bool(on) and all(
+        ln.endswith(console.CREAM + "◉" + console.RESET + " on") for ln in on))
+    check("lights: an unlit light's word is uncoloured", bool(off) and all(
+        ln.endswith(console.MUTED + "○" + console.RESET + " off") for ln in off))
 
 
 if __name__ == "__main__":

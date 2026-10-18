@@ -168,6 +168,11 @@ def build_dashboard_html(repo_root: Path) -> str:
 # --------------------------------------------------------------------------- #
 ANSI_PALETTE = {"32": "#4ec9a0", "31": "#e06c75", "33": "#e5c07b",
                 "36": "#56b6c2", "34": "#61afef", "90": "#7d828c"}
+# The console's board palette is xterm 256-colour (`ESC[38;5;Nm`); these are the
+# standard xterm values of the indices it uses: brass, amber, cream, dim brass,
+# unlit lamp, red cord, muted.
+ANSI_256 = {"178": "#d7af00", "214": "#ffaf00", "230": "#ffffd7", "94": "#875f00",
+            "58": "#5f5f00", "160": "#d70000", "137": "#af875f"}
 
 
 def ansi_to_html(line: str) -> str:
@@ -176,7 +181,18 @@ def ansi_to_html(line: str) -> str:
         if line[i] == "\x1b":
             m = re.match(r"\x1b\[([0-9;]*)m", line[i:])
             if m:
-                for code in (m.group(1).split(";") if m.group(1) else ["0"]):
+                codes = m.group(1).split(";") if m.group(1) else ["0"]
+                j = 0
+                while j < len(codes):
+                    code = codes[j]
+                    if code == "38" and j + 2 < len(codes) and codes[j + 1] == "5":
+                        # ★ One colour, not three codes: `38;5;N` read code by code
+                        # dropped every colour the 256-colour console emits, and
+                        # console.png went out grey.
+                        hexv = ANSI_256.get(codes[j + 2])
+                        if hexv:
+                            out.append(f'<span style="color:{hexv}">'); opened += 1
+                        j += 3; continue
                     if code in ("0", ""):
                         out.append("</span>" * opened); opened = 0
                     elif code == "1":
@@ -185,6 +201,7 @@ def ansi_to_html(line: str) -> str:
                         out.append('<span style="opacity:.6">'); opened += 1
                     elif code in ANSI_PALETTE:
                         out.append(f'<span style="color:{ANSI_PALETTE[code]}">'); opened += 1
+                    j += 1
                 i += m.end(); continue
         out.append(H.escape(line[i])); i += 1
     return "".join(out) + "</span>" * opened
@@ -215,9 +232,10 @@ def build_console_html(repo_root: Path) -> str:
     body = "\n".join(ansi_to_html(l) for l in lines)
     return (
         '<!doctype html><html><head><meta charset="utf-8"><style>\n'
-        "html,body{margin:0;background:#0f1216}\n"
-        ".wrap{padding:26px;background:#0f1216;display:inline-block}\n"
-        ".term{padding:20px 26px;background:#12151b;color:#c6ccd6;"
+        "html,body{margin:0;background:#1d140e}\n"
+        ".wrap{padding:26px;background:#1d140e;display:inline-block}\n"
+        # The walnut ground and enamel text of the web terminal.
+        ".term{padding:20px 26px;background:#120c08;color:#efe6cf;"
         'font:15px/1.55 "SF Mono","Menlo","DejaVu Sans Mono",monospace;white-space:pre;'
         "border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4)}\n"
         f'</style></head><body><div class="wrap"><div class="term">{body}</div></div></body></html>'
