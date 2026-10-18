@@ -80,8 +80,9 @@ def test_no_unsafe_idle_gates():
 
     # Positive assertion: the console services (the ones that actually regressed)
     # AND the whisper-server RAM gate use the hardened explicit-false form.
-    for svc, flag in [("console-web", "console_enabled"),
+    for svc, flag in [("console-web", "console_web_enabled"),
                       ("operator-console", "console_enabled"),
+                      ("operator-console", "console_web_enabled"),
                       ("rtpmon", "link_health_enabled"),
                       ("devhealth", "device_health_enabled"),
                       ("wakeup-scheduler", "wakeup_enabled"),
@@ -189,8 +190,11 @@ def _extract_guard(run_path):
 
 
 def test_the_loopback_guard_is_correct_where_it_actually_runs():
+    # Only the web terminal binds a network address now. The operator console
+    # listens on a Unix socket alone, so its run script has no bind to judge
+    # (test_the_operator_console_run_script_has_no_network_listener pins that).
     root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
-    scripts = [root / "operator-console" / "run", root / "console-web" / "run"]
+    scripts = [root / "console-web" / "run"]
     checked = 0
     for run in scripts:
         guard = _extract_guard(run)
@@ -209,7 +213,8 @@ def test_the_loopback_guard_is_correct_where_it_actually_runs():
             check(f"{run.parent.name}: {value!r} -> {'loopback' if want_loopback else 'LAN'}",
                   got is want_loopback)
             checked += 1
-    check(f"the guard was actually executed ({checked} cases)", checked == len(_LOOPBACK_CASES) * 2)
+    check(f"the guard was actually executed ({checked} cases)",
+          checked == len(_LOOPBACK_CASES) * len(scripts))
 
 
 def test_the_asterisk_run_script_takes_its_verbosity_from_the_init_step():
@@ -246,7 +251,7 @@ def test_the_asterisk_run_script_takes_its_verbosity_from_the_init_step():
 def test_the_bind_is_resolved_before_the_warning_that_depends_on_it():
     """console-web resolved BIND eight lines BELOW the notice that used it."""
     root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
-    for name in ("operator-console", "console-web"):
+    for name in ("console-web",):
         src = (root / name / "run").read_text().splitlines()
         assign = next((i for i, l in enumerate(src) if re.match(r'^\s*BIND="\$\(switchboard-opt', l)), None)
         notice = next((i for i, l in enumerate(src) if "bashio::log.notice" in l and "UNAUTHENTICATED" in l), None)
@@ -257,9 +262,9 @@ def test_the_bind_is_resolved_before_the_warning_that_depends_on_it():
 
 
 def test_the_warning_is_inside_a_guard_not_at_the_top_level():
-    """The wiring half: the notice must sit under a conditional in both scripts."""
+    """The wiring half: the notice must sit under a conditional."""
     root = Path(__file__).resolve().parents[1] / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
-    for name in ("operator-console", "console-web"):
+    for name in ("console-web",):
         src = (root / name / "run").read_text().splitlines()
         for line in src:
             if "bashio::log.notice" in line and "UNAUTHENTICATED" in line:
@@ -438,6 +443,120 @@ def test_whisper_server_stdout_is_discarded_and_its_stderr_kept():
           r.returncode == 0 and "processing" in r.stderr)
     check(f"whisper-server/run: nothing it prints on stdout reaches the log ({r.stdout!r})",
           r.stdout == "")
+
+
+# ── The operator console board behind SSH, the web terminal and the sidebar ──
+#
+# The board listens only on /run/switchboard/console.sock. console_enabled now
+# switches the SSH service, so the board must keep running for the browser
+# terminal and the sidebar console when SSH alone is off. These run the scripts'
+# REAL idle gates under bash (bashio is bash) with bashio::config stubbed, so
+# what is pinned is the decision the shell makes, not the characters in it.
+def _idle_gates(run_path):
+    """Every top-level `if ...; then ... exec sleep infinity ... fi` block."""
+    lines = run_path.read_text().splitlines()
+    blocks, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith("if "):
+            j = i
+            while j < len(lines) and not lines[j].startswith("fi"):
+                j += 1
+            block = lines[i:j + 1]
+            if any("exec sleep infinity" in ln for ln in block):
+                blocks.append("\n".join(block))
+            i = j + 1
+        else:
+            i += 1
+    return blocks
+
+
+def _gate_verdict(svc, values):
+    """IDLE or RUN: what the service's idle gates decide for these option reads."""
+    import shlex
+    gates = _idle_gates(_S6 / svc / "run")
+    arms = " ".join(f"{k}) printf %s {shlex.quote(v)} ;;" for k, v in values.items())
+    body = (f'bashio::config() {{ case "$1" in {arms} *) printf null ;; esac; }}\n'
+            "bashio::log.info() { :; }\n"
+            + "\n".join(g.replace("exec sleep infinity", "echo IDLE; exit 0") for g in gates)
+            + "\necho RUN\n")
+    r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, timeout=30)
+    return r.stdout.strip(), len(gates)
+
+
+def test_the_board_idles_only_when_ssh_and_the_web_terminal_are_both_off():
+    cases = [
+        ({"console_enabled": "true", "console_web_enabled": "true"}, "RUN"),
+        ({"console_enabled": "false", "console_web_enabled": "true"}, "RUN"),
+        ({"console_enabled": "true", "console_web_enabled": "false"}, "RUN"),
+        ({"console_enabled": "false", "console_web_enabled": "false"}, "IDLE"),
+        # A transient blank read on either flag must never idle the board.
+        ({"console_enabled": "", "console_web_enabled": "false"}, "RUN"),
+        ({"console_enabled": "false", "console_web_enabled": ""}, "RUN"),
+        ({"console_enabled": "", "console_web_enabled": ""}, "RUN"),
+        ({"console_enabled": "null", "console_web_enabled": "false"}, "RUN"),
+    ]
+    for values, want in cases:
+        got, n = _gate_verdict("operator-console", values)
+        check("operator-console/run: the idle gate was found and executed", n >= 1)
+        check(f"operator-console/run: {values} -> {want} (got {got!r})", got == want)
+
+
+def test_the_web_terminal_no_longer_idles_when_ssh_is_off():
+    """console_enabled used to idle the web terminal too, because it switched the
+    board the terminal bridges to. It now switches SSH only."""
+    cases = [
+        ({"console_enabled": "false", "console_web_enabled": "true"}, "RUN"),
+        ({"console_enabled": "true", "console_web_enabled": "false"}, "IDLE"),
+        ({"console_enabled": "false", "console_web_enabled": "false"}, "IDLE"),
+        ({"console_enabled": "true", "console_web_enabled": ""}, "RUN"),
+    ]
+    for values, want in cases:
+        got, n = _gate_verdict("console-web", values)
+        check("console-web/run: the idle gate was found and executed", n >= 1)
+        check(f"console-web/run: {values} -> {want} (got {got!r})", got == want)
+
+
+def _code(svc):
+    """A run script with its comment lines removed."""
+    return "\n".join(ln for ln in (_S6 / svc / "run").read_text().splitlines()
+                     if not ln.lstrip().startswith("#"))
+
+
+def test_the_operator_console_run_script_has_no_network_listener():
+    """console_port and console_bind are the SSH service's options now. The board
+    reading them would put a second, unauthenticated listener back."""
+    code = _code("operator-console")
+    for gone in ("console_port", "console_bind", "CONSOLE_PORT", "CONSOLE_HOST",
+                 "UNAUTHENTICATED"):
+        check(f"operator-console/run: no {gone}", gone not in code)
+    check("operator-console/run: still starts console.py", "exec python3 console.py" in code)
+
+
+def test_the_web_terminal_never_follows_the_ssh_bind():
+    """★ console_bind now defaults to every interface, because SSH always asks for
+    a password. The web terminal has no login while console_users is empty, so
+    a blank console_web_bind that followed console_bind would put an open
+    terminal on the LAN."""
+    code = _code("console-web")
+    check("console-web/run: never reads console_bind", "console_bind" not in code)
+    check("console-web/run: never reads console_port (the SSH port)",
+          "console_port" not in code)
+    check("console-web/run: exports no TCP target for the bridge",
+          "CONSOLE_WEB_TARGET" not in code)
+
+
+def test_nothing_overrides_the_console_socket_path():
+    """The socket-path env overrides exist for the tests alone. A run script that
+    set one for a single service would split the board from its clients with
+    every check here still green."""
+    # Any *CONSOLE*SOCKET name: CONSOLE_SOCKET (console.py, console-web),
+    # SWITCHBOARD_CONSOLE_SOCKET (the sidebar bridge) and whatever the SSH
+    # service calls its own.
+    pattern = re.compile(r"\b([A-Z_]*CONSOLE[A-Z_]*SOCKET)=")
+    for run in sorted(_S6.glob("*/run")):
+        found = pattern.findall(run.read_text())
+        check(f"{run.parent.name}/run: sets no console socket override ({found or 'none'})",
+              not found)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ already shipped a documented default that had been wrong for two releases — th
 kind of error that is invisible in review (both files look right on their own)
 and expensive in use, because the reader trusts the manual over the schema.
 
-The loopback assertions at the bottom are separate: they pin a SECURITY default
+The bind assertions at the bottom are separate: they pin a SECURITY default
 rather than merely a consistent one.
 """
 import re
@@ -24,6 +24,14 @@ DOCS = ROOT / "DOCS.md"
 # (a derived default, or one whose meaning needs a sentence).
 PROSE_DEFAULTS = {"rooms", "trunk", "operator_synonyms", "wakeup_scenes",
                   "console_users", "gateway_ports"}
+
+# A default that changed in config.yaml while its DOCS.md row is rewritten in a
+# separate change: {option: (the stale value DOCS.md still shows, the new
+# config.yaml value)}. Checked in BOTH directions so an entry cannot outlive the
+# edit it waits for: once DOCS.md shows the config.yaml default, the comparison
+# below fails until the entry is deleted. Never a way to excuse a mismatch with
+# no documentation change on its way.
+DOCS_PENDING = {}
 
 
 def _config_options():
@@ -80,6 +88,15 @@ def test_every_documented_default_matches_config_yaml():
         if name in PROSE_DEFAULTS or name not in cfg:
             continue
         actual = cfg[name]
+        if name in DOCS_PENDING:
+            stale, new = DOCS_PENDING[name]
+            if _norm(documented) == _norm(stale) and _norm(actual) == _norm(new):
+                continue
+            mismatches.append(
+                f"{name}: the DOCS_PENDING entry {DOCS_PENDING[name]!r} no longer "
+                f"describes the files (DOCS says {documented!r}, config.yaml has "
+                f"{actual!r}). Delete the entry once DOCS.md shows the default.")
+            continue
         if _norm(documented) != _norm(actual):
             mismatches.append(f"{name}: DOCS says {documented!r}, config.yaml has {actual!r}")
     assert not mismatches, (
@@ -97,33 +114,69 @@ def test_the_comparison_can_actually_fail():
 # --------------------------------------------------------------------------- #
 # The security default, pinned by value.
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("option", ["console_bind", "console_web_bind"])
-def test_the_console_listeners_default_to_loopback(option):
-    """★ Both consoles drive call control — ring, connect, hang up, page.
+@pytest.mark.parametrize("option", ["console_web_bind"])
+def test_the_unauthenticated_console_listener_defaults_to_loopback(option):
+    """★ The web terminal drives call control — ring, connect, hang up, page.
 
-    Neither has ever had authentication of its own worth the name (the web
-    terminal's `console_users` gate is opt-in and ships empty), and both used to
-    default to every interface. Since 0.93.0 the browser console is served
-    through the Home Assistant sidebar, where HA's own session authenticates it,
-    so nothing needs to be on the network at all.
+    It has never had authentication of its own worth the name (its
+    `console_users` gate is opt-in and ships empty), and it used to default to
+    every interface. Since 0.93.0 the browser console is served through the Home
+    Assistant sidebar, where HA's own session authenticates it, so the web
+    terminal does not need to be on the network at all.
 
     A change here puts an unauthenticated switchboard back on the LAN, so it
     must be deliberate enough to edit a test that says so.
     """
     value = _norm(_config_options()[option])
     assert value in ("127.0.0.1", "::1"), (
-        f"{option} defaults to {value!r}. Both console listeners must default to "
-        f"loopback: they drive ring/connect/hang-up with no authentication of "
-        f"their own, and the authenticated console now lives on the Ingress port.")
+        f"{option} defaults to {value!r}. The web terminal must default to "
+        f"loopback: it drives ring/connect/hang-up with no login until "
+        f"console_users has an entry, and the authenticated console lives on "
+        f"the Ingress port.")
+
+
+def test_the_ssh_console_bind_is_on_the_lan_only_because_ssh_authenticates():
+    """console_bind is the SSH console's bind, and defaults to every interface.
+
+    That is safe only because SSH refuses every login without a console_users
+    password; the board itself listens on a root-only Unix socket. Two things
+    would make it unsafe, and both are pinned here: an operator console run
+    script that binds console_bind itself (a second, unauthenticated listener),
+    and a web terminal whose blank bind follows console_bind onto the LAN.
+    """
+    assert _norm(_config_options()["console_bind"]) == "0.0.0.0"
+    s6 = ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d"
+    for svc in ("operator-console", "console-web"):
+        code = "\n".join(ln for ln in (s6 / svc / "run").read_text().splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "console_bind" not in code, (
+            f"{svc}/run reads console_bind, the SSH bind that defaults to every "
+            f"interface; only the SSH service may listen on it")
 
 
 def test_the_bind_fallback_also_fails_closed():
-    """The run script's terminal fallback, for when BOTH option reads come back
-    empty during a config reload. It used to be 0.0.0.0 — so a transient blank
-    read put the terminal on the LAN until the next restart."""
+    """The run script's terminal fallback, for a blank console_web_bind or a
+    blank read during a config reload. It used to be 0.0.0.0 — so a transient
+    blank read put the terminal on the LAN until the next restart — and later it
+    followed console_bind, which is now the SSH bind and defaults to 0.0.0.0.
+
+    Runs the script's REAL bind chain under bash with switchboard-opt stubbed:
+    console_bind is set to every interface throughout, so a chain that still
+    consulted it would land there."""
+    import subprocess
     run = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "console-web" / "run").read_text()
     chain = run[run.index('BIND="$(switchboard-opt console_web_bind)"'):]
     chain = chain[:chain.index("export CONSOLE_WEB_BIND")]
     assert 'BIND="0.0.0.0"' not in chain, (
         "the console-web bind chain still falls back to all interfaces")
-    assert 'BIND="127.0.0.1"' in chain, "no loopback fallback found in the bind chain"
+    for web_bind, want in (("", "127.0.0.1"), ("null", "127.0.0.1"),
+                           ("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "0.0.0.0")):
+        stub = ('switchboard-opt() { case "$1" in '
+                'console_web_bind) printf %s "$WEB_BIND" ;; '
+                'console_bind) printf %s 0.0.0.0 ;; esac; }\n')
+        r = subprocess.run(["bash", "-c", stub + chain + '\nprintf "[%s]" "$BIND"'],
+                           capture_output=True, text=True, timeout=30,
+                           env={"PATH": "/usr/bin:/bin", "WEB_BIND": web_bind})
+        assert r.stdout == f"[{want}]", (
+            f"console_web_bind {web_bind!r} resolved to {r.stdout!r}, expected "
+            f"[{want}] (stderr: {r.stderr!r})")

@@ -28,7 +28,7 @@ and cancel a wake-up:
 
 **The operator console** — the same board, full-screen, driven by keystroke. It
 opens from the Switchboard panel in the Home Assistant sidebar, and also answers
-over telnet on the Home Assistant machine itself:
+over SSH, with a password, on port 2300:
 
 ![The full-screen operator console](switchboard/docs/img/console.png)
 
@@ -93,7 +93,7 @@ over telnet on the Home Assistant machine itself:
   transfer, page, message-waiting, and wake-up controls, and a **Lights panel**
   with per-area on/off toggles for every Home Assistant light.
 - **A full-screen operator console** — a switchboard board you drive by keystroke,
-  in the Home Assistant sidebar, over telnet, or through a standalone browser
+  in the Home Assistant sidebar, over SSH, or through a standalone browser
   terminal, mirroring the same live signals.
 - **Proactive health monitoring** — the add-on watches every phone's registration
   and round-trip latency, scores each call's audio quality, tracks the WiFi
@@ -257,12 +257,12 @@ Two read-only GETs are open to the LAN: speaker-announcement clips
 cordless phonebook (`/phonebook.xml`). `POST /api/announce/<ext>` is accepted from
 the LAN only with the configured `announce_token`, which is blank by default and
 so keeps that path closed. Host networking means that port *does* listen on
-your LAN; the guard, not the bind, is what closes it. The two standalone consoles — telnet on
-`2300` and the browser terminal on `8100` — both default to `127.0.0.1`, so neither
-is reachable from your LAN as shipped. Neither has authentication of its own that
-is on by default, so if you move either bind, put it on a trusted network or
-configure `console_users` for the browser one. Change the default room secrets before
-your phones register. Full details in [SECURITY.md](switchboard/SECURITY.md).
+your LAN; the guard, not the bind, is what closes it. The SSH console on `2300`
+asks for a `console_users` password and refuses every login until one is
+configured. The standalone browser terminal on `8100` defaults to `127.0.0.1` and
+has no login until `console_users` has an entry, so configure one before you
+move its bind. Change the default room secrets before your phones register.
+Full details in [SECURITY.md](switchboard/SECURITY.md).
 
 ## License
 

@@ -587,41 +587,86 @@ these defenses are generated automatically:
 ## Accepted LAN-local risks
 
 These are deliberate design choices, documented here so you can decide whether they
-fit your network. Where the add-on can flag one at start-up it does — each console
-logs its bind, escalating from INFO to a NOTICE only when it is actually reachable
-from the LAN without a login, and a blank `cordless_cert_sha256` prints a NOTE — but the
+fit your network. Where the add-on can flag one at start-up it does — the web
+terminal logs its bind, escalating from INFO to a NOTICE only when it is actually
+reachable from the LAN without a login; the SSH console logs its bind, its host-key
+fingerprint and how many console users can log in, with a WARNING when none can;
+and a blank `cordless_cert_sha256` prints a NOTE — but the
 AppArmor and developer-tool items are structural and emit no start-up line, so
 this list is the record of them.
 
-### The telnet operator console (`:2300`) and web terminal (`:8100`)
+### The SSH operator console (`:2300`) and web terminal (`:8100`)
 
-Since v0.94.0 both listeners default to loopback (`console_bind` and
-`console_web_bind` are both `127.0.0.1`), so on a **fresh** install neither is
-reachable from the LAN. An upgrade keeps whatever binds are already stored in its
-options. This section describes what you take on if either is on the network.
+**No unauthenticated network listener remains for the board.** Since v0.114.0
+the operator console board listens only on the Unix socket
+`/run/switchboard/console.sock`, owned by root and created mode `0600` (the umask
+is set before `bind()`, so the socket is never looser, even briefly). Where the
+kernel reports the peer's uid (`SO_PEERCRED`), a client running as any other uid
+is refused as well. Its three clients connect there: the SSH service, the
+standalone web terminal and the Ingress console. Each one guards its own door.
+The telnet listener on `:2300`, which had no login, is gone, and that port now
+speaks SSH. That is also why the board and the Home Assistant broker listen on
+Unix sockets rather than loopback ports: under `host_network`, `127.0.0.1` is
+shared with every host-network add-on and process on the machine.
 
-Loopback here is the **host's** loopback. Under `host_network`, `127.0.0.1` is
-shared with every host-network add-on and process on the machine, so neither
-listener is private to Switchboard even on the default binds: any of them can open
-`:2300`, which has no login, or an ungated `:8100`, and drive the board. That is
-why the Home Assistant broker listens on a Unix socket instead of a loopback port.
+All three can ring, connect, hang up, transfer, page, set message-waiting, and
+control lights. Each caps its own sessions (the web terminal 5, the Ingress
+console 5, SSH 16 connections), the board caps them all together at 32, and a
+session with no input for 15 minutes is reclaimed.
 
-Both can ring, connect, hang up,
-transfer, page, set message-waiting, and control lights. The blast radius is
-bounded — at most 5 concurrent sessions, a 15-minute idle reclaim, and (for the web
-terminal) a same-origin WebSocket gate that blocks cross-site drive-by hijacking —
-but anyone who can reach the port from a same-origin context can drive the board.
+**SSH (`:2300`).** `console_bind` defaults to `0.0.0.0` since v0.114.0, because
+every SSH login needs a password:
 
-If either is on the LAN: the telnet console is **unauthenticated by design**; the
-**web terminal supports a login** — configure `console_users` (username + masked
-password) and both its page and its WebSocket require a signed-in session, with
-per-address throttling of failed attempts. With an empty `console_users` the web
-terminal is as open as the telnet console — **and so it is with a `console_users`
+- **Password login only**, against `console_users`, read by the web terminal's own
+  parser. There is no public-key, keyboard-interactive, host-based or GSSAPI
+  login, and no anonymous or default account. While `console_users` has no valid
+  row, **every login is refused**. That includes a value that fails to parse, so
+  SSH fails closed where the web terminal fails open.
+- **A per-address throttle, charged before the password is checked**: 5 attempts
+  per address in any 300 s. It is the web terminal's rule, with a separate count.
+  A connection also gets at most 3 password attempts.
+- **Caps before the handshake**: at most 16 connections in total and 4 per
+  address, applied when the TCP connection arrives, before the SSH version
+  exchange. Refusals are logged at most once per 30 s, with a count. A connection
+  has 60 s to log in. An authenticated one is closed after 15 minutes without
+  input, or after 30 s if the client stops reading.
+- **One interactive shell per connection.** Refused: running a command (exec),
+  subsystems (sftp), scp, local and remote TCP and Unix-socket forwarding, tun/tap,
+  agent and X11 forwarding, and a second session on the same connection.
+- **The host key** (ed25519) is at `/data/ssh_host_ed25519_key`, mode `0600` from
+  creation; a looser mode found at start-up is set back to `0600`. `/data` is in
+  add-on backups, so **every backup carries the private host key**, and anyone
+  holding a backup could present the console's host key.
+- **Logs**: no log line carries a username, a password or a command line, and
+  asyncssh's own logger is held at WARNING, below which it names users. Client
+  addresses are logged for every admitted connection, before any login, and with
+  each login result.
+- **The process** runs as root (it reads the host key and holds the passwords)
+  under the add-on's main AppArmor profile, and is started without the Supervisor
+  token. The `console_users` passwords reach it through an environment variable,
+  as they reach the web terminal, so root in the container can read them from
+  `/proc/<pid>/environ`. Its SSH version banner names AsyncSSH and its version.
+
+**The web terminal (`:8100`)** has defaulted to loopback since v0.94.0
+(`console_web_bind: 127.0.0.1`), and since v0.114.0 a blank `console_web_bind`
+also means `127.0.0.1`: it no longer falls back to `console_bind`, which is now
+the SSH bind and defaults to every interface. An upgrade keeps whatever bind is
+already stored in its options. Loopback here is the **host's** loopback, so on
+the default bind any host-network add-on or process can open an ungated `:8100`
+and drive the board. The terminal's same-origin WebSocket gate blocks cross-site
+drive-by hijacking, but anyone who can reach the port from a same-origin context
+can drive the board.
+
+The **web terminal supports a login**: configure `console_users` (username +
+masked password) and both its page and its WebSocket require a signed-in session,
+with per-address throttling of failed attempts. With an empty `console_users`
+the web terminal has no login at all — **and so it is with a `console_users`
 value that fails to parse, or whose rows are missing a username or a password**:
 those rows are dropped, and a list left with no valid rows disables the gate
 entirely. The start-up log line reports which mode is actually live
 (`login gate ACTIVE (n user(s))` vs `no login gate`); trust that line over the
-options page.
+options page. **This is the only login-free network path to the board left**:
+the web terminal with an empty `console_users`, moved off loopback.
 
 **Prefer the Ingress console.** Since v0.93.0 the same terminal is served at
 `/console/` on the Ingress port, where Home Assistant's own session authenticates
@@ -637,19 +682,17 @@ session. Only `xterm.js` and `xterm.css` are served to that page, from an
 exact-match allowlist of two filenames (no directory serving, no path joining on
 the parameter), which is the surface that keeps that trade acceptable.
 
-**Mitigations you control:** both listeners already default to loopback
-(`console_bind: 127.0.0.1`, `console_web_bind: 127.0.0.1`), so neither is on the
-LAN unless you change it. **`console_web_bind` is the web terminal's own setting
-and takes precedence**; `console_bind` is consulted only when `console_web_bind`
-is left empty — so set the one you mean. If you do put the `:8100` terminal on the
-LAN, configure `console_users` to gate it.
+**Mitigations you control:** `console_bind: 127.0.0.1` keeps SSH on the Home
+Assistant host. `console_web_bind` stays on loopback unless you change it; if you
+do put the `:8100` terminal on the LAN, configure `console_users` first.
 
-`console_web_enabled: false` turns off the standalone terminal and does **not**
-affect the Ingress console. `console_enabled: false` **does**: the Ingress
-terminal bridges to the operator console on `127.0.0.1:2300`, so disabling that
-console, or binding it to a single LAN address (which excludes 127.0.0.1),
-leaves `/console/` showing "unavailable". `0.0.0.0` includes loopback and keeps it
-working.
+`console_enabled: false` stops only the SSH service, and `console_web_enabled:
+false` only the standalone terminal; neither alone affects the Ingress console.
+With both `false` the board itself idles and `/console/` shows "unavailable".
+`console_bind` no longer affects the Ingress console, which reaches the board over
+the Unix socket. An install that relied on `console_enabled: false` to turn the
+web terminal off as well now runs it after the upgrade; set
+`console_web_enabled: false` for that.
 
 ### The AppArmor profile is narrowed, not a per-path sandbox
 
@@ -777,11 +820,11 @@ where they remain listed among the closed alerts.)
 1. **Change the default room secrets** (`change-me-101`, `change-me-102`, …) before
    your phones register. Use a strong, unique `secret` per room; the validator
    rejects `;`, whitespace, and control characters.
-2. **Nothing, for the consoles, on a fresh install** — `console_bind` and
-   `console_web_bind` both default to `127.0.0.1`. If you are upgrading from
-   before 0.94.0 your stored binds are unchanged, so check them; and if you
-   deliberately put either on the LAN, configure `console_users` for the web
-   terminal (the telnet one cannot be authenticated at all).
+2. **A `console_users` entry, to use the SSH console.** With none, every SSH
+   login is refused. The same entries gate the web terminal, which defaults to
+   `127.0.0.1` (`console_web_bind`); configure one before you move that bind. An
+   upgraded install keeps its stored binds, so check them: a `console_bind` of
+   `127.0.0.1` keeps SSH on the Home Assistant host.
 3. **To allow LAN-triggered announcements**, set a non-empty `announce_token`;
    otherwise `/api/announce` is Supervisor-only.
 4. **Use a strong trunk secret** if you enable the outside line, and set

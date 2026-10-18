@@ -9,6 +9,7 @@ action key handling (navigation + mode transitions + guarded actions). The AMI
 side effects (ring/connect/hangup) are exercised only on their guard paths,
 which never open a socket.
 """
+import contextlib
 import os
 import re
 import tempfile
@@ -1079,6 +1080,267 @@ def test_a_lights_badge_colours_only_its_lamp() -> None:
         ln.endswith(console.CREAM + "◉" + console.RESET + " on") for ln in on))
     check("lights: an unlit light's word is uncoloured", bool(off) and all(
         ln.endswith(console.MUTED + "○" + console.RESET + " off") for ln in off))
+
+
+SOCKET = "/run/switchboard/console.sock"
+
+PREAMBLE = bytes([255, 251, 1, 255, 251, 3, 255, 253, 3, 255, 253, 31])
+
+def _sock_dir() -> str:
+    """A temp dir short enough for a Unix socket path (macOS caps it at 104)."""
+    d = tempfile.mkdtemp(prefix="sbc-")
+    if len(d) > 80:
+        d = tempfile.mkdtemp(prefix="sbc-", dir="/tmp")
+    return d
+
+@contextlib.contextmanager
+def _running_board(path, max_sessions=None):
+    import threading
+    logs = []
+    stop = threading.Event()
+    srv = console.make_server(path, _board([]), stop, console.ClientGate(), logs.append,
+                              max_sessions=max_sessions or console.MAX_SESSIONS)
+    t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    t.start()
+    try:
+        yield srv, logs
+    finally:
+        stop.set()
+        srv.shutdown()
+        srv.server_close()
+        t.join(5)
+
+def _client(path):
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(path)
+    return s
+
+def _read_all(sock, limit=5.0) -> bytes:
+    import time
+    buf, end = b"", time.monotonic() + limit
+    while time.monotonic() < end:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+def test_the_board_has_no_tcp_listener() -> None:
+    import socket
+    import socketserver
+    check("listener: the server class is a Unix stream server",
+          issubclass(console.ConsoleServer, socketserver.UnixStreamServer)
+          and console.ConsoleServer.address_family == socket.AF_UNIX)
+    check("listener: the default path is the board's socket", console.SOCKET_PATH == SOCKET)
+    code = "\n".join(ln for ln in CONSOLE_PATH.read_text().splitlines()
+                     if not ln.lstrip().startswith("#"))
+    for gone in ("TCPServer", 'environ.get("CONSOLE_PORT"', 'environ.get("CONSOLE_HOST"'):
+        check(f"listener: no {gone} left in console.py", gone not in code)
+
+def test_the_socket_is_0600_whatever_the_umask() -> None:
+    """bind() creates the inode as 0777 & ~umask. Everything here runs under
+    umask 0, the most permissive there is.
+
+    The first half binds with bind_owner_only() alone, with no chmod after it,
+    so what it sees is the mode the inode was CREATED with: a bind that relied
+    on the inherited umask, or only on a later chmod, leaves a window in which
+    any local process can connect, and shows here as 0777. The second half
+    proves the server binds through it and ends at 0600."""
+    import socket
+    import stat
+    old = os.umask(0)
+    try:
+        path = os.path.join(_sock_dir(), "console.sock")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            console.bind_owner_only(s, path)
+            created = stat.S_IMODE(os.stat(path).st_mode)
+            restored = os.umask(0)
+        check(f"socket: created 0600, before any chmod ({created:04o})", created == 0o600)
+        check("socket: the bind put the caller's umask back", restored == 0)
+
+        calls = []
+        real = console.bind_owner_only
+        console.bind_owner_only = lambda sock, p: (calls.append(p), real(sock, p))
+        try:
+            path = os.path.join(_sock_dir(), "console.sock")
+            with _running_board(path):
+                st = os.stat(path)
+                check("socket: the path is a socket", stat.S_ISSOCK(st.st_mode))
+                check(f"socket: mode is 0600 ({stat.S_IMODE(st.st_mode):04o})",
+                      stat.S_IMODE(st.st_mode) == 0o600)
+        finally:
+            console.bind_owner_only = real
+        check(f"socket: the server binds through bind_owner_only ({calls})", calls == [path])
+    finally:
+        os.umask(old)
+
+def test_a_client_gets_the_telnet_board_and_can_quit() -> None:
+    """The protocol on the socket is unchanged: telnet negotiation first, then the
+    board, and `q` ends the session cleanly. A Unix-socket client has no peer
+    address, so the connect log line must not try to print one."""
+    path = os.path.join(_sock_dir(), "console.sock")
+    with _running_board(path) as (_srv, logs):
+        with _client(path) as c:
+            first = b""
+            while len(first) < len(PREAMBLE):
+                first += c.recv(4096)
+            check("session: the first bytes are the telnet preamble",
+                  first[:len(PREAMBLE)] == PREAMBLE)
+            c.sendall(bytes([255, 250, 31, 0, 120, 0, 40, 255, 240]) + b"q")
+            tail = _read_all(c)
+            check("session: q restores the screen and hangs up",
+                  console.EXIT_ALT.encode() in tail)
+        import time
+        deadline = time.monotonic() + 5
+        while "client disconnected" not in logs and time.monotonic() < deadline:
+            time.sleep(0.02)
+        check(f"session: connect and disconnect are logged ({logs})",
+              logs[:1] == ["client connected"] and "client disconnected" in logs)
+        check("session: no session error", not any("error" in m for m in logs))
+
+def test_a_stale_socket_from_an_earlier_run_is_replaced() -> None:
+    """A crash skips server_close, and bind() on an existing path fails, so
+    without the unlink one crash would keep the board down for good."""
+    import socket
+    path = os.path.join(_sock_dir(), "console.sock")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as dead:
+        dead.bind(path)                    # leaves the file behind, nobody listening
+    with _running_board(path):
+        with _client(path) as c:
+            check("stale: a client reaches the new board",
+                  c.recv(len(PREAMBLE)) == PREAMBLE[:len(PREAMBLE)])
+
+def test_a_file_that_is_not_a_socket_is_never_deleted() -> None:
+    import threading
+    path = os.path.join(_sock_dir(), "console.sock")
+    Path(path).write_text("not ours\n")
+    raised = None
+    try:
+        console.make_server(path, _board([]), threading.Event(), console.ClientGate(),
+                            lambda m: None)
+    except RuntimeError as exc:
+        raised = exc
+    check(f"refuse: a regular file at the path is refused ({raised})", raised is not None)
+    check("refuse: and left exactly as it was", Path(path).read_text() == "not ours\n")
+
+def test_closing_removes_its_own_socket_and_never_a_successors() -> None:
+    import socket
+    path = os.path.join(_sock_dir(), "console.sock")
+    with _running_board(path):
+        pass
+    check("close: the socket is removed on shutdown", not os.path.exists(path))
+
+    with _running_board(path):
+        os.unlink(path)                    # a successor takes the path over
+        successor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        successor.bind(path)
+    try:
+        check("close: a successor's socket at the same path survives",
+              os.path.exists(path))
+    finally:
+        successor.close()
+        os.unlink(path)
+
+def test_a_client_running_as_another_user_is_refused() -> None:
+    """The second lock behind the 0600 mode. The uid lookup is the kernel's, so
+    the other user is simulated by replacing it."""
+    path = os.path.join(_sock_dir(), "console.sock")
+    real = console.peer_uid
+    console.peer_uid = lambda sock: os.geteuid() + 1
+    try:
+        with _running_board(path) as (_srv, logs):
+            with _client(path) as c:
+                got = _read_all(c)
+            check(f"peer: another user gets nothing, not even the preamble ({got!r})",
+                  got == b"")
+            check(f"peer: the refusal is logged ({logs})",
+                  any(m.startswith("refused a local client") for m in logs)
+                  and "client connected" not in logs)
+    finally:
+        console.peer_uid = real
+
+def test_peer_uid_reports_this_process_where_the_kernel_can() -> None:
+    import socket
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    with a, b:
+        got = console.peer_uid(a)
+    if hasattr(socket, "SO_PEERCRED"):
+        check(f"peer_uid: SO_PEERCRED reports this process's uid ({got})", got == os.geteuid())
+    else:
+        print("  (no SO_PEERCRED on this platform; the 0600 mode alone guards here)")
+        check("peer_uid: None where the kernel has no SO_PEERCRED", got is None)
+
+def test_a_full_board_says_busy() -> None:
+    path = os.path.join(_sock_dir(), "console.sock")
+    with _running_board(path, max_sessions=1):
+        with _client(path) as first:
+            check("busy: the first session is served", first.recv(len(PREAMBLE)) == PREAMBLE)
+            with _client(path) as second:
+                got = _read_all(second)
+            check(f"busy: the second is told so and hung up ({got!r})",
+                  b"busy" in got and PREAMBLE not in got)
+
+def _top_level_ints(path: Path) -> dict:
+    import ast
+    out = {}
+    for node in ast.parse(path.read_text()).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, int)):
+            out[node.targets[0].id] = node.value.value
+    return out
+
+def test_the_board_cap_holds_every_front_door_at_once() -> None:
+    """Every front end caps its own sessions; the board's cap is the backstop
+    behind all of them. Below their sum, one front end's sessions could lock the
+    others out (at the old cap of 5, five sidebar tabs left nothing for SSH).
+
+    The SSH service's cap is read from its module once it exists (a top-level
+    MAX_*CONNECTIONS / MAX_*SESSIONS / MAX_*CLIENTS int that is not a per-address
+    one); until then the design figure of 16 stands in."""
+    import re as _re
+    share = CONSOLE_PATH.parents[1]
+    web = _top_level_ints(share / "console-web" / "server.py")["MAX_SESSIONS"]
+    sidebar = _top_level_ints(share / "webui" / "console_bridge.py")["MAX_SESSIONS"]
+    ssh = 16
+    for py in sorted((share / "console-ssh").glob("*.py")) if (share / "console-ssh").is_dir() else []:
+        for name, value in _top_level_ints(py).items():
+            if (_re.fullmatch(r"MAX_\w*(CONNECTIONS|SESSIONS|CLIENTS)", name)
+                    and "PER" not in name):
+                ssh = max(ssh, value)
+    need = web + sidebar + ssh
+    check(f"caps: board {console.MAX_SESSIONS} >= web {web} + sidebar {sidebar} + SSH {ssh}",
+          console.MAX_SESSIONS >= need)
+
+def test_every_reference_names_the_same_socket() -> None:
+    """★ The interface between the board and its clients is one path. A client
+    pointed anywhere else shows "unavailable" with every unit test still green,
+    so every mention of a console socket in the shipped tree must be this one."""
+    import re as _re
+    root = CONSOLE_PATH.parents[4]           # .../rootfs
+    seen, files = set(), []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if "console.sock" not in text:
+            continue
+        # The lookbehind anchors each match at the start of a path token, so a
+        # long minified line is scanned once rather than once per character.
+        found = set(_re.findall(r"(?<![\w./-])[\w./-]*console\.sock\b", text))
+        if found:
+            seen |= found
+            files.append(p.relative_to(root).as_posix())
+    check(f"socket: every reference is {SOCKET} (found {sorted(seen)})", seen == {SOCKET})
+    for must in ("usr/share/switchboard/console/console.py",
+                 "usr/share/switchboard/console-web/server.py",
+                 "usr/share/switchboard/webui/console_bridge.py"):
+        check(f"socket: {must} names it", must in files)
 
 
 if __name__ == "__main__":

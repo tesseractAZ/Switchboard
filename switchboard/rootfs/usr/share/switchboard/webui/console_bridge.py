@@ -1,9 +1,10 @@
 """Browser ↔ operator-console bridge, with no web framework in sight.
 
-The operator console (``console/console.py``) is a telnet server on
-127.0.0.1:2300. This module is everything needed to put a browser on the other
-end of it: the telnet client preamble, the byte-level payload rules, and two
-async pumps. ``webui/app.py`` supplies only the WebSocket object.
+The operator console (``console/console.py``) speaks telnet on the Unix socket
+/run/switchboard/console.sock (0600 root), its only listener. This module is
+everything needed to put a browser on the other end of it: the telnet client
+preamble, the byte-level payload rules, and two async pumps. ``webui/app.py``
+supplies only the WebSocket object.
 
 WHY IT IS SEPARATE. Same reason ``ami.py`` is: FastAPI is not installed on the
 box the tests run on, so anything importable only alongside it is untestable.
@@ -29,10 +30,11 @@ import json
 import os
 import sys
 
-# Where the operator console listens. Parameters, not import-time constants
-# baked into the callers, so a test can point the bridge at a fixture socket.
-CONSOLE_HOST = os.environ.get("SWITCHBOARD_CONSOLE_HOST", "127.0.0.1")
-CONSOLE_PORT = int(os.environ.get("SWITCHBOARD_CONSOLE_PORT") or 2300)
+# Where the operator console listens: a Unix socket, and nowhere else. A
+# parameter, not an import-time constant baked into the callers, so a test can
+# point the bridge at a fixture socket. Nothing in the add-on sets the env.
+CONSOLE_SOCKET = (os.environ.get("SWITCHBOARD_CONSOLE_SOCKET", "").strip()
+                  or "/run/switchboard/console.sock")
 
 CONNECT_TIMEOUT = 5.0
 # Browser INPUT idle, never socket idle. console.py stamps a clock into every
@@ -41,9 +43,10 @@ CONNECT_TIMEOUT = 5.0
 IDLE_SECONDS = 900
 # Absolute ceiling on one session, matching the TTL the standalone server used.
 MAX_SESSION_SECONDS = 12 * 3600
-# Concurrent browser terminals. Matches console.py's own MAX_SESSIONS so five
-# forgotten tabs cannot lock a real telnet operator out of the board. Acquired
-# BEFORE any socket to :2300 is opened.
+# Concurrent sidebar terminals: this front end's own share of the board.
+# console.py's MAX_SESSIONS is the backstop behind every front end together and
+# is sized above their sum, so five forgotten tabs cannot lock an SSH operator
+# out of the board. Acquired BEFORE the console socket is opened.
 MAX_SESSIONS = 5
 # Bounded queue rather than a send timeout: a browser that stops reading is
 # detected in bounded BYTES, with no cancellation reaching into the server's
@@ -193,15 +196,16 @@ def strip_console_output(buf: bytes, carry: bytes = b""):
 _slots = asyncio.Semaphore(MAX_SESSIONS)
 
 
-async def connect_console(host: str = None, port: int = None):
-    """Open the console socket. Returns ``(reader, writer)`` or ``None``.
+async def connect_console(path: str = None):
+    """Open the console's Unix socket. Returns ``(reader, writer)`` or ``None``.
 
     Never raises: the caller is inside a live WebSocket and a traceback there
-    would close it with no explanation.
+    would close it with no explanation. A missing socket (the board is idle, or
+    still starting) and a stale one (nothing listening) are both OSError.
     """
     try:
         return await asyncio.wait_for(
-            asyncio.open_connection(host or CONSOLE_HOST, port or CONSOLE_PORT),
+            asyncio.open_unix_connection(path or CONSOLE_SOCKET),
             CONNECT_TIMEOUT)
     except (OSError, asyncio.TimeoutError):
         return None
@@ -212,17 +216,18 @@ def unavailable_notice() -> bytes:
     return _UNAVAILABLE
 
 
-async def run_bridge(ws, *, host: str = None, port: int = None, now=None) -> None:
+async def run_bridge(ws, *, path: str = None, now=None) -> None:
     """Pump one browser session against the operator console.
 
-    ``ws`` is duck-typed on the three methods a Starlette WebSocket exposes —
-    ``send_bytes``, ``receive`` and ``close`` — so a test can drive this with a
-    fake and never import a web framework.
+    ``ws`` is duck-typed on the methods a Starlette WebSocket exposes —
+    ``accept``, ``send_bytes``, ``receive`` and ``close`` — so a test can drive
+    this with a fake and never import a web framework. ``path`` overrides the
+    console socket for the same reason.
 
     Structure, and why each piece is the way it is:
 
-      * The session slot is taken BEFORE the console socket, so five abandoned
-        browser tabs cannot occupy console.py's own five slots.
+      * The session slot is taken BEFORE the console socket, so abandoned
+        browser tabs cannot hold more than this front end's share of the board.
       * Both directions are tasks passed to ``asyncio.wait``. Passing bare
         coroutines there raises ``TypeError`` on Python 3.12 (the base image),
         so they are wrapped in ``create_task`` first.
@@ -243,7 +248,7 @@ async def run_bridge(ws, *, host: str = None, port: int = None, now=None) -> Non
     conn = None
     try:
         await ws.accept()
-        conn = await connect_console(host, port)
+        conn = await connect_console(path)
         if conn is None:
             await ws.send_bytes(unavailable_notice())
             await ws.close(code=1011)
