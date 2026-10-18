@@ -1,0 +1,47 @@
+#!/command/with-contenv bashio
+# SSH operator console — the network door to the operator console. An
+# in-process SSH server (console-ssh/server.py) that asks for a console_users
+# password, then bridges one shell per connection to the console's Unix socket
+# (/run/switchboard/console.sock). host_network exposes the port on the LAN,
+# so `ssh -p <console_port> <user>@<host>` reaches it when console_bind allows.
+# Root: it reads /data (the host key) and holds the console_users passwords.
+#
+# Idle ONLY on an explicit `false`. bashio can momentarily read blank options at
+# boot; `bashio::config.true` treats that empty read as false and would then
+# PERMANENTLY idle this enabled-by-default service (s6 never restarts an idle
+# process). Key off the literal value so an empty/transient read runs.
+if [ "$(bashio::config 'console_enabled')" = "false" ]; then
+    bashio::log.info "Operator console disabled (console_enabled: false); SSH console idling."
+    exec sleep infinity
+fi
+
+# Value reads via switchboard-opt (the post-overlay snapshot from
+# init-switchboard, a declared dependency) — bashio::config parses raw
+# options.json and would bypass an options overlay. The enable gate above
+# stays on bashio: its empty-read semantics are load-bearing.
+PORT="$(switchboard-opt console_port 2300)"
+if [ -z "${PORT}" ] || [ "${PORT}" = "null" ]; then
+    PORT="2300"
+fi
+BIND="$(switchboard-opt console_bind 127.0.0.1)"
+if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
+    # Fail CLOSED, as the web terminal does: this fires only on a transient
+    # blank read, and a console briefly reachable only from the host is the
+    # cheaper failure than one briefly on the LAN.
+    BIND="127.0.0.1"
+fi
+# Compact JSON. server.py parses it with the web terminal's own parser
+# (webauth.parse_users) and logs how many rows are valid; with none, every
+# login is refused. The passwords are never printed.
+USERS_JSON="$(switchboard-opt console_users '[]')"
+
+export CONSOLE_SSH_PORT="${PORT}"
+export CONSOLE_SSH_BIND="${BIND}"
+export CONSOLE_SSH_USERS="${USERS_JSON}"
+# Timezone backstop, matching the other services.
+export TZ="$(cat /run/switchboard/tz 2>/dev/null || echo UTC)"
+
+bashio::log.info "Starting Switchboard SSH operator console on ${BIND}:${PORT} ..."
+# env -u: the SSH server answers the network before anyone has logged in, and
+# it never calls Home Assistant, so it holds no Supervisor token.
+exec env -u SUPERVISOR_TOKEN -u HASSIO_TOKEN python3 /usr/share/switchboard/console-ssh/server.py
