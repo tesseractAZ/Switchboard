@@ -163,7 +163,7 @@ def test_a_roster_that_fits_is_not_scrolled_and_says_nothing():
     out, sess = _render(_board(n_rooms=5), h=30, sel=0)
     assert not any("more below" in ln or "more above" in ln for ln in out)
     assert sess["rtop"] == 0
-    assert sum(1 for ln in out if re.search(r"^\s+[▸ ]\s*1\d\s", ln)) == 5
+    assert sum(1 for ln in out if re.search(r"^\s+[▸ ]\s*[◉○✕]\s+1\d\s", ln)) == 5
 
 
 # --------------------------------------------------------------------------- #
@@ -179,7 +179,7 @@ def test_the_roster_keeps_a_workable_window_before_the_lists_are_cut():
     """
     assert c.ROSTER_MIN_ROWS == 3
     out, _ = _render(_board(n_rooms=14, n_calls=3, n_wakes=4), h=20, sel=0)
-    rows = [ln for ln in out if re.search(r"^\s+[▸ ]\s*\d\d\s+Room", ln)]
+    rows = [ln for ln in out if re.search(r"^\s+[▸ ]\s*[◉○✕]\s+\d\d\s+Room", ln)]
     assert len(rows) >= 3, (len(rows), out)
 
 

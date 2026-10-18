@@ -81,16 +81,37 @@ BOLD = f"{ESC}[1m"
 DIM = f"{ESC}[2m"
 ENTER_ALT = f"{ESC}[?1049h"
 EXIT_ALT = f"{ESC}[?1049l"
-GREEN = f"{ESC}[32m"
-RED = f"{ESC}[31m"
-YELLOW = f"{ESC}[33m"
-CYAN = f"{ESC}[36m"
-BLUE = f"{ESC}[34m"
-GREY = f"{ESC}[90m"
+
+
+def _fg(n: int) -> str:
+    """An xterm 256-colour foreground."""
+    return f"{ESC}[38;5;{n}m"
+
+
+# The board palette — a manual cord switchboard after hours. State is shown by
+# LAMPS: white-lit (ok), amber (in use / ringing / attention), red (fault),
+# unlit (unknown), and every lamp has its state word typed beside it, so colour
+# is never the only signal. Primary text stays the terminal's own foreground
+# (the cream enamel in the web terminal), which keeps it legible on any ground.
+BRASS = _fg(178)       # the nameplate, section titles, key caps, the selection
+BRASS_DIM = _fg(94)    # ink / dim brass: rules and dot leaders (decorative only)
+LAMP = _fg(214)        # amber: in use, ringing, a message waiting, a prompt
+CREAM = _fg(230)       # a lit WHITE lamp: registered, healthy
+IDLE = _fg(58)         # an unlit lamp cap
+FAULT = _fg(160)       # the red cord: offline, unreachable
+MUTED = _fg(137)       # secondary text
+# The 16-colour names this file used before, kept as aliases onto the palette so
+# anything still naming them renders on-palette rather than in terminal green.
+GREEN, RED, YELLOW, CYAN, BLUE, GREY = CREAM, FAULT, LAMP, LAMP, BRASS, MUTED
 
 
 def color(code: str, text: str) -> str:
     return f"{code}{text}{RESET}"
+
+
+def _cap(key: str) -> str:
+    """A key cap in the command bars and help: brass, bold."""
+    return color(BOLD + BRASS, key)
 
 
 # ── Telnet protocol bytes ───────────────────────────────────────────────────── #
@@ -370,9 +391,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
 def vis_width(s: str) -> int:
     """Visible column width of a line: strip ANSI SGR codes, count East-Asian
-    wide/fullwidth glyphs (our ☎️ / ⏰ emoji) as 2 and everything else — including
-    'ambiguous' box/arrow glyphs, which terminals render narrow — as 1. Note ☎️
-    counts 2 only WITH its U+FE0F variation selector; a bare ☎ is ambiguous → 1."""
+    wide/fullwidth glyphs (an emoji in a room or light name) as 2 and everything
+    else — including the lamps ◉ ○ ✕ and the 'ambiguous' box/arrow glyphs ═ ─ ·,
+    which terminals render narrow — as 1. Note ☎️ counts 2 only WITH its U+FE0F
+    variation selector; a bare ☎ is ambiguous → 1."""
     s = _ANSI_RE.sub("", s)
     return sum(0 if unicodedata.combining(c) else (2 if unicodedata.east_asian_width(c) in ("W", "F") else 1)
                for c in s)
@@ -498,29 +520,87 @@ def poller_loop(board: Board, stop: threading.Event, gate: ClientGate, log) -> N
 
 
 # ── Rendering (pure) ─────────────────────────────────────────────────────────── #
-def _room_status(room: dict):
-    """(glyph, color, text, peer_suffix) for a room row."""
+def _flicker(now: float) -> str:
+    """A ringing lamp's colour this second: amber, then unlit, then amber. It
+    rides the console's existing once-a-second redraw (the clock changes the
+    frame anyway), and the state word beside it never flickers."""
+    return IDLE if int(now) % 2 else LAMP
+
+
+def _room_status(room: dict, now: float = 0.0):
+    """(lamp, lamp colour, state word, word colour, peer_suffix) for a room's
+    position: ◉ white-lit READY, ◉ amber in use, ◉ amber RINGING (flickering),
+    ✕ red OFFLINE. The word is typed beside the lamp on every row."""
     ds = (room.get("device_state") or "").lower()
     cs = (room.get("call_state") or "")
     peer = room.get("peer") or ""
     codec = _codec_label(room.get("codec", ""))
     suffix = (f"  ↔ {peer}" if peer else "") + (f"  · {codec}" if (peer and codec) else "")
     if not room.get("registered"):
-        return "○", RED, "Offline", ""
+        return "✕", FAULT, "OFFLINE", MUTED, ""
     if cs == "Ringing" or "ring" in ds:
-        return "◐", YELLOW, "Ringing", suffix
+        return "◉", _flicker(now), "RINGING", LAMP, suffix
     active = bool(cs) or (("use" in ds and ds != "not in use") or ds in ("busy", "on hold"))
     if active:
-        return "◉", CYAN, (cs or "On call"), suffix
-    return "●", GREEN, "Registered", ""
+        return "◉", LAMP, (cs or "On call").upper(), LAMP, suffix
+    return "◉", CREAM, "READY", "", ""
+
+
+def _nameplate(width: int, view: str = "", tally: str = "") -> str:
+    """The masthead — an engraved brass plate run out to `width` visible columns:
+
+        ═══ S W I T C H B O A R D ═══ LIGHTS ════════════ 3/12 on ═══
+
+    with the view's name and its live tally set into it. It never runs past
+    `width`, so it lines up with the rules beneath it. A narrower terminal gets
+    the title un-spaced, then the tally without its closing rule, then the tally
+    shortened one " · " part at a time from the right (the clock goes first),
+    then the plate alone, cut to fit."""
+    def rule(n: int) -> str:
+        return color(BRASS, "═" * n) if n > 0 else ""
+
+    def plate(title: str) -> str:
+        out = rule(3) + " " + color(BOLD + BRASS, title) + " " + rule(3)
+        if view:
+            out += " " + color(BOLD + BRASS, view) + " " + rule(3)
+        return out
+
+    tallies = [tally]
+    while " · " in tallies[-1]:
+        tallies.append(tallies[-1].rsplit(" · ", 1)[0])
+    if tally:
+        tallies.append("")
+    for t in tallies:
+        for title, closing in (("S W I T C H B O A R D", True), ("SWITCHBOARD", True),
+                               ("SWITCHBOARD", False)):
+            left = plate(title)
+            right = (" " + color(MUTED, t) + (" " + rule(3) if closing else "")) if t else ""
+            fill = width - vis_width(left) - vis_width(right)
+            if fill >= 0:
+                return left + rule(fill) + right
+    return _truncate_visible(plate("SWITCHBOARD"), width)
+
+
+def _leader(text: str, width: int) -> str:
+    """`text` run out to `width` columns with a dim dot leader, as on a typed
+    designation strip: "Kitchen ·········". Plain text in, ANSI out; a name
+    cut mid-word at `width` loses its trailing space to the leader."""
+    text = text.rstrip()
+    return text + " " + color(BRASS_DIM, "·" * max(0, width - vis_width(text)))
+
+
+def _titled_rule(title: str, width: int) -> str:
+    """A section rule with its title set into it: "── ACTIVE CALLS ─────"."""
+    return (color(BRASS_DIM, "──") + " " + color(BOLD + BRASS, title) + " "
+            + color(BRASS_DIM, "─" * max(0, width - 4 - vis_width(title))))
 
 
 def _help_lines(width: int) -> list[str]:
     """The `?` help overlay — a one-screen key reference, dismissed by any key."""
-    rule = color(GREY, "─" * min(width, 72))
-    b = lambda s: color(BOLD, s)  # noqa: E731 (tiny local alias for the key glyphs)
+    rule = color(BRASS_DIM, "─" * min(width, 72))
+    b = _cap
     return [
-        f" {BOLD}☎️ SWITCHBOARD OPERATOR — HELP{RESET}",
+        _nameplate(min(width, 72), "HELP"),
         rule,
         f"  {b('↑ ↓')} / {b('j k')}   Move the selection between rooms",
         f"  {b('R')}         Ring the selected room (a short test ring)",
@@ -536,11 +616,14 @@ def _help_lines(width: int) -> list[str]:
         f"  {b('?')}         This help",
         f"  {b('Q')} / {b('Ctrl-C')}  Quit",
         rule,
-        "  " + color(BOLD, "In the lights view:") + color(GREY, "  ↑↓/jk move · Enter/Space toggle"),
-        "  " + color(GREY, "                     r refresh · Esc back to the board"),
+        "  " + color(BOLD + BRASS, "In the lights view:") + color(MUTED, "  ↑↓/jk move · Enter/Space toggle"),
+        "  " + color(MUTED, "                     r refresh · Esc back to the board"),
         rule,
-        "  " + color(GREY, "Wake-ups place a spoken “good morning” call at the set time."),
-        "  " + color(CYAN, "Press any key to return to the board."),
+        "  " + color(BOLD + BRASS, "Lamps:") + "  " + color(CREAM, "◉") + " ready   "
+        + color(LAMP, "◉") + " in use / ringing   " + color(FAULT, "✕") + " offline   "
+        + color(IDLE, "○") + " unlit",
+        "  " + color(MUTED, "Wake-ups place a spoken “good morning” call at the set time."),
+        "  " + color(LAMP, "Press any key to return to the board."),
     ]
 
 
@@ -588,17 +671,16 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
     """
     lights = sess.get("lights", []) or []
     lsel = max(0, min(sess.get("lsel", 0), max(0, len(lights) - 1)))
-    rule = color(GREY, "─" * min(width, 72))
+    rule = color(BRASS_DIM, "─" * min(width, 72))
     on_n = sum(1 for li in lights if str(li.get("state", "")).lower() == "on")
-    head_right = color(GREY, f"{on_n}/{len(lights)} on ")
-    head = [f" {BOLD}💡 LIGHTS{RESET}   {head_right}", rule]
+    head = [_nameplate(min(width, 72), "LIGHTS", f"{on_n}/{len(lights)} on"), rule]
     foot = [rule,
-            "  " + color(GREY, "[↑↓] select   ") + color(BOLD, "Enter") + color(GREY, " toggle   ")
-            + color(BOLD, "r") + color(GREY, " refresh   ")
-            + color(BOLD, "Esc") + color(GREY, " back   ") + color(BOLD, "Q") + color(GREY, " quit")]
+            "  " + color(MUTED, "[↑↓] select   ") + _cap("Enter") + color(MUTED, " toggle   ")
+            + _cap("r") + color(MUTED, " refresh   ")
+            + _cap("Esc") + color(MUTED, " back   ") + _cap("Q") + color(MUTED, " quit")]
 
     if not lights:
-        return head + ["  " + color(GREY, "— no lights —")] + foot
+        return head + ["  " + color(MUTED, "— no lights —")] + foot
 
     # Build the body once, remembering which row is which light and which area
     # heading is in force at each row (for the repeat-heading-when-scrolled rule).
@@ -610,12 +692,14 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
         if area != last_area:
             last_area = area
             cur_area = area or "Unassigned"
-            rows.append(("  " + color(BOLD, cur_area), None, cur_area))
-        cursor = color(CYAN, "▸") if idx == lsel else " "
+            rows.append(("  " + color(BOLD + BRASS, cur_area), None, cur_area))
+        cursor = color(BOLD + BRASS, "▸") if idx == lsel else " "
         is_on = str(li.get("state", "")).lower() == "on"
-        badge = color(GREEN, "● on") if is_on else color(GREY, "○ off")
-        name = (li.get("name") or li.get("entity_id") or "")[:28].ljust(28)
-        rows.append((f"    {cursor} {name}  {badge}", idx, cur_area))
+        # A light that is on is a lit white lamp; off is an unlit cap, and the
+        # word beside it says which either way.
+        badge = color(CREAM, "◉ on") if is_on else color(MUTED, "○ off")
+        name = _leader((li.get("name") or li.get("entity_id") or "")[:28], 28)
+        rows.append((f"    {cursor} {name} {badge}", idx, cur_area))
 
     # Room for the body: the chrome above and below, plus one line reserved for
     # the "more" indicator. Never less than one row, so a tiny terminal still
@@ -647,7 +731,7 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
     # If the window opens inside an area, say which area — its heading has
     # scrolled off, and a name with no room is half the information.
     if need_head:
-        body[0:0] = ["  " + color(BOLD, rows[top][2]) + color(GREY, " (cont.)")]
+        body[0:0] = ["  " + color(BOLD + BRASS, rows[top][2]) + color(MUTED, " (cont.)")]
 
     # Count LIGHTS, not rows. The rows include area headings, so a row count
     # tells the operator a number that matches nothing they can see. And clamp:
@@ -664,7 +748,7 @@ def _lights_lines(sess: dict, width: int, height: int = 24) -> list[str]:
         note = f"↓ {hidden_below} more below"
     else:
         note = ""
-    return head + body + ([("  " + color(GREY, note))] if note else []) + foot
+    return head + body + ([("  " + color(MUTED, note))] if note else []) + foot
 
 
 # The roster never shrinks below this. Fewer rows than this and the operator is
@@ -685,7 +769,7 @@ def _capped(rows: list, cap: int, noun: str) -> list:
         return list(rows)
     hidden = len(rows) - cap
     plural = noun if hidden == 1 else noun + "s"
-    return list(rows[:cap]) + ["    " + color(GREY, f"… {hidden} more {plural}")]
+    return list(rows[:cap]) + ["    " + color(MUTED, f"… {hidden} more {plural}")]
 
 
 def render(board: dict, sess: dict, now: float) -> list[str]:
@@ -698,7 +782,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     if sess.get("mode") == "lights":
         lines = _lights_lines(sess, width, height)
         msg = sess.get("msg", "")
-        lines.append("  " + color(CYAN, "› " + msg) if (msg and sess.get("msg_until", 0) > now) else "")
+        lines.append("  " + color(LAMP, "› " + msg) if (msg and sess.get("msg_until", 0) > now) else "")
         return center(lines, width, height)
     rooms = board.get("rooms", [])
     calls = board.get("calls", [])
@@ -708,32 +792,32 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     # 1-col margin + vertical centering. A wider label column uses the new room.
     bw = max(24, width - 2)
     label_w = 16 if width < 64 else 22
-    rule = color(GREY, "─" * bw)
+    rule = color(BRASS_DIM, "─" * bw)
     lines: list[str] = []
 
     on_calls = sum(1 for r in rooms if r.get("call_state"))
     online = sum(1 for r in rooms if r.get("registered"))
     clock = time.strftime("%H:%M:%S", time.localtime(now))
-    head_left = f" {BOLD}☎️ SWITCHBOARD OPERATOR{RESET}"
-    head_right = color(GREY, f"{online}/{len(rooms)} online · {on_calls} on call · {clock}")
-    head = _fill_row(head_left, head_right, bw)
-    lines.append(head if head != head_left else f"{head_left}   {head_right}")  # narrow: left-cluster
+    lines.append(_nameplate(bw, "", f"{online}/{len(rooms)} online · {on_calls} on call · {clock}"))
     lines.append(rule)
 
     # Slow signals (present only when build_board was given opts): trunk SIP
     # registration + resident-STT health, as a compact status line under the head.
+    # Lamps like the roster's: white-lit healthy, unlit unknown, red down, amber
+    # for the degraded-but-working CLI fallback.
     trunk_reg = board.get("trunk_reg", "")
     stt = board.get("stt", "")
     bits = []
     if trunk_reg:
-        tcol = GREEN if trunk_reg == "Registered" else (GREY if trunk_reg == "Unknown" else RED)
-        bits.append(color(GREY, "trunk ") + color(tcol, "● " + trunk_reg))
+        tlamp = (color(CREAM, "◉") if trunk_reg == "Registered"
+                 else color(IDLE, "○") if trunk_reg == "Unknown" else color(FAULT, "✕"))
+        bits.append(tlamp + " " + color(MUTED, "trunk ") + trunk_reg)
     if stt and stt != "disabled":
-        bits.append(color(GREY, "STT ") + color(GREEN if stt == "up" else YELLOW,
-                                                "● " + ("resident" if stt == "up" else "CLI fallback")))
+        bits.append(color(CREAM if stt == "up" else LAMP, "◉") + " " + color(MUTED, "STT ")
+                    + ("resident" if stt == "up" else color(LAMP, "CLI fallback")))
     # Droppable: informative, but the last chrome to keep when the terminal is
     # too short to hold the roster, the calls and the keys at once.
-    signal_lines = (["  " + color(GREY, "     ").join(bits), rule] if bits else [])
+    signal_lines = (["  " + "     ".join(bits), rule] if bits else [])
 
     # ★ THREE STATES, NOT TWO. `ami_ok` is False both before the first poll and
     # when the PBX is genuinely unreachable, and those read very differently to
@@ -751,25 +835,31 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     # falsy `ts` means "not asked yet", which is not the same as "asked and the
     # answer was no" — the distinction this codebase keeps having to relearn.
     if not board.get("ts"):
-        lines.append("  " + color(GREY, "Connecting to the PBX…"))
+        lines.append("  " + color(IDLE, "○") + " " + color(MUTED, "Connecting to the PBX…"))
         lines.append(rule)
     elif not board.get("ami_ok", False):
-        lines.append("  " + color(RED, "Asterisk Manager unreachable — the PBX may still be starting."))
+        # The alarm: a red lamp, and the words in the terminal's own foreground
+        # (red type on the dark ground is too faint to be the whole message).
+        lines.append("  " + color(FAULT, "✕") + " " + color(BOLD, "Asterisk Manager unreachable")
+                     + color(MUTED, " — the PBX may still be starting."))
         lines.append(rule)
 
     room_rows: list[str] = []
     for idx, r in enumerate(rooms):
-        cursor = color(CYAN, "▸") if idx == sel else " "
-        glyph, col, txt, suffix = _room_status(r)
-        # Pad the PLAIN text first; wrap in color after, so ANSI codes don't
-        # throw off the column width.
+        cursor = color(BOLD + BRASS, "▸") if idx == sel else " "
+        glyph, lamp_col, txt, txt_col, suffix = _room_status(r, now)
+        # A jack position: the lamp, the extension, then the designation strip —
+        # the room's name typed out to a dot leader and its state word — so the
+        # lamps form one column and the state words another. Pad the PLAIN text
+        # first; wrap in color after, so ANSI codes don't throw off the width.
         ext = f"{r['ext']:<3}"
-        label = (r.get("label") or r["ext"])[:label_w].ljust(label_w)
-        status = color(col, f"{glyph} {txt}")
+        label = _leader((r.get("label") or r["ext"])[:label_w], label_w)
+        status = color(txt_col, txt) if txt_col else txt
         # ✉ marker for a room with a message-waiting flag set. The glyph is a
         # narrow (width-1) char, so it lines up like any other trailing badge.
-        mwi = color(YELLOW, "  ✉") if r.get("mwi") else ""
-        left = f"  {cursor} {BOLD}{ext}{RESET}  {label}  {status}{color(GREY, suffix)}{mwi}"
+        mwi = color(LAMP, "  ✉") if r.get("mwi") else ""
+        left = (f"  {cursor} {color(lamp_col, glyph)} {BOLD}{ext}{RESET} {label} "
+                f"{status}{color(MUTED, suffix)}{mwi}")
         # Right-aligned live link detail: idle qualify RTT + a notable contact
         # status (anything other than the healthy "Reachable"). Registered only.
         detail = ""
@@ -781,7 +871,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             cs = (r.get("contact_status") or "")
             if cs and cs.lower() not in ("reachable", "created", ""):
                 parts.append(cs)
-            detail = color(GREY, "  ·  ".join(parts)) if parts else ""
+            detail = color(MUTED, "  ·  ".join(parts)) if parts else ""
         row = _fill_row(left, detail, bw)
         room_rows.append(row)
 
@@ -789,27 +879,32 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     # given whatever height is left over rather than running off the bottom.
     call_rows: list[str] = []
     if not calls:
-        call_rows.append("    " + color(GREY, "— none —"))
+        call_rows.append("    " + color(MUTED, "— none —"))
     else:
-        glyphs = {"outside": "📞", "operator": "🎧", "internal": "🏠"}
+        # A call is a cord up between two positions: an amber supervision lamp
+        # (flickering while it rings) with the call's kind typed beside it.
         for c in calls:
-            g = glyphs.get(c.get("kind", "internal"), "•")
+            kind = str(c.get("kind", "internal") or "internal").upper()
+            ringing = str(c.get("state", "")).lower() == "ringing"
+            lamp = color(_flicker(now) if ringing else LAMP, "◉")
             dur = str(c.get("duration", "") or "")
             if dur.startswith("00:"):
                 dur = dur[3:]
             cname = _codec_label(c.get("codec", ""))
             meta = c.get("state", "") + (f"  {dur}" if dur else "") + (f"  {cname}" if cname else "")
-            tail = color(GREY, meta)
-            call_rows.append(f"    {g}  {c.get('detail','')}   {tail}")
+            tail = color(MUTED, meta)
+            call_rows.append(f"    {lamp} {color(MUTED, f'{kind:<8}')} {c.get('detail','')}   {tail}")
 
     wake_rows: list[str] = []
     for w in board.get("wakeups", []) or []:
-        wake_rows.append(f"    ⏰  {w.get('label','')}   " + color(GREY, fmt12(w.get("hhmm", ""))))
+        # A wake-up is an unlit lamp with its time on the strip: armed, not yet up.
+        wake_rows.append(f"    {color(IDLE, '○')} {_leader(str(w.get('label', '')), label_w)} "
+                         + fmt12(w.get("hhmm", "")))
 
     def _section(rows: list, cap: int, title: str, noun: str, glyph: str) -> list[str]:
         """A titled list, a capped list, or — at cap 0 — a single-line count.
 
-        A heading plus a rule plus "… 2 more" is three rows spent saying nothing
+        A titled rule plus "… 2 more" is two rows spent saying nothing
         actionable. At that point the honest thing is one row that says the
         section exists and how big it is, and to give the rows to the roster.
         """
@@ -817,16 +912,16 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
             return []
         if cap <= 0:
             n = len(rows)
-            return ["  " + color(GREY, f"{glyph} {n} {noun}{'' if n == 1 else 's'}")]
-        return [rule, "  " + color(BOLD, title)] + _capped(rows, cap, noun)
+            return ["  " + color(MUTED, f"{glyph} {n} {noun}{'' if n == 1 else 's'}")]
+        return [_titled_rule(title, bw)] + _capped(rows, cap, noun)
 
     def _tail(cap_calls: int, cap_wakes: int) -> list[str]:
         out: list[str] = []
         if call_rows and calls:
-            out += _section(call_rows, cap_calls, "ACTIVE CALLS", "call", "📞")
-        else:                               # the "— none —" placeholder: 3 rows
-            out += [rule, "  " + color(BOLD, "ACTIVE CALLS")] + call_rows
-        out += _section(wake_rows, cap_wakes, "WAKE-UPS", "wake-up", "⏰")
+            out += _section(call_rows, cap_calls, "ACTIVE CALLS", "call", "◉")
+        else:                               # the "— none —" placeholder: 2 rows
+            out += [_titled_rule("ACTIVE CALLS", bw)] + call_rows
+        out += _section(wake_rows, cap_wakes, "WAKE-UPS", "wake-up", "○")
         out.append(rule)
         return out
 
@@ -837,36 +932,36 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
         hhmm = timeparse.parse(buf) if (timeparse is not None and buf) else None
         # Live preview: show the (forgiving) parser's reading before committing —
         # the same parse()+fmt12() the commit path uses, so they can't disagree.
-        preview = color(GREY, f"   → {fmt12(hhmm)}") if hhmm else ""
-        footer.append("  " + color(YELLOW, f"SET WAKE-UP {label}:  {buf}█") + preview)
-        footer.append("  " + color(GREY, "type a time · Enter sets · Esc cancels · Backspace deletes"))
+        preview = color(MUTED, f"   → {fmt12(hhmm)}") if hhmm else ""
+        footer.append("  " + color(LAMP, f"SET WAKE-UP {label}:  {buf}█") + preview)
+        footer.append("  " + color(MUTED, "type a time · Enter sets · Esc cancels · Backspace deletes"))
     elif sess.get("mode") == "connect":
         frm = sess.get("connect_from_label", "?")
-        footer.append("  " + color(YELLOW, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+        footer.append("  " + color(LAMP, f"CONNECT {frm} → pick a room with ↑↓ and press Enter") + color(MUTED, "  (Esc cancels)"))
     elif sess.get("mode") == "transfer":
         frm = sess.get("transfer_from_label", "?")
-        footer.append("  " + color(YELLOW, f"TRANSFER {frm}'s call → pick a room with ↑↓ and press Enter") + color(GREY, "  (Esc cancels)"))
+        footer.append("  " + color(LAMP, f"TRANSFER {frm}'s call → pick a room with ↑↓ and press Enter") + color(MUTED, "  (Esc cancels)"))
     elif sess.get("mode") == "pageconfirm":
-        footer.append("  " + color(YELLOW, "PAGE ALL — ring every phone into the intercom?")
-                     + color(GREY, "   ") + color(BOLD, "[Y]") + color(GREY, " yes    ")
-                     + color(BOLD, "[N]") + color(GREY, " cancel"))
+        footer.append("  " + color(LAMP, "PAGE ALL — ring every phone into the intercom?")
+                     + color(MUTED, "   ") + _cap("[Y]") + color(MUTED, " yes    ")
+                     + _cap("[N]") + color(MUTED, " cancel"))
     else:
-        bar1 = ("  " + color(GREY, "[↑↓] select   ") + color(BOLD, "R") + color(GREY, " ring   ")
-                + color(BOLD, "C") + color(GREY, " connect   ") + color(BOLD, "H") + color(GREY, " hang up   ")
-                + color(BOLD, "T") + color(GREY, " transfer"))
-        bar2 = ("  " + color(BOLD, "W") + color(GREY, " set wake-up   ")
-                + color(BOLD, "X") + color(GREY, " cancel wake-up   ")
-                + color(BOLD, "M") + color(GREY, " message   ")
-                + color(BOLD, "P") + color(GREY, " page all"))
-        bar3 = ("  " + color(BOLD, "L") + color(GREY, " lights   ")
-                + color(BOLD, "?") + color(GREY, " help   ")
-                + color(BOLD, "Q") + color(GREY, " quit"))
+        bar1 = ("  " + color(MUTED, "[↑↓] select   ") + _cap("R") + color(MUTED, " ring   ")
+                + _cap("C") + color(MUTED, " connect   ") + _cap("H") + color(MUTED, " hang up   ")
+                + _cap("T") + color(MUTED, " transfer"))
+        bar2 = ("  " + _cap("W") + color(MUTED, " set wake-up   ")
+                + _cap("X") + color(MUTED, " cancel wake-up   ")
+                + _cap("M") + color(MUTED, " message   ")
+                + _cap("P") + color(MUTED, " page all"))
+        bar3 = ("  " + _cap("L") + color(MUTED, " lights   ")
+                + _cap("?") + color(MUTED, " help   ")
+                + _cap("Q") + color(MUTED, " quit"))
         footer.append(bar1)
         footer.append(bar2)
         footer.append(bar3)
     msg = sess.get("msg", "")
     if msg and sess.get("msg_until", 0) > now:
-        footer.append("  " + color(CYAN, "› " + msg))
+        footer.append("  " + color(LAMP, "› " + msg))
     else:
         footer.append("")
     # ── Fit the roster to what is left. ────────────────────────────────────────
@@ -917,7 +1012,7 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
                 else f"↓ {below} more below" if below else "")
         lines += room_rows[top:top + avail]
         if note:
-            lines.append("  " + color(GREY, note))
+            lines.append("  " + color(MUTED, note))
     else:
         sess["rtop"] = 0
         lines += room_rows
