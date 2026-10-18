@@ -242,7 +242,8 @@ Asterisk Manager socket is loopback-only, with two accounts that each get a fres
 random secret every boot; neither can run a program through the Manager or use
 Asterisk's CLI `command` class;
 the SIP trunk blocks international/premium prefixes and confines every transfer to
-internal destinations. Asterisk runs as an unprivileged user with no capabilities
+internal destinations, and a room phone may register only from a private LAN
+address. Asterisk runs as an unprivileged user with no capabilities
 and without the Home Assistant token (a root broker forwards only the requests its
 features make), and the add-on's AppArmor profile refuses every capability the
 add-on does not use and any write to its shipped code or its Asterisk configuration,

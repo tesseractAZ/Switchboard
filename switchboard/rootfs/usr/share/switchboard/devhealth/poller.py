@@ -779,10 +779,14 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
     return ("degraded", reasons) if reasons else ("ok", [])
 
 
-# After THIS add-on restarts, Asterisk drops every registration and the GXW
-# re-REGISTERs its ports on its own timer. During that window "all ports down" is
-# the expected state, not an outage, so the all-down CRITICAL is held back until
-# it passes. Anything still down afterwards alerts normally, and a PARTIAL outage
+# When THIS add-on starts with no usable registrations, the GXW re-REGISTERs its
+# ports on its own timer, and during that window "all ports down" is the
+# expected state, not an outage, so the all-down CRITICAL is held back until it
+# passes. Since v0.112.0 that is the exception: astdb lives in /data/state, so a
+# restart restores the contacts and qualifies them within max_initial_qualify_time
+# (9/9 reachable 4 s after Asterisk started, measured 2026-10-17). The window
+# still opens on the first start of a new astdb, after an outage longer than a
+# registration (120 s), or whenever a restored contact fails its qualify. Anything still down afterwards alerts normally, and a PARTIAL outage
 # is never suppressed. Without this, every add-on restart fired "the GXW gateway
 # likely lost power or its uplink" (observed repeatedly on 2026-08-03) — an alarm
 # that names the wrong component and trains the reader to ignore it.
