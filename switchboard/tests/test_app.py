@@ -2453,6 +2453,20 @@ def test_every_lamp_says_its_state_in_words_and_warms_up_once() -> None:
     check("lamps: reduced motion stops both animations",
           ".lamp.warm" in motion and ".lamp.lit-ring" in motion and "animation: none" in motion)
 
+def test_a_completed_wake_up_time_survives_the_rebuild() -> None:
+    """refresh() rebuilds every line each 4 s. The focus guard holds only while
+    the time box has focus; Safari moves focus off it when Set is clicked, so a
+    completed time was wiped and Set answered "pick a time". A completed value is
+    kept per line until Set or Cancel succeeds."""
+    html = app.INDEX_HTML
+    check("wake draft: a store exists", "const wakeDrafts = {};" in html)
+    check("wake draft: the rebuild prefers the draft", "esc(wakeDrafts[r.ext] || wkPending)" in html)
+    check("wake draft: input and change keep it",
+          "['input', 'change'].forEach" in html and "wakeDrafts[x] = t.value" in html)
+    check("wake draft: a successful Set and Cancel clear it",
+          "delete wakeDrafts[ext]; done('Set ✓')" in html
+          and "delete wakeDrafts[ext]; done('Cancelled ✓')" in html)
+
 
 if __name__ == "__main__":
     import _runner
