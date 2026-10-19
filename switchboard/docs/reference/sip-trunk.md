@@ -21,7 +21,7 @@
    cell), while your 2–3-digit extensions and feature codes still ring internally.
    The leading `1` is required (a bare 10-digit number won't dial out); that's what
    keeps extension 20 and every feature code except `41` (which overlaps `411`,
-   §7.4) dialing instantly. `011` international and
+   see [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay)) dialing instantly. `011` international and
    `1-900` premium stay blocked, and **911 is not routed** (no E911 — use a cell for
    emergencies). Don't try to disable the prefix by blanking `dial_prefix`; the
    options form reverts a cleared field to its default, so use the `direct_dial`
@@ -37,7 +37,7 @@ room-to-room.
 ## Toll-fraud protection
 
 The trunk is where the internet meets your phone bill, so several defenses are
-layered on automatically (details in [SECURITY.md](SECURITY.md#toll-fraud-the-trunk-threat-model)):
+layered on automatically (details in [SECURITY.md](../../SECURITY.md#toll-fraud-the-trunk-threat-model)):
 
 - **Blocked prefixes** — international (`011`) and premium (`900`, `1-900`) are
   rejected before any outbound rule.

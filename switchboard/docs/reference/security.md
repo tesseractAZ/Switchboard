@@ -2,7 +2,7 @@
 
 The security model, the toll-fraud threat model, the console services and their
 exposure, secret handling, and the short list of things
-**you** must configure are documented in **[SECURITY.md](SECURITY.md)**. The
+**you** must configure are documented in **[SECURITY.md](../../SECURITY.md)**. The
 essentials:
 
 - The Ingress dashboard is reachable only from the Home Assistant Supervisor.
@@ -21,11 +21,11 @@ essentials:
   login is refused. The board itself has no network listener, only a root-only
   Unix socket. The standalone web terminal binds to `127.0.0.1` by default, and
   its sign-in is off until `console_users` has an entry — so configure one before
-  you move its bind. The sidebar console (§10) needs neither.
+  you move its bind. The [sidebar console](operator-console.md) needs neither.
 - Two read-only GETs on port 8099 are deliberately reachable from the LAN
   without authentication. `/phonebook.xml` lets the cordless fetch its remote
   phonebook and exposes room names and internal extensions only
-  ([§8](#8-the-wp826-wifi-cordless-optional)). `/announce/a<digits>.wav` is the
+  ([The WP826 WiFi cordless](wp826-cordless.md)). `/announce/a<digits>.wav` is the
   speaker announcement clip a Home Assistant media player fetches; its name is
   random and it is deleted five to six minutes after it is written. Handset
   announcement clips are not served to the LAN (since v0.106.0).

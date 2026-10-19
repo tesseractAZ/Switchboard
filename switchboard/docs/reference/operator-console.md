@@ -9,7 +9,7 @@ status line under the header shows the **SIP trunk registration** (Registered /
 Unregistered) and **resident-STT health** (resident / CLI-fallback) — the same
 signals the Ingress dashboard surfaces. Three front-ends onto the same board:
 
-![The full-screen operator console](docs/img/console.png)
+![The full-screen operator console](../img/console.png)
 
 - **In the Home Assistant sidebar** *(recommended, added in 0.93.0)* — open the
   **Switchboard** panel and press **Console**, or go straight to `/console/`
@@ -18,7 +18,7 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   password to configure, forget, or leave switched off. The port does listen on
   your LAN — host networking gives it no choice — but every connection whose peer
   is not the Supervisor is refused, apart from three narrow HTTP exceptions that never
-  reach the console (§8). It works in the HA mobile app.
+  reach the console ([Security](security.md)). It works in the HA mobile app.
 
   Two things worth knowing about it. The URL must end in a **slash**: the page
   loads its assets relatively, so `/console` alone resolves them one directory up
@@ -108,7 +108,7 @@ both `false` does the board stop, and the sidebar console then shows
 >   for the terminal's WebSocket. The port does listen on your LAN — host
 >   networking gives it no choice — but every connection whose peer is not the
 >   Supervisor is refused, apart from three narrow HTTP exceptions that never
->   reach the console (§8), and there is no second password to configure or leave
+>   reach the console ([Security](security.md)), and there is no second password to configure or leave
 >   switched off.
 > - **SSH (2300)** asks every connection for a `console_users` password and
 >   refuses every login while that list has no valid entry; there is no key,
@@ -131,6 +131,6 @@ both `false` does the board stop, and the sidebar console then shows
 > has a 12-hour absolute ceiling per session. The standalone terminal additionally
 > same-origin-gates its WebSocket upgrade, and its bind is `console_web_bind`
 > (`127.0.0.1` by default, and when blank). SSH has its own caps, listed above. See
-> [SECURITY.md](SECURITY.md).
+> [SECURITY.md](../../SECURITY.md).
 
 ---

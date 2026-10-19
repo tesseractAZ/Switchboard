@@ -10,13 +10,13 @@
    `switchboard-config` render the configuration (look for
    `codecs: u-law only (no transcoding)` near the end, closing with
    `done: N room(s), trunk=…`), then Asterisk start.
-4. **Provision the gateway** ([§7](#7-grandstream-gxw4216-v2-provisioning)) so
+4. **Provision the gateway** ([Grandstream GXW4216 V2 provisioning](gxw4216-gateway.md)) so
    each FXS port registers.
 5. Open the **Switchboard** panel in the Home Assistant sidebar (Ingress) — each
    room flips to **Registered** as its port comes online.
 6. Pick up a phone and dial another room's extension. Done.
 
-![The Switchboard dashboard in the Home Assistant sidebar](docs/img/dashboard.png)
+![The Switchboard dashboard in the Home Assistant sidebar](../img/dashboard.png)
 
 The dashboard also carries a **Lights panel**: every Home Assistant light the add-on can see, grouped by area, with on/off toggles — the same control the voice menu on `43` offers, for when you would rather tap than talk.
 

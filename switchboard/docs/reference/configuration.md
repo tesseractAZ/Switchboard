@@ -30,10 +30,10 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, high loss, high round-trip time, one-way audio). Every leg is measured and written to the ledger. Legs the PBX originates to play something at a phone (wake-up delivery, paging, announcements) skip the one-way-audio check and never update the last-call sensor, but a poor connection under one of them alerts like any other leg (v0.104.0). A clip that was cut short stays quiet, except an *undelivered* wake-up, which alerts (v0.78.0). See §11. |
+| `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, high loss, high round-trip time, one-way audio). Every leg is measured and written to the ledger. Legs the PBX originates to play something at a phone (wake-up delivery, paging, announcements) skip the one-way-audio check and never update the last-call sensor, but a poor connection under one of them alerts like any other leg (v0.104.0). A clip that was cut short stays quiet, except an *undelivered* wake-up, which alerts (v0.78.0). See [Per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts). |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
-| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
+| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See [*Pinning the cordless certificate*](wp826-cordless.md#pinning-the-cordless-certificate). |
 | `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
 | `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
 | `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
@@ -50,10 +50,10 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `announce_enabled` | `true` | The announce feature on dial `46` (phone → Home Assistant speakers). It does not affect `POST /api/announce` (Home Assistant → handset, §6), which `announce_token` governs. |
+| `announce_enabled` | `true` | The announce feature on dial `46` (phone → Home Assistant speakers). It does not affect `POST /api/announce` (Home Assistant → handset, see [Announce onto a handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)), which `announce_token` governs. |
 | `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
 | `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. **Required for the feature to work:** while this list is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up. |
-| `announce_retry_attempts` | `2` | How many times a handset announcement (`POST /api/announce`) whose audio never played is **sent again** (§6 below), once the phone reports itself registered and idle. Range 0–3; `0` turns retries off and leaves only the record. An announcement that did play is never replayed, whatever this is set to. |
+| `announce_retry_attempts` | `2` | How many times a handset announcement (`POST /api/announce`) whose audio never played is **sent again** (see [Announce onto a handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)), once the phone reports itself registered and idle. Range 0–3; `0` turns retries off and leaves only the record. An announcement that did play is never replayed, whatever this is set to. |
 | `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
 
 ## Operator console
@@ -61,10 +61,10 @@ its default is fine.
 | Option | Default | Notes |
 |--------|---------|-------|
 | `console_bind` | `0.0.0.0` | Interface the SSH console listens on. Every login needs a `console_users` password; `127.0.0.1` restricts it to the Home Assistant host. Only SSH uses it. An upgraded install keeps the bind it had saved, and the default from 0.94.0 to 0.113.0 was `127.0.0.1`: set `0.0.0.0` to reach SSH from the LAN. |
-| `console_enabled` | `true` | The SSH operator console (ring/connect/hang up, §10). Password login only, against `console_users`; while that list has no valid entry, **every login is refused**. Turning it off stops SSH only: the sidebar console and the web terminal keep working. With this and `console_web_enabled` both off, the board itself stops and the sidebar console shows "unavailable". |
+| `console_enabled` | `true` | The SSH operator console (ring/connect/hang up; see [The operator console](operator-console.md)). Password login only, against `console_users`; while that list has no valid entry, **every login is refused**. Turning it off stops SSH only: the sidebar console and the web terminal keep working. With this and `console_web_enabled` both off, the board itself stops and the sidebar console shows "unavailable". |
 | `console_port` | `2300` | TCP port of the SSH console. The sidebar console and the web terminal do not use it. |
 | `console_users` | `[]` | Sign-in accounts for the **SSH console** and the **web terminal** — each entry has `username` and `password` (masked); a row missing either is ignored. SSH accepts only these accounts and refuses every login while the list is empty. The web terminal with the list empty has no login (the historical open behavior); when any user is configured, its page **and its WebSocket** require a signed-in session. Repeated wrong attempts from one address are throttled (5 per 5 minutes, counted separately by SSH and the web terminal). The sidebar console needs none of this. |
-| `console_web_bind` | `127.0.0.1` | Interface the web terminal listens on. Blank also means `127.0.0.1`; since 0.114.0 it no longer follows `console_bind`. The browser console is served through the Home Assistant sidebar instead (§10), so this terminal does not need to be on your network. |
+| `console_web_bind` | `127.0.0.1` | Interface the web terminal listens on. Blank also means `127.0.0.1`; since 0.114.0 it no longer follows `console_bind`. The browser console is served through the Home Assistant sidebar instead ([The operator console](operator-console.md)), so this terminal does not need to be on your network. |
 | `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 
@@ -75,7 +75,7 @@ its default is fine.
 | `clock_enabled` / `clock_ext` | `true` / `41` | The talking clock and its dial code (2–6 digits). |
 | `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
 | `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
-| `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry (§6), which run in the same scheduler, and identical repeats are then not held back. |
+| `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry ([Announce onto a handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)), which run in the same scheduler, and identical repeats are then not held back. |
 | `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
 | `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. At least `wakeup_ring_seconds` + 20 (one scheduler poll); a shorter value is raised to that and a WARNING naming both values is logged at every start. With a ring above 580 s every allowed retry is raised, which is expected. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
@@ -87,7 +87,7 @@ its default is fine.
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
+| `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [Local voice assistant](voice-operator.md#local-voice-assistant--dial-47). |
 | `assistant_transcripts` | `true` | Keep the words people say to the voice features. On: the assistant's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder) records what was said and replied, and the add-on's log — shown by the Supervisor to Home Assistant administrators, kept about two days across a host reboot — quotes what the recognizer heard at the operator, wake-up, home-automation, status, directory and assistant prompts. Off: both still record every timing, outcome and failure reason, with each utterance replaced by its length. If the setting cannot be read, the add-on's log leaves the words out. |
 | `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
@@ -102,12 +102,12 @@ its default is fine.
 ## Outside line (SIP trunk)
 
 `trunk` is a group; leave `trunk.enabled: false` (the default) for a room-to-room
-system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
+system. When you enable it, see [Adding an outside line (SIP trunk)](sip-trunk.md).
 
 | Sub-field | Default | Notes |
 |-----------|---------|-------|
 | `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
-| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see §7.4. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
+| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay). `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
 | `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
 | `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
 | `from_user` | `""` | Outbound `From` user (defaults to `username`). |

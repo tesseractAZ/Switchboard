@@ -30,4 +30,4 @@ network, and it can place calls that cost money. The parts most worth reporting:
 
 **These phones cannot reach emergency services.** Dialling `911` is answered with
 a spoken notice saying so. That is a deliberate limitation, not a vulnerability;
-see [DOCS §9](switchboard/DOCS.md#9-adding-an-outside-line-sip-trunk).
+see [Emergency calls are not carried](switchboard/docs/reference/sip-trunk.md#emergency-calls-are-not-carried).
