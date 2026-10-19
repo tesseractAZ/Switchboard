@@ -177,7 +177,7 @@ Full details: [Directory](https://github.com/tesseractAZ/Switchboard/blob/main/s
 Dial `44` from a room phone to ring **every room phone at once** into a
 house-wide intercom. It is duplex: anyone who picks up can talk back. The
 **Page all** button on the dashboard and **P** in the console (confirm with
-**Y**) page the house the same way.
+**Y**) also page the whole house.
 
 Full details: [Page all](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/paging-and-announcements.md#page-all--dial-44).
 
