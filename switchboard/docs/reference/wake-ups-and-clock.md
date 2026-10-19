@@ -172,7 +172,7 @@ You can also set wake-ups from the **dashboard** with the ⏰ time box and **Set
 each room card. A room with a pending wake-up shows a **Cancel** button on its own
 line on the card, and another in the Wake-up calls list; a cancel that fails says
 so. The operator console also sets and cancels them (**W** to set, **X** to
-cancel — §10).
+cancel — see [The operator console](operator-console.md)).
 
 ## Talking clock — dial `41`
 

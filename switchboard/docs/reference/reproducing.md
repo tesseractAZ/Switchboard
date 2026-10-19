@@ -42,11 +42,11 @@ settings survive. You only need to reconfigure them if you replace *those*
 devices, in which case:
 
 - **GXW** — re-apply Profile-1 and the per-port SIP credentials via the SSH shell
-  ([§7.3](#73-configuring-the-gateway-from-the-cli-reliable-path)); the reference
-  dial plan and `P85 = 3` send delay are in [§7.4](#74-dial-plan--the-send-delay).
+  ([Configuring the gateway from the CLI](gxw4216-gateway.md#73-configuring-the-gateway-from-the-cli-reliable-path)); the reference
+  dial plan and `P85 = 3` send delay are in [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay).
 - **WP826** — re-register it as its extension and, for the phonebook / distinctive
   ring / ringtone / speed-dial extras, re-run the tools in
-  [`tools/`](../tools/) (`wp826.mjs`, `wp826-pcodes.md`).
+  [`tools/`](../../../tools/) (`wp826.mjs`, `wp826-pcodes.md`).
 
 Point the rebuilt gateway/cordless at the new host's IP as the SIP server and the
 phones re-register — the add-on regenerates all of Asterisk's config from your

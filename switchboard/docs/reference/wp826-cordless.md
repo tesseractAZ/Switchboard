@@ -7,13 +7,13 @@ cordless integrates in three extra ways:
 
 - **Home Assistant announce endpoint** — with `POST /api/announce/{ext}` targeting
   the cordless's extension, Home Assistant can speak alerts on it hands-free
-  ([§6](#6-paging--announcements)).
+  ([Announce onto a handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)).
 - **Remote phonebook** — the add-on serves your rooms as a Grandstream GS
   Phonebook XML document at `http://<ha-host>:8099/phonebook.xml` (one `<Contact>`
   per room: the room `name`, the `ext` as its number). Point the handset's
   **Remote/XML Phonebook** at that URL — `P330 = 1` (HTTP) and
   `P331 = <ha-host>:8099/phonebook.xml`, see
-  [`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md) — and it shows every room by
+  [`tools/wp826-pcodes.md`](../../../tools/wp826-pcodes.md) — and it shows every room by
   name, on caller ID and in its own directory. It is rendered from your live
   `rooms` option on each fetch, so renaming a room needs no re-upload; rooms whose
   `ext` fails validation are skipped and names are XML-escaped. This URL is
@@ -23,7 +23,7 @@ cordless integrates in three extra ways:
   announcement clip (`GET /announce/a<digits>.wav`), and
   `POST /api/announce/{ext}` carrying a valid `X-Announce-Token`. Every other
   request on the port is refused unless it comes from the Supervisor (see
-  [SECURITY.md](SECURITY.md)). The phonebook exposes room names and internal
+  [SECURITY.md](../../SECURITY.md)). The phonebook exposes room names and internal
   extensions only — the same directory already printed on every handset — and no
   secrets.
 - **Device-health monitoring** — set `cordless_ext` (its extension) and
@@ -32,12 +32,12 @@ cordless integrates in three extra ways:
   `cordless_ext` set it **auto-follows the phone's IP** from its live registration,
   so DHCP moving the handset never breaks monitoring (`cordless_ip` is just the
   fallback)
-  ([§11](#11-health-monitoring--home-assistant-sensors)).
+  ([Device health](health-monitoring.md#device-health-device_health_)).
 
 For scripting the cordless's own settings (remote phonebook, distinctive ring,
 custom ringtone, speed-dial keys), the repo ships a standalone tool and a P-code
-reference at [`tools/wp826.mjs`](../tools/wp826.mjs) and
-[`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md).
+reference at [`tools/wp826.mjs`](../../../tools/wp826.mjs) and
+[`tools/wp826-pcodes.md`](../../../tools/wp826-pcodes.md).
 
 ---
 

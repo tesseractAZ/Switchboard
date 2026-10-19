@@ -19,15 +19,15 @@ Dial these from any room phone. All are configurable (`*_ext`) and can be disabl
 
 | Dial | Feature | Section |
 |-----:|---------|---------|
-| `0`   | **Operator** — say a room, an extension, or any feature ("lights", "wake me up", "what time is it", "weather", "directory", "announce", "page") | [§4](#4-the-voice-operator--directory-assistance) |
-| `41`  | **Talking clock** | [§5](#5-wake-up-calls--the-talking-clock) |
-| `42`  | **Wake-up call** — set or cancel by speaking the time | [§5](#5-wake-up-calls--the-talking-clock) |
-| `43`  | **Home-automation voice menu** — control your lights | [§4](#4-the-voice-operator--directory-assistance) |
-| `44`  | **Page all** — house-wide intercom | [§6](#6-paging--announcements) |
-| `45`  | **Dial-a-status** — hear live Home Assistant readings | [§4](#4-the-voice-operator--directory-assistance) |
-| `46`  | **Announce** — speak a message out your Home Assistant speakers | [§6](#6-paging--announcements) |
-| `47`  | **Local voice assistant** — ask Home Assistant anything (*off by default*) | [§4](#4-the-voice-operator--directory-assistance) |
-| `411` | **Directory assistance** | [§4](#4-the-voice-operator--directory-assistance) |
+| `0`   | **Operator** — say a room, an extension, or any feature ("lights", "wake me up", "what time is it", "weather", "directory", "announce", "page") | [Operator](voice-operator.md#operator--dial-0) |
+| `41`  | **Talking clock** | [Talking clock](wake-ups-and-clock.md#talking-clock--dial-41) |
+| `42`  | **Wake-up call** — set or cancel by speaking the time | [Wake-up calls](wake-ups-and-clock.md#wake-up-calls--dial-42) |
+| `43`  | **Home-automation voice menu** — control your lights | [Home-automation voice menu](voice-operator.md#home-automation-voice-menu--dial-43-or-say-lights-to-the-operator) |
+| `44`  | **Page all** — house-wide intercom | [Page all](paging-and-announcements.md#page-all--dial-44) |
+| `45`  | **Dial-a-status** — hear live Home Assistant readings | [Dial-a-status](voice-operator.md#dial-a-status--dial-45) |
+| `46`  | **Announce** — speak a message out your Home Assistant speakers | [Announcements](paging-and-announcements.md#announcements--dial-46-phone--home-assistant-speakers) |
+| `47`  | **Local voice assistant** — ask Home Assistant anything (*off by default*) | [Local voice assistant](voice-operator.md#local-voice-assistant--dial-47) |
+| `411` | **Directory assistance** | [Directory assistance](voice-operator.md#directory-assistance--dial-411) |
 
 A feature's dial code is skipped (with a log line) if it collides with a room
 extension or another code, but the underlying feature usually still works via

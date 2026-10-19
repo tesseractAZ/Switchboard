@@ -85,8 +85,9 @@ over SSH, with a password, on port 2300:
   and the first two digits of an 11-digit number. The talking clock `41` is also
   the start of directory assistance `411`, a clash between feature codes that
   applies with or without direct dial
-  ([DOCS §7.4](switchboard/DOCS.md#74-dial-plan--the-send-delay)). All behind
-  layered toll-fraud protection. Off by default; room-to-room needs no trunk.
+  ([dial plan & the send delay](switchboard/docs/reference/gxw4216-gateway.md#74-dial-plan--the-send-delay)).
+  All behind layered toll-fraud protection. Off by default; room-to-room needs no
+  trunk.
 - **A live dashboard** in the Home Assistant sidebar (Ingress): every phone's
   registration and call state, the trunk's registration and the speech engine's
   health, per-phone latency, one-click test-ring, patch-two-rooms, hang-up,
@@ -109,7 +110,7 @@ element and the two-wire loop top out around 300–3400 Hz, so wrapping it in G.
 Opus buys nothing the transducer can reproduce. Pinning one codec everywhere means
 **no call ever transcodes** — lowest latency, and dial tone, ringback, and fax/modem
 tones pass through cleanly. See
-[DOCS §13](switchboard/DOCS.md#13-codecs--g711-µ-law-only-on-purpose).
+[Codecs — G.711 µ-law only, on purpose](switchboard/docs/reference/codecs.md).
 
 ---
 
@@ -139,17 +140,18 @@ tones pass through cleanly. See
 3. **Start** the add-on. The **Log** tab shows `switchboard-config` rendering the
    configuration, then Asterisk starting.
 4. **Provision the gateway**
-   ([DOCS §7](switchboard/DOCS.md#7-grandstream-gxw4216-v2-provisioning)) so each FXS
-   port registers — SIP server = your Home Assistant IP, transport UDP, and per port
-   the User ID / Auth ID = the extension and the password = that room's `secret`.
+   ([Grandstream GXW4216 V2 provisioning](switchboard/docs/reference/gxw4216-gateway.md))
+   so each FXS port registers — SIP server = your Home Assistant IP, transport UDP,
+   and per port the User ID / Auth ID = the extension and the password = that
+   room's `secret`.
 5. Open the **Switchboard** panel in the sidebar; each room flips to **Registered**
    as its port comes online. Pick up a phone and dial another room. Done.
 
 Changing options and restarting the add-on regenerates the entire Asterisk
 configuration — **the add-on options, plus the optional
-[options overlay](switchboard/DOCS.md#the-options-overlay-advanced) file, are the
-single source of truth**; hand edits to `/etc/asterisk/*.conf` are overwritten on
-every start.
+[options overlay](switchboard/docs/reference/configuration.md#the-options-overlay-advanced)
+file, are the single source of truth**; hand edits to `/etc/asterisk/*.conf` are
+overwritten on every start.
 
 ## Feature codes at a glance
 
@@ -213,10 +215,13 @@ WP826 WiFi cordless ──────WiFi────────────�
 
 ## Documentation
 
-- **[Complete system reference](switchboard/DOCS.md)** — installation, every
-  configuration option, the voice features, gateway and cordless provisioning, the
-  SIP trunk and direct dial, the operator console, health monitoring and sensors,
-  codecs, troubleshooting, and reproducing the system on new hardware.
+- **[Operator guide](switchboard/DOCS.md)** — the short guide the add-on's
+  Documentation tab in Home Assistant shows.
+- **[Complete system reference](switchboard/docs/reference/README.md)** —
+  installation, every configuration option, the voice features, gateway and
+  cordless provisioning, the SIP trunk and direct dial, the operator console,
+  health monitoring and sensors, codecs, troubleshooting, and reproducing the
+  system on new hardware.
 - **[Security](switchboard/SECURITY.md)** — the security model, toll-fraud defenses,
   the accepted LAN-local risks, what you must configure, and how to report an issue.
 - **[Changelog](switchboard/CHANGELOG.md)** — recent releases; earlier ones are in the [changelog archive](switchboard/CHANGELOG-ARCHIVE.md).
@@ -225,15 +230,15 @@ WP826 WiFi cordless ──────WiFi────────────�
   wake-up and announcement delivery, the voice assistant, whether anything is
   transcoded, which alarms have ever actually fired, and test coverage.
 - **Printable manual** — a [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
-  carries the README + Security + reference assembled into a **Word (`.docx`)**
-  and **PDF** you can read offline. (Releases v0.69.0 through v0.80.0 shipped
+  carries the README, the operator guide, the reference and the security model
+  assembled into a **Word (`.docx`)** and **PDF** you can read offline. (Releases v0.69.0 through v0.80.0 shipped
   without one — the build waited on an event a bot-created release does not
   emit. Repaired in v0.81.0; every release since carries both files.)
 
 Every version from v0.43.0 on is tagged and released, so `git checkout vX.Y.Z`
 reproduces the exact source that built it. One older version, **v0.42.1**, was
 never tagged: tagging was manual until v0.46.1 and that one was missed. See
-[DOCS §16, *Reproducing on new hardware*](switchboard/DOCS.md#16-reproducing-on-new-hardware).
+[*Reproducing on new hardware*](switchboard/docs/reference/reproducing.md).
 
 ## Security in one paragraph
 

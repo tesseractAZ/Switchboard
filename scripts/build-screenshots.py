@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate the documentation screenshots in switchboard/docs/img/.
 
-The screenshots in README.md and switchboard/DOCS.md are rendered from the REAL
-user interfaces so they can never drift into fiction:
+The screenshots in README.md and the reference pages (switchboard/docs/reference/)
+are rendered from the REAL user interfaces so they can never drift into fiction:
 
     dashboard.png  the Ingress dashboard — webui/app.py's INDEX_HTML, served with
                    a stubbed /api/status so it paints without a live PBX

@@ -100,7 +100,7 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   in-memory window decides only when it cannot. The window alone knew one thing,
   that this web UI had sent the same audio, and that was wrong in both
   directions. Past it, the same words reached a room twice: the first copy was
-  an automatic replay (§6, which runs in another process), went out while
+  an automatic replay (the retry below, which runs in another process), went out while
   Asterisk could not report the handset's state (the window is deliberately not
   started then), or played before a restart. Inside it, the window said
   "duplicate" even after the room had since been asked for something else, or
@@ -173,7 +173,7 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   two cases were written as `originate-error` and `originate-refused`, the same
   two names the wake-up call uses for its own failures and with no clip on
   either, so an announce failure could not be joined to the announcement it
-  belonged to. (The wake-up rows are unchanged; §5 still lists them.)
+  belonged to. (The wake-up rows are unchanged; [Wake-up calls](wake-ups-and-clock.md#wake-up-calls--dial-42) still lists them.)
 - **...and when the pre-flight check could not answer.** Before placing the call
   the add-on asks Asterisk whether the handset is registered, and if the answer
   is "no contact" the call is skipped and recorded `unreachable`. If that
@@ -237,7 +237,7 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   is why an add-on restart does not produce a burst of false failures.
 
   An announcement **cut off partway through still counts as arrived**, with the
-  stage and packet count on the record. It did not meet its contract — §11 scores
+  stage and packet count on the record. It did not meet its contract — [per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts) scores
   it `undelivered` as it always has — but it did reach the phone, and filing it
   beside one that rang out unanswered would erase the distinction this exists for.
 
@@ -278,7 +278,7 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   not what you want in your house.
 
   **An announcement whose audio played is never replayed.** The confirming record
-  carries the name of the clip (§6 above), and a clip that has one is excluded
+  carries the name of the clip (above), and a clip that has one is excluded
   permanently, at any age, whichever order the records arrive in.
 
   Bounded at `announce_retry_attempts` attempts (default **two**, at most three),

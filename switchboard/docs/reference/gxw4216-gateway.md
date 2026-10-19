@@ -16,7 +16,7 @@ configured through its own web UI (this add-on does not push config to it).
 
 - **Preferred Vocoder**: **PCMU (G.711 µ-law)**. Switchboard only offers µ-law, so
   PCMU must be in the gateway's list; anything else it advertises is simply never
-  selected ([§13](#13-codecs--g711-µ-law-only-on-purpose)).
+  selected ([Codecs](codecs.md)).
 - **Disable** silence suppression / VAD for the cleanest analog audio and to keep
   antique sets' tones intact.
 
@@ -60,7 +60,7 @@ CONFIG> commit                # persist
 CONFIG> exit
 ```
 
-Useful P-codes (Profile 1 is shared by every FXS port assigned to it in §7.2; type
+Useful P-codes (Profile 1 is shared by every FXS port assigned to it in [§7.2](#72-configure-each-fxs-port); type
 them at the shell without the `P`):
 
 | P-code | Setting | Reference value |
@@ -69,17 +69,17 @@ them at the shell without the `P`):
 | `P37` | **Voice Frames per TX** (G.711 ptime = value × 10 ms) | `2` (20 ms) |
 | `P57` | Codec preference | µ-law first |
 | `P72` | Use `#` as dial key | `1` (enabled) |
-| `P81` | **Unregister On Reboot** (Profile 1) | `1` — a gateway restart then leaves `Removed contact … due to request` in `/data/state/asterisk.log` (and in the Log tab at `info`, `debug` or `trace`); see §14 |
-| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see §7.4 |
+| `P81` | **Unregister On Reboot** (Profile 1) | `1` — a gateway restart then leaves `Removed contact … due to request` in `/data/state/asterisk.log` (and in the Log tab at `info`, `debug` or `trace`); see [Troubleshooting](troubleshooting.md) |
+| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see [§7.4](#74-dial-plan--the-send-delay) |
 | `P4200`–`P4203` | **Dial Plan** (per profile; the FXS ports use Profile 1 = `P4200`) | see below |
-| `P21929` | **Automatic Reboot** (global; `0` off, `1` daily, `2` weekly, `3` monthly) | `2` (weekly). Optional: every wired phone drops for about a minute at each scheduled reboot; see §14 |
+| `P21929` | **Automatic Reboot** (global; `0` off, `1` daily, `2` weekly, `3` monthly) | `2` (weekly). Optional: every wired phone drops for about a minute at each scheduled reboot; see [Troubleshooting](troubleshooting.md) |
 | `P21930` | Automatic Reboot hour | `1` (01:00) |
 | `P21931` | Automatic Reboot day of the week (weekly schedule) | `1` (Monday) |
 | `P28118` | Automatic Reboot day of the month (monthly schedule) | not used with a weekly schedule |
 
 ## 7.4 Dial plan & the send delay
 
-A dial plan that supports **prefix-free direct dial** (`direct_dial: true`, §9) —
+A dial plan that supports **prefix-free direct dial** (`direct_dial: true`, see [Adding an outside line (SIP trunk)](sip-trunk.md)) —
 2-digit rooms, feature codes, and `1` + 10-digit outside numbers — for the
 reference home's `11`–`20` extensions:
 
@@ -125,6 +125,6 @@ themselves, not from direct dial.
 ## 7.5 Verify
 
 On the **Switchboard** panel, each provisioned room shows **Registered** within
-~30 s. If not, see [§14](#14-troubleshooting).
+~30 s. If not, see [Troubleshooting](troubleshooting.md).
 
 ---

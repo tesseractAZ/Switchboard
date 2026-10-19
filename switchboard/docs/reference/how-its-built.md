@@ -19,9 +19,9 @@
   health pollers, and the Home Assistant broker: since 0.110.0 the programs that
   run as the `asterisk` user hold no Home Assistant token and reach Home
   Assistant only through it
-  ([SECURITY.md](SECURITY.md#4-home-assistant-access)). Each optional service
+  ([SECURITY.md](../../SECURITY.md#4-home-assistant-access)). Each optional service
   idles when its feature is turned off (except the link-health poller, which
-  keeps scrubbing the readable log; §11), so `wakeup_enabled: false` also stops
+  keeps scrubbing the readable log; see [Link health](health-monitoring.md#link-health-link_health_)), so `wakeup_enabled: false` also stops
   announcement verdicts and retries. The web UI reads the same switch: with
   wake-up calls off it treats the retry as off and never holds an identical
   repeat back for a replay that cannot run.
@@ -34,7 +34,7 @@
   Asterisk runs as the unprivileged `asterisk` user with no capabilities. Since
   0.109.0 it also write-locks the Asterisk configuration, Asterisk's spool and the
   s6 init trees, and the config generator runs under a child profile of its own
-  ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)).
+  ([SECURITY.md](../../SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)).
   Architectures: `amd64`, `aarch64`.
 
 ---

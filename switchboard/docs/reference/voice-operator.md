@@ -12,15 +12,15 @@ Say what you want:
 
 - **A room name** ("Kitchen", "the study") or a **spoken extension** ("one four")
   — you're connected to that room. Add aliases with `operator_synonyms`.
-- **"Wake me up"** — jumps to the wake-up flow ([§5](#5-wake-up-calls--the-talking-clock)).
+- **"Wake me up"** — jumps to the wake-up flow ([Wake-up calls](wake-ups-and-clock.md#wake-up-calls--dial-42)).
 - **"Lights"** / **"automation"** — jumps to the home-automation menu (below).
-- **"What time is it"** — jumps to the talking clock ([§5](#5-wake-up-calls--the-talking-clock)).
+- **"What time is it"** — jumps to the talking clock ([Talking clock](wake-ups-and-clock.md#talking-clock--dial-41)).
 - **"Weather"** / **"power"** / **"battery"** / **"house status"** — jumps to
   dial-a-status (below).
 - **"Directory"** / **"who's here"** / **"list the rooms"** — jumps to directory
   assistance (below).
-- **"Announce"** / **"over the speakers"** — jumps to announce ([§6](#6-paging--announcements)).
-- **"Page everyone"** / **"intercom"** / **"all call"** — jumps to page-all ([§6](#6-paging--announcements)).
+- **"Announce"** / **"over the speakers"** — jumps to announce ([Announcements](paging-and-announcements.md#announcements--dial-46-phone--home-assistant-speakers)).
+- **"Page everyone"** / **"intercom"** / **"all call"** — jumps to page-all ([Page all](paging-and-announcements.md#page-all--dial-44)).
 
 A **confident** room match wins over a feature word — an exact name, a configured
 synonym, a full-word hit, or a recognizer-clipped prefix (all score ≥ 0.9) — so a
@@ -102,7 +102,7 @@ open indefinitely.
 **Off by default.** Set `assistant_enabled: true` to switch it on.
 
 Dial `47`, say a command or a question in plain language, and hear the answer.
-Unlike the home-automation menu (§4, dial `43`) there is no guided room →
+Unlike the [home-automation menu](#home-automation-voice-menu--dial-43-or-say-lights-to-the-operator) (dial `43`) there is no guided room →
 light → action script: you say the whole thing at once, and anything Home
 Assistant's own voice assistant understands works here too.
 
@@ -196,7 +196,7 @@ pressed a key). Those three used to be one event, which made an abandoned call
 and a silent one impossible to tell apart.
 
 `call` is Asterisk's unique id for the leg, so a row here lines up with the
-matching row in the call-quality ledger (§11) for the same call — "it gave a
+matching row in the call-quality ledger ([Per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts)) for the same call — "it gave a
 wrong answer" and "the audio was bad" become one question rather than two.
 
 **Who can reach it.** Anyone who can pick up a house phone: family, guests, a
@@ -205,7 +205,7 @@ caller. Two independent mechanisms stop that: the inbound trunk `Dial` uses
 `r` only (never `t`/`T`), so no in-call DTMF transfer is ever armed for the
 outside party; and even if one were, transfers are confined by
 `__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
-and `0` — no feature codes at all. See [§9](#9-adding-an-outside-line-sip-trunk).
+and `0` — no feature codes at all. See [Toll-fraud protection](sip-trunk.md#toll-fraud-protection).
 
 **What it can act on.** Only entities exposed to Assist
 (*Settings → Voice assistants → Expose*). Exposing an entity makes it reachable

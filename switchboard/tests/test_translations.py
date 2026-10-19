@@ -195,8 +195,10 @@ def test_every_outcome_name_the_code_writes_is_in_the_manual() -> None:
     """
     import re
     from pathlib import Path
+    from _manual import manual_text
     root = Path(__file__).resolve().parents[1]
-    docs = (root / "DOCS.md").read_text()
+    # DOCS.md and every reference page: the outcome lists live in the reference.
+    docs = manual_text()
     written = set()
     for rel in ("rootfs/usr/share/switchboard/wakeup/scheduler.py",
                 "rootfs/usr/share/switchboard/webui/app.py",
@@ -251,8 +253,11 @@ def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
     """
     import re
     from pathlib import Path
+    from _manual import manual_pages
     root = Path(__file__).resolve().parents[1]
-    docs = (root / "DOCS.md").read_text()
+    # DOCS.md and every reference page, one by one so a region never runs from
+    # the end of one page into the next.
+    pages = [p.read_text(encoding="utf-8") for p in manual_pages()]
     code = "".join((root / p).read_text() for p in (
         "rootfs/usr/share/switchboard/wakeup/scheduler.py",
         "rootfs/usr/share/switchboard/webui/app.py",
@@ -265,9 +270,14 @@ def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
         "rootfs/var/lib/asterisk/agi-bin/switchboard-assistant.agi",
     ))
 
-    def region(anchor, span=1400):
-        i = docs.index(anchor)
-        return docs[i:i + span]
+    def regions(anchor, span=1400):
+        """Every place the manual says `anchor` — the guide may repeat a
+        paragraph the reference has, and each copy is a claim. At least one
+        must exist, or the scan below would check nothing."""
+        found = [page[i:None if span is None else i + span] for page in pages
+                 for i in (m.start() for m in re.finditer(re.escape(anchor), page))]
+        check(f"outcomes: the manual still says {anchor!r}", bool(found))
+        return found
 
     # The two places the manual enumerates outcome names: the wake-up ledger
     # paragraph and the announce one. Every hyphenated identifier in them is a
@@ -275,20 +285,21 @@ def test_every_outcome_name_the_manual_cites_exists_in_code() -> None:
     cited = set()
     for anchor in ("Every step above is recorded in",
                    "**Every outcome is recorded**",
-                   # ...and the §5 narrative, which names outcomes in prose. A
-                   # mutation that renamed one HERE survived a version of this
+                   # ...and the wake-up narrative, which names outcomes in prose.
+                   # A mutation that renamed one HERE survived a version of this
                    # test that scanned only the ledger paragraphs, because the
                    # same name appears twice and only one copy was covered.
                    "1. The phone rings for `wakeup_ring_seconds`"):
-        cited |= set(re.findall(r"`([a-z]+(?:-[a-z]+)+)`", region(anchor)))
+        for text in regions(anchor):
+            cited |= set(re.findall(r"`([a-z]+(?:-[a-z]+)+)`", text))
     # ...plus the assistant outcome table, whose first column is the same kind
     # of claim.
-    tbl = docs[docs.index("| `outcome` | What happened |"):]
-    tbl = tbl[:tbl.index("\n\n")]
-    # ...from AFTER the separator row, so the header cell `outcome` is not
-    # mistaken for one of the values the column lists.
-    tbl = tbl[tbl.index("| --- | --- |"):]
-    cited |= set(re.findall(r"^\| `([a-z]+(?:-[a-z]+)*)` \|", tbl, re.M))
+    for tbl in regions("| `outcome` | What happened |", span=None):
+        tbl = tbl.split("\n\n", 1)[0]                # the table ends at a blank line or the page's end
+        # ...from AFTER the separator row, so the header cell `outcome` is not
+        # mistaken for one of the values the column lists.
+        tbl = tbl[tbl.index("| --- | --- |"):]
+        cited |= set(re.findall(r"^\| `([a-z]+(?:-[a-z]+)*)` \|", tbl, re.M))
 
     # Filenames and paths are not outcomes.
     cited = {c for c in cited if not c.endswith(".jsonl") and "/" not in c}
