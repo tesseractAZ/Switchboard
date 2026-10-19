@@ -78,7 +78,22 @@
     justify-content: center;
     border-bottom: 1px solid var(--brass-dim);
     box-sizing: content-box;
+    position: relative;
   }
+  /* The way back to the dashboard. Shown only when this page is the dashboard's
+     own console (served under .../console/); the standalone terminal on its own
+     port has no dashboard behind it. Positioned off the flow so the nameplate
+     stays centred. */
+  .back {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    font-family: "Cutive Mono", "Courier Prime", ui-monospace, monospace;
+    font-size: .8rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--brass); text-decoration: none;
+    border: 1px solid var(--brass-dim); border-radius: 2px; padding: 4px 10px;
+  }
+  .back:hover { color: var(--lamp); border-color: var(--brass); }
+  .back[hidden] { display: none; }
+  @media (max-width: 560px) { .back .back-label { display: none; } }
   .plate {
     display: inline-flex;
     align-items: baseline;
@@ -176,6 +191,7 @@
 </head>
 <body>
   <header class="band">
+    <a class="back" id="back" href="../" hidden title="Back to the dashboard">&larr;<span class="back-label"> Dashboard</span></a>
     <h1 class="plate"><span class="plate-name">Switchboard</span><span class="plate-sub">Operator console</span></h1>
   </header>
   <div id="term"></div>
@@ -184,6 +200,11 @@
   <script>
   (function () {
     "use strict";
+
+    // Under the dashboard (Ingress) this page is .../console/; "../" is the
+    // dashboard. The standalone terminal serves it at "/", with nothing behind.
+    var back = document.getElementById("back");
+    if (back && /\/console\/$/.test(location.pathname)) { back.hidden = false; }
 
     var statusEl = document.getElementById("status");
     // Reconnect delay, grown on each failed attempt and reset on a real

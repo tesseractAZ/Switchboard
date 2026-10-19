@@ -521,6 +521,14 @@ def test_the_terminal_wears_the_tokens_and_fits_after_its_font():
     # The element ids the script hooks are unchanged.
     assert 'id="term"' in html and 'id="status"' in html
 
+def test_the_dashboard_console_has_a_way_back() -> None:
+    """The dashboard's Console button replaced the page with the terminal and
+    nothing led back. A link to "../" is shown only under .../console/ (the
+    dashboard's own console); the standalone terminal at "/" has no dashboard."""
+    page = (Path(__file__).resolve().parents[1] / "rootfs/usr/share/switchboard/console-web/static/index.html").read_text()
+    assert '<a class="back" id="back" href="../" hidden' in page
+    assert "/\\/console\\/$/.test(location.pathname)" in page and "back.hidden = false" in page
+
 
 if __name__ == "__main__":
     import _runner

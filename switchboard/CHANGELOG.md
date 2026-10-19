@@ -1,7 +1,16 @@
 # Changelog
 
-Recent releases. Releases up to 0.108.2 are in the
+Recent releases. Releases up to 0.108.3 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.114.2
+
+**A way back from the console to the dashboard.**
+
+- The dashboard's Console button replaced the page with the terminal, and nothing
+  on the terminal led back. Its nameplate now carries a "← Dashboard" link when it
+  is the dashboard's own console; the standalone terminal on its own port, which
+  has no dashboard behind it, does not show one.
 
 ## 0.114.1
 
@@ -334,35 +343,3 @@ second wave locks the Asterisk configuration, its spool and the s6 init trees.**
   - Message-waiting ran as the `asterisk` user, and the backup hooks, restarts,
     an options change and a stop/start all passed.
   - The audit journal held only the six deliberate write probes.
-
-## 0.108.3
-
-**Documentation audit.** No change to how the add-on runs.
-
-- **The Asterisk Manager account is described accurately.** The README, the
-  manual and SECURITY.md said the account has no shell-command privilege.
-  - It withholds the CLI `command` class, but it holds `system`, which the
-    trunk re-register needs.
-  - With `system`, Asterisk lets an `Originate` run the `System` application,
-    so whoever holds the secret can run a command as the `asterisk` user.
-  - That is no more than Asterisk's own dialplan can already do, and the secret
-    is readable only by root and the `asterisk` group.
-- **SECURITY.md describes the CI supply chain:**
-  - actions are pinned by commit SHA;
-  - weekly grouped Dependabot version updates keep the pins current;
-  - the auto-merge rules: CI passed on the exact commit, Dependabot's own pull
-    request, workflow files only, no major-version change.
-- **Missed wake-ups are described as they behave since 0.108.2.**
-  - The ledger closes with a `missed` row.
-  - A wake-up still rings if Switchboard is back within the 10-minute grace
-    window.
-  - The notification is retried until Home Assistant accepts it.
-  - The README's wake-up summary covers misses too.
-- **The gateway P-code table lists the Automatic Reboot codes**, including
-  `P21931`, the day of the week a weekly schedule uses. The troubleshooting row
-  explains a scheduled weekly reboot.
-- **The README's install steps use Home Assistant's current menu names**
-  (Settings → Apps → Install app), with the older add-on path for reference.
-- **Smaller corrections:** a stale section reference; PERFORMANCE.md's test
-  count (980); the cordless firmware note in the WP826 tool notes; a CI comment
-  that renaming the CI workflow would switch off the Dependabot auto-merge.
