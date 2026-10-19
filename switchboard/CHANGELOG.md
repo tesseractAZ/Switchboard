@@ -1,7 +1,20 @@
 # Changelog
 
-Recent releases. Releases up to 0.108.3 are in the
+Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.115.0
+
+**Documentation opens quickly in Home Assistant.** No change to how the add-on runs.
+
+- Home Assistant renders the add-on's `DOCS.md` whole each time Documentation is
+  opened, and it had grown to 137 KB. It is now a short operator guide (about
+  25 KB): what to dial, everyday tasks, the options most often changed and the
+  most common fixes, each linking to its full reference page.
+- The full reference moved, unchanged in substance, to `docs/reference/` (sixteen
+  pages and an index). README and SECURITY links point there, the Word and PDF
+  manual is built from the guide plus every reference page, and tests keep the
+  guide under 32 KiB and fail on any dead link or anchor.
 
 ## 0.114.2
 
@@ -280,66 +293,3 @@ review of the dial plan closed seven gaps.**
 - `tests/test_workflow_runners.py` pins every job's runner, including CodeQL's.
   SECURITY.md's CI supply-chain section describes the rule.
 - This release's images are the first built on the new runners.
-
-## 0.109.0
-
-**The Asterisk Manager is split into two accounts, and the AppArmor profile's
-second wave locks the Asterisk configuration, its spool and the s6 init trees.**
-
-- **No Manager account can run a program.**
-  - The single account held `originate` and `system`. With `system`, Asterisk lets
-    an `Originate` run `System`, `Exec` or `AGI` and lets `Getvar` read `SHELL()`,
-    so one secret could both place calls and run programs.
-  - `switchboard-call` (`originate`, `call`) places, ends and transfers calls and
-    reads device state and codecs. Asterisk refuses it `System`, `Exec`, `AGI`,
-    `SHELL()` and `EVAL()`. Its credentials file is readable by root only.
-  - `switchboard-status` (`system`) reads endpoints, contacts, channels and the
-    trunk registration, re-registers the trunk and sets message-waiting. It
-    cannot originate or run `Getvar`. Its credentials file is also readable by
-    the `asterisk` group, for the message-waiting helper the dial plan runs.
-  - Both secrets are also in `manager.conf`, which Asterisk must read, and
-    `system` lets the status account read Asterisk's configuration. SECURITY.md
-    lists what the split does and does not separate.
-  - The dialplan functions that read configuration and the environment
-    (`func_env`, `func_config`, `func_sorcery`) are no longer loaded. Nothing
-    used them, and they let a call-class `Getvar` read configuration values.
-  - Neither account holds `command` or `config`, and neither subscribes to
-    events. Each account's access list now denies every address before it
-    permits loopback; a lone `permit` was a no-op.
-  - The secrets live in `/run/switchboard/ami-call.env` and `ami-status.env`, read
-    on first use. The services no longer export a shared secret, and the old
-    `ami.env` is removed at boot.
-  - An action refused for want of a class is reported as an error, not as an
-    empty board. Hang up and transfer accept only a real channel name, so
-    Asterisk's `/regex/` form, leading blanks included, is refused.
-- **The Asterisk configuration has one writer.**
-  - `/etc/asterisk`, `/etc/localtime` and `/etc/timezone` are write-locked for every
-    process, root included.
-  - The configuration generator runs at boot under a nested child profile,
-    `<slug>//switchboard_config`. The child lists exactly the files it writes and
-    four capabilities, and it runs no program.
-  - Only a root process that runs the generator by its path enters the child.
-  - `/etc/asterisk` is now root-owned (group `asterisk`, read-only) in the image.
-    The package had given it to the `asterisk` user, so Asterisk could rewrite
-    its own dial plan.
-  - The generator runs Python with `-I`, so environment variables cannot load
-    other code into it.
-- **Asterisk's spool and the s6 init trees are write-locked:**
-  - `/var/spool/asterisk`;
-  - `/command` and `/package`;
-  - `/etc/s6-overlay` and s6's legacy `/etc` directories.
-
-  The call-file loader `pbx_spool` is no longer loaded: nothing uses call files,
-  and a dropped file could have placed a call.
-- **The boot step no longer follows links in `/data/state`.** That directory is
-  writable by the `asterisk` user. The root step that creates the shared stores,
-  repairs their modes and owners and trims the durable log now acts only
-  through a no-follow descriptor on a regular file. Before, a link planted there
-  could redirect a root `chmod`, `chown` or truncation to any file.
-- **Verified on the host's own AppArmor parser** with an isolated copy of the
-  add-on.
-  - Both accounts were probed action by action; every web-app Manager call and
-    each feature code ran.
-  - Message-waiting ran as the `asterisk` user, and the backup hooks, restarts,
-    an options change and a stop/start all passed.
-  - The audit journal held only the six deliberate write probes.
