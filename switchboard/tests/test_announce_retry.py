@@ -1170,10 +1170,12 @@ def test_the_ring_out_shape_reaches_both_attempts(tmp_path):
     # three rings for one message on the FXS phones, which have no auto-answer.
     # The manual motivated the feature entirely with the restart incident, which a
     # reader would fairly take as its only trigger.
-    docs = (ROOT / "DOCS.md").read_text()
+    from _manual import manual_text
+    docs = manual_text()
     assert "announcement nobody answers is retried too" in docs, (
-        "DOCS.md does not tell the owner that an UNANSWERED announcement is "
-        "replayed as well — the behaviour they will actually notice")
+        "the manual (DOCS.md and docs/reference/) does not tell the owner that an "
+        "UNANSWERED announcement is replayed as well — the behaviour they will "
+        "actually notice")
 
 
 def test_the_second_attempt_would_be_unreachable_at_the_settling_window(tmp_path):
@@ -1341,10 +1343,12 @@ def test_the_off_switch_actually_reaches_the_scheduler():
     assert cfg["schema"]["announce_retry_attempts"] == "int(0,3)?"
     # ...and anything ANNOUNCE_RETRY_* the manual tells the owner to set must be
     # bridged by that same script. The manual used to promise all four.
-    docs = (ROOT / "DOCS.md").read_text()
+    # DOCS.md and every reference page: a knob named anywhere in the manual.
+    from _manual import manual_text
+    docs = manual_text()
     for name in sorted(set(re.findall(r"ANNOUNCE_RETRY_[A-Z_]+", docs))):
         assert f"export {name}=" in run, (
-            f"DOCS.md tells the reader about {name}, which no run script exports")
+            f"the manual tells the reader about {name}, which no run script exports")
 
 
 # --------------------------------------------------------------------------- #

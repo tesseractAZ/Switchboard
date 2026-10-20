@@ -1,1977 +1,358 @@
-# Switchboard — complete system reference
+# Switchboard — operator guide
 
 A self-hosted **Asterisk 20 + PJSIP** phone system for the analog phones in your
 home, packaged as a Home Assistant add-on. Each FXS port on a **Grandstream
 GXW4216 V2** gateway becomes a room extension; every phone can call every other
-phone, reach a set of on-box voice features, and — optionally — an outside line
-over a SIP trunk. Audio is **G.711 µ-law end to end** — no transcoding, no HD/Opus.
+phone, reach a set of voice features that run on the box, and, optionally, an
+outside line over a SIP trunk. Audio is **G.711 µ-law end to end**.
 
-This document is the complete reference. For the security model and the accepted
-LAN-local risks, see **[SECURITY.md](SECURITY.md)**.
+This page is the short guide for everyday use. Everything in detail, every
+option and every log line, is in the
+**[full reference](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/README.md)**.
+The security model is in
+**[SECURITY.md](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/SECURITY.md)**.
+
+> **These phones cannot reach emergency services.** Dialling `911` (or `933`,
+> the test number) from any house phone plays a spoken notice saying so. Keep a
+> mobile phone for emergencies.
 
 **Contents**
 
 1. [Quick start](#1-quick-start)
-2. [Configuration reference](#2-configuration-reference)
-3. [Extensions & feature codes](#3-extensions--feature-codes)
-4. [The voice operator & directory](#4-the-voice-operator--directory-assistance)
-5. [Wake-up calls & the talking clock](#5-wake-up-calls--the-talking-clock)
-6. [Paging & announcements](#6-paging--announcements)
-7. [Grandstream GXW4216 V2 provisioning](#7-grandstream-gxw4216-v2-provisioning)
-8. [The WP826 WiFi cordless](#8-the-wp826-wifi-cordless-optional)
-9. [Adding an outside line (SIP trunk)](#9-adding-an-outside-line-sip-trunk)
-10. [The operator console](#10-the-operator-console-ssh--browser)
-11. [Health monitoring & Home Assistant sensors](#11-health-monitoring--home-assistant-sensors)
-12. [How it's built](#12-how-its-built)
-13. [Codecs — G.711 µ-law only, on purpose](#13-codecs--g711-µ-law-only-on-purpose)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Security](#15-security)
-16. [Reproducing on new hardware](#16-reproducing-on-new-hardware)
+2. [What to dial](#2-what-to-dial)
+3. [Everyday tasks](#3-everyday-tasks)
+4. [Options you are most likely to change](#4-options-you-are-most-likely-to-change)
+5. [Troubleshooting](#5-troubleshooting)
+6. [Reference](#6-reference)
 
 ---
 
 ## 1. Quick start
 
-1. **Install** the add-on (you already did if you're reading this from the add-on's
+1. **Install** the add-on (already done if you are reading this from its
    Documentation tab).
 2. Open the **Configuration** tab and define one entry under `rooms` per phone,
-   each with a unique extension, a friendly name, and a **secret** (the password
-   the Grandstream port will use to register). **Replace the `change-me-…`
-   placeholder secrets.**
-3. **Start** the add-on. Watch the **Log** tab; you should see
-   `switchboard-config` render the configuration (look for
-   `codecs: u-law only (no transcoding)` near the end, closing with
-   `done: N room(s), trunk=…`), then Asterisk start.
-4. **Provision the gateway** ([§7](#7-grandstream-gxw4216-v2-provisioning)) so
-   each FXS port registers.
-5. Open the **Switchboard** panel in the Home Assistant sidebar (Ingress) — each
-   room flips to **Registered** as its port comes online.
+   each with a unique extension (2–6 digits), a friendly name, and a **secret**
+   (the password the gateway port uses to register). **Replace the
+   `change-me-…` placeholder secrets.**
+3. **Start** the add-on and watch the **Log** tab: `switchboard-config` renders
+   the configuration (look for `codecs: u-law only (no transcoding)` near the
+   end, closing with `done: N room(s), trunk=…`), then Asterisk starts.
+4. **Provision the gateway** so each FXS port registers: SIP server = the Home
+   Assistant host's LAN IP, user ID and authenticate ID = the extension,
+   password = the room's `secret`, PCMU (G.711 µ-law) enabled. Step by step:
+   [Grandstream GXW4216 V2 provisioning](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/gxw4216-gateway.md).
+5. Open the **Switchboard** panel in the Home Assistant sidebar. Each room flips
+   to **Registered** as its port comes online.
 6. Pick up a phone and dial another room's extension. Done.
 
-![The Switchboard dashboard in the Home Assistant sidebar](docs/img/dashboard.png)
+The add-on options are the source of truth. Every start regenerates the whole
+Asterisk configuration from them, so editing `/etc/asterisk/*.conf` by hand is
+pointless: each file is overwritten.
 
-The dashboard also carries a **Lights panel**: every Home Assistant light the add-on can see, grouped by area, with on/off toggles — the same control the voice menu on `43` offers, for when you would rather tap than talk.
-
-Changing options and restarting the add-on regenerates the entire Asterisk
-configuration — **the add-on options are the source of truth.** Editing
-`/etc/asterisk/*.conf` by hand is pointless; every file is overwritten on start.
+Full details: [Quick start](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/quick-start.md).
 
 ---
 
-## 2. Configuration reference
+## 2. What to dial
 
-Every option below appears in the **Configuration** tab with a friendly label and
-inline help. Defaults are shown. A value is *optional* unless noted; leaving it at
-its default is fine.
+The feature codes below are the defaults. Each feature has a `*_ext` option to
+move its code and a `*_enabled` option to switch it off; the operator on `0`
+has only `operator.enabled`.
 
-### Core
+| Dial | What it does |
+|-----:|--------------|
+| a room's extension | Rings that room. |
+| `0` | **Operator.** Say a room, an extension, or a feature ("wake me up", "lights", "what time is it", "weather", "directory", "announce", "page everyone"). |
+| `41` | **Talking clock.** |
+| `42` | **Wake-up call.** Set or cancel one by speaking the time. |
+| `43` | **Lights.** A voice menu for your Home Assistant lights. |
+| `44` | **Page all.** A house-wide intercom. |
+| `45` | **Dial-a-status.** Live readings on request: power, weather, house. |
+| `46` | **Announce.** Speak a message out of your Home Assistant speakers. |
+| `47` | **Local voice assistant.** Ask Home Assistant anything. *Off by default* (`assistant_enabled`). |
+| `411` | **Directory assistance.** Say a name, or "list". |
+| `911`, `933` | Not carried. Answered with a spoken notice that emergency calls cannot be made from these phones. |
+| `9` + number | Outside line, only when the trunk is enabled. With `direct_dial` on, dial `1` + the 10-digit number instead, with no prefix. International (`011`) and premium (`1-900`) numbers are blocked. |
+| `##` / `*2` during a call | Blind / attended transfer from an analog phone, to an internal destination only. IP phones use their own Transfer button. |
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — how much of Asterisk reaches the add-on's **Log** tab. Only **three** of the seven behave differently. `info` shows notices, warnings and errors plus Asterisk's verbose trace: the dialplan trace, every dialled and calling number included. `debug` and `trace` are identical to each other: they add Asterisk's debug class, which (the add-on leaves Asterisk's debug level at 0) holds only the messages Asterisk logs at debug unconditionally — each outbound trunk REGISTER attempt among them, naming the trunk's SIP address. `notice`, `warning`, `error` and `critical` are identical too: notices, warnings and errors, **without** the verbose trace — the only other lines are a few of Asterisk's own start-up and shutdown messages, which it prints at any level. Since v0.107.0 those four start Asterisk without `-v`, which is what keeps the trace off the Log tab, and the add-on's own per-call lines (`[rtpqos]`, `Operator dial`) are written at verbosity 1 so they leave with it; before v0.107.0 Asterisk always started with `-vvv` and the trace stayed there at every level. This is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose the trunk, then set it back. The durable `/data/state/asterisk.log` does not follow this setting: it is fixed at `notice,warning,error,verbose(3)` and holds the same content at every level — endpoint reachability (`Endpoint <n> is now Unreachable`, verbosity 2), the `Contact <n>/… is now Unreachable` and `Added`/`Removed contact` lines (verbosity 3), and the whole dialplan trace, numbers included (see SECURITY.md). The `(3)` filters nothing; it keeps Asterisk producing verbosity-3 lines when the console runs without `-v`. The file is private to the add-on, though included in its backups, and trimmed at boot, before Asterisk opens it, keeping the newest half whenever it has grown past 8 MB. The Log tab keeps about two days across a host reboot and is readable by Home Assistant administrators. Since v0.107.0 every line in Asterisk's two log files, and every notice, warning and error in the Log tab, is stamped with the full date, milliseconds and UTC offset — `[2026-10-01 01:00:17.289 -0700]`. |
-| `rtp_start` | `10000` | First UDP port for live call audio (RTP). Must be below `rtp_end`. |
-| `rtp_end` | `10200` | Last RTP port. The default 200-port window is far more than a home needs (~2 ports per call). |
+**Choosing extensions.** An extension is any 2–6 digit number, unique per phone.
+Keep `0` for the operator, keep clear of the feature codes, and, with a trunk in
+prefix mode, of extensions that start with its prefix digit. The shipped
+placeholder rooms use `101` and `102`; the `gateway_ports` default
+(`11`–`18`) and `cordless_ext` default (`19`) assume wired ports on `11`–`18` and
+the cordless on `19`, so set those two options to match your own scheme. A
+feature code that collides with a room or another code is skipped at start, with
+a log line.
 
-### Rooms (the phones)
+**`41` pauses before it connects.** Because `411` starts with the same two
+digits, the gateway waits out its no-key-entry timeout before sending `41`.
+Pressing `#` sends it at once when the gateway's `#` dial key is enabled.
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `rooms` | 2 placeholders | A list; one entry per handset. Each has `ext` (2–6 digits, unique), `name` (shown in the directory/operator/dashboard), and `secret` (the SIP password — **change it from the default**). The shipped defaults are `101 Kitchen` / `102 Living Room` with `change-me-…` secrets. An entry is skipped at start, with a log line, when its `ext` is all zeros or repeats an earlier entry, or when its `secret` is empty, contains `;` or control characters, or has leading/trailing whitespace (Asterisk would truncate it). A skipped room does not register. |
+Full details: [Extensions & feature codes](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/extensions.md)
+· [dial plan & send delay](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/gxw4216-gateway.md#74-dial-plan--the-send-delay).
 
-### Voice operator & speech
+---
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `operator.enabled` | `true` | The voice operator on dial `0`. |
-| `operator_synonyms` | `[]` | Extra spoken aliases mapped to a room, for accents/nicknames. Each entry has `ext` and `phrases` (e.g. "lounge" → the Living Room). |
-| `stt_resident` | `true` | Keep the speech-to-text model resident in RAM for instant response. Turn off on a very memory-constrained host; recognition then loads the model on demand per call. |
+## 3. Everyday tasks
 
-### Call-quality & health monitoring
+All the voice features work the same way: a prompt plays, you speak one short
+phrase after the beep, and the speech is recognised on the box. No keypress is
+ever needed, so rotary phones work. Nothing connects a call or switches a light
+on a low-confidence guess; it asks again instead.
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, high loss, high round-trip time, one-way audio). Every leg is measured and written to the ledger. Legs the PBX originates to play something at a phone (wake-up delivery, paging, announcements) skip the one-way-audio check and never update the last-call sensor, but a poor connection under one of them alerts like any other leg (v0.104.0). A clip that was cut short stays quiet, except an *undelivered* wake-up, which alerts (v0.78.0). See §11. |
-| `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
-| `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
-| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See *Pinning the cordless certificate* in [§8](#8-the-wp826-wifi-cordless-optional). |
-| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
-| `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
-| `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
-| `cordless_wifi_min_signal` | `2` | Lowest acceptable WiFi bars (0–5) before flagging a weak link. |
-| `device_health_alerts` | `true` | Notify when the cordless or gateway becomes unhealthy (and again on recovery). |
-| `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
-| `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
-| `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
-| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage), including a mass drop that healed between polls, and when the outside line stops or resumes registering. |
-| `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
-| `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
+### Wake-up calls
+
+Dial `42` (or say "wake me up" to the operator) and, after the beep, say a time:
+"seven thirty", "quarter past six", "nineteen thirty", "noon". The time is read
+back, so you can say it again if it is wrong, or say "cancel" to remove a
+pending wake-up. Each room holds **one** wake-up; setting a new one replaces it.
+The dashboard (the **Wake** box and **Set** on a room card) and the console
+(**W** to set, **X** to cancel) set and cancel them too.
+
+At the set time the room rings for `wakeup_ring_seconds` (60 s) and speaks a
+greeting and the time, plus any extras you configured: a scene, the weather, the
+next calendar event. If nobody hears it, the room is rung a second time
+`wakeup_retry_seconds` (90 s) after the first ring started, provided the phone
+is registered and idle; if it still is not heard, a **critical** alert goes to
+`wakeup_push_target`, which sounds through Do Not Disturb. Setting or cancelling
+a wake-up from the ringing room's own phone counts as a snooze: no second ring
+and no alert. A room that stays busy or offline through the 10-minute grace
+window is skipped, with a Home Assistant notification.
+
+Full details: [Wake-up calls](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/wake-ups-and-clock.md#wake-up-calls--dial-42).
+
+### The talking clock
+
+Dial `41` (or ask the operator "what time is it") for an old-style speaking
+clock: "At the sound of the tone, the time will be …", then the time as a
+24-hour hours-minutes-seconds readout and a tone, looping until you hang up.
+The tone sounds **on** the second just announced. The time follows the
+`timezone` option, or Home Assistant's timezone when that is blank.
+
+Full details: [Talking clock](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/wake-ups-and-clock.md#talking-clock--dial-41).
+
+### The operator — dial `0`
+
+Say a **room name** ("Kitchen") or a **spoken extension** ("one four") to be
+connected, or name a feature: "wake me up", "lights", "what time is it",
+"weather" or "power", "directory" or "list the rooms", "announce", "page
+everyone". A name it keeps missing can be given extra spoken aliases with
+`operator_synonyms`. If it cannot understand you after two tries, it says so and
+hangs up.
+
+Lights, dial-a-status, announce and page act on the house, so the operator hands
+them only to a room phone that dialled `0` itself; a caller transferred in from
+outside can still be connected to a room, use the directory, hear the clock or
+set a wake-up. Dialling `0` also clears the calling room's own message-waiting
+indicator (below).
+
+Full details: [The voice operator](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#operator--dial-0).
+
+### Directory, lights, status and the voice assistant
+
+- **Directory (`411`).** Say a room name to be connected, or "list" to hear
+  every room and its extension. It speaks the room and extension before
+  connecting, which is your cue to hang up if it guessed wrong.
+- **Lights (`43`).** A guided menu: it asks for a room, then a light, says
+  whether it is on or off, and asks you to say "turn on", "turn off" or
+  "cancel". Say "list" at any step to hear the choices.
+- **Dial-a-status (`45`).** Say "power" (or battery, solar, grid), "weather"
+  or "house". It asks "anything else?" after each answer; say "goodbye" to
+  leave. The power readings come from the `status_power_*` options.
+- **Voice assistant (`47`, off by default).** Set `assistant_enabled: true`,
+  then say a whole command or question in plain language. The words go to Home
+  Assistant's built-in conversation agent and the reply is spoken back; say
+  "no" or "goodbye" to finish. Speech recognition and the voice both run on the
+  box. `assistant_transcripts` (on by default) decides whether the logs keep
+  the words people say to the voice features, or only their length.
+
+Full details: [Directory](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#directory-assistance--dial-411)
+· [Lights](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#home-automation-voice-menu--dial-43-or-say-lights-to-the-operator)
+· [Dial-a-status](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#dial-a-status--dial-45)
+· [Voice assistant](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#local-voice-assistant--dial-47).
+
+### Paging
+
+Dial `44` from a room phone to ring **every room phone at once** into a
+house-wide intercom. It is duplex: anyone who picks up can talk back. The
+**Page all** button on the dashboard and **P** in the console (confirm with
+**Y**) also page the whole house.
+
+Full details: [Page all](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/paging-and-announcements.md#page-all--dial-44).
 
 ### Announcements
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `announce_enabled` | `true` | The announce feature on dial `46` (phone → Home Assistant speakers). It does not affect `POST /api/announce` (Home Assistant → handset, §6), which `announce_token` governs. |
-| `announce_ext` | `46` | The extension to dial to record an announcement. 2–6 digits. |
-| `announce_players` | `[]` | Home Assistant `media_player` entity IDs an announcement plays on, e.g. `media_player.kitchen_speaker`. One per line. **Required for the feature to work:** while this list is empty, dialling the announce code answers "No speakers are set up for announcements" and hangs up. |
-| `announce_retry_attempts` | `2` | How many times a handset announcement (`POST /api/announce`) whose audio never played is **sent again** (§6 below), once the phone reports itself registered and idle. Range 0–3; `0` turns retries off and leaves only the record. An announcement that did play is never replayed, whatever this is set to. |
-| `announce_token` | `""` | Optional shared secret required on the `/api/announce` HTTP endpoint (used to speak alerts onto a handset from Home Assistant / another add-on). **Blank disables LAN announce** — only the Supervisor can call it. Masked. |
+- **Phone to speakers (`46`).** Dial `46`, speak your message after the beep,
+  and it plays out of the Home Assistant speakers listed in `announce_players`,
+  with a station chime before and after. The message is transcribed and
+  re-spoken on the box.
+  While `announce_players` is empty, dialling `46` answers "No speakers are set
+  up for announcements" and hangs up.
+- **Home Assistant to a phone.** An automation (or another add-on) can speak
+  onto a room handset with
+  `POST http://<ha-host>:8099/api/announce/<ext>`, body `{"text": "Dinner is
+  ready"}` or `{"url": "http://…/clip.wav"}`, and header `X-Announce-Token`. From
+  the LAN this needs a non-empty `announce_token`; while it is blank, only the
+  Supervisor can call it. The WP826 cordless answers hands-free; an analog phone
+  rings like a call.
+- A clip whose audio never played is sent again, up to `announce_retry_attempts`
+  times (2), once the phone reports itself registered and idle.
+  An announcement nobody answers is retried too, so set
+  `announce_retry_attempts` to `0` or `1` if that is too many rings for your
+  house. The same audio sent to the same phone within five minutes is not
+  played twice.
 
-### Operator console
+Full details: [Announcements](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/paging-and-announcements.md#announcements--dial-46-phone--home-assistant-speakers)
+· [Announce onto a handset](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone).
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `console_bind` | `0.0.0.0` | Interface the SSH console listens on. Every login needs a `console_users` password; `127.0.0.1` restricts it to the Home Assistant host. Only SSH uses it. An upgraded install keeps the bind it had saved, and the default from 0.94.0 to 0.113.0 was `127.0.0.1`: set `0.0.0.0` to reach SSH from the LAN. |
-| `console_enabled` | `true` | The SSH operator console (ring/connect/hang up, §10). Password login only, against `console_users`; while that list has no valid entry, **every login is refused**. Turning it off stops SSH only: the sidebar console and the web terminal keep working. With this and `console_web_enabled` both off, the board itself stops and the sidebar console shows "unavailable". |
-| `console_port` | `2300` | TCP port of the SSH console. The sidebar console and the web terminal do not use it. |
-| `console_users` | `[]` | Sign-in accounts for the **SSH console** and the **web terminal** — each entry has `username` and `password` (masked); a row missing either is ignored. SSH accepts only these accounts and refuses every login while the list is empty. The web terminal with the list empty has no login (the historical open behavior); when any user is configured, its page **and its WebSocket** require a signed-in session. Repeated wrong attempts from one address are throttled (5 per 5 minutes, counted separately by SSH and the web terminal). The sidebar console needs none of this. |
-| `console_web_bind` | `127.0.0.1` | Interface the web terminal listens on. Blank also means `127.0.0.1`; since 0.114.0 it no longer follows `console_bind`. The browser console is served through the Home Assistant sidebar instead (§10), so this terminal does not need to be on your network. |
-| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. |
-| `console_web_port` | `8100` | TCP port for the web terminal. |
+### The dashboard
 
-### Time, clock & wake-up
+Open **Switchboard** in the Home Assistant sidebar. Each room card shows whether
+the phone is **Registered** or **Offline**, who it is talking to, and its idle
+round-trip time, with buttons to **Test ring**, **Connect** (then pick a second
+room to patch the two together), **Hang up**, **Transfer**, set or clear
+**Message**-waiting, and a **Wake** time box with **Set** and **Cancel**. Below
+the rooms are the active calls, the pending wake-ups, and a **Lights** panel:
+every Home Assistant light the add-on can see, grouped by area, with on/off
+toggles. **Console** and **Page all** sit at the top.
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `clock_enabled` / `clock_ext` | `true` / `41` | The talking clock and its dial code (2–6 digits). |
-| `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
-| `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
-| `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry (§6), which run in the same scheduler, and identical repeats are then not held back. |
-| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
-| `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. At least `wakeup_ring_seconds` + 20 (one scheduler poll); a shorter value is raised to that and a WARNING naming both values is logged at every start. With a ring above 580 s every allowed retry is raised, which is expected. |
-| `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
-| `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
-| `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
-| `wakeup_weather` | `true` | Speak a short local weather summary during the wake-up call. |
+Full details: [Quick start](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/quick-start.md)
+· [How it's built](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/how-its-built.md).
 
-### Extra feature codes
+### The operator console
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [§4](#local-voice-assistant--dial-47). |
-| `assistant_transcripts` | `true` | Keep the words people say to the voice features. On: the assistant's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder) records what was said and replied, and the add-on's log — shown by the Supervisor to Home Assistant administrators, kept about two days across a host reboot — quotes what the recognizer heard at the operator, wake-up, home-automation, status, directory and assistant prompts. Off: both still record every timing, outcome and failure reason, with each utterance replaced by its length. If the setting cannot be read, the add-on's log leaves the words out. |
-| `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
-| `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
-| `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
-| `page_enabled` / `page_ext` | `true` / `44` | All-call paging / intercom and its dial code. |
-| `status_enabled` / `status_ext` | `true` / `45` | Dial-a-status voice menu (live HA readings) and its dial code. |
-| `status_power_battery` | `""` | `sensor` giving battery charge as a **percentage** — the menu says "the home battery is at N percent", so a sensor reporting kWh will be read out as if it were a percent. |
-| `status_power_grid` | `""` | Entity whose on/off state says whether utility power is present, spoken by the **power** branch of dial-`45`. Accepts `input_boolean`, `binary_sensor`, `sensor` or `switch`. |
-| `status_power_runway` | `""` | `sensor` giving hours of runway remaining. |
-| `status_power_solar` | `""` | `sensor` giving the solar share of current load as a **percentage** — spoken as "solar is covering N percent of the load". |
+A full-screen switchboard you drive by keystroke: every room's status, any live
+call, the outside line's registration, and the same actions as the dashboard.
+There are three ways in:
 
-### Outside line (SIP trunk)
+- **In the sidebar (recommended).** Press **Console** on the dashboard, or open
+  `/console/` under the panel's URL; the address must end in a slash. Home
+  Assistant's own login is the only login, and it works in the mobile app.
+- **SSH.** `ssh -p 2300 <user>@<ha-host>`, signing in as a `console_users`
+  entry: its username, then its password at the prompt. While `console_users`
+  has no valid entry, **every login is refused**, and the Log tab says so. On
+  first connection, compare the host-key fingerprint your client shows with the
+  one the add-on log prints at every start. A fresh install listens on every
+  interface (`console_bind: 0.0.0.0`); an upgraded one keeps the bind it had
+  saved, which may be `127.0.0.1` (the Home Assistant host only). The start-up
+  line names the address actually in use. Recent OpenSSH clients warn that the
+  connection does not use a post-quantum key exchange; that is expected, and
+  `-o WarnWeakCrypto=no-pq-kex` silences it.
+- **Standalone web terminal (port 8100).** Bound to `127.0.0.1` by default, so it
+  answers only on the Home Assistant host itself; it is a fallback for the
+  sidebar console.
 
-`trunk` is a group; leave `trunk.enabled: false` (the default) for a room-to-room
-system. When you enable it, see [§9](#9-adding-an-outside-line-sip-trunk).
+Keys: **↑↓** / **j k** move · **R** ring · **C** connect · **H** hang up ·
+**T** transfer · **W** set wake-up · **X** cancel wake-up · **M**
+message-waiting · **P** page all · **L** lights · **?** help · **Q** /
+**Ctrl-C** quit.
 
-| Sub-field | Default | Notes |
-|-----------|---------|-------|
-| `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
-| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see §7.4. `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
-| `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
-| `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
-| `from_user` | `""` | Outbound `From` user (defaults to `username`). |
-| `inbound_ext` | `""` | Which extension(s) an incoming outside call rings: one extension or a comma-separated list. Blank rings every room. An entry that is not a configured room is dropped (logged at start) and the call rings the remaining entries. **Fails open:** when no entry is valid, the call rings the whole house. Check the start-up log after changing it. |
-| `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
-| `port` | `5060` | Provider SIP port. |
-| `provider_host` | `""` | Your SIP provider's host, e.g. `losangeles.voip.ms`. |
-| `registns` | `true` | Register to the provider (most trunks need this). |
-| `secret` | `""` | Trunk auth password. Must not contain `;`, control characters or leading/trailing whitespace (Asterisk would truncate it). Such a secret skips the whole trunk at start, with a log line. |
-| `username` | `""` | Trunk auth username / sub-account. |
+Full details: [The operator console](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/operator-console.md).
 
----
+### Message-waiting
 
-### The options overlay (advanced)
+A room's message-waiting indicator means "call the operator". There is no
+voicemail and no missed-call detection: the indicator is set by you, with
+**Message** on the dashboard's room card or **M** in the console, never by a
+missed call. On an analog phone it produces a **stutter dial tone** once the
+gateway's "Send Stutter Dialtone for MWI" setting (the label varies by firmware)
+is enabled; without it, the indicator still shows on the dashboard. Clear it
+with **Clear** on the card or **M** again, or simply dial `0` from that room
+(while `mwi_enabled` is on). Indicators survive an add-on restart.
 
-Everything above is normally edited in the add-on's **Configuration** tab. For
-automation (or when the Supervisor's options API is unreachable), the add-on
-also honors an **overlay file** the administrator can place at
-`/addon_configs/<slug>/options-overlay.json` (visible to the add-on as
-`/config/options-overlay.json`): a JSON object that is **deep-merged over the
-saved options at every start**. Dictionaries merge recursively (so
-`{"trunk": {"inbound_ext": "11,19"}}` refines the trunk without touching its
-credentials); scalars and lists replace.
+Full details: [The stutter-tone setting](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/gxw4216-gateway.md#72-configure-each-fxs-port)
+· [`mwi_enabled`](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md#extra-feature-codes).
 
-Because the overlay bypasses the add-on's schema, it is **type-checked against
-the saved options**: an entry whose JSON type differs from the value it would
-replace (a string where the trunk object belongs, `8100.5` for a port, `true`
-for a number) is rejected with a warning and the saved value is kept. Any other
-overlay problem — unparseable JSON, a non-object root — is logged and the
-overlay is ignored wholesale. The overlay can never fail the start: the whole
-add-on, Asterisk included, hangs off that step.
+### Notifications and health sensors
 
-The boot log lists every key path whose value actually **changes** (a no-op
-restatement is reported as changing nothing), so an override the Configuration
-tab can't show you is still visible. Remove the file and restart to return to
-the saved options.
+Three monitors publish Home Assistant sensors and raise notifications: **link
+health** (each phone's registration and round-trip time, and the outside line),
+**call quality** (a call whose audio was poor) and **device health** (the WP826
+cordless's battery and Wi-Fi, and the gateway). The `*_alerts` options switch
+only the notifications; the sensors keep publishing. Turning
+`link_health_enabled` off also silences gateway health, the trunk sensor and the
+cordless half of device health, so leave it on unless you mean all of that.
 
-Services read the merged result for **values**, not `options.json` — the config
-renderer, the dashboard, the operator console, and the health monitors all read
-the post-overlay snapshot (via `switchboard-opt`), so they share one effective
-view.
-
-**The overlay cannot turn a service on or off.** Each s6 `run` script decides
-whether to start or idle by reading its enable flag with `bashio::config`, which
-parses the saved `options.json` directly and never sees the overlay. That is
-deliberate — `bashio::config` can momentarily return an empty string during a
-config reload, and the run scripts' literal `= "false"` comparison is what stops
-a blank read from permanently idling an enabled service (s6 treats an idle
-process as "started" and never restarts it) — but it means these keys are read
-from the **saved** options even when the overlay names them:
-
-- `console_enabled`, `console_web_enabled` (SSH console, web terminal; the board
-  behind them idles only when both are `false`),
-- `link_health_enabled`, `device_health_enabled` (the two pollers),
-- `wakeup_enabled` (the wake-up scheduler, and the web UI's retry gate),
-- `stt_resident` and the seven speech-feature flags the resident recognizer gates
-  its RAM on (`operator.enabled`, `wakeup_enabled`, `automation_enabled`,
-  `status_enabled`, `announce_enabled`, `directory_enabled`,
-  `assistant_enabled`),
-- `device_health_alerts`.
-
-Note the asymmetry: an overlay `{"link_health_enabled": false}` still leaves the
-poller running, while an overlay `{"link_health_interval": 60}` does take effect.
-The boot log reports the first one as an applied override anyway — it lists what
-the **merge** changed, not what each consumer honored. Turn a service off in the
-Configuration tab, not in the overlay.
-
-## 3. Extensions & feature codes
-
-### Room extensions
-
-An extension is **any 2–6 digit number you choose**, one per phone; they only need
-to be unique. Pick a scheme that leaves room for the feature codes. The reference
-home wires its eight GXW FXS ports to **`11`–`18`** and its WiFi cordless to
-**`19`** (this matches the `gateway_ports` default). A `1xx` scheme (`101`, `102`,
-…) works just as well — the shipped placeholder rooms use it.
-
-Whatever you pick, keep the single-digit `0` for the operator and (if you use a
-trunk) a leading digit like `9` for the outside line, and don't collide with the
-feature codes below.
-
-### Feature codes
-
-Dial these from any room phone. All are configurable (`*_ext`) and can be disabled
-(`*_enabled`); the defaults are:
-
-| Dial | Feature | Section |
-|-----:|---------|---------|
-| `0`   | **Operator** — say a room, an extension, or any feature ("lights", "wake me up", "what time is it", "weather", "directory", "announce", "page") | [§4](#4-the-voice-operator--directory-assistance) |
-| `41`  | **Talking clock** | [§5](#5-wake-up-calls--the-talking-clock) |
-| `42`  | **Wake-up call** — set or cancel by speaking the time | [§5](#5-wake-up-calls--the-talking-clock) |
-| `43`  | **Home-automation voice menu** — control your lights | [§4](#4-the-voice-operator--directory-assistance) |
-| `44`  | **Page all** — house-wide intercom | [§6](#6-paging--announcements) |
-| `45`  | **Dial-a-status** — hear live Home Assistant readings | [§4](#4-the-voice-operator--directory-assistance) |
-| `46`  | **Announce** — speak a message out your Home Assistant speakers | [§6](#6-paging--announcements) |
-| `47`  | **Local voice assistant** — ask Home Assistant anything (*off by default*) | [§4](#4-the-voice-operator--directory-assistance) |
-| `411` | **Directory assistance** | [§4](#4-the-voice-operator--directory-assistance) |
-
-A feature's dial code is skipped (with a log line) if it collides with a room
-extension or another code, but the underlying feature usually still works via
-the operator, the scheduler, or the dashboard. Two exceptions: the talking
-clock is fully disabled on a collision, and a collided page code stays
-reachable only from the dashboard/console (the operator's "page" route is
-dropped with it). The local voice assistant is also fully disabled on a
-collision: nothing else routes into it, so a context with no dial code would be
-unreachable dialplan that still reads as a working feature.
-
-### In-call transfer (analog phones)
-
-On a live call, an analog phone can blind-transfer with **`##`** and
-attended-transfer with **`*2`**. Transfers are confined to internal destinations —
-you cannot transfer a call out to the trunk. IP phones (like the cordless) use
-their own Transfer button. A `*2` consult call to the operator counts as an
-outside line for the house features and the message-waiting clear (see the
-operator below): to use those, dial `0` directly.
+Full details: [Health monitoring & sensors](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/health-monitoring.md).
 
 ---
 
-## 4. The voice operator & directory assistance
+## 4. Options you are most likely to change
 
-All voice features share the same rotary-safe shape: a prompt plays, you speak one
-short phrase after the beep, recognition runs **on-box** (whisper.cpp), and the
-system acts. No keypress is ever required, and nothing connects a call or toggles a
-light on a low-confidence guess — it asks again instead. Speech never leaves the
-box.
+Every option has a label and inline help in the **Configuration** tab. Changing
+one and restarting the add-on regenerates the configuration. This table covers
+the options people change most often; all of them, with their limits, are in the
+[configuration reference](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md).
 
-### Operator — dial `0`
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `rooms` | 2 placeholders | One entry per phone: `ext` (2–6 digits, unique), `name`, and `secret`, the SIP password its gateway port uses. Replace the `change-me-…` secrets. A room with an invalid `ext` or `secret` is skipped at start, with a log line. |
+| `gateway_ports` | `11,12,13,14,15,16,17,18` | The extensions on the wired gateway ports, used to derive gateway health. |
+| `cordless_ext` | `19` | The extension the WP826 cordless registers as. |
+| `cordless_password` | `""` | The WP826's web-admin password, needed for its battery and Wi-Fi checks. |
+| `timezone` | `""` | Blank follows Home Assistant's timezone; set an IANA name (such as `America/Phoenix`) only to override it. |
+| `operator_synonyms` | `[]` | Extra spoken names for a room: `ext` plus a list of `phrases`. |
+| `wakeup_ring_seconds` | `60` | How long a wake-up rings (10–600 s). |
+| `wakeup_retry_seconds` | `90` | When an unheard wake-up is rung again, counted from the first ring. Raised to at least the ring time + 20 s. |
+| `wakeup_push_target` | `mobile_app_iphone` | Notify service (without `notify.`) for the critical alert about an undelivered wake-up. Empty sends a Home Assistant notification card instead. |
+| `wakeup_scene` | `""` | A `scene.*` activated when a wake-up is answered. `wakeup_scenes` sets one per room. |
+| `wakeup_weather` | `true` | Speak a short local forecast during the wake-up. |
+| `wakeup_calendar` | `""` | A `calendar.*` entity whose next event in the coming 18 hours is read out. |
+| `announce_players` | `[]` | The `media_player` entities dial-`46` announcements play on. Required for `46` to work. |
+| `announce_token` | `""` | Shared secret for `POST /api/announce` from the LAN. Blank: only the Supervisor can call it. |
+| `announce_retry_attempts` | `2` | How many times a handset announcement that never played is sent again (0–3; `0` turns it off). |
+| `assistant_enabled` | `false` | The local voice assistant on `47`. |
+| `console_users` | `[]` | Accounts (`username`, `password`) for the SSH console and the standalone web terminal. SSH refuses every login while it is empty. |
+| `console_bind` | `0.0.0.0` | The interface the SSH console listens on; `127.0.0.1` keeps it on the Home Assistant host. An upgraded install keeps the value it had saved. |
+| `console_web_bind` | `127.0.0.1` | The interface the standalone web terminal (port 8100) listens on. |
+| `log_level` | `info` | How much of Asterisk reaches the Log tab. `info` includes the dialplan trace, dialled numbers among it; `notice`, `warning`, `error` and `critical` leave the trace out; `debug` adds trunk detail for diagnosis. |
+| `trunk` | off (`enabled: false`) | The outside line. Leave it off for a room-to-room system. |
 
-Say what you want:
-
-- **A room name** ("Kitchen", "the study") or a **spoken extension** ("one four")
-  — you're connected to that room. Add aliases with `operator_synonyms`.
-- **"Wake me up"** — jumps to the wake-up flow ([§5](#5-wake-up-calls--the-talking-clock)).
-- **"Lights"** / **"automation"** — jumps to the home-automation menu (below).
-- **"What time is it"** — jumps to the talking clock ([§5](#5-wake-up-calls--the-talking-clock)).
-- **"Weather"** / **"power"** / **"battery"** / **"house status"** — jumps to
-  dial-a-status (below).
-- **"Directory"** / **"who's here"** / **"list the rooms"** — jumps to directory
-  assistance (below).
-- **"Announce"** / **"over the speakers"** — jumps to announce ([§6](#6-paging--announcements)).
-- **"Page everyone"** / **"intercom"** / **"all call"** — jumps to page-all ([§6](#6-paging--announcements)).
-
-A **confident** room match wins over a feature word — an exact name, a configured
-synonym, a full-word hit, or a recognizer-clipped prefix (all score ≥ 0.9) — so a
-handset named "Office", "Garage", even "Weather", still connects normally. A
-weaker, merely-fuzzy room match does *not* win: the feature word takes it. That
-ordering exists because neither pure precedence is right — a spoken "page" scores
-0.67 against a room named "Garage", clearing the 0.6 room threshold, so
-room-first would send the caller to the Garage phone instead of the intercom.
-The two exceptions sit *ahead* of room matching entirely: "wake me up" and
-"lights"/"automation" are tested first, so a room you literally name "Lights"
-would be shadowed by the automation flow.
-
-A feature you name but have disabled falls through to a polite goodbye. If it
-can't understand you after two tries, it says so and hangs up. Room-name matching
-is deliberately forgiving of narrowband tail-clipping ("Base" → "Basement"), and
-refuses to guess between two similar names.
-
-Dialing `0` also **clears the caller's own message-waiting indicator** — the
-stutter tone means "call the operator", and they just did. It is cleared after
-the call is answered and in the background, so it never delays the greeting. It
-applies only to a call from a configured room's own phone, identified by the PJSIP
-endpoint configuration assigns, never by caller ID, which a caller can set. So an
-outside caller transferred to `0` is skipped, and so is a `*2` consult to `0`
-(dial `0` directly instead). It also applies only while `mwi_enabled` is on.
-
-**House features are for the room phones** (since 0.110.0). Lights, dial-a-status,
-announce and page act on the house, so the operator hands them only to a room
-phone that dialled `0` itself. An outside caller transferred to the operator, or a
-room's `*2` consult to `0`, can still be connected to a room, use the directory,
-hear the clock or set a wake-up; asked for anything else, they hear the operator's
-goodbye. The same check runs again when each of those features starts, including
-when it is dialled by its own code.
-
-### Directory assistance — dial `411`
-
-Say a room name to be connected, or say **"list"** to hear every room and its
-extension read out. Resolution is ordered so a mishearing degrades safely:
-
-1. an **unambiguous** room match (score ≥ 0.9 — exact name, synonym, or a
-   recognizer-clipped prefix) connects outright, so a room genuinely called
-   "List" or "Cancel" is still reachable by name;
-2. otherwise a cancel word ("goodbye", "never mind", "stop") ends the call;
-3. otherwise a fuzzy "list" reads the directory — the narrowband line turns
-   *list* into *lift* / *least* / *last*, and those used to clear the room
-   threshold and dial a bedroom;
-4. otherwise a **weaker but above-threshold** room match connects.
-
-So it does connect on a less-than-confident match — step 4 is the point of the
-service. What it will not do is connect on a name the matcher rejected outright
-or found ambiguous between two similar rooms; those re-prompt. It speaks the room
-name and extension before connecting, which is your cue to hang up if it guessed
-wrong. Saying "list" doesn't burn a retry (capped at three read-outs); three
-unresolved replies end the call.
-
-### Home-automation voice menu — dial `43` (or say "lights" to the operator)
-
-A guided flow: it asks for a room, then a light in that room, tells you whether
-it's on or off, and asks you to say "turn on", "turn off", or "cancel". It reads
-your lights and areas live from Home Assistant. Say "list" at any step to hear the
-options. Lights with no assigned area appear under "Unassigned".
-
-### Dial-a-status — dial `45`
-
-A looping voice menu that speaks live Home Assistant readings on demand. Say:
-
-- **"power"** (or battery / solar / grid) — your power/battery status.
-- **"weather"** — a short local forecast (from the U.S. National Weather Service,
-  using your Home Assistant location).
-- **"house"** — thermostats and a light count.
-
-It re-asks "anything else?" after each answer, but the loop is bounded: it stops
-after **8 answers**, and it gives up (with "okay, goodbye") as soon as **two
-replies in a row** go unrecognized at the same prompt. Say "goodbye" to leave
-early. The cap is a backstop against a noisy or wedged line holding a channel
-open indefinitely.
-
-### Local voice assistant — dial `47`
-
-**Off by default.** Set `assistant_enabled: true` to switch it on.
-
-Dial `47`, say a command or a question in plain language, and hear the answer.
-Unlike the home-automation menu (§4, dial `43`) there is no guided room →
-light → action script: you say the whole thing at once, and anything Home
-Assistant's own voice assistant understands works here too.
-
-It re-asks "anything else?" after each answer. The loop is bounded: it stops
-after **5 recordings**, and it gives up as soon as **two turns in a row** are
-silent or unintelligible. Say "goodbye", "cancel", "never mind", "that's all"
-or "thanks" to leave early — and, since v0.82.0, simply **"no"** works too, along
-with "nope", "nah", "no thanks" and "that's it". That is the natural answer to
-"anything else?", and until then it was sent to Home Assistant, matched nothing,
-and came back "Sorry, I couldn't understand that". A decline only ends the call
-when it is the *whole* utterance, so "no, turn on the kitchen light" is still a
-command. The same whole-utterance rule applies to the other endings, so
-"turn off the porch light" and "stop the music" are treated as commands, not
-as hang-ups.
-
-**Nothing on this path leaves the machine.** The recording is transcribed by
-this add-on's own speech recognition, the text goes to Home Assistant's
-built-in `conversation.home_assistant` agent, and the reply is spoken by this
-add-on's own voice. No cloud speech-to-text, no cloud text-to-speech, no cloud
-conversation agent — an internet outage does not affect it. (Home Assistant
-Cloud's assistant is *not* used even if you have a subscription.)
-
-**Where it leaves — and does not leave — a record.** "Nothing leaves the
-machine" is a statement about the network. It is not, on its own, a statement
-about what stays behind, so here is that separately.
-
-Each turn writes one line to `/data/state/assistant.jsonl` inside the add-on:
-what was heard, what was replied, how long recognition, Home Assistant and the
-voice took, and — when a turn produced nothing — which of the several possible
-reasons applied. It holds the last 400 turns and then discards the oldest.
-
-That file is inside the add-on's private data, not the shared folder. It cannot
-be read from a file browser, a Samba share, or another add-on; the container
-shell is closed while protection mode is on, and add-on backups are encrypted.
-It is also never copied to `/share`, which the rest of this add-on uses
-precisely *because* that directory is readable from outside — the call-quality
-and delivery ledgers live there for that reason, and this one deliberately does
-not. Nothing spoken is written to either `asterisk.log`.
-
-The add-on's log is a different matter. Each voice feature's recognizer writes a
-line there for everything it hears, and the assistant adds one per turn. That log
-is readable by Home Assistant administrators through the Supervisor, and it is
-kept for about two days, across a restart of the host. With
-`assistant_transcripts` on, those lines quote the words; with it off, they give
-only the outcome and the length.
-
-Set `assistant_transcripts: false` to keep the diagnostics without the words.
-Every timing, outcome and failure reason is still recorded, in the file and in
-the add-on's log; only what was said is withheld, replaced by its length. The switch is meant to cost privacy, not
-visibility — a setting that also made the feature undebuggable would just be
-left on.
-
-To read it you need host-level access to the container — which is exactly the
-access the paragraph above says an ordinary reader does not have, and both
-statements are meant to be true at once. The file is out of reach of a file
-browser, a Samba share or another add-on; it is not out of reach of whoever
-administers the machine. With the add-on's protection mode turned off and a
-shell on the host:
-
-```
-sudo docker exec addon_<slug> tail -n 20 /data/state/assistant.jsonl
-```
-
-A turn that worked looks like this (wrapped for print):
-
-```json
-{"v":1,"ts":1788700000,"outcome":"answered","chan":"PJSIP/19-0000000c",
- "call":"1788700000.42","ext":"19","turn":1,
- "heard":"turn on the kitchen lights","reply":"Turned on 2 lights",
- "response_type":"action_done","stt_ms":1840,"converse_ms":410,"tts_ms":900,
- "turn_ms":9200,"rec_ms":4300,"rec_end":"timeout","wav_bytes":68844}
-```
-
-`outcome` is the field to read first:
-
-| `outcome` | What happened |
-| --- | --- |
-| `answered` | A command was heard, sent to Home Assistant, and the reply spoken. |
-| `bias-failed` | The recogniser's hint list could not be built. The call continued with a smaller one. |
-| `ended-max-turns` | Five recordings were used without a goodbye. |
-| `ended-unheard` | Two turns in a row produced nothing, so it gave up. |
-| `fatal` | The assistant crashed. `detail` carries the exception. |
-| `goodbye` | The caller ended it themselves. |
-| `ha-unavailable` | Home Assistant could not be reached at all; the call was apologised out. |
-| `no-speech` | The turn produced no text. `reason` says which: `silence` (nothing was said, and the recogniser is healthy), `timeout`, `spawn-error` or `error`. |
-| `tts-failed` | The voice failed twice on one call, so it apologised and hung up rather than continuing in silence. `tts_fails` carries the count. One failure is tolerated: a long answer can outrun the synthesiser's time limit while it is perfectly healthy, so one is a slow sentence and two is a broken voice. |
-
-`rec_end` says how the recording finished — `timeout` (the caller stopped
-talking), `hangup` (they put the phone down mid-sentence) or `dtmf` (they
-pressed a key). Those three used to be one event, which made an abandoned call
-and a silent one impossible to tell apart.
-
-`call` is Asterisk's unique id for the leg, so a row here lines up with the
-matching row in the call-quality ledger (§11) for the same call — "it gave a
-wrong answer" and "the audio was bad" become one question rather than two.
-
-**Who can reach it.** Anyone who can pick up a house phone: family, guests, a
-child, a visitor left alone in a room with an extension. **Not** an outside
-caller. Two independent mechanisms stop that: the inbound trunk `Dial` uses
-`r` only (never `t`/`T`), so no in-call DTMF transfer is ever armed for the
-outside party; and even if one were, transfers are confined by
-`__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
-and `0` — no feature codes at all. See [§9](#9-adding-an-outside-line-sip-trunk).
-
-**What it can act on.** Only entities exposed to Assist
-(*Settings → Voice assistants → Expose*). Exposing an entity makes it reachable
-from **every phone in the house**, so treat that list as the real security
-boundary. Two things worth knowing about it:
-
-- A **garage door, lock, or anything that opens or unlocks should not be
-  exposed.** A voice command is not authenticated — the phone in the guest room
-  is as good as the one in the kitchen.
-- Entities that **silence an alarm or disable a safety automation** deserve the
-  same treatment even though they actuate nothing: a switch that turns off
-  critical power alerts is a security control, and turning it off by voice
-  leaves no visible trace.
-
-**Duplicate names break commands.** The intent matcher resolves by spoken name,
-so two exposed entities sharing a name make both unreliable. This bites in a
-non-obvious way: Home Assistant's `switch_as_x` helper creates a `light.*`
-wrapper *from* a `switch.*`, giving one physical device two entity IDs with the
-identical friendly name. Expose the `light.*` (it answers brightness intents
-too), not the switch.
-
-**Phrasings that work.** The built-in agent is a fixed-sentence matcher, not a
-language model, so the wording matters:
-
-| Goal | Say |
-|---|---|
-| A binary sensor | "is the front door motion on" (not "is there motion at the front door") |
-| Check something | "is the master bath fan on" |
-| Control a light | "turn on the kitchen lights" |
-| Read a sensor | "what is the camera health" |
-| Survey | "what lights are on" |
-| Temperature | "what is the temperature in the hallway" |
-
-**Temperature needs a room.** A bare "what is the temperature" fails when more
-than one thermostat is exposed. A smart speaker resolves this from the room it
-sits in; a phone call carries no room, so name the area. This also means your
-thermostats must have an **area** assigned — without one, even the room-qualified
-question fails.
-
-**Say the whole command in one go.** Each utterance is a fresh request, and that
-is a property of Home Assistant's built-in agent rather than a shortcut taken
-here: it is a sentence matcher, not a dialogue manager. Measured on this system,
-`continue_conversation` comes back false for every ambiguous phrasing, and a
-second turn sent with the previous turn's conversation id is matched as a new
-independent sentence. It never asks "which light?" — an ambiguous command simply
-fails, so name the room or the device the first time.
+Full details: [Configuration reference](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md)
+· [Adding an outside line](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/sip-trunk.md).
 
 ---
 
-## 5. Wake-up calls & the talking clock
+## 5. Troubleshooting
 
-### Wake-up calls — dial `42`
-
-Dial the code (or say "wake me up" to the operator) and, after the beep, say a
-time — "seven thirty", "quarter past six", "six a.m.", "nineteen thirty", "noon".
-The spoken-time parser is intentionally forgiving; the flow reads the parsed time
-back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
-"never mind") to remove a pending wake-up.
-
-- **One wake-up per room.** Setting a new one replaces the old.
-- At the set time the room rings for `wakeup_ring_seconds` (default 60). The call
-  speaks a greeting and the time, runs any smart extras, then repeats the greeting
-  and time.
-- If the room is busy or offline through a **10-minute grace window**, the wake-up
-  is dropped and surfaced as a Home Assistant persistent notification.
-- **Every set and cancel is recorded**, in
-  `/share/switchboard/delivery-outcomes.jsonl`, with where it was made: `phone`
-  (dialled on the room's own phone, or asked of the voice operator from it), `web`
-  (the dashboard) or `console` (the operator console). A set carries the time it
-  will ring; a cancel says whether there was anything to remove. Until 2026-09-14
-  a wake-up's record began at its first ring, so nothing could say who had set it.
-
-**If nobody answers** (v0.70.0, corrected in v0.78.0). Ringing a phone is not
-the same as waking somebody, and until v0.70.0 the system could not tell the
-difference: an originate reports "queued" the moment the PBX accepts it, so a
-wake-up that rang out and one that woke you were recorded identically.
-
-v0.70.0 had the delivery leg record that it was answered, and joined on that.
-That turned out to be the wrong fact. The record was written the instant the
-handset was picked up, before a word had played — so a wake-up that was answered
-in **silence** counted as delivered. It happened: on 2026-09-02 at 06:15:21 a
-handset answered and the far end dropped a second later, before the greeting,
-with zero audio packets transmitted. Somebody reached for a ringing phone at six
-in the morning, heard nothing, and every ledger read healthy.
-
-The delivery leg records a `spoken` milestone written immediately **after the
-greeting has played** — Asterisk abandons the script the moment the channel
-drops, so reaching that point proves audio reached a live line. Since v0.97.0
-the hangup handler also records `audio-delivered` when it measures at least a
-second of audio actually transmitted at or after the greeting. Both are read and
-either is enough: `spoken` cannot be written by a sleeper who is woken **by** the
-greeting and hangs up during it, because the line that writes it never runs, and
-that was a real source of six-in-the-morning false alarms. The scheduler joins on
-those two, not on the pickup:
-
-1. The phone rings for `wakeup_ring_seconds` (default 60).
-2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
-   answered, the scheduler re-checks the room and — if the handset is registered
-   and idle — **rings it a second time**. The second attempt gets the same check
-   the first one does, because an origination reports "queued" the moment
-   Asterisk accepts it and says nothing about whether a channel was ever
-   created. If the handset is not there, the re-ring is **skipped** and recorded
-   as `re-ring-skipped` with the state that caused it.
-3. If the wake-up still has not been delivered, it is recorded `undelivered` and
-   pushed to `wakeup_push_target` (default `mobile_app_iphone`) as a **critical**
-   alert, so it sounds through Do Not Disturb. The alert says only what is known
-   — picked up but silent, rung twice, or rung once with the second attempt
-   skipped — rather than asserting a second ring it cannot confirm.
-
-**Every way an attempted wake-up can fail now raises that alert** (v0.100.0). There are four, and
-until then only the last one did; the other three wrote a line to the ledger and
-stopped, which is not what wakes anyone at six in the morning:
-
-| what happened | recorded | the alert says |
-| --- | --- | --- |
-| Asterisk refused to place the call | `originate-refused` | the phone never rang |
-| the handset was gone, so no second ring | `re-ring-skipped` | the second attempt was not made, and why |
-| the second ring was attempted and failed | `re-ring-failed` | whether it was refused or unreachable |
-| rang twice, or was picked up in silence | `no-answer` / `answered-silent` | which of the two |
-
-A network blip while placing the call is deliberately **not** one of these: it is
-recorded `originate-error`, the wake-up stays due, and the next tick tries again.
-Treating an unreachable PBX as a failed alarm would cry wolf and then ring the
-phone anyway.
-
-A wake-up that is never placed within its 10-minute grace window falls outside
-this table. The room may read busy, offline or unknown on every pass
-(`deferred`; an Asterisk that cannot be reached at all is recorded this way, with
-`device_state: unknown`), or the originate itself may raise on every pass
-(`originate-error`). Either way, the
-wake-up is dropped as missed with a Home Assistant persistent notification (see
-above), not the critical push. Since 0.108.2 its ledger history closes with a
-`missed` row (`reason: grace-expired`) after the last `deferred` or
-`originate-error` row, and the notification is retried on every scheduler pass
-until Home Assistant accepts it, for up to an hour.
-
-The second ring comes first on purpose: the phone is the loudest thing in the
-room and it is the device that was supposed to wake you. The push is the fallback
-for when the handset itself is the problem. Set `wakeup_push_target` to empty and
-the escalation falls back to a Home Assistant notification card instead — the
-signal is not lost, it just stops sounding through Do Not Disturb.
-
-If `wakeup_retry_seconds` is shorter than `wakeup_ring_seconds` plus one 20 s poll,
-the scheduler judges rings at ring + 20 s instead and logs a WARNING at start-up
-naming both values, so a call still ringing is never judged unanswered.
-
-**Snoozing from the ringing phone.** If the room's own phone sets a new wake-up or
-cancels one while its wake-up is ringing — or in the short gap before the
-scheduler decides whether to ring it again — that is taken as proof somebody is
-up. The phone is not rung again and no alert is sent. The ring is recorded
-`snoozed`, with `change` (`set` or `cancelled`) and, when a new time was set,
-`new_hhmm`. The new time then rings, re-rings and escalates like any other
-wake-up. A cancel counts even when it removed nothing: by the time a wake-up
-rings, its entry has already been used up.
-
-Only the room's **own phone** counts:
-
-| during the ring, the wake-up was changed from | the ring is |
-| --- | --- |
-| the ringing room's phone (dial `42`, or the voice operator) | `snoozed` — no second ring, no alert |
-| the dashboard or the operator console | judged as usual — whoever changed it may be setting it for somebody still asleep |
-| another room's phone | judged as usual |
-
-A change made before the ring began does not count either, and a wake-up that
-was heard stays delivered whatever the room does next. If the ledger cannot be
-read, the ring is judged as if this rule did not exist: an unneeded alert to
-somebody awake is the safer mistake than silence for somebody asleep.
-
-A snooze is recorded once the phone has heard the new time, about ten seconds
-after dialling `42`. So if the scheduler comes to judge a ring while the room's
-own phone is **on a call** — usually somebody part-way through that call — it
-waits up to **90 seconds** before judging, looking again on each scheduler pass
-for the change to land. A room still on a call after 90 seconds is judged as
-usual, so a handset that is genuinely busy delays the alert by at most that
-long. A room the phone system cannot report on never waits, and a phone that is
-merely ringing does not count as on a call.
-
-This is a fix for a real morning. On 2026-09-14 one handset snoozed three of its
-own wake-ups this way, and was rung a second time twice and sent three critical
-alerts saying nobody had picked up.
-
-Every step above is recorded in `/share/switchboard/delivery-outcomes.jsonl`:
-`ring-queued`, `deferred` (the room was busy or offline at the appointed time),
-`originate-refused` or `originate-error` when the call could not be placed at
-all, `answered`, `spoken` and `audio-delivered`, `no-answer` or
-`answered-silent`, `ring-requeued`, `re-ring-skipped` or `re-ring-failed`, and
-finally `undelivered` — or `snoozed`, when the room's own phone changed the
-wake-up during the ring. Each set and cancel is a row of its own, `set` or
-`cancelled`, with its `source`. A wake-up whose time passed without it ringing is
-`missed` (since 0.108.2), with a `reason`: `grace-expired` when the room stayed
-busy or offline through its grace window, `not-running` when Switchboard itself was
-down at that time (after a power cut, for example).
-
-A room holds **one** pending wake-up, so setting a second one replaces the
-first. Since v0.104.0 the `set` row for a replacement also names the time it
-displaced, as `replaced_hhmm` and `replaced_target_epoch` — one row, not two,
-and a first-ever set is unchanged. Before that a replacement left no trace at
-all: on 2026-09-15 a 06:20 wake-up set at 13:10:35Z was replaced at 13:15:09Z by
-a 04:00 one, and the ledger showed the 06:20 being set, then no ring and no
-cancel — which is also exactly what a wake-up the system had lost would look
-like. One more is worth knowing:
-`unjudgeable` means the ledger itself could not be written, so the scheduler
-refused to guess whether anyone answered rather than escalate on a broken
-instrument. Since 0.108.2 that includes a missed wake-up: reading that file end to end tells you
-what happened to a wake-up without needing the call log.
-
-**Smart extras** (during the wake-up call):
-
-- **Scene** (`wakeup_scene`) — activates a Home Assistant scene (e.g. gently raise
-  the lights). It is fired the moment the call is answered, in the background, and
-  the greeting follows within about a second rather than waiting for Home
-  Assistant to reply; it still fires if the call is hung up a moment after
-  answering (a hangup in the first fraction of a second, before the scene has
-  been handed off, can still stop it). Until 2026-09-14 the greeting waited for
-  the scene — 1.7 to 3.8 seconds of silence after picking up, longer when Home
-  Assistant was slow — and one pickup hung up two seconds into that silence.
-- **Weather** (`wakeup_weather`, on by default) — speaks a short local forecast.
-- **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
-
-You can also set wake-ups from the **dashboard** with the ⏰ time box and **Set** on
-each room card. A room with a pending wake-up shows a **Cancel** button on its own
-line on the card, and another in the Wake-up calls list; a cancel that fails says
-so. The operator console also sets and cancels them (**W** to set, **X** to
-cancel — §10).
-
-### Talking clock — dial `41`
-
-An old-style speaking clock: "At the sound of the tone, the time will be …", then
-the time as a 24-hour ("military") H-M-S readout, then a tone — looping until you
-hang up. The time is spoken in your configured timezone (`timezone`, or the Home
-Assistant timezone if blank).
-
-The tone sounds **on** the second just announced. Like a real speaking clock,
-it names a moment a few seconds ahead: the first whole second that the readout
-can finish before, worked out from the lengths of the recordings it is about to
-play. The tone waits for that second, and always follows "…seconds" by the same
-short beat. Any extra wait comes before the numbers instead. Each cycle writes
-one line to the add-on log with the second it named and how far from it the tone
-started, e.g. `[clock] 16:15:52 tone +2 ms`. Until v0.106.2 the tone followed a
-readout of the time the readout **began**, so it sounded 4.5–8.6 seconds late,
-by a different amount at each time of day.
-
----
-
-## 6. Paging & announcements
-
-### Page all — dial `44`
-
-Dial the paging code to talk out of **every configured room phone at once** — a
-house-wide intercom, duplex, so anyone paged can answer back.
-
-Paging has **two implementations**, and which one you get depends on where you
-start it:
-
-- **Dialing `44`** runs Asterisk's `Page()` application against every room
-  endpoint at once. `Page()` assembles its own conference.
-- **The dashboard's and console's page buttons** instead Originate each phone
-  into the add-on's `[page]` dialplan context, which answers the line and joins
-  it to a ConfBridge under the generated `switchboard_bridge` /
-  `switchboard_user` profiles.
-
-Those ConfBridge profiles (in the generated `confbridge.conf`: no music-on-hold,
-no join/leave name announcements, no "you are the only person in this
-conference") therefore shape the **dashboard/console** page only — the dial-`44`
-path does not read them, so the two can behave slightly differently on prompts
-and tones.
-
-### Announcements — dial `46` (phone → Home Assistant speakers)
-
-Dial the announce code, speak your message after the beep, and it plays out your
-configured Home Assistant `media_player` speakers (`announce_players`), bracketed
-by a three-note station chime. The message is transcribed and re-synthesized
-on-box (espeak-ng), rendered to a WAV the add-on serves on your LAN, and pushed to
-every speaker at once via `media_player.play_media`.
-
-### Announce onto a handset — `POST /api/announce/{ext}` (Home Assistant → phone)
-
-The add-on also exposes an HTTP endpoint that speaks a clip **onto a room handset**
-— the integration that lets Home Assistant (or another add-on) announce to a phone,
-including the WP826 cordless, the way it would to a smart speaker. The phone
-auto-answers hands-free (an intercom `answer-after=0` header, caller ID `8000`) and
-plays the clip.
-
-```
-POST http://<ha-host>:8099/api/announce/<ext>
-Header: X-Announce-Token: <announce_token>
-Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
-        {"url":  "http://…/clip.wav"}    # audio to fetch and play (WAV; MP3 and other formats via ffmpeg)
-```
-
-- The `<ext>` must be a configured room. It can only play a local clip to a known
-  handset — never place an outside call.
-- **Limits and responses.** `text` is capped at 500 characters (HTTP 400). A
-  missing `text`/`url`, or a `url` that is not `http`/`https`, also returns HTTP
-  400. An extension that is not a configured room returns 404. A clip that cannot
-  be rendered, such as a `url` that cannot be fetched or decoded, returns 502
-  `render failed`. A rendered clip longer than 90 seconds is refused with HTTP 413
-  `{"ok": false, "skipped": "too-long", "seconds": N}` and recorded `too-long`. A
-  handset with no contact returns 503
-  `{"ok": false, "skipped": "unreachable", "device_state": …}`. Otherwise the
-  response is HTTP 200 `{"ok": true|false, "sound": "<clip name>"}`, with `ok`
-  saying whether Asterisk accepted the call (the busy and duplicate answers below
-  are also HTTP 200). A request refused before its clip is rendered leaves no
-  ledger row; only the HTTP status records it.
-- **Authentication:** over the LAN this requires the `X-Announce-Token` header to
-  match your `announce_token` option. If `announce_token` is blank (the default),
-  LAN announce is **disabled** and only the Home Assistant Supervisor can call it.
-- The `{url}` branch fetches `http`/`https` only. It rejects loopback,
-  link-local, multicast, reserved and unspecified hosts; a private-LAN URL such
-  as Home Assistant's own TTS is allowed. It does not follow redirects and caps
-  the body at 5 MB. A WAV is decoded directly and other formats (such as the MP3
-  Home Assistant's TTS proxy serves) with ffmpeg, which the image installs on a
-  best-effort basis. The result is transcoded to 8 kHz for the phone line and
-  bracketed by the same chime as a `{text}` clip.
-- **Busy-guard:** when the target phone is already on (or being offered) a call —
-  its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
-  call is **not** placed. A second INVITE cannot auto-answer mid-call and would
-  ring the handset as call waiting. The skip is logged and the response is
-  `{"ok": true, "skipped": "busy", "device_state": …}` (HTTP 200), so callers
-  treat the announcement as handled instead of re-queueing identical content
-  behind the call in progress. If the device state cannot be read, the call
-  proceeds (the guard fails open, so a state-read hiccup never suppresses an
-  alert). The guard applies only to this endpoint — ordinary inbound/outbound
-  calling, paging, and wake-up calls are unaffected.
-- **Duplicate suppression:** the same audio sent to the same phone again within
-  five minutes is not played twice. Every render gets a fresh filename, so the
-  clip is compared by content rather than by name.
-
-  A request alone never starts the window. The ledger check below measures it
-  from the earlier copy's `audio-delivered` row. The in-memory fallback starts it
-  when Asterisk accepts the call, and only if the handset's state was read first;
-  since v0.105.0 it does not start when that state could not be read. Until
-  v0.85.0 the window started when the request arrived — before the guards above
-  had run — so an announcement refused because the handset was not
-  registered began a suppression window anyway, and each retry pushed that
-  window forward. An announcement turned away once could never be delivered
-  while the caller kept trying, which is the opposite of what a retry is for.
-  Every refusal path now leaves the window untouched.
-
-  It is a rate limit, not a lock: identical content repeated on a timer plays
-  once per window, rather than once and then never again.
-
-  Since v0.106.0 the check **reads the ledger** below whenever it can, and the
-  in-memory window decides only when it cannot. The window alone knew one thing,
-  that this web UI had sent the same audio, and that was wrong in both
-  directions. Past it, the same words reached a room twice: the first copy was
-  an automatic replay (§6, which runs in another process), went out while
-  Asterisk could not report the handset's state (the window is deliberately not
-  started then), or played before a restart. Inside it, the window said
-  "duplicate" even after the room had since been asked for something else, or
-  when the first copy never played at all.
-
-  The ledger sorts every earlier announcement to that phone into **heard**
-  (its audio arrived), **in flight** (handed to Asterisk within the last
-  3 minutes, no verdict yet, so it may still ring or play), **waiting** (the
-  retry below may still send it), or **gone**. An announcement is a duplicate
-  when the same audio was **heard** inside the window with nothing different
-  heard or in flight since. It is also a duplicate while the same audio is
-  still **in flight or waiting**. "Door open, door closed, door open" is
-  therefore three announcements. An identical announcement whose first copy is
-  gone unheard is sent at once.
-
-  Both cases answer the caller `{"ok": true, "skipped": "duplicate"}` and record
-  the clip:
-  - `duplicate-suppressed` (`basis: delivered`) names the delivery it matched
-    (`matched`, `delivered_at`) and is never replayed.
-  - `duplicate-pending` (`basis: pending`) names the copy it is waiting for
-    (`matched`, `asked_at`). It is a record, not a second announcement: the copy
-    already queued is the one the room hears, keeping its place in the retry and
-    the idle observations it has gathered. If that copy can never play, the next
-    repeat finds it gone and is announced normally.
-
-  A repeat is only held back when something really will send it: the retry
-  must be on (`announce_retry_attempts` above `0`) and running, and it runs in the
-  wake-up scheduler, which idles while `wakeup_enabled` is off. If either is not
-  so, no replay is coming, so repeats are never held back — they are the only way
-  the room hears anything.
-
-  Neither duplicate row is a request of its own: it is never replayed, and it
-  never displaces or retires another announcement. A stale, different
-  announcement still waiting for the retry is superseded by the original request
-  for the matched audio when that request is the newer one, ranked at the time
-  that request was made, not when the repeat arrived. A different message asked
-  for after that request still plays.
-
-  When the ledger cannot be read, or holds no history for that room at all, the
-  in-memory window decides as before, and its row says `basis: memory`.
-
-  The ledger check runs after the handset's state is read and before the busy
-  and registration checks. A duplicate is therefore answered as a duplicate
-  whatever the handset is doing, and a copy whose audio finishes while the state
-  is being read is caught.
-
-  Rows name the content by a **keyed tag** (`digest`, 12 hex characters), never
-  by a plain hash of the audio. The spoken text is predictable, so a plain hash
-  in a shared folder would let anything that can read `/share` confirm a guessed
-  sentence. The key is created on first use and kept in the add-on's private
-  `/data` folder. If it cannot be created, no row carries a tag and duplicates
-  are recognised in memory only. The clips themselves are no longer served to
-  the LAN: only the separate speaker announcements that Home Assistant media
-  players fetch are.
-- **Every outcome is recorded**, in `/share/switchboard/delivery-outcomes.jsonl`:
-  `originate-queued` when the call was placed, and `too-long`,
-  `duplicate-suppressed`, `duplicate-pending`, `skipped-busy`, `unreachable` or
-  `announce-originate-failed` when it was not. An announcement that never became
-  a call has no call-quality record, so once its clip has been rendered, this
-  ledger is the only place it appears.
-
-  `announce-originate-failed` carries the reason on the row, and the name of the
-  clip, so a failed send appears in the same place in an announcement's history
-  as a successful one. The reason is `refused` whenever Asterisk did not accept
-  the call. That currently includes a request that could not reach Asterisk at
-  all, because the Asterisk client reports a connection or login failure as a
-  refusal; the caller then receives HTTP 200 with
-  `{"ok": false, "sound": "<clip>"}`. The `ami-error` reason, answered with
-  HTTP 502, is written only when the request itself raises. Before v0.104.0 those
-  two cases were written as `originate-error` and `originate-refused`, the same
-  two names the wake-up call uses for its own failures and with no clip on
-  either, so an announce failure could not be joined to the announcement it
-  belonged to. (The wake-up rows are unchanged; §5 still lists them.)
-- **...and when the pre-flight check could not answer.** Before placing the call
-  the add-on asks Asterisk whether the handset is registered, and if the answer
-  is "no contact" the call is skipped and recorded `unreachable`. If that
-  question cannot be answered at all — Asterisk not yet talking to the add-on, a
-  few seconds after a restart — the announcement goes out anyway, because a check
-  that refuses to announce when it cannot ask would silence an alert.
-
-  Since v0.104.0 that also writes an `announce-guard-unjudged` row naming the
-  clip, so "the handset looked fine" and "nobody could tell" stop looking
-  identical in the ledger. Live on 2026-09-15 at 01:42:12Z, 8.4 seconds after an
-  add-on restart, an announcement went to the cordless before it had
-  re-registered; Asterisk logged one error line, the clip never played, and
-  nothing recorded that the check had been skipped. It is **not** a refusal: the
-  announcement still goes out and is still judged normally afterwards.
-
-  Until v0.105.2 the question came back unanswered almost every time — on 28 of
-  29 announcements — because Asterisk writes that reply in two pieces a few
-  microseconds apart and the add-on stopped reading after the first. So the
-  `busy` and `unreachable` refusals above almost never happened, and nearly every
-  announcement carried an `announce-guard-unjudged` row. The reader now waits for
-  the whole reply, and that row is back to meaning what it says: Asterisk really
-  was not answering.
-- **...and a refusal is sent again** (v0.105.2). `skipped-busy` and `unreachable`
-  are announcements whose audio never played, so both now carry the clip name
-  and are replayed by the retry described below — `unreachable` once the phone
-  has contact again, `skipped-busy` once the line is free — under the same limits
-  as any other replay. The response to the caller is unchanged. A refusal that
-  is never replayed gets no `announce-undelivered` verdict, because it was never
-  handed to Asterisk; its history ends with the retry's own
-  `announce-retry-skipped` row, or with the refusal row itself when
-  `announce_retry_attempts` is `0`, `wakeup_enabled` is off, or the add-on
-  restarted before it could be
-  replayed. Once it has been replayed it has been handed
-  over, and from then on it is judged like any other announcement.
-- **...including how it ended** (v0.98.0). `originate-queued` only means Asterisk
-  accepted the request. The handset's hangup now records `audio-delivered` once at
-  least a second of the clip has actually played, and anything still unaccounted
-  for after the deadline below is recorded `announce-undelivered`. Before this, an
-  announcement that rang a phone nobody answered ran no dialplan at all and so
-  left **no record anywhere** — it looked exactly like one that was never sent.
-  Live on 2026-09-01 at 19:05:15.
-
-  The two halves are matched **by the name of the clip**, which the call now
-  carries, not by which records happen to sit near each other in time — three
-  alerts inside a few minutes is what an incident looks like, and that is when
-  this has to be right. Since v0.98.2 the comparison uses the name's letters and
-  digits only: the name crosses the dialplan, which was silently stripping the
-  hyphens out of it, and an alert's delivery verdict should not depend on which
-  punctuation survives that trip.
-
-  The deadline is **ring + clip cap + a minute, and never under 180 s**, measured
-  from the newest send: the original, or the latest automatic replay (v0.105.0). An
-  announcement may ring for 30 s and then speak for up to `90 s`, so a flat
-  two-minute deadline would report a failure for announcements still playing.
-  Nothing older than an hour is judged at all, so a scheduler that was stopped
-  overnight cannot file a night of retroactive failures — and, since v0.98.1,
-  **nothing sent before the current run started** is judged either. A window the
-  reconciler was not running for is unknown rather than failed: the confirming
-  record comes from a short-lived helper that an add-on restart kills, and across
-  an upgrade it may have been a build that never wrote one. Skipping that window
-  is why an add-on restart does not produce a burst of false failures.
-
-  An announcement **cut off partway through still counts as arrived**, with the
-  stage and packet count on the record. It did not meet its contract — §11 scores
-  it `undelivered` as it always has — but it did reach the phone, and filing it
-  beside one that rang out unanswered would erase the distinction this exists for.
-
-  Unlike a missed wake-up, this is **recorded and not pushed**. An alarm clock has
-  a deadline; an announcement does not.
-- **...and one it declines to judge** (v0.100.2). Asterisk restarts with the
-  add-on, and its handsets take up to two minutes to re-register (since v0.112.0 a
-  handset still registered when the add-on stopped is reachable again within
-  seconds of the restart, because registrations are kept). An announcement
-  sent into that gap genuinely does not arrive — but `announce-undelivered` would
-  be a true and useless record, because the cause is a restart you just performed.
-  Anything queued within **120 seconds** of the add-on starting is recorded
-  `announce-unsettled` instead, which says plainly that it was not judged and why.
-  It is recorded rather than skipped: a request with no verdict at all cannot be
-  told apart from one the system forgot about.
-
-  120 s is the same settling cap the fleet monitor uses to decide the phones have
-  finished re-registering, rather than a second number for the same question.
-- **...and one it sends AGAIN** (v0.105.0). An announcement whose audio never
-  played is now **retried automatically**, because three times in a fortnight one
-  was sent to the cordless in the seconds after an add-on restart, before that
-  handset had re-registered — the phone never rang, nothing played, and the only
-  outcome was a ledger row minutes later. The handset in question was back 38
-  seconds after the send that failed.
-
-  The retry runs in the same 20-second loop as the reconciler above, and it will
-  only send again once the phone **positively reports itself registered and idle,
-  twice in a row**. Anything else — ringing, in a call, unregistered, or a state
-  Asterisk could not report at all — waits. A check that cannot ask is what caused
-  the original miss, and for a replay the safe answer to "we could not ask" is no.
-
-  It is the *audio* that decides, not the reason it was missing — so **an
-  announcement nobody answers is retried too**. A room phone that is registered
-  and idle is a green light as soon as it stops ringing, which means one
-  unanswered announcement can ring that room up to one more time than
-  `announce_retry_attempts` (three times by default) inside the 150 seconds
-  below. Set `announce_retry_attempts` to `1`, or to `0`, if that is
-  not what you want in your house.
-
-  **An announcement whose audio played is never replayed.** The confirming record
-  carries the name of the clip (§6 above), and a clip that has one is excluded
-  permanently, at any age, whichever order the records arrive in.
-
-  Bounded at `announce_retry_attempts` attempts (default **two**, at most three),
-  and **never started more than 150 seconds** after
-  the original send: an announcement is often time-sensitive, and dinner being
-  ready is not worth saying twenty minutes late. Two attempts spaced a poll apart
-  straddle the 30-45 seconds a cordless handset takes to come back after a
-  restart; past that the cause is no longer the restart. The 150 seconds is
-  measured against how long a clip lives on disk (five minutes), not against the
-  settling window above — the phone is not even available until most of a minute
-  into that window. The attempt count is the `announce_retry_attempts` option and
-  `0` switches the whole thing off; the two timings are fixed in the code, where
-  they are derived from the clip's life and from this loop's own 20-second poll
-  rather than being independent dials.
-
-  Each attempt is recorded as `announce-retry-attempted` with the clip, the
-  attempt number and the handset state that cleared it; the row is written
-  **before** the call is placed, and the call is abandoned if it could not be
-  written, because an attempt that cannot be counted cannot be limited. A replay
-  that Asterisk does not accept is recorded `announce-originate-failed` with
-  `reason: retry-refused` and the attempt number. This includes an Asterisk that
-  could not be reached at all; `retry-ami-error` is written only when the request
-  itself raises. The attempt still counts against the limit, and the
-  announcement is still judged afterwards. When the retry gives up it records `announce-retry-skipped` once, saying why: `too-old`,
-  `budget-exhausted`, `ext-superseded` (a newer announcement was sent to the same
-  room, so only that one is replayed — never two at once to one phone),
-  `clip-gone`, or `content-delivered` (v0.106.0: the same audio reached that
-  room under another announcement's name, within the duplicate window around
-  this one's request and with nothing different heard since, so replaying it
-  would say it twice; the row names the clip that was heard as `matched`). None
-  of these rows is a verdict — the reconciler above still files
-  `announce-undelivered` or `announce-unsettled` for the announcement itself, now
-  carrying how many retries it had.
-
-  A restart inside the window abandons the retry, deliberately: the clip lives in
-  memory-backed storage that the restart clears, and a run that may not judge an
-  announcement may certainly not replay one.
-
----
-
-## 7. Grandstream GXW4216 V2 provisioning
-
-Each FXS port becomes one SIP **user** that registers to this add-on. The GXW is
-configured through its own web UI (this add-on does not push config to it).
-
-### 7.1 Point the gateway at Home Assistant
-
-**Profiles → Profile 1 → General Settings**
-
-- **SIP Server**: the LAN IP of your Home Assistant host. (The add-on uses host
-  networking, so Asterisk listens there on UDP 5060.)
-- **SIP Transport**: UDP
-- **NAT Traversal**: No (everything is on the LAN)
-
-**Profiles → Profile 1 → Audio Settings**
-
-- **Preferred Vocoder**: **PCMU (G.711 µ-law)**. Switchboard only offers µ-law, so
-  PCMU must be in the gateway's list; anything else it advertises is simply never
-  selected ([§13](#13-codecs--g711-µ-law-only-on-purpose)).
-- **Disable** silence suppression / VAD for the cleanest analog audio and to keep
-  antique sets' tones intact.
-
-### 7.2 Configure each FXS port
-
-For each wired port, under **FXS Ports**:
-
-| Field | Value |
-|-------|-------|
-| **SIP User ID** | the extension, e.g. `11` |
-| **Authenticate ID** | the same extension |
-| **Authenticate Password** | the room's `secret` from the add-on options |
-| **Name** | the room label, e.g. `Kitchen` |
-| **Profile ID** | Profile 1 |
-| **Enable Port** | Yes |
-
-Save & **Apply**; reboot the gateway if ports don't register.
-
-> **Message-waiting stutter tone (optional).** For the message-waiting indicator
-> (dashboard ✉, console `M`) to produce the classic **stutter dial tone** on an
-> antique handset, enable **"Send Stutter Dialtone for MWI"** / **"MWI → Stutter
-> Tone"** in Profile 1 (or per port); the label varies by firmware. Without it the
-> indicator still tracks in the dashboard, but the dial tone won't stutter.
-
-### 7.3 Configuring the gateway from the CLI (reliable path)
-
-The GXW's web UI works, but its **SSH command shell** is the authoritative,
-scriptable way to read and write settings — and, importantly, the **only** way to
-*confirm* a value. Grandstream's `export`/HTTP config views show the *firmware
-default* for many Profile-1 codes, not the committed value; only `get <n>` in the
-shell reflects what's actually running. The shell takes the **bare number**:
-`get 4200` reads the dial plan, while `get P4200` prints `(null)` whatever the
-value is.
-
-```
-ssh admin@<gateway-ip>        # password = the GXW admin password
-> config                      # enter config mode
-CONFIG> get 4200              # read a value (authoritative; no "P")
-CONFIG> set 85 3              # change a value
-CONFIG> commit                # persist
-CONFIG> exit
-```
-
-Useful P-codes (Profile 1 is shared by every FXS port assigned to it in §7.2; type
-them at the shell without the `P`):
-
-| P-code | Setting | Reference value |
-|--------|---------|-----------------|
-| `P32` | Register Expiration (minutes) | `2` (fast re-register after a restart) |
-| `P37` | **Voice Frames per TX** (G.711 ptime = value × 10 ms) | `2` (20 ms) |
-| `P57` | Codec preference | µ-law first |
-| `P72` | Use `#` as dial key | `1` (enabled) |
-| `P81` | **Unregister On Reboot** (Profile 1) | `1` — a gateway restart then leaves `Removed contact … due to request` in `/data/state/asterisk.log` (and in the Log tab at `info`, `debug` or `trace`); see §14 |
-| `P85` | **No Key Entry Timeout** (global; seconds the gateway waits after the last digit before sending) | `3` — see §7.4 |
-| `P4200`–`P4203` | **Dial Plan** (per profile; the FXS ports use Profile 1 = `P4200`) | see below |
-| `P21929` | **Automatic Reboot** (global; `0` off, `1` daily, `2` weekly, `3` monthly) | `2` (weekly). Optional: every wired phone drops for about a minute at each scheduled reboot; see §14 |
-| `P21930` | Automatic Reboot hour | `1` (01:00) |
-| `P21931` | Automatic Reboot day of the week (weekly schedule) | `1` (Monday) |
-| `P28118` | Automatic Reboot day of the month (monthly schedule) | not used with a weekly schedule |
-
-### 7.4 Dial plan & the send delay
-
-A dial plan that supports **prefix-free direct dial** (`direct_dial: true`, §9) —
-2-digit rooms, feature codes, and `1` + 10-digit outside numbers — for the
-reference home's `11`–`20` extensions:
-
-```
-{ 0 | 1[1-9] | 20 | 4[1-7] | 411 | 911 | 933 | 1[2-9]xxxxxxxxx | \+x+ | *x+ | *xx*x+ }
-```
-
-- `1[1-9]` = rooms 11–19; `20` = the softphone; `4[1-7]`/`411` = feature codes
-  (`47` is the voice assistant, added in 0.69.0); `911`/`933` are always
-  emitted by the add-on and must be dialable from the gateway or the spoken
-  emergency notice cannot be reached at all.
-- `1[2-9]xxxxxxxxx` = 1 + 10-digit direct dial. This **overlaps** rooms 12–19
-  (each is both a complete room *and* the start of an 11-digit number), so those
-  extensions send only after the **No Key Entry Timeout** (`P85`) — or immediately
-  if you press `#` (`P72` is enabled). Room 11, `20`, `0`, and feature codes
-  `42`–`47` are unambiguous and send instantly.
-- **`41` is the one feature code that is not instant.** With the talking clock on
-  `41` and directory assistance on `411`, `41` is both a complete code and the
-  first two digits of a longer one, so the gateway cannot know you are finished
-  and waits out `P85` exactly like rooms 12–19 (press `#` to send at once). `411`
-  itself is unambiguous once the third digit lands. If that pause on the clock
-  bothers you, move one of the two off the collision. Pick a code that is not
-  already taken — `47` is the local voice assistant, and setting `clock_ext: 47`
-  would collide with it and silently disable one of the two (a collided feature
-  code is skipped with a log line, not an error). `48` or `49` are free; or move
-  `directory_ext` to something that isn't a `41…` prefix.
-- **`P85 = 3` seconds** is the reference value: it trims that 12–19 pause from the
-  firmware default of 4 s while staying above a **rotary/pulse** phone's
-  inter-digit gap, so a slow rotary dial of a long number isn't cut off mid-number.
-  Dropping to 2 s risks that on rotary sets. It's a single global value (no
-  per-port setting).
-
-For **pulse/rotary** phones, enable the **Pulse Dialing** option on that FXS port.
-
-If you're not using direct dial, a simpler prefix-mode plan works:
-`{ 1x | 20 | 4[1-7] | 411 | 911 | 933 | 0 | 9911 | 9933 | 9xxxxxxxxxx }` (dial
-`9` for an outside line; `911` and `933` are accepted both bare and prefixed, and
-both forms wait for `P85` because they also begin `9xxxxxxxxxx`).
-Here rooms `11`–`19` send instantly (nothing longer starts with `1`), but the
-`41`/`411` overlap above is unchanged — it comes from the feature codes
-themselves, not from direct dial.
-
-### 7.5 Verify
-
-On the **Switchboard** panel, each provisioned room shows **Registered** within
-~30 s. If not, see [§14](#14-troubleshooting).
-
----
-
-## 8. The WP826 WiFi cordless (optional)
-
-A Grandstream **WP826** WiFi cordless can join as an ordinary room extension —
-register it to the add-on the same way (SIP server = your Home Assistant IP, user
-ID / auth ID = its extension, password = its `secret`). Beyond being a phone, the
-cordless integrates in three extra ways:
-
-- **Home Assistant announce endpoint** — with `POST /api/announce/{ext}` targeting
-  the cordless's extension, Home Assistant can speak alerts on it hands-free
-  ([§6](#6-paging--announcements)).
-- **Remote phonebook** — the add-on serves your rooms as a Grandstream GS
-  Phonebook XML document at `http://<ha-host>:8099/phonebook.xml` (one `<Contact>`
-  per room: the room `name`, the `ext` as its number). Point the handset's
-  **Remote/XML Phonebook** at that URL — `P330 = 1` (HTTP) and
-  `P331 = <ha-host>:8099/phonebook.xml`, see
-  [`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md) — and it shows every room by
-  name, on caller ID and in its own directory. It is rendered from your live
-  `rooms` option on each fetch, so renaming a room needs no re-upload; rooms whose
-  `ext` fails validation are skipped and names are XML-escaped. This URL is
-  **LAN-reachable and unauthenticated**. The handset cannot ride Ingress, so this
-  read-only GET is exempt from the Supervisor-only guard on `:8099`. The guard
-  has two other exemptions: a Home Assistant media player fetching a speaker
-  announcement clip (`GET /announce/a<digits>.wav`), and
-  `POST /api/announce/{ext}` carrying a valid `X-Announce-Token`. Every other
-  request on the port is refused unless it comes from the Supervisor (see
-  [SECURITY.md](SECURITY.md)). The phonebook exposes room names and internal
-  extensions only — the same directory already printed on every handset — and no
-  secrets.
-- **Device-health monitoring** — set `cordless_ext` (its extension) and
-  `cordless_password` and the add-on polls the phone's own API for battery, WiFi
-  signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
-  `cordless_ext` set it **auto-follows the phone's IP** from its live registration,
-  so DHCP moving the handset never breaks monitoring (`cordless_ip` is just the
-  fallback)
-  ([§11](#11-health-monitoring--home-assistant-sensors)).
-
-For scripting the cordless's own settings (remote phonebook, distinctive ring,
-custom ringtone, speed-dial keys), the repo ships a standalone tool and a P-code
-reference at [`tools/wp826.mjs`](../tools/wp826.mjs) and
-[`tools/wp826-pcodes.md`](../tools/wp826-pcodes.md).
-
----
-
-### Pinning the cordless certificate
-
-The WP826 serves its **own self-signed certificate** and offers no way to install
-a CA-signed one, so ordinary TLS validation can never succeed against it. Both
-the health monitor and `tools/wp826.mjs` therefore skip chain validation — which
-means, unpinned, a device on your LAN could impersonate the handset and capture
-the **admin password** the monitor sends every poll.
-
-Pinning the certificate closes that. Read the fingerprint:
-
-```
-WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint
-```
-
-Set the value as `cordless_cert_sha256` (and, for the tool,
-`export WP826_CERT_SHA256=<fingerprint>`). From then on the monitor compares the
-presented certificate **before** the login body is written, and refuses to send
-credentials on a mismatch; the tool exits non-zero before logging in. Colons,
-spaces, upper case and a `sha256:` prefix are all accepted.
-
-A factory reset regenerates the certificate — re-run the
-`WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint` command above and
-re-pin after one, or the monitor will (correctly) stop authenticating:
-`sensor.switchboard_cordless_health` then reads `degraded`, with the reason that
-the cordless answers on the network but its admin API is unreadable (wrong
-`cordless_password`, or a `cordless_cert_sha256` mismatch), and its battery,
-Wi-Fi and call-score attributes are no longer published. The
-`WP826_HOST=` prefix is not optional: without it the tool falls back to a
-built-in default address and would fingerprint whatever answers there.
-
-## 9. Adding an outside line (SIP trunk)
-
-1. Sign up with a SIP-trunk provider (host, username, password, a DID).
-2. In **Configuration**, set:
-   ```yaml
-   trunk:
-     enabled: true
-     provider_host: losangeles.voip.ms
-     port: 5060
-     username: "100000_sub"
-     secret: "provider-password"
-     from_domain: losangeles.voip.ms
-     outbound_caller_id: "12135550123"
-     inbound_ext: "19"        # ring one room, or "19,20", or "" for the whole house
-     dial_prefix: "9"         # or set direct_dial: true to drop the prefix (below)
-     registns: true
-   ```
-3. **Restart** the add-on.
-4. **Outbound**: dial `9` then the number. Prefer dialing **without** a prefix?
-   Set `direct_dial: true` — then you dial **`1` + the 10-digit number** (like a
-   cell), while your 2–3-digit extensions and feature codes still ring internally.
-   The leading `1` is required (a bare 10-digit number won't dial out); that's what
-   keeps extension 20 and every feature code except `41` (which overlaps `411`,
-   §7.4) dialing instantly. `011` international and
-   `1-900` premium stay blocked, and **911 is not routed** (no E911 — use a cell for
-   emergencies). Don't try to disable the prefix by blanking `dial_prefix`; the
-   options form reverts a cleared field to its default, so use the `direct_dial`
-   toggle. On analog phones, extensions 12–19 send after a brief pause (or press
-   `#`) because they start with `1` like an outside number does.
-5. **Inbound**: rings the `inbound_ext` room(s), or every room if blank. Outside
-   calls ring with a **distinctive ring** on the WP826 cordless (an
-   `Alert-Info: …;info=outsideline` tag; analog handsets ignore it).
-
-With `enabled: false`, none of the trunk config is emitted and the PBX is purely
-room-to-room.
-
-### Toll-fraud protection
-
-The trunk is where the internet meets your phone bill, so several defenses are
-layered on automatically (details in [SECURITY.md](SECURITY.md#toll-fraud-the-trunk-threat-model)):
-
-- **Blocked prefixes** — international (`011`) and premium (`900`, `1-900`) are
-  rejected before any outbound rule.
-- **Inbound calls get no in-call feature codes** — an outside caller can't key
-  `##` to reach an outbound path.
-- **Transfers are internal-only** — a transferred outside caller lands in a context
-  with no outbound rule at all.
-- **Provider-initiated transfers (REFER) are rejected.**
-- The trunk **re-registers every 120 s** to hold the router's NAT pinhole open
-  (many providers, e.g. VoIP.ms, don't answer keep-alive OPTIONS reliably, so the
-  AOR is deliberately not qualified).
-
-### Emergency calls are not carried
-
-**This PBX cannot reach 911.** The trunk provider has no service address
-registered for it, so an emergency call could not be routed to the correct
-dispatcher even if it completed. Dial `911` from any house phone and Switchboard
-answers immediately with a spoken notice telling the caller to hang up and use a
-mobile — in **both** dial modes, and before any trunk pattern can match.
-
-That explicit handling matters: in prefix mode the outbound pattern `_9.` also
-matches `911`, and before v0.49.0 it would strip the prefix and dial the
-remainder (`11`) out to the PSTN — a wrong call placed during an emergency.
-Anyone relying on these phones should be told to keep a mobile for
-emergencies.
-
-### Registration resilience
-
-The REGISTER refresh is the trunk's lifeline (§ NAT note above) — and losing it
-used to be permanent: Asterisk's default `max_retries=10` means a WAN outage
-longer than ~10 minutes drove the registration into a **terminal** "Rejected"
-state that nothing ever retried. That exact failure occurred live: a 75-minute
-WAN blip silently killed inbound calling for 24 hours (outbound was unaffected —
-it authenticates per-INVITE). v0.48.0 closes it from three sides:
-
-1. the generated `[trunk-reg]` sets `max_retries = 10000` (≈ 7 days of retrying)
-   plus fatal/forbidden retry intervals, so the terminal state effectively
-   cannot arise;
-2. the link-health poller watches the registration every cycle, publishes
-   `sensor.switchboard_trunk_health`, and **auto-sends a re-register** if it
-   ever sees Rejected/Stopped (via the native `PJSIPRegister` AMI action —
-   v0.48.0 used the `Command` CLI bridge, which none of the add-on's AMI
-   accounts is authorised to run, so that recovery was inert until
-   v0.49.0);
-3. if the registration stays down for 2 consecutive cycles, a persistent
-   notification fires. Recovery does **not** dismiss it: the poller posts a
-   *second* notification ("the outside line re-registered") under the same
-   `notification_id`, which **replaces** the outage entry in the notification
-   list. So the bell is never left showing a stale "outside line down", but you
-   are left with a recovery notice to dismiss yourself.
-
----
-
-## 10. The operator console (SSH + browser)
-
-A live switchboard board an operator can drive by keystroke: see every phone's
-status, **ring** a room, **connect** two rooms (patch a call), **hang up**,
-**transfer**, **set/cancel a wake-up**, toggle **message-waiting**, **page all**,
-and control **lights**. The board fills the whole terminal: each room row shows its
-registration, any live call + peer, and its idle **round-trip latency** (RTT); a
-status line under the header shows the **SIP trunk registration** (Registered /
-Unregistered) and **resident-STT health** (resident / CLI-fallback) — the same
-signals the Ingress dashboard surfaces. Three front-ends onto the same board:
-
-![The full-screen operator console](docs/img/console.png)
-
-- **In the Home Assistant sidebar** *(recommended, added in 0.93.0)* — open the
-  **Switchboard** panel and press **Console**, or go straight to `/console/`
-  under the panel's URL. This is the same board, served from the Ingress port, so
-  **Home Assistant's own login is the only login** — there is no separate
-  password to configure, forget, or leave switched off. The port does listen on
-  your LAN — host networking gives it no choice — but every connection whose peer
-  is not the Supervisor is refused, apart from three narrow HTTP exceptions that never
-  reach the console (§8). It works in the HA mobile app.
-
-  Two things worth knowing about it. The URL must end in a **slash**: the page
-  loads its assets relatively, so `/console` alone resolves them one directory up
-  and you get a terminal that never finishes connecting. `/console` redirects to
-  `/console/` for you, and the page now says so plainly if the assets are
-  missing. And because it is served inside the Home Assistant frontend, the
-  terminal shares HA's browser *origin* — a scripting bug in this page would be a
-  bug against your HA session, not merely against a terminal on its own port. The
-  page is served only `xterm.js` and `xterm.css`, from a two-entry allowlist, for
-  that reason.
-
-- **Browser sign-in** *(the standalone `:8100` terminal only)* — when
-  `console_users` is configured that terminal first shows a sign-in page; its
-  socket also requires the signed-in session, and repeated failures from one
-  address are throttled. The sidebar console above needs none of this.
-- **SSH** — `ssh -p 2300 <user>@<ha-host>`, as a `console_users` entry: its
-  username, then its password at the prompt. **While `console_users` has no valid
-  entry, every login is refused**; the add-on log says so at start-up and once for
-  each connection that tries. Keys: **↑↓ / j k** move, **R** ring,
-  **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
-  `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
-  **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. The **lights**
-  list scrolls with **↑↓** — it says how many lights are hidden above and below,
-  and repeats the area heading when the view starts inside one (0.94.4). Since
-  0.100.0 **the board itself scrolls the same way**: the roster follows the
-  selection and says how many rooms are out of view. When the window is shorter
-  still, the active-call and wake-up lists collapse to a count of what they are
-  hiding — but the key bar at the bottom is never given up, which is what used to
-  happen first, because the page was simply cut off at the terminal's last row.
-  The window size comes from your SSH terminal and follows a resize. Toggle with
-  `console_enabled`; `console_port` and `console_bind` set its port and interface.
-  **Since 0.114.0 `console_bind` defaults to `0.0.0.0`** — on a *fresh* install;
-  an upgrade keeps the `console_bind` it had saved, most likely `127.0.0.1`, which
-  leaves SSH reachable from the Home Assistant host only. The start-up line names
-  the address it is actually listening on, so read that rather than assuming the
-  new default applied, and set `console_bind: 0.0.0.0` to reach it from the LAN.
-
-  The first connection asks you to accept the server's host key. Compare the
-  fingerprint your client shows with the add-on log, which repeats it on a
-  start-up line at every start:
-
-  ```text
-  [switchboard-console-ssh] SSH operator console listening on 0.0.0.0:2300 — host key SHA256:… (ssh-ed25519) — …
-  ```
-
-  The ed25519 key is created on first start at `/data/ssh_host_ed25519_key` and
-  reused after every restart and update. If it is ever replaced (the file was
-  deleted, or was not a usable key), clients warn that the host identification has
-  changed: check the new fingerprint against the log, then drop the old one with
-  `ssh-keygen -R "[<ha-host>]:2300"`.
-
-  Only the interactive console is offered. Login is by password, never by key;
-  running a command (`ssh … <command>`), sftp and scp, port forwarding, and agent
-  or X11 forwarding are all refused, and the connection closes when the console
-  is quit. A connection has 60 s to log in and is closed after 15 minutes without
-  input. Wrong passwords are throttled per address — 5 attempts in any 5 minutes,
-  at most 3 on one connection — separately from the web terminal's count. A
-  `console_users` entry holding a character an SSH client cannot send (a control
-  character, say) cannot log in over SSH; the start-up log counts such entries.
-  Recent OpenSSH clients warn that the connection "is not using a post-quantum
-  key exchange algorithm". That is expected: the SSH library in the add-on
-  (asyncssh) offers post-quantum key exchange only with liboqs, which the image
-  does not include. `-o WarnWeakCrypto=no-pq-kex` silences the warning.
-- **Browser web terminal (the standalone one)** — the same TUI rendered with
-  xterm.js by a small stdlib HTTP + WebSocket server that bridges to the board
-  over its Unix socket, `/run/switchboard/console.sock`. **Since 0.94.0 it binds
-  to `127.0.0.1` by default**, so `http://<ha-host>:8100/` does not answer from
-  another machine; it is kept as a fallback reachable from the Home Assistant host
-  itself. A blank `console_web_bind` also means `127.0.0.1` (since 0.114.0 it no
-  longer follows `console_bind`). The sidebar console above supersedes it and
-  needs no `console_users` entry. Toggle with `console_web_enabled` /
-  `console_web_port`; since 0.114.0 it keeps running when `console_enabled` is off.
-
-The board itself listens on no network port, only on the Unix socket
-`/run/switchboard/console.sock` (mode 0600, root), and all three front-ends
-connect to it there. The sidebar console and the web terminal work whatever
-`console_enabled` is set to. Only with `console_enabled` and `console_web_enabled`
-both `false` does the board stop, and the sidebar console then shows
-"unavailable".
-
-> **Security:** all three front-ends can ring, connect and hang up phones, and
-> they are *not* equally exposed.
->
-> - **The sidebar console is the one to use.** It is served on the Ingress port,
->   so Home Assistant has already authenticated the caller before anything reaches
->   the add-on, and a guard pins the connection to the Supervisor — for HTTP *and*
->   for the terminal's WebSocket. The port does listen on your LAN — host
->   networking gives it no choice — but every connection whose peer is not the
->   Supervisor is refused, apart from three narrow HTTP exceptions that never
->   reach the console (§8), and there is no second password to configure or leave
->   switched off.
-> - **SSH (2300)** asks every connection for a `console_users` password and
->   refuses every login while that list has no valid entry; there is no key,
->   anonymous or default login. That is why `console_bind` defaults to every
->   interface since 0.114.0. Connections are capped at 16, and 4 per address,
->   before the SSH handshake; failed passwords are throttled per address; no log
->   line carries a username, a password or a command line. Set
->   `console_bind: 127.0.0.1` to keep it on the Home Assistant host.
-> - **The standalone web terminal (8100)** binds to `127.0.0.1` by default since
->   0.94.0. It still supports a sign-in when `console_users` has an entry:
->   the page redirects to a login form, the `/ws` upgrade re-checks the session
->   cookie (so a saved socket URL is no way around it), sessions are 256-bit
->   tokens with a 12-hour lifetime dropped on restart, and failed attempts are
->   throttled per source address. With `console_users` **empty** the gate is off,
->   which is why the bind matters; the start-up log states which mode is live and
->   whether the bind actually exposes it.
->
-> Independently of any login, **both** browser front-ends cap concurrent sessions
-> at 5 and reclaim one after 15 minutes of browser idle; the sidebar console also
-> has a 12-hour absolute ceiling per session. The standalone terminal additionally
-> same-origin-gates its WebSocket upgrade, and its bind is `console_web_bind`
-> (`127.0.0.1` by default, and when blank). SSH has its own caps, listed above. See
-> [SECURITY.md](SECURITY.md).
-
----
-
-## 11. Health monitoring & Home Assistant sensors
-
-Three monitors watch different things and publish Home Assistant
-sensors. Within each monitor the **alert** toggles only control the pop-up
-notifications — the sensors keep publishing either way.
-
-> **They are not independent.** The link-health poller is the only one of these
-> three monitors with AMI access, so three things it publishes are inputs to the
-> others:
-> `sensor.switchboard_gateway_health` is *derived* from the link-health rollup,
-> the cordless's IP auto-follow reads `contact_ip` off the per-phone sensors,
-> and the trunk watchdog runs inside the same poller. Setting
-> **`link_health_enabled: false` therefore also silences gateway health, the
-> trunk sensor and its auto-recovery, and the cordless half of device health** —
-> with no alert to tell you so. Leave it on unless you mean to turn all of that
-> off.
->
-> One thing it does **not** stop: the same service keeps the readable log copy,
-> `/share/switchboard/asterisk.log`, free of SIP accounts and LAN addresses (see
-> SECURITY.md). With link health off it runs that scrub alone, every 300 s,
-> rather than idling.
-
-### Link health (`link_health_*`)
-
-Polls every phone's PJSIP registration and qualify round-trip latency **between
-calls**, so a degrading link (especially the WiFi cordless) shows on a graph before
-a call ever drops. Publishes:
-
-- `sensor.switchboard_link_<ext>` — per phone; state is the RTT in ms, or
-  `offline` / `unavailable`.
-- `sensor.switchboard_link_health` — a rollup (worst RTT; counts of reachable /
-  unreachable / offline; the down extensions).
-
-A **second detector**, added in v0.79.0, covers the outage no sample can see.
-Asterisk logs every reachability change as it happens, and those lines are read
-each cycle; if half the fleet went unreachable *between* two polls and was back
-before the next one, that is reported too. The one whole-house outage this
-system has had lasted 119 seconds and fell entirely inside a single five-minute
-gap, so both surrounding samples read healthy. Only **phone** extensions count
-toward that half: the outside line logs its own reachability changes in the same
-place, and it is not one of the phones the threshold is measured against. Its
-changes still appear in `heartbeat.jsonl`.
-
-**After a restart** the poller checks every 15 s instead of every
-`link_health_interval` until every gateway port, and every other phone that has
-ever registered (in practice the cordless), is back — or eight checks (about two minutes)
-have passed, whichever is first. An extension that has never registered (a
-configured softphone that is never used) does not hold it open. Before this, the
-fast checks stopped as soon as the wired ports were back. Three restarts in a row
-ended warm-up with the cordless still missing, so the next check came five minutes
-later. After one of them the cordless showed `offline` for more than four and a
-half minutes after it had re-registered, and the rollup's `worst_rtt_is_partial`
-read `false` with the cordless missing. The published `poll_interval_s` stays at the steady interval
-throughout. The last fast check is always followed by a full-length sleep, and a
-15 s figure would make every staleness check call the sensors stale after every
-restart.
-
-It raises **one** notification on a mass outage — at least half the fleet *and* at
-least 3 phones unreachable for 2 consecutive cycles — so a shared-gateway failure
-(e.g. the GXW loses power) can't go unnoticed. Recovery posts a second
-notification ("phones recovered") under the **same** `notification_id`, which
-replaces the outage entry rather than dismissing it; the same replace-on-recovery
-pattern is used by the trunk watchdog ([§9](#9-adding-an-outside-line-sip-trunk))
-and by device health below.
-
-### Per-call quality (`call_quality_alerts`)
-
-Every context that can carry audio writes a record to the ledger
-(`/data/state/callqos.jsonl`): room-to-room calls, the operator, directory
-assistance and outside calls, **and** — since v0.55.0 — wake-up set and
-delivery, paging, announcements and the voice menus — and, since v0.77.0,
-**transfers**, which were one of three contexts without the hook. Before v0.55.0
-only the first four reported, so the ledger under-reported activity roughly
-fivefold.
-
-**Recorded is not the same as alerted.** The legs the PBX originates to play
-something *at* a phone — wake-up delivery, paging, announcements — never move
-`sensor.switchboard_last_call`. A three-second chime is not "the last call", and
-those legs are one-directional by design, so the one-way-audio detector (which
-exists to catch a broken *conversation*) would fire on their perfectly normal
-shape. Both of those exemptions are about the shape of the leg.
-
-**A bad line under one of them now speaks up.** Until 2026-09-15 those same tags
-also silenced the ordinary poor-quality alert, and that turned out to be the
-wrong thing to silence. The rule had been written for a clip that got *cut
-short*, which is a fair thing to stay quiet about — but a cut-short clip is
-handled earlier and never reached the rule. All the rule could actually suppress
-was a **bad connection to the handset**, and that is the same connection the next
-real conversation on that phone will use. Over fifty days it hid five of them.
-The worst was an announcement at 00:26 that played all the way through while the
-cordless was hearing it at MOS 3.4 with round trips peaking near nine tenths of a
-second; nothing else noticed, because the phone was reachable the whole time — it
-just sounded bad. Those legs now raise a card like any other. On the same fifty
-days of real calls that is a change from about **1.8 to 4.8 cards a month**.
-
-**A clip that was cut short still stays quiet, with one exception, added in
-v0.78.0.** A wake-up delivery that was answered and then failed to deliver is
-recorded `undelivered` and *does* alert. A page cut short is not worth waking
-anyone over; an alarm clock that did not go off is the one thing on this list
-with a deadline.
-
-Where that line falls was corrected in v0.97.0. A wake-up counts as delivered
-once the script has reached the **greeting** *and* at least a second of audio has
-left the box — so somebody woken by the greeting who hangs up on it is a success,
-not an alarm. It is `undelivered` when the call stopped before the greeting, or
-when it was answered and carried no audio at all. That second case is the one
-this whole mechanism exists for: an alarm clock picked up in silence.
-Conversations and the interactive menus alert exactly as before.
-
-**Whether the card was actually posted** is recorded on the leg itself, as
-`notify_status`: `posted` (Home Assistant accepted it), `failed` (the post was
-refused or could not be made), `disabled` (an alert was called for and
-`call_quality_alerts` is off) or `skipped` (the leg called for none). The
-recorder runs detached from the call with nowhere to write an error, so until
-2026-09-14 a card that failed to post left no trace at all. The field is in the
-`/share` mirror too; records carrying it are schema version `4` or later.
-
-**Whether the sensor was updated** is recorded the same way, as `sensor_status`:
-`posted` (Home Assistant accepted the state), `failed` (the update was refused or
-could not be made) or `skipped` (the leg does not drive the sensor: not the dial
-plan's record, a playback leg, or no credible score). Before v0.111.0 a failed
-update left no trace. The field is in the `/share` mirror too; records carrying it
-are schema version `6`.
-
-**Two spellings of the time, on purpose.** Each record's `ts` is plain epoch
-seconds, and has to stay that way because the cordless health monitor reads it as
-a number on every line. But every *other* ledger in `/share/switchboard` writes
-its timestamp as an ordinary `2026-09-15T00:26:35+00:00` date string, so anyone
-filtering the folder by date quietly matched nothing here and read the file as
-empty — one review reported "no calls" for a stretch that held eighteen. Records
-from 2026-09-15 carry `ts_iso` as well: the same instant, in the same spelling as
-its neighbours. Those records are schema version `5`.
-
-
-After each call, scores the worse of the two audio directions from the RTP/RTCP
-stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
-jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
-— low score, high loss, high latency (a round-trip **mean over 250 ms** or a
-**peak over 500 ms**, scored across the whole call rather than from the last
-RTCP round), or **one-way audio**.
-
-**Not every call updates the sensor.** Each leg is appended to the durable JSONL
-ledger, but the sensor is only pushed when the leg produced a *credible* MES, and
-only from the authoritative hangup record written by the dialplan
-(`source=dialplan`). A reading is discarded as not credible when Asterisk reports
-`0.0` for a direction it could not score — a short call, or RTCP that never
-converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
-alongside ~0 % loss, packetization-only jitter and a low RTT, which is the
-signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
-v0.77.0, when it reports its *other* nothing-to-report constant, the literal
-`88.087887`, on a leg where no RTCP round completed. That one reads as a flawless
-call rather than an absent one: three such legs were scored `excellent` while a
-fourth, identical but carrying the `0.0` constant, was scored `unknown`. The
-verdict was decided by which of two placeholders Asterisk happened to leave
-behind. If neither
-direction is credible there is no score to publish and the sensor simply keeps
-its previous value; the raw per-direction numbers are still in the ledger. The
-alerting is independent of this: a call with no credible MES can still notify on
-loss, latency, or one-way audio, since one-way is detected from packet counts.
-
-### Device health (`device_health_*`)
-
-Covers the two blind spots the above can't see:
-
-- The **WP826 cordless**'s own battery %, WiFi signal, and most-recent-call MOS
-  (needs `cordless_password`) → `sensor.switchboard_cordless_health`. Flags
-  CRITICAL when unreachable or the battery is dying, degraded on low battery / weak
-  WiFi / a recent poor call.
-- The **GXW gateway**'s port health, derived from the link-health rollup →
-  `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
-  lost power or its uplink.
-
-Both use a 2-cycle hysteresis so a transient blip doesn't alert; a worsening from
-degraded to critical alerts again. Both post a recovery notice when they return
-to normal, again under that device's shared `notification_id`, so the recovery
-replaces the alert rather than removing it. For the cordless, "recovered" is
-reserved for a clear backed by a newer scored call. A clear with no newer call
-(typically because the poor call simply aged out of the 15-minute window) is
-titled "alert lapsed" instead, and says the state is unknown until the next call.
-
-**When a poor call counts.** The handset scores every call itself. Each score is
-matched to a call-quality ledger leg that hung up within 90 s of it: the
-**nearest** one, except that the cordless's own leg (`cordless_ext`) is preferred
-unless another phone's leg hung up more than 5 s nearer. On the three occasions
-measured, the handset's clock and the phone system's put the same hangup within
-2 s of each other. The score is skipped when there is no such leg,
-or when the nearest leg, or the cordless's own leg preferred over it, is a wake-up
-delivery, page or announcement: the handset has been seen to score those playback
-legs between 2.2 and 2.9.
-
-Calls that never happened are left out of that search, as of 2026-09-15. A
-misdialled room number still leaves a row in the ledger — dialled, rejected, zero
-seconds long, no audio either way — and one of those landing a few seconds nearer
-than the real call used to win the match. When it did, there was nothing in it to
-agree or disagree with, so a genuinely poor score was quietly written off as
-unmeasured. The nearest leg that actually carried audio is now preferred. A real
-call the phone system simply could not score is *not* in this category: that is a
-measurement that came back empty, and it still matches and still reads
-`unmeasured`.
-
-A score below `mos_min` (a fixed 3.4, not an add-on option) from a call that ended
-within the last 15 minutes degrades the sensor only when the same leg agrees in
-the ledger, in the direction the handset hears. That means at least 1 % transmit
-loss, or a transmit MES below 78. The ledger reads those from the handset's own
-receiver reports. A call made **to** the cordless is logged under the caller's
-extension, so its figures describe the caller's phone and never count either way.
-
-Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and
-`last_mos_uncorroborated: true`), but the state stays `ok`. On 2026-09-14 the
-handset scored 2.2 on three calls the ledger measured at 0 % loss and MES 88, and
-raised three false `degraded` alerts. Why it does that is not yet known.
-
-To find out, every score below `mos_min` is captured once, whether it counted or
-not, to `/data/state/cordless-mos.jsonl`. That file is private to the add-on,
-readable by root only, capped at 512 KB, and never copied to `/share`. Each row
-carries the handset's whole RTP record, the ledger leg it matched, `match_rule`
-(`own-ext` for the cordless's own leg; `nearest` for another phone's leg, or when
-`cordless_ext` is not set), the gap between the two clocks, and a `verdict`:
-
-| `verdict` | Meaning |
-|-----------|---------|
-| `corroborated` | The ledger leg was impaired too; the score counts toward `degraded`. |
-| `playback` | The nearest leg, or the cordless's own leg preferred over it, was a wake-up delivery, page or announcement; skipped. |
-| `uncorroborated` | The ledger measured that direction clean; published, does not degrade. |
-| `unmatched` | No ledger leg within 90 s; skipped. |
-| `unmeasured` | No usable transmit figure for the cordless: Asterisk could not score that direction, or the leg belongs to another phone (such as a call made to the cordless). Published, does not degrade. |
-
-```
-sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
-```
-
-| Sensor | What it tells you |
-|--------|-------------------|
-| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
-| `sensor.switchboard_gateway_health` | GXW gateway port health |
-| `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but never drive this sensor. They are also exempt from the one-way-audio check, because their one-directional shape would trip it by design. Since v0.104.0 a poor line under one of them (low MES, loss or latency) raises an ordinary call-quality card like any other leg, while a clip that was merely cut short stays quiet. The exception to that silence is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
-| `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
-| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
-| `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/`Unregistered`/…). Published only when the trunk is enabled **and** registers (`registns: true`); a trunk that authenticates per-INVITE has nothing to watch. `unknown` means Asterisk answered but reported no registration object, which counts as down. A cycle in which Asterisk could not answer at all (for example in the seconds after a restart) publishes nothing, and the sensor keeps its last value. `auto_reregister_attempts` counts the re-registers Asterisk accepted (a refused one is not counted), and `next_reg_s` is the refresh countdown when one is running. A ~24 h silent inbound outage motivated this sensor — see §9. The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
-| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
-
-> Pushed sensors are recreated after each poll and clear on a Home Assistant
-> restart until the next push — that's expected. A pushed sensor never expires,
-> though: if the add-on stops while Home Assistant keeps running, every value
-> freezes at its last reading. `link_health`, `wired_link_health`,
-> `trunk_health`, `cordless_health` and `gateway_health` therefore carry
-> `measured_at` (when the value was measured) and `poll_interval_s` (the poller's
-> steady interval). Compare the two against the current time before trusting the
-> state. Gateway health does this itself: it publishes `unknown` when the
-> link-health rollup is missing, more than 2.5 poll intervals old (at least
-> 60 s), or measured before the device-health monitor last started. That last case
-> covers the rollup a previous run left behind across an add-on restart; it reads
-> `unknown` until the link-health poller publishes again, and `unknown` never
-> raises an alert.
-
----
-
-**Where to read them.** The full call-quality ledger is
-`/data/state/callqos.jsonl`, inside the add-on and not readable from outside.
-Three ledgers in the host-mounted `/share/switchboard/` can be read without a
-shell. `callqos-outcomes.jsonl` mirrors the call-quality ledger record for
-record, except that an `ext` longer than an extension (a telephone number on a
-trunk leg) is masked to its last four digits and flagged `ext_redacted: true`.
-v0.99.0 made that rule length-only; before then a number arriving as `+1…` went
-through unmasked. `delivery-outcomes.jsonl` is not a mirror but the delivery
-ledger itself: every wake-up and announcement outcome, the only copy, and the
-record that the wake-up and announcement reconcilers, the announcement retry
-and the duplicate check read. `heartbeat.jsonl` holds one row per health cycle.
-The same folder also holds `asterisk.log` (the scrubbed readable log) and
-`backup-window.jsonl` (when the Supervisor began and finished copying this add-on's own image and `/data` in each backup; when a backup includes `/share`, the Supervisor archives it after every add-on in that backup, with its writers still appending; trimmed to its newest half past 256 KiB). Each heartbeat row's `interval_s`, `settled` and `phase` describe the
-cycle the row ran in, and `since_prev_s` how long it actually waited. `next_sleep_s`
-is the wait that follows the row. The row that ends warm-up therefore reads
-`phase: warmup` beside `next_sleep_s: 300`. `transitions` lists every reachability
-change Asterisk logged since the previous row written by the same poller process,
-the outside line included. The first row after a restart starts fresh, so a change
-logged between the old process's last row and the new one's first cycle does not
-appear there (the durable Asterisk log still holds it). With `remove_existing`, a
-phone re-registering from a new contact logs Unreachable and then Reachable a few
-milliseconds apart; an entry carries no time, so that pair reads like a real drop.
-On a row with `ami: unreachable` nothing was measured, so `reachable`, `down` and
-`wired_down` are `null`; an empty list on any other row means the cycle measured
-and found nothing down.
-The assistant's own ledger is deliberately **not** mirrored — see
-[§4](#4-the-voice-operator--directory-assistance).
-
-## 12. How it's built
-
-- **Asterisk 20 + PJSIP** is the only telephony engine; `chan_sip` is not used.
-- On every start, **`switchboard-config`** regenerates
-  `/etc/asterisk/{pjsip,extensions,confbridge,modules,pjsip_notify,rtp,manager,logger,features}.conf`
-  from your add-on options (`/data/options.json`). The options are the source of
-  truth; hand edits are overwritten, and since 0.109.0 they are refused: only the
-  generator, under its own AppArmor child profile, may write those files.
-- **Offline voice.** Speech-to-text is **whisper.cpp** (English `base.en` model,
-  ~142 MB), kept resident in RAM by a loopback-only server with a per-call
-  `whisper-cli` fallback. Text-to-speech is **espeak-ng**. Both run on-box under
-  the unprivileged `asterisk` user — no cloud, no API key.
-- The **Ingress dashboard** is a small single-worker FastAPI app that reads live
-  state over the loopback-only Asterisk Manager (AMI) socket.
-- **Services** run under s6-overlay: a one-shot config generator, then Asterisk,
-  the web UI, the console (the board, its SSH front end and the web terminal),
-  the resident recognizer, the wake-up scheduler (whose 20-second loop also
-  files the announcement verdicts and runs the announcement auto-retry), the two
-  health pollers, and the Home Assistant broker: since 0.110.0 the programs that
-  run as the `asterisk` user hold no Home Assistant token and reach Home
-  Assistant only through it
-  ([SECURITY.md](SECURITY.md#4-home-assistant-access)). Each optional service
-  idles when its feature is turned off (except the link-health poller, which
-  keeps scrubbing the readable log; §11), so `wakeup_enabled: false` also stops
-  announcement verdicts and retries. The web UI reads the same switch: with
-  wake-up calls off it treats the retry as off and never holds an identical
-  repeat back for a replay that cannot run.
-- Built on the Home Assistant **Alpine 3.21** base image (a two-stage build that
-  compiles whisper.cpp from source), with `fastapi` / `uvicorn` / `jinja2` and
-  best-effort `espeak-ng`, `ffmpeg`, and the ConfBridge/Page modules.
-- Runs under an **AppArmor** profile and **host networking** (required for SIP +
-  RTP on your LAN). Since 0.108.0 the profile allows only the capabilities the add-on
-  uses (no raw sockets) and write-locks the shipped code for every process, and
-  Asterisk runs as the unprivileged `asterisk` user with no capabilities. Since
-  0.109.0 it also write-locks the Asterisk configuration, Asterisk's spool and the
-  s6 init trees, and the config generator runs under a child profile of its own
-  ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)).
-  Architectures: `amd64`, `aarch64`.
-
----
-
-## 13. Codecs — G.711 µ-law only, on purpose
-
-Switchboard uses **G.711 µ-law only**, everywhere — every endpoint (rooms and the
-trunk) is pinned to `disallow = all` / `allow = ulaw`. There is no codec option; it
-isn't configurable, and no HD/Opus module is even installed. **Nothing is ever
-transcoded between codecs, and nothing ever has been** — no other codec can be
-negotiated. This is deliberate:
-
-- **Antique analog handsets are narrowband by physics** — the carbon/electret
-  element and the two-wire loop top out around 300–3400 Hz. Wrapping that in Opus
-  or G.722 carries no extra fidelity; the analog transducer is the ceiling.
-- **µ-law is the baseline every leg speaks** — the analog FXS ports, the cordless,
-  and the PSTN trunk. Pinning one codec means **no call ever transcodes**: lowest
-  latency, and dial tone / ringback / fax tones pass cleanly.
-
-Because enforcement is server-side at the Asterisk endpoints, a phone's own codec
-order doesn't matter — the negotiation can only ever land on µ-law. Just make sure
-each device still *offers* G.711 µ-law (PCMU); a device configured to offer only a
-non-µ-law codec would have no common codec and the call would fail. The dashboard
-and operator console show the negotiated codec per active call, so you can confirm
-it reads "µ-law".
-
----
-
-**One thing is converted, and it is not a codec.** Asterisk's internal working
-format is signed linear, so anything that needs raw samples converts to and from
-µ-law inside the box. Speech recognition does — a recording has to be decoded
-before it can be transcribed, and that is unavoidable.
-
-Playing a prompt used to as well, and that one was avoidable: all 28 shipped
-prompts were 16-bit PCM with no µ-law copy, so every greeting, wake-up prompt and
-page was converted in real time — eight legs at once during a house-wide page.
-Since v0.82.0 each prompt also ships as `.ulaw`, and Asterisk picks the file that
-matches the channel, so the conversion simply does not happen. The `.wav` masters
-stay: they are the editable source, and a build check fails if a prompt and its
-µ-law twin ever drift apart.
-
-
-## 14. Troubleshooting
+The ten most common problems, most common first.
 
 | Symptom | Check |
-|--------|-------|
-| "No common codec" / call fails instantly | A device is offering only a non-µ-law codec. Make sure G.711 µ-law (PCMU) is enabled on it ([§13](#13-codecs--g711-µ-law-only-on-purpose)). |
-| Calls drop after ~30 s | Usually a NAT/registration timer — set NAT Traversal = No on the LAN. |
-| **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed — check the **Log** tab. |
-| Investigating something that happened **before** a restart/reboot | Asterisk's notices, warnings and errors, plus endpoint reachability (`Endpoint <n> is now Unreachable`, since v0.84.0) and each phone's registration being added or removed, are written durably to `/data/state/asterisk.log` on the persistent data volume, so registration flaps, trunk timeouts and RTP errors from before a crash are there. Since v0.107.0 each line carries the full date, milliseconds and UTC offset, so it can be placed against `heartbeat.jsonl` (UTC) and the gateway's own clock. That file is private to the add-on (it also carries the dialplan trace) and is trimmed at boot to its newest half once it passes 8 MB. The copy readable from the host is `/share/switchboard/asterisk.log`: notices, warnings and errors only, with SIP accounts and private LAN addresses scrubbed out. The add-on's Log tab reaches back about two days, across a host reboot. |
-| Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting: on the reference GXW4216 V2 a restart takes about a minute. Without `P81` (below), a gateway that is back within its registration window renews most registrations instead of re-creating them, so "most phones stayed registered" does **not** rule a restart out. To tell: the gateway's status page shows its **System Up Time**; with `P81` (Unregister On Reboot, §7.3) set to `1` the gateway clears its old registrations as it boots, which `/data/state/asterisk.log` records as `Removed contact … due to request` followed by `Added contact` in the same second. The pair comes at the **end** of the outage, as the phones come back, not when they drop, and a power cut leaves it too. A network stall never produces the `due to request` line. The gateway's own **Automatic Reboot** schedule is `P21929` (`0` off, `1` daily, `2` weekly, `3` monthly) at hour `P21930`, on day of the week `P21931` when weekly (`1` is Monday) or day of the month `P28118` when monthly. The reference gateway reboots weekly, Monday at 01:00 (`P21929` `2`, `P21930` `1`, `P21931` `1`), so an all-port drop of about a minute at that time, ending with the `due to request` pair, is that reboot, not a fault. |
-| LAN announce (`/api/announce`) returns 403 | Set a non-empty `announce_token` and send it as the `X-Announce-Token` header. The **Log** tab names the reason on a `[switchboard-webui] refused POST /api/announce/<ext> from <address>: ...` line (missing token, bad token, or LAN announce is off); further refusals from the same address for the same reason are counted for 10 minutes and then summarised in one line; a different reason gets its own line. |
-| No / one-way audio | Host networking is required (set by the add-on) and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the LAN. |
-| Room stays **Offline** | Gateway SIP Server = your HA host IP? FXS port enabled? Its Authenticate Password matches the room `secret` **exactly**? Reboot the gateway if a port raced the add-on's startup. |
-| Rotary phone won't dial | Enable **Pulse Dialing** on that FXS port. |
-| Voice features mis-hear you | Speak after the beep, in a quiet moment; the recognizer is narrowband. Add `operator_synonyms` for names it keeps missing. |
-| Wake-up didn't ring | The room must be **registered and idle** at the set time; if busy/offline through the 10-minute grace window it's dropped and you get a persistent notification. If Switchboard itself was not running at the set time (the add-on or the host was down, e.g. after a power cut), the wake-up still rings if Switchboard is back within that 10-minute grace window, under the same registered-and-idle rule; if it comes back later, the wake-up is dropped as soon as it starts again. Since 0.108.2 that miss is recorded in the delivery ledger (`outcome: missed`, `reason: not-running`) and the notification says so, retried until Home Assistant has finished starting and accepts it. |
-| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the **Log** tab shows `[ha-broker] refused` | Since 0.110.0 those features reach Home Assistant through the add-on's broker, which accepts only the requests they make. A `refused` line names the request and the rule it failed. One you did not cause by hand is a bug: report it with that line. A broker that is not running shows instead as `[ha_client] Home Assistant unreachable through the broker` or `[ha_client] no Home Assistant token and no broker`, and calls themselves are unaffected. On a line transferred in from outside (or a `*2` consult), those features are refused by design: dial `0` or the feature code directly from a room phone. Once an hour, when there was traffic, the broker also writes `[ha-broker] traffic over <N> s: <kind> ok=<n> http<code>=<n> unreachable=<n> refused=<n>; ...` (and the partial interval, marked `(stopping)`, when it stops); a count under `unreachable` or `http<code>` means Home Assistant failed requests the broker had accepted. |
-| A feature stops working after an update, and the **Log** tab shows `Permission denied` or `Operation not permitted` | Since v0.108.0 the add-on's AppArmor profile refuses, for every process including root, any write to its shipped code (`/usr`, `/bin`, `/sbin`, `/lib`, `/init`, and Asterisk's AGI, sound and music-on-hold trees) and every capability it does not list. Since v0.109.0 it also refuses writes to the Asterisk configuration (`/etc/asterisk`, `/etc/localtime`, `/etc/timezone`), Asterisk's spool (`/var/spool/asterisk`) and the s6 init trees (`/command`, `/package`, `/etc/s6-overlay`); only the config generator may write the first three, under a child profile named `<slug>//switchboard_config`, whose own refusals carry that name. Each refusal leaves a `DENIED` record, but not in the Log tab and not in `dmesg`, so an empty `dmesg` proves nothing: it goes to the host's **audit journal**. From a shell on the host, run `journalctl _TRANSPORT=audit` and look for records naming the add-on's profile (`profile="<slug>"`, where `<slug>` is the add-on's ID — the last part of its page address in Home Assistant, `…/hassio/addon/<slug>/info`); their `operation` and `name` (or `capname`) fields say what was refused. A shell inside the add-on meets the same wall by design: `apk add`, `pip install` and editing a shipped file in place all fail, so rebuild the image instead. Outside that, no refusal is expected in normal operation ([SECURITY.md](SECURITY.md#the-apparmor-profile-is-narrowed-not-a-per-path-sandbox)): report one with the record attached, through a private security advisory if it could be an intrusion. |
+|---------|-------|
+| A room stays **Offline** | On the gateway: SIP Server = the Home Assistant host's LAN IP, the FXS port enabled, its Authenticate Password exactly the room's `secret`. Reboot the gateway if a port raced the add-on's start. The Log tab names any room skipped for a bad `ext` or `secret`. |
+| No audio, or one-way audio | Host networking is required (the add-on sets it), and `rtp_start`–`rtp_end` must not be blocked by a host firewall. NAT Traversal should be **No** on the gateway. |
+| "No common codec", or a call fails instantly | A device is offering only a codec other than µ-law. Enable G.711 µ-law (PCMU) on it. |
+| A rotary phone will not dial | Enable **Pulse Dialing** on that FXS port. |
+| The voice features mis-hear you | Speak after the beep, in a quiet moment; the line is narrowband. Add `operator_synonyms` for names it keeps missing. |
+| A wake-up did not ring | The room must be **registered and idle** at the set time. A room busy or offline through the 10-minute grace window is skipped, with a persistent notification. If Switchboard itself was down at the set time, the wake-up still rings if it is back within that window; otherwise the miss is recorded (`missed`) and the notification says so. |
+| Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting, which takes about a minute on a GXW4216 V2, often at its own scheduled automatic reboot. The full page explains how to tell from the logs. |
+| **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed. Check the **Log** tab. |
+| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the Log tab shows `[ha-broker] refused` | On a call transferred in from outside, or a `*2` consult, those features are refused by design: dial `0` or the feature code directly from a room phone. Otherwise the `refused` line names the request and the rule it failed; report it with that line. |
+| Calls drop after about 30 s | Usually a NAT or registration timer. Set NAT Traversal = **No** on the LAN. |
 
-**Useful Asterisk CLI** (from the add-on's shell, if you have one):
-
-```
-asterisk -rx "pjsip show endpoints"
-asterisk -rx "pjsip show contacts"
-asterisk -rx "core show channels"
-asterisk -rx "pjsip show registrations"   # trunk registration
-```
+Full details: [Troubleshooting](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/troubleshooting.md).
 
 ---
 
-## 15. Security
+## 6. Reference
 
-The security model, the toll-fraud threat model, the console services and their
-exposure, secret handling, and the short list of things
-**you** must configure are documented in **[SECURITY.md](SECURITY.md)**. The
-essentials:
+The full reference, one page per topic:
 
-- The Ingress dashboard is reachable only from the Home Assistant Supervisor.
-- The Asterisk Manager socket is loopback-only. Since 0.109.0 it has two accounts,
-  each with a fresh random secret every boot. Neither can run a program through
-  the Manager, and neither holds Asterisk's CLI `command` class; SECURITY.md says
-  what the two accounts do and do not separate.
-- The trunk blocks international/premium prefixes and confines transfers to
-  internal destinations.
-- Inside the container, Asterisk runs as the unprivileged `asterisk` user with no
-  capabilities, and the AppArmor profile refuses raw sockets and any write to the
-  shipped code or the Asterisk configuration, root included.
-- **Change the default room secrets** before your phones register.
-- The SSH console listens on every interface by default (`console_bind`), and
-  every login needs a `console_users` password: with none configured, every
-  login is refused. The board itself has no network listener, only a root-only
-  Unix socket. The standalone web terminal binds to `127.0.0.1` by default, and
-  its sign-in is off until `console_users` has an entry — so configure one before
-  you move its bind. The sidebar console (§10) needs neither.
-- Two read-only GETs on port 8099 are deliberately reachable from the LAN
-  without authentication. `/phonebook.xml` lets the cordless fetch its remote
-  phonebook and exposes room names and internal extensions only
-  ([§8](#8-the-wp826-wifi-cordless-optional)). `/announce/a<digits>.wav` is the
-  speaker announcement clip a Home Assistant media player fetches; its name is
-  random and it is deleted five to six minutes after it is written. Handset
-  announcement clips are not served to the LAN (since v0.106.0).
-  `POST /api/announce/{ext}` is accepted from the LAN only with a matching
-  `X-Announce-Token`, and never while `announce_token` is blank.
-
----
-
-## 16. Reproducing on new hardware
-
-Everything needed to rebuild Switchboard lives in this repository, so replacing
-the Home Assistant host (a new Raspberry Pi, a restored image, a different
-machine) is straightforward.
-
-### Rebuild the add-on from GitHub
-
-1. Install **Home Assistant OS** on the new host.
-2. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
-   `https://github.com/tesseractAZ/Switchboard`.
-3. Install **Switchboard**. The add-on builds from source in the repo (Asterisk,
-   whisper.cpp, espeak-ng, everything) — no external image to host.
-4. To pin an exact prior version, check out that release's tag first: versions
-   are tagged (`v0.1.0` … the current release) and published as a **GitHub
-   Release** with the changelog, and each release since v0.81.0 carries a
-   generated `.docx` + `.pdf` of this manual. `git checkout vX.Y.Z` gives you the
-   precise source that built that release. One exception: **v0.42.1** has a
-   changelog entry but no tag and no release — tagging was a manual step until
-   v0.46.1, and that version was missed. Its source is merge commit `8fcb453`.
-
-### Restore your configuration (the one thing not in the repo)
-
-Your **runtime configuration** — room names, SIP `secret`s, the trunk
-credentials, the cordless address — is **not** in the (public) repository by
-design; secrets don't belong in source control. It lives in the add-on's options
-(`/data/options.json`) and is captured by Home Assistant's own backups. Two ways
-to restore it:
-
-- **Home Assistant backup (recommended).** A full or partial HA backup includes
-  each add-on's configuration; restoring one on the new host repopulates
-  Switchboard's options automatically. Take a fresh backup whenever you change the
-  configuration.
-- **Re-enter by hand.** It's a handful of fields in the **Configuration** tab
-  (rooms + secrets, and the trunk block if you use an outside line).
-
-### The gateway and cordless are separate devices
-
-The **GXW4216 gateway** and the **WP826 cordless** are independent hardware on
-your LAN — swapping the Home Assistant host does **not** touch them, so their
-settings survive. You only need to reconfigure them if you replace *those*
-devices, in which case:
-
-- **GXW** — re-apply Profile-1 and the per-port SIP credentials via the SSH shell
-  ([§7.3](#73-configuring-the-gateway-from-the-cli-reliable-path)); the reference
-  dial plan and `P85 = 3` send delay are in [§7.4](#74-dial-plan--the-send-delay).
-- **WP826** — re-register it as its extension and, for the phonebook / distinctive
-  ring / ringtone / speed-dial extras, re-run the tools in
-  [`tools/`](../tools/) (`wp826.mjs`, `wp826-pcodes.md`).
-
-Point the rebuilt gateway/cordless at the new host's IP as the SIP server and the
-phones re-register — the add-on regenerates all of Asterisk's config from your
-options on start.
+- [Reference index](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/README.md)
+- [Quick start](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/quick-start.md)
+- [Configuration reference](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md)
+- [Extensions & feature codes](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/extensions.md)
+- [The voice operator & directory assistance](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md)
+- [Wake-up calls & the talking clock](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/wake-ups-and-clock.md)
+- [Paging & announcements](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/paging-and-announcements.md)
+- [Grandstream GXW4216 V2 provisioning](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/gxw4216-gateway.md)
+- [The WP826 WiFi cordless (optional)](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/wp826-cordless.md)
+- [Adding an outside line (SIP trunk)](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/sip-trunk.md)
+- [The operator console (SSH + browser)](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/operator-console.md)
+- [Health monitoring & Home Assistant sensors](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/health-monitoring.md)
+- [How it's built](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/how-its-built.md)
+- [Codecs — G.711 µ-law only, on purpose](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/codecs.md)
+- [Troubleshooting](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/troubleshooting.md)
+- [Security](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/security.md), and the full model in [SECURITY.md](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/SECURITY.md)
+- [Reproducing on new hardware](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/reproducing.md)

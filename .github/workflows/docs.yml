@@ -1,12 +1,19 @@
 name: Docs
 
-# Assemble README + SECURITY + DOCS.md into one printable manual — an editable
-# Word (.docx) and a reader-friendly PDF — on every push/PR, and attach both to
-# each GitHub Release. Two purposes:
-#   1. Gate: a DOCS.md that no longer converts cleanly (bad table, broken raw
-#      block) fails the PR instead of silently shipping.
+# Assemble README + the DOCS.md guide + every docs/reference page (in the order
+# docs/reference/README.md lists them) + SECURITY into one printable manual — an
+# editable Word (.docx) and a reader-friendly PDF — on every push/PR, and attach
+# both to each GitHub Release. Two purposes:
+#   1. Gate: a page that no longer converts cleanly (bad table, broken raw
+#      block), or a reference page missing from the index, fails the PR instead
+#      of silently shipping.
 #   2. Distribution: reviewers get the offline manual for the branch as an
 #      artifact, and every published release carries its documentation.
+# No `paths:` filter, on purpose: the manual is built from pages spread across
+# the repository (README.md, switchboard/DOCS.md, switchboard/docs/reference/,
+# switchboard/SECURITY.md, the screenshots' UI source), and a filter that missed
+# one would let a broken page merge with this check never having run. The link
+# and index checks run in the test suite (switchboard/tests/test_docs_layout.py).
 # Generator: scripts/build-docs-docx.py (pandoc for the .docx, LibreOffice for
 # the .pdf — no LaTeX). Same process as the ecoflow-panel and zwave repos.
 
@@ -73,7 +80,7 @@ jobs:
 
       # A PDF alongside the .docx — a faithful render of the SAME document (same
       # generated TOC + page breaks) via LibreOffice headless (no LaTeX). This is
-      # a HARD gate (test -s below): a DOCS.md or toolchain change that can't
+      # a HARD gate (test -s below): a docs or toolchain change that can't
       # produce a PDF fails the check rather than silently shipping without one.
       - name: Ensure LibreOffice (docx → pdf)
         run: |

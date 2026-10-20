@@ -1,4 +1,4 @@
-"""DOCS.md's option tables must agree with config.yaml.
+"""The manual's option tables must agree with config.yaml.
 
     python3 -m pytest switchboard/tests/test_documented_defaults.py
 
@@ -7,6 +7,11 @@ are hand-maintained beside a `config.yaml` that changes, and this repo has
 already shipped a documented default that had been wrong for two releases — the
 kind of error that is invisible in review (both files look right on their own)
 and expensive in use, because the reader trusts the manual over the schema.
+
+The full option tables live in docs/reference/configuration.md. DOCS.md, the
+short guide Home Assistant's Documentation tab shows, is checked too: any table
+of its own headed `| Option | Default |` is held to the same schema, since that
+is the page most readers see.
 
 The bind assertions at the bottom are separate: they pin a SECURITY default
 rather than merely a consistent one.
@@ -18,20 +23,24 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config.yaml"
-DOCS = ROOT / "DOCS.md"
+DOCS = ROOT / "docs" / "reference" / "configuration.md"
+GUIDE = ROOT / "DOCS.md"
 
 # Options whose documented "default" is deliberately prose rather than a value
 # (a derived default, or one whose meaning needs a sentence).
 PROSE_DEFAULTS = {"rooms", "trunk", "operator_synonyms", "wakeup_scenes",
                   "console_users", "gateway_ports"}
 
-# A default that changed in config.yaml while its DOCS.md row is rewritten in a
-# separate change: {option: (the stale value DOCS.md still shows, the new
+# A default that changed in config.yaml while its manual row is rewritten in a
+# separate change: {option: (the stale value the manual still shows, the new
 # config.yaml value)}. Checked in BOTH directions so an entry cannot outlive the
-# edit it waits for: once DOCS.md shows the config.yaml default, the comparison
+# edit it waits for: once the manual shows the config.yaml default, the comparison
 # below fails until the entry is deleted. Never a way to excuse a mismatch with
 # no documentation change on its way.
 DOCS_PENDING = {}
+
+# The header of a table whose rows are `| \`option\` | default | ... |`.
+_OPTION_TABLE = re.compile(r"^\|\s*(?:Option|Sub-field)\s*\|\s*Default\s*\|", re.I)
 
 
 def _config_options():
@@ -52,14 +61,39 @@ def _config_options():
     return out
 
 
-def _documented_defaults():
-    """{option: default-cell} from every `| \\`name\\` | default | ... |` row."""
-    out = {}
-    for line in DOCS.read_text().split("\n"):
+def _option_rows(path: Path, headed_only: bool):
+    """[(option, default-cell)] from the `| \\`name\\` | default | ... |` rows of
+    `path`. With `headed_only`, only rows of a table whose header is
+    `| Option | Default |` (or `| Sub-field | Default |`) count, so a guide's
+    feature-code or sensor table is not mistaken for a list of defaults."""
+    rows, in_table = [], not headed_only
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if headed_only:
+            if _OPTION_TABLE.match(line):
+                in_table = True
+                continue
+            if not line.startswith("|"):
+                in_table = False
         m = re.match(r"^\|\s*`([a-z0-9_]+)`\s*\|\s*(.*?)\s*\|", line)
-        if m:
-            out.setdefault(m.group(1), m.group(2))
+        if m and in_table:
+            rows.append((m.group(1), m.group(2)))
+    return rows
+
+
+def _documented_defaults():
+    """{option: default-cell} from every option row of the configuration
+    reference (the first, where an option appears twice)."""
+    out = {}
+    for name, cell in _option_rows(DOCS, headed_only=False):
+        out.setdefault(name, cell)
     return out
+
+
+def _every_documented_default():
+    """[(where, option, default-cell)] for every option row the manual shows:
+    the configuration reference, then any option table in DOCS.md."""
+    return ([(DOCS.name, n, c) for n, c in _option_rows(DOCS, headed_only=False)]
+            + [(GUIDE.name, n, c) for n, c in _option_rows(GUIDE, headed_only=True)])
 
 
 def _norm(v: str) -> str:
@@ -75,16 +109,27 @@ def test_both_files_parse():
     """Fail closed. A parser that silently finds nothing agrees with anything."""
     cfg, doc = _config_options(), _documented_defaults()
     assert len(cfg) > 40, f"config.yaml options block parsed to {len(cfg)} entries"
-    assert len(doc) > 30, f"DOCS.md tables parsed to {len(doc)} entries"
+    assert len(doc) > 30, f"{DOCS.name} tables parsed to {len(doc)} entries"
     for expected in ("console_bind", "console_web_bind", "wakeup_ring_seconds"):
         assert expected in cfg, f"{expected} missing from the config parse"
-        assert expected in doc, f"{expected} missing from the DOCS parse"
+        assert expected in doc, f"{expected} missing from the {DOCS.name} parse"
+
+
+def test_a_guide_table_is_read_only_under_an_option_header(tmp_path):
+    """The DOCS.md scan must see an option table and nothing else: a feature-code
+    table also starts its rows with a backticked name."""
+    page = tmp_path / "DOCS.md"
+    page.write_text("| Dial | Feature |\n|---|---|\n| `41` | clock |\n\n"
+                    "| Option | Default | What it does |\n|---|---|---|\n"
+                    "| `wakeup_ring_seconds` | `45` | ring time |\n\nprose\n"
+                    "| `console_bind` | `x` | not in a table with a header |\n")
+    assert _option_rows(page, headed_only=True) == [("wakeup_ring_seconds", "`45`")]
 
 
 def test_every_documented_default_matches_config_yaml():
-    cfg, doc = _config_options(), _documented_defaults()
+    cfg = _config_options()
     mismatches = []
-    for name, documented in sorted(doc.items()):
+    for where, name, documented in sorted(_every_documented_default()):
         if name in PROSE_DEFAULTS or name not in cfg:
             continue
         actual = cfg[name]
@@ -94,11 +139,11 @@ def test_every_documented_default_matches_config_yaml():
                 continue
             mismatches.append(
                 f"{name}: the DOCS_PENDING entry {DOCS_PENDING[name]!r} no longer "
-                f"describes the files (DOCS says {documented!r}, config.yaml has "
-                f"{actual!r}). Delete the entry once DOCS.md shows the default.")
+                f"describes the files ({where} says {documented!r}, config.yaml has "
+                f"{actual!r}). Delete the entry once the manual shows the default.")
             continue
         if _norm(documented) != _norm(actual):
-            mismatches.append(f"{name}: DOCS says {documented!r}, config.yaml has {actual!r}")
+            mismatches.append(f"{name}: {where} says {documented!r}, config.yaml has {actual!r}")
     assert not mismatches, (
         "the manual documents a default the schema does not ship:\n  "
         + "\n  ".join(mismatches))
