@@ -8,19 +8,19 @@ between calls, both audio directions of every call leg, and every wake-up and
 announcement, which it tracks until a ledger records whether it arrived.
 
 > **Scale:** ten supervised services and about 25,000 lines of service code.
-> **Verification:** 1,218 tests, mutation testing on releases, and CodeQL
+> **Verification:** 1,218 tests, mutation testing on selected releases, and CodeQL
 > `security-extended` full scans on every pull request.
-> **Runtime:** a narrowed AppArmor profile; G.711 µ-law end to end, so no call
-> ever transcodes; speech recognition and synthesis run on the box, and no audio
-> leaves your network.
+> **Runtime:** a narrowed AppArmor profile; G.711 µ-law is the only codec on the
+> wire, so calls are never converted between codecs; speech recognition and
+> synthesis run on the box, so no speech goes to a cloud service.
 
 | | |
 | --- | --- |
-| **Telephony** | Room-to-room calling, a speech-driven operator, directory assistance, a talking clock, wake-up calls, house-wide paging, announcements onto speakers *and* handsets, a local voice assistant, and an optional SIP-trunk outside line dialled like a cell phone |
-| **Link measurement** | Registration and qualify round-trip time for every endpoint between calls; a second detector catches outages shorter than the poll interval; mass-outage detection with hysteresis; trunk watchdog with automatic re-registration |
-| **Call quality** | Every audio-carrying leg is scored from RTP/RTCP: the worse direction's MES, loss in both directions, jitter, mean and peak round trip across the whole call, and one-way audio. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
+| **Telephony** | Room-to-room calling, a speech-driven operator, directory assistance, a talking clock, wake-up calls, house-wide paging, announcements onto speakers *and* handsets, a local voice assistant, and an optional SIP-trunk outside line (dial `9` first, or, with direct dial, `1` and the 10-digit number) |
+| **Link measurement** | Registration and qualify round-trip time for every phone between calls; a second detector catches outages shorter than the poll interval; mass-outage detection with hysteresis; trunk watchdog with automatic re-registration |
+| **Call quality** | One leg of every call is scored from RTP/RTCP: the worse direction's MES, loss in both directions, mean and peak round trip across the whole call, and one-way audio, with jitter recorded alongside. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
 | **Device health** | Gateway port health, plus the cordless's battery, WiFi signal and own MOS. A low score from the handset counts only when the PBX's record of the same call corroborates it |
-| **Delivery integrity** | Wake-ups and handset announcements are written to a ledger. A reconciler gives each one a verdict, and a failure brings a re-ring, a retry or an escalation that names its cause |
+| **Delivery integrity** | Wake-ups and handset announcements are written to a ledger. A reconciler judges each one it sees through, and a failure brings a re-ring, a retry or an escalation that names its cause |
 | **Security** | A Supervisor-only dashboard, a split Manager interface with secrets rotated every boot, a PBX that never holds the Home Assistant token, LAN-only room registration, toll-fraud controls and a confined runtime |
 
 ---
@@ -48,8 +48,9 @@ over SSH on port 2300, with a password:
 - **A voice operator (dial `0`).** Say a room name ("Kitchen"), a spoken extension
   ("one four"), or a feature: **"time"**, **"weather"**, **"wake me up"**,
   **"lights"**, **"directory"**, **"page the house"**, **"announce"**. Recognition
-  is **whisper.cpp** on the box. A confident room name always beats a feature
-  word, and the operator asks again rather than guess wrong.
+  is **whisper.cpp** on the box. A confident room name beats the time, weather,
+  directory, page and announce words; "wake me up" and "lights" are checked
+  before any room name. The operator asks again rather than guess wrong.
 - **Directory assistance (`411`)**, a **talking clock (`41`)**, **dial-a-status
   (`45`)** for live Home Assistant readings, and a **lights menu (`43`)**.
 - **Wake-up calls (`42`).** Speak a time ("seven thirty", "quarter past six"). The
@@ -63,37 +64,40 @@ over SSH on port 2300, with a password:
   makes any phone, the WiFi cordless included, an announce target.
 - **A local voice assistant (`47`, off by default)** that answers through Home
   Assistant's built-in conversation agent.
-- **An outside line, dialled like a cell phone.** Enable a SIP trunk for inbound
-  and outbound calls. With **direct dial** you dial `1` and the 10-digit number,
-  with no prefix. Requiring the leading `1` keeps the operator, the rooms and most
-  feature codes dialling instantly. Toll-fraud controls apply throughout. The
+- **An outside line.** Enable a SIP trunk for inbound and outbound calls. Dial
+  the prefix (`9` by default) first, or turn on **direct dial** and dial `1` and
+  the 10-digit number like a cell phone. Requiring the leading `1` keeps the
+  operator and most feature codes dialling instantly. A room numbered `12`–`19`
+  is also the start of an 11-digit number, so it sends after the gateway's
+  inter-digit timer, or at once on `#`. Toll-fraud controls apply throughout. The
   trunk is off by default; room-to-room calling doesn't need it
   ([dial plan & the send delay](switchboard/docs/reference/gxw4216-gateway.md#74-dial-plan--the-send-delay)).
 - **A live dashboard and a full-screen operator console.** The console runs in the
   Home Assistant sidebar, over SSH, or in a standalone browser terminal, and shows
-  the same live signals as the dashboard. The dashboard adds a Lights panel with
-  per-area toggles.
+  the same live signals as the dashboard. The dashboard adds a Lights panel:
+  every Home Assistant light, grouped by area, each with its own on/off toggle.
 
 ---
 
 ## Measurement and monitoring
 
-Three monitors publish everything they measure as Home Assistant sensors. They
-raise a notification only when something is actually wrong, and the recovery
+Three monitors publish their headline results as Home Assistant sensors and keep
+the detail in their ledgers. They raise a notification only when something is
+actually wrong, and the recovery
 notice replaces the outage notice rather than piling up beside it. Full detail is
 in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md).
 
 ### Link health, measured between calls
 
-- **Per-endpoint registration and qualify round-trip time.** These are polled
-  continuously, so a degrading link (usually the WiFi cordless) shows on a graph
+- **Per-phone registration and qualify round-trip time.** These are polled
+  every five minutes by default (`link_health_interval`), so a degrading link (usually the WiFi cordless) shows on a graph
   before a call ever drops. The monitor publishes `sensor.switchboard_link_<ext>`
   for each phone and a rollup with the worst RTT, counts of reachable,
   unreachable and offline phones, and the extensions that are down.
 - **A detector for outages shorter than the poll interval.** A point sample can't
-  see an outage that starts and ends between two polls. The one whole-house outage
-  this system has had lasted 119 seconds and fell entirely between two five-minute
-  samples. So each cycle also reads the reachability changes Asterisk logs as they
+  see an outage that starts and ends between two polls. The one outage on record
+  that began and ended between two samples took all eight wired phones down for
+  119 seconds and fell entirely inside one five-minute gap. So each cycle also reads the reachability changes Asterisk logs as they
   happen, and it reports half the fleet going dark *between* samples even when
   both samples look healthy.
 - **Mass-outage alerting with hysteresis.** It needs at least half the fleet
@@ -111,23 +115,29 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
 
 ### Per-call media quality
 
-- **Every leg that can carry audio is recorded** in a schema-versioned ledger:
-  conversations, the operator and voice menus, outside calls, transfers, wake-up
-  delivery, paging and announcements.
-- **Scoring covers the whole call, not its last moment.** The leg is graded on the
-  *worse* of its two audio directions. The inputs are Asterisk's RTCP-derived
-  Media Experience Score, loss in each direction, and jitter. Round trip is
-  checked as a **mean over 250 ms** or a **peak over 500 ms** across every RTCP
-  round. In this deployment one leg peaked at 845.93 ms and reported 10.65 ms on
-  its final round. Grading on that final round alone would have scored it
-  excellent.
+- **One leg of every call is recorded** in a schema-versioned ledger. It is the
+  leg that runs the dial plan: the calling phone, the inbound trunk, or the phone
+  the PBX rings for a wake-up, page or announcement. That covers conversations,
+  the operator and voice menus, outside calls, transfers, wake-up delivery, paging
+  and announcements. The answering phone's side of a dialled call is not
+  measured.
+- **The worse direction decides.** The leg is graded on the *worse* of its two
+  audio directions. The inputs are Asterisk's RTCP-derived Media Experience Score
+  and loss in each direction. Jitter is recorded beside them and feeds only the
+  glitch filter below.
+- **Round trip is scored across the whole call, not its last moment.** It alerts
+  on a **mean over 250 ms** or a **peak over 500 ms** across every RTCP round. In
+  this deployment one leg peaked at 845.93 ms and reported 10.65 ms on its final
+  round. A round-trip check on that final round alone stayed silent; checked on
+  the peak, the leg raises an alert.
 - **One-way audio** is detected from packet counts, so it fires even when no
   score is available.
 - **Credibility filtering.** Asterisk reports `0.0` for a direction it couldn't
   score and the literal `88.087887` when no RTCP round completed. The first reads
   as a dead call and the second as a flawless one. Both are recognised and
   discarded. So is the collapsed-score signature of a re-INVITE or transfer glitch
-  (MES < 40 with no loss, packetization-only jitter and a low RTT). Each record
+  (MES under 40 with loss under 0.5 %, jitter under 40 ms and a round trip under
+  80 ms). Each record
   also says whether its RTT figures rest on one RTCP round or several.
 - **The alert path checks itself.** Each leg records whether its notification was
   actually posted (`notify_status`) and whether its sensor update was accepted
@@ -143,9 +153,9 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   address is followed automatically when it changes.
 - **Two-cycle hysteresis** applies on both devices. A worsening from degraded to
   critical alerts again, and a recovery notice closes the episode.
-- **Speech engine.** The resident whisper.cpp server is probed and the result is
-  read against the configuration. A server idled on purpose reports `disabled`,
-  never `down`, and recognition falls back to a per-call process if it is
+- **Speech engine.** The dashboard and console probe the resident whisper.cpp
+  server and read the result against the configuration. A server idled on purpose
+  shows `disabled`, never `down`, and recognition falls back to a per-call process if it is
   missing.
 
 ---
@@ -156,8 +166,10 @@ An alarm clock that never went off is a failure with a deadline. Switchboard
 doesn't stop when it has queued a call; it records what actually happened.
 
 - **Every wake-up and handset announcement is written to a delivery ledger.** A
-  reconciler gives each one a verdict: delivered, undelivered, or not judged
-  because a restart interrupted it.
+  reconciler in the wake-up scheduler judges each call it sees through:
+  delivered, undelivered, or not judged when the PBX was still restarting. A call
+  in flight across an add-on restart ends without a verdict, and nothing is judged
+  while wake-up calls are disabled.
 - **A wake-up counts as delivered** only once the script has reached the greeting
   *and* at least a second of audio has left the box. A phone picked up in silence
   is undelivered. An unanswered wake-up is rung again if the phone is registered
@@ -171,8 +183,9 @@ doesn't stop when it has queued a call; it records what actually happened.
   refuses to ring an endpoint that is already unreachable. An announcement whose
   audio never played is sent again once the phone reports itself registered and
   idle (`announce_retry_attempts`, default 2, each within 150 s of the original
-  send). An identical repeat the room has already heard is answered as a
-  duplicate, not played twice.
+  send). An identical repeat to the same phone within five minutes, with
+  nothing different played to it in between, is answered as a duplicate, not
+  played twice.
 - **[Measured behaviour](switchboard/PERFORMANCE.md)** is built from these
   ledgers. Every figure names the rows it is drawn from, and a table lists which
   detectors have ever fired, with the reason each silent one is silent: healthy,
@@ -197,18 +210,19 @@ doesn't stop when it has queued a call; it records what actually happened.
 - **The PBX never holds the Home Assistant token.** Asterisk runs as an
   unprivileged user with no capabilities. A root broker forwards only the requests
   Switchboard's features make.
-- **The runtime is confined.** The AppArmor profile refuses every capability the
-  add-on doesn't use. It also refuses any write to the shipped code or the
-  Asterisk configuration, root included. The configuration renderer runs under its
-  own child profile.
+- **The runtime is confined.** The AppArmor profile grants capabilities from an
+  explicit allow list and refuses every other one. It also refuses any write to
+  the shipped code or the Asterisk configuration, root included. The only
+  exception is the configuration renderer, which runs under its own child
+  profile.
 - **Network policy:**
   - Room phones may register only from private LAN addresses.
   - The trunk blocks international and premium prefixes.
   - Every transfer stays on internal destinations.
   - `911` and `933` are answered locally with a spoken notice that these phones
     can't reach emergency services.
-- **Secret handling.** Generated files that hold secrets are written `0640` with
-  no umask window. Room and trunk credentials are validated and fail closed on
+- **Secret handling.** Generated files that hold secrets are created `0640`, or
+  `0600` where only root reads them, with no umask window. Room and trunk credentials are validated and fail closed on
   characters Asterisk would silently truncate. Secrets never reach a log, and the
   readable log copy is scrubbed of SIP accounts and LAN addresses.
 - **Consoles.**
@@ -226,20 +240,22 @@ reporting process are in [SECURITY.md](switchboard/SECURITY.md).
 
 ## How it's verified
 
-- **1,218 tests** (about 31,000 lines) run on every push and pull request.
-- **Mutation testing on releases.** Releases 0.77–0.100 applied 130 deliberate
-  defects to the source. Every one was ultimately caught by a named test. The 17
-  that survived their first run each drove a new test, and the failure patterns
+- **1,218 tests** (about 31,000 lines) run in CI on pull requests and pushes to
+  `main`.
+- **Mutation testing on selected releases.** Releases 0.77–0.80 and 0.96–0.100
+  applied 130 deliberate defects to the source, and their release records count
+  every one as caught by a named test. The 17 that survived their first run each
+  drove a new test or a code change, and the failure patterns
   are written up in [PERFORMANCE.md §6](switchboard/PERFORMANCE.md#6-test-and-mutation-coverage).
 - **CodeQL `security-extended`** scans Python and JavaScript. Pull-request scans
   are full scans, not diff-informed ones. The gate fails on any high-severity
   finding missing from a small, path-pinned baseline, and it fails closed if that
-  baseline can't be read. It also refuses an analysis that reproduces none of the
-  known findings, so an extractor that silently scanned nothing can't pass as
-  clean.
+  baseline can't be read. It also refuses a Python analysis that reproduces none
+  of the known findings, so an extractor that silently scanned nothing can't pass
+  as clean.
 - **Supply chain.** Every GitHub Action is pinned by full commit SHA, and every
   job names its runner image instead of a floating `latest`.
-- **Every change must also pass these gates:**
+- **These gates also run in CI on pull requests and pushes to `main`:**
   - the AppArmor profile compiles;
   - the image builds natively on `amd64` and `aarch64`;
   - the version is consistent.
@@ -255,7 +271,7 @@ Switchboard is **G.711 µ-law on every leg**, and it isn't configurable — on
 purpose. An antique analog handset is narrowband *by physics*: the carbon/electret
 element and the two-wire loop top out around 300–3400 Hz, so wrapping it in G.722 or
 Opus buys nothing the transducer can reproduce. Pinning one codec everywhere means
-**no call ever transcodes** — lowest latency, and dial tone, ringback, and fax/modem
+**no call is converted between codecs on the wire** — lowest latency, and dial tone, ringback, and fax/modem
 tones pass through cleanly. See
 [Codecs — G.711 µ-law only, on purpose](switchboard/docs/reference/codecs.md).
 
@@ -294,10 +310,10 @@ tones pass through cleanly. See
 5. Open the **Switchboard** panel in the sidebar; each room flips to **Registered**
    as its port comes online. Pick up a phone and dial another room. Done.
 
-Changing options and restarting the add-on regenerates the entire Asterisk
-configuration — **the add-on options, plus the optional
+Changing options and restarting the add-on regenerates the Asterisk
+configuration files the add-on controls — **the add-on options, plus the optional
 [options overlay](switchboard/docs/reference/configuration.md#the-options-overlay-advanced)
-file, are the single source of truth**; hand edits to `/etc/asterisk/*.conf` are
+file, are the single source of truth**; hand edits to those files are
 overwritten on every start.
 
 ## Feature codes at a glance
@@ -325,11 +341,13 @@ only). The table shows the defaults.
 ## How it's built
 
 - **Asterisk 20 + PJSIP** is the only telephony engine; `chan_sip` is not used.
-  On every start, `switchboard-config` regenerates the *entire* Asterisk
-  configuration from the add-on options. The running PBX always matches what you
-  declared, and hand edits can't drift.
-- **Ten supervised services under s6-overlay.** Each idles when its feature is
-  off:
+  On every start, `switchboard-config` regenerates the nine Asterisk configuration
+  files the add-on controls (PJSIP, dial plan, Manager, modules, logger and four
+  more) from the add-on options. The running PBX always matches what you declared,
+  and hand edits can't drift.
+- **Ten supervised services under s6-overlay.** Those behind an option idle when
+  it is off. `asterisk`, `webui` and `ha-broker` always run, and `rtpmon` keeps
+  scrubbing the readable log when link health is off:
 
   | Service | Role |
   | --- | --- |
@@ -349,9 +367,11 @@ only). The table shows the defaults.
 - **Offline voice.** Speech-to-text is **whisper.cpp** (the English `base.en`
   model, kept resident in RAM with a per-call fallback). Text-to-speech is
   **espeak-ng**. Both run on the box, with no cloud service and no API key.
-- **Durable, bounded ledgers.** Call quality, link heartbeats and delivery
-  outcomes are append-only JSONL ledgers, each capped in size and trimmed at a
-  line boundary. Call-quality records carry a schema version. The voice
+- **Durable, bounded ledgers.** Link heartbeats and delivery outcomes are
+  append-only JSONL ledgers, each capped in size and trimmed at a line boundary.
+  The call-quality ledger keeps the newest 300 legs, schema-versioned and
+  rewritten atomically on each write; its `/share` mirror is append-only and
+  size-capped. The voice
   assistant keeps its own private ledger of what it heard and why each turn
   ended.
 - **The image** builds on the Home Assistant **Alpine** base in two stages,
