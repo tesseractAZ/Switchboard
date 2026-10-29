@@ -96,8 +96,10 @@ def test_classify_cordless():
     check("cordless: recent poor MOS -> degraded", lvl == "degraded" and any("MOS" in r for r in why))
 
     # ...but ONLY when the ledger's own measurement of that leg agrees. Three
-    # false 'degraded' episodes on 2026-09-14 rested on a handset 2.2 the ledger
-    # measured at 0 % loss and MES 88. A missing judgement is no support either.
+    # false 'degraded' episodes on 2026-09-14 rested on a handset 2.2 for legs
+    # the ledger measured at 0 % loss on the stream the handset hears
+    # (loss_tx_pct); on the 12:42:31Z leg that stream's score, mes_rx, was 88.0.
+    # A missing judgement is no support either.
     for tx in ("clean", "unmeasured", None):
         snap = {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
                 "wifi_connected": True, "wifi_signal": 4, "last_mos": 2.9, "last_mos_age_s": 30}

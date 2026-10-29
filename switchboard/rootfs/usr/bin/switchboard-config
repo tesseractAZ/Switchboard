@@ -1021,9 +1021,10 @@ def render_announce_context() -> list[str]:
     the playback exemptions: the one-way-audio detector was forced off, the
     poor-call notification was suppressed, and the leg never reached
     sensor.switchboard_last_call. A resident recording a twelve-second
-    announcement on a handset whose transmit path was dead — rxcount high,
-    txcount zero, exactly the shape that detector exists for — was filed
-    `notify: false` and reported to nobody.
+    announcement on a handset that heard nothing back — its microphone reached
+    the PBX (rxcount high) but the PBX sent it no audio (txcount zero), exactly
+    the shape that detector exists for — was filed `notify: false` and reported
+    to nobody.
     """
     return [
         ";; ----- Phone -> HA speaker announce -----",

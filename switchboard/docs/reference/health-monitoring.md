@@ -87,10 +87,10 @@ short*, which is a fair thing to stay quiet about — but a cut-short clip is
 handled earlier and never reached the rule. All the rule could actually suppress
 was a **bad connection to the handset**, and that is the same connection the next
 real conversation on that phone will use. Over fifty days it hid five of them.
-The worst was an announcement at 00:26 that played all the way through while the
-cordless was hearing it at MOS 3.4 with round trips peaking near nine tenths of a
-second; nothing else noticed, because the phone was reachable the whole time — it
-just sounded bad. Those legs now raise a card like any other. On the same fifty
+The worst was an announcement at 00:26 that played all the way through with
+round trips peaking near nine tenths of a second. Asterisk scored the stream it
+received from the cordless at MOS 3.4, and the clip the cordless heard at about
+3.8. Nothing else noticed, because the phone was reachable the whole time. Those legs now raise a card like any other. On the same fifty
 days of real calls that is a change from about **1.8 to 4.8 cards a month**.
 
 **A clip that was cut short still stays quiet, with one exception, added in
@@ -135,7 +135,8 @@ its neighbours. Those records are schema version `5`.
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
-— low score, high loss, high latency (a round-trip **mean over 250 ms** or a
+— low score (MES under 70), loss of **1.5 % or more** in either direction (it was
+3 % through v0.115.0), high latency (a round-trip **mean over 250 ms** or a
 **peak over 500 ms**, scored across the whole call rather than from the last
 RTCP round), **one-way audio**, or a receive-jitter **peak over 60 ms** on a
 conversation.
@@ -159,7 +160,9 @@ only from the authoritative hangup record written by the dialplan
 (`source=dialplan`). A reading is discarded as not credible when Asterisk reports
 `0.0` for a direction it could not score — a short call, or RTCP that never
 converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
-alongside ~0 % loss, a receive-jitter peak no higher than 60 ms and a low RTT,
+alongside ~0 % loss in the stream it scores (`mes_rx` with `loss_tx_pct`,
+`mes_tx` with `loss_rx_pct`; through v0.115.0 each was checked against the
+other stream's loss), a receive-jitter peak no higher than 60 ms and a low RTT,
 which is the
 signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
 v0.77.0, when it reports its *other* nothing-to-report constant, the literal
@@ -215,9 +218,13 @@ measurement that came back empty, and it still matches and still reads
 
 A score below `mos_min` (a fixed 3.4, not an add-on option) from a call that ended
 within the last 15 minutes degrades the sensor only when the same leg agrees in
-the ledger, in the direction the handset hears. That means at least 1 % transmit
-loss, or a transmit MES below 78. The ledger reads those from the handset's own
-receiver reports. A call made **to** the cordless is logged under the caller's
+the ledger, in the direction the handset hears. That means at least 1 % loss on
+the way to the handset (`loss_tx_pct`), or an MES below 78 for that same stream
+(`mes_rx`). Both come from the handset's own receiver reports. The two names
+point opposite ways because Asterisk names its loss counters after the direction
+of travel and its scores after the report they were built from. `mes_tx` is the
+PBX's score for the handset's microphone, and through v0.115.0 it was the MES
+this check read. A call made **to** the cordless is logged under the caller's
 extension, so its figures describe the caller's phone and never count either way.
 
 Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and

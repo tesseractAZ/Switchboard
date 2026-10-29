@@ -126,6 +126,13 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   and loss in each direction. Jitter never changes the grade. Asterisk 20.11.1's
   score multiplies jitter in seconds, which leaves it almost no weight, and a
   jitter buffer absorbs jitter until it overflows.
+- **Loss alerts at 1.5 % in either direction.** That is the point where loss
+  alone takes a call from good to fair, so a short call that drops a few dozen
+  packets raises an alert. Asterisk's score cannot be left to catch it, because it
+  counts loss differently in each direction. The score for the audio the PBX sends
+  falls on the running total of lost packets, so 41 lost early in a 38-second call
+  take it from 88 to 28. The score for the audio it receives falls on the loss per
+  5-second report, so the same burst leaves it near 81.
 - **A conversation alerts on an abnormal jitter peak.** A receive-jitter peak
   over 60 ms raises an alert on room-to-room, outside, inbound and transferred
   calls, and on calls the operator or directory connects. The grade is left
@@ -145,8 +152,11 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   score and the literal `88.087887` when no RTCP round completed. The first reads
   as a dead call and the second as a flawless one. Both are recognised and
   discarded. So is the collapsed-score signature of a re-INVITE or transfer glitch
-  (MES under 40 with loss under 0.5 %, a receive-jitter peak no higher than
-  60 ms and a round trip under 80 ms). Each record
+  (MES under 40 with under 0.5 % loss in the stream that score describes, a
+  receive-jitter peak no higher than 60 ms and a round trip under 80 ms).
+  Asterisk's names for the two scores point the opposite way to its loss
+  counters, and until v0.116.0 each score was checked against the other
+  stream's loss. Each record
   also says whether its RTT figures rest on one RTCP round or several.
 - **The alert path checks itself.** Each leg records whether its notification was
   actually posted (`notify_status`) and whether its sensor update was accepted

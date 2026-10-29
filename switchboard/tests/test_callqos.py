@@ -52,7 +52,8 @@ class _Args:
 
 
 def test_classify() -> None:
-    # The real degraded call: rx MES 59, one-way. Must be POOR and must notify.
+    # The real degraded call: rxmes 59 (the score of the stream the PBX sent),
+    # one-way. Must be POOR and must notify.
     label, notify, reasons = cq.classify(59.0, 1.4, 1.5)
     check("classify: MES 59 one-way -> poor + notify", label == "poor" and notify)
     check("classify: reason names the MES", any("MES" in r for r in reasons))
@@ -96,7 +97,8 @@ def test_build_record() -> None:
         rxcount="2689", txcount="2131", rxploss="0", txploss="30",
         rxjitter="0.020000", txjitter="0.000000", rtt="0.001525",
         rxmes="58.966802", txmes="88.071923"))
-    check("build: worst MES is the degraded rx leg", rec["mes_worst"] == 59.0)
+    check("build: worst MES is rxmes, the stream the PBX sent "
+          "(the same stream as the 1.4% tx loss)", rec["mes_worst"] == 59.0)
     check("build: worst loss is the tx direction (1.4%)", rec["loss_tx_pct"] == 1.408)
     check("build: quality poor, notify true", rec["quality"] == "poor" and rec["notify"])
     check("build: MOS derived from worst MES", rec["mos_worst"] == 2.95)
@@ -200,17 +202,23 @@ def test_ha_routing() -> None:
 
 
 def test_one_way_audio() -> None:
-    # Dead-receive: the phone SENT audio but HEARD nothing. Worst-direction MES
-    # scoring alone would miss it (tx MES healthy, rx MES absent) -> must be caught.
+    # Dead-receive: Asterisk received nothing (the phone's microphone audio never
+    # arrived) while it sent the phone 1500 packets. Worst-direction MES scoring
+    # alone would miss it: rxmes, the score of the stream Asterisk sent, is
+    # healthy, and txmes, its score of the dead received stream, is left out
+    # here. Live, Asterisk computes txmes from no data at every report and it
+    # reads a healthy ~88, so min() would pass that too. -> must be caught.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-1",
-                                rxcount="0", txcount="1500", txmes="88"))
+                                rxcount="0", txcount="1500", rxmes="88"))
     check("one-way: dead receive -> poor + notify",
           rec["quality"] == "poor" and rec["notify"])
     check("one-way: reason names the dead direction",
           any("one-way" in r and "receive" in r for r in rec["reasons"]))
-    # Dead-transmit: the phone HEARD audio but sent nothing (dead mic path).
+    # Dead-transmit: Asterisk sent the phone nothing (the handset heard silence)
+    # while the phone's microphone audio arrived (1500 packets); the dead path is
+    # PBX-to-handset, not the microphone.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-2",
-                                rxcount="1500", txcount="0", rxmes="88"))
+                                rxcount="1500", txcount="0", txmes="88"))
     check("one-way: dead transmit -> poor + notify + names transmit",
           rec["quality"] == "poor" and rec["notify"]
           and any("transmit" in r for r in rec["reasons"]))
@@ -219,21 +227,22 @@ def test_one_way_audio() -> None:
                                 rxcount="1500", txcount="1500", rxmes="88", txmes="88"))
     check("one-way: healthy two-way call not flagged", rec["quality"] == "excellent")
     # A tiny call-setup blip (few packets, other side 0) is NOT a false alarm.
+    # Sub-second, so no RTCP round completes and neither score is set.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-4",
-                                rxcount="8", txcount="0", rxmes="88"))
+                                rxcount="8", txcount="0", rxmes="0", txmes="0"))
     check("one-way: sub-second blip is not flagged one-way",
           not any("one-way" in r for r in rec["reasons"]))
     # REGRESSION (seen live): a lone stray inbound packet across a 38s call — rx=1,
     # tx=542 — is effectively dead-receive and MUST flag. The old exactly-zero test
     # ("rxcount and rxcount > 0") let it read "excellent".
     rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/12-5",
-                                billsec="38", rxcount="1", txcount="542", txmes="88"))
+                                billsec="38", rxcount="1", txcount="542", rxmes="88"))
     check("one-way: rx=1 (near-dead receive) -> poor + notify",
           rec["quality"] == "poor" and rec["notify"]
           and any("one-way" in r and "receive" in r for r in rec["reasons"]))
     # ...and the mirror: tx just under the dead threshold with a live receive side.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-6",
-                                rxcount="900", txcount="3", rxmes="88"))
+                                rxcount="900", txcount="3", txmes="88"))
     check("one-way: tx=3 (near-dead transmit) -> poor + notify",
           rec["quality"] == "poor" and rec["notify"]
           and any("transmit" in r for r in rec["reasons"]))
@@ -1324,10 +1333,12 @@ def test_the_jitter_field_names_do_not_assert_a_false_relationship() -> None:
 
     In 22 of 28 live records the "max" was SMALLER than the field it appeared to
     bound — idx37: 19.88 vs 0.38, a 52.3x inversion. They are different
-    quantities: one is Asterisk's interarrival estimate read once at hangup, the
-    other its maxrxjitter, the peak of that estimate sampled at every RTCP report
-    instant. A name that implies an ordering the data contradicts sends a reader
-    looking for a bug in the data.
+    quantities on different streams: one (rxjitter, read at hangup) is the jitter
+    the far end put in its last RTCP receiver report, its measure of the stream
+    Asterisk SENDS; the other (maxrxjitter) is the per-packet peak of Asterisk's
+    own interarrival estimate for the stream it RECEIVES. Because they measure
+    different streams, no ordering between them holds. A name that implies an
+    ordering the data contradicts sends a reader looking for a bug in the data.
     """
     a = _Args(source="dialplan", tag="rooms", chan="PJSIP/16-00000025",
               billsec="30", rxcount="1500", txcount="1500",
@@ -1483,13 +1494,13 @@ def test_a_call_that_carried_no_media_still_reaches_the_ledger() -> None:
     # exemplar moves to the abandoned shape it was always about.
     loud = _Args(source="dialplan", tag="rooms", chan="PJSIP/19-0000000b",
                  cid="19", billsec="0", hcause="16", nomedia=True,
-                 rxcount="1000", txcount="0", rxmes="88", txmes="0")
+                 rxcount="1000", txcount="0", rxmes="0", txmes="88")
     check("F31: precondition — this shape DOES alert without the no-media flag",
           cq.build_record(_Args(source="dialplan", tag="rooms",
                                 chan="PJSIP/19-0000000b", cid="19",
                                 billsec="10", hcause="16", rxcount="1000",
-                                txcount="0", rxmes="88",
-                                txmes="0"))["notify"] is True)
+                                txcount="0", rxmes="0",
+                                txmes="88"))["notify"] is True)
     check("F31: a media-less leg never alerts, whatever else is in the record",
           cq.build_record(loud)["notify"] is False)
 
@@ -1652,7 +1663,7 @@ def test_more_than_one_stage_counts_as_delivered() -> None:
     cut = cq.build_record(_Args(
         source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000a2",
         cid="19", billsec="1", hcause="16", stage="scene",
-        rxcount="10", txcount="0", rxmes="88", txmes="0"))
+        rxcount="10", txcount="0", rxmes="0", txmes="0"))
     assert cut["quality"] == "undelivered", (
         "a wake-up that stopped at 'scene' having transmitted nothing is the "
         "failure this alarm exists for")
@@ -1665,8 +1676,11 @@ def test_a_link_fault_on_a_playback_leg_raises_the_alert_it_called_for() -> None
 
     An announcement played to the WiFi cordless, and it played IN FULL: stage
     `complete`, 1114 packets transmitted, 0 % loss in both directions. The
-    handset's own RTCP told the other half of the story — MES 68.4 (MOS 3.42),
-    RTT mean 287 ms, RTT peak 883 ms. classify() flagged all three. The record
+    RTCP told the other half of the story — Asterisk's own score of the stream
+    it received from the handset (txmes) was MES 68.4 (MOS 3.42), against 76.8
+    for the clip the handset heard (rxmes, from the handset's receiver reports),
+    with RTT mean 287 ms and RTT peak 883 ms. classify() flagged the 68.4 and
+    both RTT figures. The record
     then met `notify and (a.tag or "") not in PLAYBACK_TAGS` and came out False,
     so the ledger kept every number and the house was told nothing. Nothing else
     could have caught it either: the 5-minute reachability poller read 9/9 right
@@ -1691,7 +1705,8 @@ def test_a_link_fault_on_a_playback_leg_raises_the_alert_it_called_for() -> None
           ann["stage"] == "complete" and ann["quality"] != "undelivered")
     check("link: and it lost nothing on the way",
           (ann["loss_rx_pct"], ann["loss_tx_pct"]) == (0.0, 0.0))
-    check("link: the handset's own score is what it was",
+    check("link: the worst-direction score (txmes, Asterisk's own score of the "
+          "handset-to-PBX stream) is what it was",
           (ann["mes_worst"], ann["mos_worst"]) == (68.4, 3.42))
     check("link: ...as is the RTT distribution the alert rests on",
           (ann["rtt_mean_ms"], ann["rtt_max_ms"]) == (287.19, 882.51))
@@ -1723,7 +1738,7 @@ def test_a_link_fault_on_a_playback_leg_raises_the_alert_it_called_for() -> None
     silent = cq.build_record(_Args(
         source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000f5",
         cid="19", billsec="1", hcause="16", stage="scene",
-        rxcount="34", txcount="0", rxmes="88", txmes="0"))
+        rxcount="34", txcount="0", rxmes="0", txmes="0"))
     check("link: the sleeper who heard silence is still paged",
           silent["quality"] == "undelivered" and silent["notify"] is True)
 

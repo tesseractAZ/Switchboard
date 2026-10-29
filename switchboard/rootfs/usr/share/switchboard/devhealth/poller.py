@@ -558,7 +558,8 @@ def newest_call(judged: list[dict], now: float | None = None) -> dict | None:
     latest stopTimeSecond; a copy with `age_s`, the seconds since that call ended
     (None if `now` is not given or the record has no timestamp). None when no
     record matched a call. moscq is the phone's own conversational MOS for its
-    leg — the callee-side quality Asterisk cannot measure."""
+    leg. On a call made TO the cordless it is the only per-call score of the
+    cordless's link, because the leg the PBX scores is the caller's."""
     best = None
     for j in judged or []:
         if j.get("match") != "call":
