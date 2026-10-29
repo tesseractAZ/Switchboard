@@ -18,7 +18,7 @@ announcement, which it tracks until a ledger records whether it arrived.
 | --- | --- |
 | **Telephony** | Room-to-room calling, a speech-driven operator, directory assistance, a talking clock, wake-up calls, house-wide paging, announcements onto speakers *and* handsets, a local voice assistant, and an optional SIP-trunk outside line (dial `9` first, or, with direct dial, `1` and the 10-digit number) |
 | **Link measurement** | Registration and qualify round-trip time for every phone between calls; a second detector catches outages shorter than the poll interval; mass-outage detection with hysteresis; trunk watchdog with automatic re-registration |
-| **Call quality** | One leg of every call is scored from RTP/RTCP: the worse direction's MES, loss in both directions, mean and peak round trip across the whole call, and one-way audio, with jitter recorded alongside. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
+| **Call quality** | One leg of every call is scored from RTP/RTCP: the worse direction's MES, loss in both directions, mean and peak round trip across the whole call, one-way audio, and the receive-jitter peak on conversations. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
 | **Device health** | Gateway port health, plus the cordless's battery, WiFi signal and own MOS. A low score from the handset counts only when the PBX's record of the same call corroborates it |
 | **Delivery integrity** | Wake-ups and handset announcements are written to a ledger. A reconciler judges each one it sees through, and a failure brings a re-ring, a retry or an escalation that names its cause |
 | **Security** | A Supervisor-only dashboard, a split Manager interface with secrets rotated every boot, a PBX that never holds the Home Assistant token, LAN-only room registration, toll-fraud controls and a confined runtime |
@@ -123,8 +123,17 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   measured.
 - **The worse direction decides.** The leg is graded on the *worse* of its two
   audio directions. The inputs are Asterisk's RTCP-derived Media Experience Score
-  and loss in each direction. Jitter is recorded beside them and feeds only the
-  glitch filter below.
+  and loss in each direction. Jitter never changes the grade. Asterisk 20.11.1's
+  score multiplies jitter in seconds, which leaves it almost no weight, and a
+  jitter buffer absorbs jitter until it overflows.
+- **A conversation alerts on an abnormal jitter peak.** A receive-jitter peak
+  over 60 ms raises an alert on room-to-room, outside, inbound and transferred
+  calls, and on calls the operator or directory connects. The grade is left
+  alone. Other legs are not checked, because the figure measures the stream the
+  PBX receives, which on a wake-up or announcement is a handset microphone nobody
+  hears. On those legs the WiFi cordless routinely peaks at 40–58 ms with no
+  loss; the wired ports stay under 3 ms. Across the 300 legs recorded over
+  33 days the check would have raised one alert.
 - **Round trip is scored across the whole call, not its last moment.** It alerts
   on a **mean over 250 ms** or a **peak over 500 ms** across every RTCP round. In
   this deployment one leg peaked at 845.93 ms and reported 10.65 ms on its final
@@ -136,8 +145,8 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   score and the literal `88.087887` when no RTCP round completed. The first reads
   as a dead call and the second as a flawless one. Both are recognised and
   discarded. So is the collapsed-score signature of a re-INVITE or transfer glitch
-  (MES under 40 with loss under 0.5 %, jitter under 40 ms and a round trip under
-  80 ms). Each record
+  (MES under 40 with loss under 0.5 %, a receive-jitter peak no higher than
+  60 ms and a round trip under 80 ms). Each record
   also says whether its RTT figures rest on one RTCP round or several.
 - **The alert path checks itself.** Each leg records whether its notification was
   actually posted (`notify_status`) and whether its sensor update was accepted

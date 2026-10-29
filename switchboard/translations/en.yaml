@@ -30,7 +30,7 @@ configuration:
   # ── Call-quality & device-health monitoring ──────────────────────────
   call_quality_alerts:
     name: Poor-Call Alerts
-    description: Send a Home Assistant notification when a call's audio quality is poor (low MOS, high packet loss, or one-way audio). The measurements are always recorded to sensors; this only controls the pop-up alert.
+    description: Send a Home Assistant notification when a call's audio quality is poor (low MOS, high packet loss, high round-trip time, one-way audio, or a jitter peak over 60 ms on a conversation). The measurements are always recorded to sensors; this only controls the pop-up alert.
   link_health_enabled:
     name: Link-Health Monitor
     description: Continuously poll every phone's registration and round-trip latency (RTT) between calls and publish them to sensors, so a degrading link (especially the Wi-Fi cordless) shows on a graph before a call drops. This poller also runs the outside-line watchdog (trunk sensor, automatic re-register and its alert), feeds gateway health, and supplies the cordless's current IP for auto-follow. Turning it off silences all of those, with no alert. Only the scrub of the readable log copy keeps running.

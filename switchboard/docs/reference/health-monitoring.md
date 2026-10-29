@@ -137,7 +137,21 @@ stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
 — low score, high loss, high latency (a round-trip **mean over 250 ms** or a
 **peak over 500 ms**, scored across the whole call rather than from the last
-RTCP round), or **one-way audio**.
+RTCP round), **one-way audio**, or a receive-jitter **peak over 60 ms** on a
+conversation.
+
+**Jitter alerts only on conversations, and never changes the grade.** The
+figure used is `jitter_rx_peak_local_ms`, the highest value Asterisk's own
+receive-jitter estimate reached during the call. It measures the stream the PBX
+receives, which reaches a listener only on room-to-room, outside (`outbound`),
+inbound (`from-trunk`) and transferred calls, and on calls the operator or
+directory connects. On a wake-up, page, announcement or voice menu it is the
+handset's microphone, and there the WiFi cordless routinely peaks at 40–58 ms
+with no loss. A jitter alert names the peak and leaves the excellent/good/fair/poor
+label where MES and loss put it, as an RTT alert does. Asterisk 20.11.1's MES
+gives jitter almost no weight, because it multiplies the jitter in seconds. The
+two other jitter fields, `jitter_rx_last_ms` and `jitter_tx_last_ms`, are
+recorded and drive nothing.
 
 **Not every call updates the sensor.** Each leg is appended to the durable JSONL
 ledger, but the sensor is only pushed when the leg produced a *credible* MES, and
@@ -145,7 +159,8 @@ only from the authoritative hangup record written by the dialplan
 (`source=dialplan`). A reading is discarded as not credible when Asterisk reports
 `0.0` for a direction it could not score — a short call, or RTCP that never
 converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
-alongside ~0 % loss, packetization-only jitter and a low RTT, which is the
+alongside ~0 % loss, a receive-jitter peak no higher than 60 ms and a low RTT,
+which is the
 signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
 v0.77.0, when it reports its *other* nothing-to-report constant, the literal
 `88.087887`, on a leg where no RTCP round completed. That one reads as a flawless

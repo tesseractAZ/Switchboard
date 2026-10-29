@@ -3,6 +3,29 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.116.0
+
+**A conversation with an abnormal jitter peak raises a call-quality alert.**
+
+- A conversation whose receive-jitter peak goes above 60 ms now raises a
+  call-quality notification naming the peak. Conversations are room-to-room,
+  outside, inbound and transferred calls, and calls connected by the operator or
+  directory. The excellent/good/fair/poor grade is unchanged, as with a
+  round-trip alert. Wake-ups, announcements, paging and the voice menus are not
+  checked: the figure measures the stream the PBX receives, which on those legs
+  is a handset microphone nobody hears, and there the WiFi cordless routinely
+  peaks at 40–58 ms with no loss. Across the last 300 recorded legs (33 days)
+  the check would have raised one notification.
+- The filter that discards a collapsed score caused by a re-INVITE or transfer
+  now reads the same receive-jitter peak, at the same 60 ms line. It used two
+  single-moment readings before. One of those, the far end's last report, read
+  as high as 136 ms on talking-clock and assistant legs whose received audio
+  was steady, so a glitch on such a leg could stay in the score as a false
+  "poor". No verdict in the current ledger changes.
+- Asterisk 20.11.1's own score (MES) gives jitter almost no weight, because it
+  multiplies the jitter in seconds. The README and the health-monitoring
+  reference now say so.
+
 ## 0.115.0
 
 **Documentation opens quickly in Home Assistant.** No change to how the add-on runs.
