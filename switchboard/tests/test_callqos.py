@@ -1753,6 +1753,149 @@ def test_the_ledger_timestamp_carries_an_iso_twin() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _jitter_leg(tag, rxmaxjitter, **kw):
+    """A clean 30-second leg on the WiFi cordless carrying a given receive-jitter
+    peak. Everything else is unremarkable, so the peak is the only thing that can
+    move the verdict."""
+    base = dict(source="dialplan", tag=tag, chan="PJSIP/19-000000a1", cid="19",
+                billsec="30", hcause="16", rxcount="1500", txcount="1500",
+                rxploss="0", txploss="0", rxjitter="0.020000",
+                txjitter="0.004000", rtt="0.005", normdevrtt="0.006",
+                maxrtt="0.009", minrtt="0.004", stdevrtt="0.001",
+                rxmes="88.0", txmes="88.0", rxmaxjitter=rxmaxjitter)
+    if tag in cq.SCRIPTED_STAGES:
+        base["stage"] = cq.SCRIPTED_STAGES[tag][0][-1]
+    base.update(kw)
+    return cq.build_record(_Args(**base))
+
+
+def test_a_conversation_with_an_abnormal_jitter_peak_raises_a_card() -> None:
+    """★ 2026-09-26T04:37:10Z, the cordless calling a wired room: 30 seconds,
+    1.49 % receive loss, MES 82.8, and a receive-jitter peak of 68.88 ms. Graded
+    `good` and silent. Nothing alerts on jitter, and Asterisk's MES cannot carry
+    it: calc_media_experience_score() multiplies the jitter in SECONDS, so the
+    68.88 ms peak moved that score by about a microsecond of "latency".
+
+    The peak is now an alert reason on conversations, and only there. The label
+    stays where MES and loss put it, as it does for an RTT alert. The fixture is
+    that leg's real metrics."""
+    check("jitter: the line is 60 ms", cq.JITTER_PEAK_ALERT_MS == 60.0)
+    check("jitter: the legs it applies to are exactly the conversations",
+          cq.CONVERSATION_TAGS == frozenset({"room-to-room", "outbound",
+                                             "from-trunk", "transfer",
+                                             "operator", "directory"}))
+
+    rec = cq.build_record(_Args(
+        source="dialplan", tag="room-to-room", chan="PJSIP/19-0000004b",
+        cid="19", billsec="30", hcause="16", rxcount="1475", txcount="1499",
+        rxploss="22", txploss="6", rxjitter="0.020000", txjitter="0.011125",
+        rtt="0.00563", normdevrtt="0.03073", maxrtt="0.09976",
+        minrtt="0.00563", stdevrtt="0.03604", rxmes="83.4", txmes="82.8",
+        rxmaxjitter="0.06888"))
+    check("jitter: the live leg's own numbers land as they were",
+          (rec["jitter_rx_peak_local_ms"], rec["loss_rx_pct"],
+           rec["mes_worst"]) == (68.88, 1.492, 82.8))
+    check("jitter: ★ the leg now raises the card", rec["notify"] is True)
+    check("jitter: the card says why, first",
+          rec["reasons"][0] == "jitter peak 69ms")
+    check("jitter: and the label is still the one MES and loss earned",
+          rec["quality"] == "good"
+          and "loss 1.49%" in rec["reasons"]
+          and any(r.startswith("MES ") for r in rec["reasons"]))
+
+    # The line itself. A peak AT it is the cordless's ordinary range; just
+    # above it is not. Literals, not the constant: a test that read the line
+    # from the code would pass wherever the line was moved to.
+    for peak, fires in (("0.06000", False), ("0.06050", True)):
+        r = _jitter_leg("room-to-room", peak)
+        check(f"jitter: a {float(peak) * 1000:g} ms peak "
+              f"{'alerts' if fires else 'does not'}", r["notify"] is fires)
+    # The cordless's normal 40-58 ms band, on a conversation, stays silent.
+    check("jitter: a 57.62 ms peak is ordinary for the cordless",
+          _jitter_leg("room-to-room", "0.05762")["notify"] is False)
+
+
+def test_the_jitter_alert_is_only_for_legs_a_person_hears() -> None:
+    """The peak measures the stream Asterisk RECEIVES. On a wake-up or an
+    announcement that is the handset's microphone, which nobody listens to, and
+    on those legs the cordless routinely peaks at 40-58 ms with clean MES and
+    loss. Two announcements went above 60 ms in the same 33 days, at 62.0 and
+    87.88 ms, MES 88, no loss, and neither should page anyone."""
+    for tag in sorted(cq.CONVERSATION_TAGS):
+        r = _jitter_leg(tag, "0.08788")
+        check(f"jitter: {tag} at 87.88 ms alerts",
+              r["notify"] is True and "jitter peak 88ms" in r["reasons"])
+    for tag in ("announce", "wakeup-deliver", "page", "wakeup", "clock",
+                "assistant", "status", "automation", "announce-menu", "rooms"):
+        r = _jitter_leg(tag, "0.08788")
+        check(f"jitter: {tag} at 87.88 ms stays silent",
+              r["notify"] is False
+              and not any(x.startswith("jitter") for x in r["reasons"]))
+
+    # classify() itself: None means "not a leg this check applies to", and a
+    # peak never changes the grade, however large.
+    check("jitter: no peak passed, no jitter alert",
+          cq.classify(88.0, 0.0, 5.0, jitter_peak_ms=None)[1] is False)
+    label, notify, reasons = cq.classify(88.0, 0.0, 5.0, jitter_peak_ms=500.0)
+    check("jitter: a 500 ms peak alerts and leaves an excellent leg excellent",
+          (label, notify, reasons) == ("excellent", True, ["jitter peak 500ms"]))
+
+
+def test_every_conversation_tag_is_one_the_dialplan_writes() -> None:
+    """A tag in CONVERSATION_TAGS that no context emits is an alert that can
+    never fire, and it would pass every test above. `room` against
+    `room-to-room` is the precedent: one character separated a real call kind
+    from the fallback."""
+    import re as _re
+    sbc = SourceFileLoader("sbc_for_callqos", str(
+        CQ_PATH.parent / "switchboard-config")).load_module()
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Family", "secret": "s1"},
+                             {"ext": "12", "name": "Kitchen", "secret": "s2"}])
+    e = sbc.render_extensions({"rooms": rooms,
+                               "trunk": {"enabled": True,
+                                         "provider_host": "x.voip.ms",
+                                         "username": "u", "secret": "x",
+                                         "direct_dial": True, "registns": True}})
+    emitted = (set(_re.findall(r"NoOp\(rtpqos ([a-z-]+)\)", e))
+               | set(_re.findall(r"Set\(SW_TAG=([a-z-]+)\)", e)))
+    check("jitter: the render was read at all", "room-to-room" in emitted)
+    for tag in sorted(cq.CONVERSATION_TAGS):
+        check(f"jitter: the dialplan writes {tag!r}", tag in emitted)
+
+
+def test_the_glitch_filter_reads_the_jitter_peak() -> None:
+    """_credible() drops a collapsed MES (< 40) as a re-INVITE glitch when
+    nothing measured can account for it. Its jitter half used to read the
+    *_last_ms fields. jitter_rx_last_ms is the far end's last report, and on
+    talking-clock and assistant legs it read as high as 136.38 ms while the
+    stream Asterisk received peaked near 2 ms, so a glitch on one of those legs
+    counted as "explained by jitter" and stayed in the score as a false `poor`."""
+    # The AGI-leg shape: a spiked far-end report, a steady received stream.
+    agi = _jitter_leg("clock", "0.00238", rxjitter="0.136380", rxmes="27.6")
+    check("glitch: a spiked far-end report no longer keeps a collapsed MES",
+          agi["mes_worst"] == 88.0 and agi["quality"] == "excellent"
+          and agi["notify"] is False)
+    check("glitch: the raw reading is still on the record",
+          agi["mes_rx"] == 27.6 and agi["jitter_rx_last_ms"] == 136.38)
+
+    # The local direction, inside the cordless's ordinary band: a 45 ms last
+    # value and a 50 ms peak. The old 40 ms line counted that as corroboration.
+    cordless = _jitter_leg("announce", "0.05000", txjitter="0.045000",
+                           txmes="27.6")
+    check("glitch: an ordinary cordless peak is not corroboration",
+          cordless["mes_worst"] == 88.0 and cordless["quality"] == "excellent")
+
+    # Above the line the link really was misbehaving, so the low score stands.
+    real = _jitter_leg("clock", "0.06888", rxmes="27.6")
+    check("glitch: an abnormal peak keeps the collapsed MES",
+          real["mes_worst"] == 27.6 and real["quality"] == "poor"
+          and real["notify"] is True)
+    # At the line exactly: still ordinary, so still a glitch.
+    edge = _jitter_leg("clock", "0.06000", rxmes="27.6")
+    check("glitch: a peak of exactly 60 ms is not corroboration",
+          edge["mes_worst"] == 88.0)
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))
