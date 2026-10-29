@@ -120,7 +120,8 @@ recorder runs detached from the call with nowhere to write an error, so until
 could not be made) or `skipped` (the leg does not drive the sensor: not the dial
 plan's record, a playback leg, or no credible score). Before v0.111.0 a failed
 update left no trace. The field is in the `/share` mirror too; records carrying it
-are schema version `6`.
+are schema version `6` or later. Records from v0.116.0 also carry
+`dialstatus` (see the jitter paragraph below) and are schema version `7`.
 
 **Two spellings of the time, on purpose.** Each record's `ts` is plain epoch
 seconds, and has to stay that way because the cordless health monitor reads it as
@@ -129,7 +130,7 @@ its timestamp as an ordinary `2026-09-15T00:26:35+00:00` date string, so anyone
 filtering the folder by date quietly matched nothing here and read the file as
 empty — one review reported "no calls" for a stretch that held eighteen. Records
 from 2026-09-15 carry `ts_iso` as well: the same instant, in the same spelling as
-its neighbours. Those records are schema version `5`.
+its neighbours. Those records are schema version `5` or later.
 
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP
@@ -146,11 +147,14 @@ grade.** The figure used is `jitter_rx_peak_local_ms`, the highest value
 Asterisk's own receive-jitter estimate reached during the call. It measures the
 stream the PBX receives, which reaches a listener on room-to-room, outside
 (`outbound`), inbound (`from-trunk`) and transferred calls, on calls the operator
-or directory connects, and on pages (both page shapes are full duplex). A call
-set up by dialling counts only when Asterisk's `DIALSTATUS` is `ANSWER`, recorded
-on each leg as `dialstatus`: an operator or directory call that connected nothing
-spoke only to the speech recogniser, and an unanswered call carried only the
-caller's microphone during ringback. On a wake-up, announcement or voice menu the
+or directory connects, and on pages, which are full duplex, so a paged handset
+that picks up is heard. The operator and directory answer the caller themselves,
+so their legs count only when Asterisk's `DIALSTATUS` for the connecting Dial()
+is `ANSWER`: one that connected nothing spoke only to the speech recogniser.
+Each leg records the value as `dialstatus`. No other kind is gated. An
+unanswered room, outside or inbound call carries no audio and is recorded as
+no-media, and a transferred call was already answered; its `dialstatus`
+describes the Dial() after the transfer. On a wake-up, announcement or voice menu the
 figure is the handset's microphone. The WiFi cordless peaked at 40–58 ms on 55 of
 its 282 legs, nearly all of them of that kind, 50 with under 0.5 % loss either
 way. A jitter alert names the peak and leaves the excellent/good/fair/poor label

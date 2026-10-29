@@ -33,8 +33,10 @@ Recent releases. Releases up to 0.109.0 are in the
 - A conversation whose receive-jitter peak goes above 60 ms now raises a
   call-quality notification naming the peak. That covers answered room-to-room,
   outside, inbound and transferred calls, calls connected by the operator or
-  directory, and pages. A dialled call counts only when Dial() reports
-  `ANSWER`, now recorded on each leg as `dialstatus` (ledger schema 7). The
+  directory, and pages. An operator or directory call counts only when its
+  connecting Dial() reports `ANSWER`, since one that connected nothing spoke
+  only to the speech recogniser. Each leg now records that value as
+  `dialstatus` (ledger schema 7). The
   excellent/good/fair/poor grade is unchanged, as with a round-trip alert.
   Wake-ups, announcements and the voice menus are not checked: the figure
   measures the stream the PBX receives, which on those legs is a handset

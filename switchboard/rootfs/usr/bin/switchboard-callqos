@@ -82,7 +82,10 @@ PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
 #
 # Both exemptions are about the SHAPE of the leg, not about how much it matters.
 # These legs are one-directional BY DESIGN: the PBX talks and the handset mostly
-# listens, so the one-way-audio detector — which exists to catch a BROKEN
+# listens. (A page is full duplex, so a paged handset that picks up is heard and
+# CONVERSATION_TAGS counts it; but most of a page is one voice and many silent
+# listeners, which is the shape that matters here.) So the one-way-audio
+# detector — which exists to catch a BROKEN
 # conversation — would fire on their perfectly normal shape. And a three-second
 # chime is not "the last call", so letting it overwrite that sensor would make
 # the sensor describe the PBX talking to itself.
@@ -100,8 +103,8 @@ PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 # link (jitter_rx_peak_local_ms; see the ★ jitter note in build_record) measures
 # that one stream. On a conversation it is the caller's voice -- or, from-trunk,
 # the outside party's -- on its way to the person at the other end. On a page it
-# is a voice the whole house hears: both page shapes are full duplex,
-# Page(...,d) dialled from a handset and the [page] ConfBridge. On every other
+# is heard by every paged handset that picks up: both page shapes are full
+# duplex, Page(...,d) dialled from a handset and the [page] ConfBridge. On every other
 # leg it is a handset microphone that nobody hears (a wake-up delivery, an
 # announcement, the talking clock) or one that only a recording or the speech
 # recogniser hears (the assistant, the status menu, setting a wake-up).
@@ -114,15 +117,22 @@ PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 CONVERSATION_TAGS = frozenset({"room-to-room", "outbound", "from-trunk",
                                "transfer", "operator", "directory", "page"})
 
-# ...of which these reach the other person through Dial(), so the stream reaches
-# anyone only if the call was answered. The operator and directory talk to the
-# caller through the speech recogniser first and Dial() only on a connect, and
-# an unanswered room call carries the caller's microphone during ringback.
+# ...of which these count only when their Dial() was answered. The operator and
+# directory Answer() the caller themselves and talk to them through the speech
+# recogniser, so their leg carries media whether or not a call follows; it
+# carries a conversation only if the Dial() that connects one was answered.
 # Dial() leaves DIALSTATUS on the calling channel, and the hangup extension
-# passes it as --dialstatus. Page() sets none, so a page is judged on its tag.
-# On a connected operator or directory call the peak also covers the speech
-# before the connect: the context answers first.
-DIALLED_CONVERSATION_TAGS = CONVERSATION_TAGS - {"page"}
+# passes it as --dialstatus. On a connected call the peak also covers the
+# speech before the connect.
+#
+# No other tag is gated, on purpose. An unanswered room, outside or inbound call
+# never reaches the jitter check: those Dial()s indicate ringing with `r`, which
+# sends no audio, and the hangup handler routes a leg with no answer time to the
+# no-media record. And a transferred leg was already in an answered call, while
+# its DIALSTATUS describes the Dial() AFTER the transfer: a transfer target that
+# did not answer would wrongly silence the conversation before it. Page() sets
+# no DIALSTATUS at all.
+ANSWER_GATED_TAGS = frozenset({"operator", "directory"})
 
 
 def jitter_alert_applies(tag, dialstatus) -> bool:
@@ -130,7 +140,7 @@ def jitter_alert_applies(tag, dialstatus) -> bool:
     tag = tag or ""
     if tag not in CONVERSATION_TAGS:
         return False
-    return tag not in DIALLED_CONVERSATION_TAGS or (dialstatus or "") == "ANSWER"
+    return tag not in ANSWER_GATED_TAGS or (dialstatus or "") == "ANSWER"
 
 # The receive-jitter peak, in ms, above which the link was doing something it
 # does not normally do. Two readers: classify() raises a card on a conversation

@@ -1838,8 +1838,8 @@ def test_a_conversation_with_an_abnormal_jitter_peak_raises_a_card() -> None:
           cq.CONVERSATION_TAGS == frozenset({"room-to-room", "outbound",
                                              "from-trunk", "transfer",
                                              "operator", "directory", "page"}))
-    check("jitter: every one but the page is set up by Dial()",
-          cq.DIALLED_CONVERSATION_TAGS == cq.CONVERSATION_TAGS - {"page"})
+    check("jitter: only the operator and directory need an answered connect",
+          cq.ANSWER_GATED_TAGS == frozenset({"operator", "directory"}))
 
     rec = cq.build_record(_Args(
         source="dialplan", tag="room-to-room", chan="PJSIP/19-0000004b",
@@ -1874,8 +1874,9 @@ def test_a_conversation_with_an_abnormal_jitter_peak_raises_a_card() -> None:
 def test_the_jitter_alert_is_only_for_legs_a_person_hears() -> None:
     """The peak measures the stream Asterisk RECEIVES. On a wake-up or an
     announcement that is the handset's microphone, which nobody listens to, and
-    on those legs the cordless routinely peaks at 40-58 ms with clean MES and
-    loss. Two announcements went above 60 ms in the same 33 days, at 62.0 and
+    on those legs the cordless often peaks at 40-58 ms: 55 of its 282 legs in 33
+    days, 50 of them with under 0.5 % loss in both directions. Two announcements
+    went above 60 ms in the same 33 days, at 62.0 and
     87.88 ms, MES 88, no loss, and neither should page anyone."""
     for tag in sorted(cq.CONVERSATION_TAGS):
         r = _jitter_leg(tag, "0.08788")
@@ -1897,35 +1898,40 @@ def test_the_jitter_alert_is_only_for_legs_a_person_hears() -> None:
           (label, notify, reasons) == ("excellent", True, ["jitter peak 500ms"]))
 
 
-def test_a_dialled_conversation_counts_only_once_it_was_answered() -> None:
-    """The operator and directory talk to the caller through the speech
-    recogniser and Dial() only on a connect; an unanswered room call carries the
-    caller's microphone during ringback. On none of those did the stream reach a
-    person, so the peak counts only when DIALSTATUS says ANSWER. A page has no
-    Dial() and is judged on its tag. Literal tables, not the sets under test."""
-    for tag in ("room-to-room", "outbound", "from-trunk", "transfer",
-                "operator", "directory"):
-        for status, applies in (("ANSWER", True), ("", False), ("NOANSWER", False),
-                                ("BUSY", False), ("CANCEL", False),
-                                ("CHANUNAVAIL", False), ("answer", False)):
-            check(f"answered: {tag} with {status!r} -> {applies}",
-                  cq.jitter_alert_applies(tag, status) is applies)
-    for status in ("", "ANSWER", "NOANSWER"):
-        check(f"answered: a page counts with {status!r}",
-              cq.jitter_alert_applies("page", status) is True)
+def test_an_operator_or_directory_leg_counts_only_once_it_connected() -> None:
+    """The operator and directory Answer() the caller themselves and talk to
+    them through the speech recogniser; their leg carries a conversation only if
+    the Dial() that connects one was answered, so for them the peak counts only
+    when DIALSTATUS says ANSWER. No other tag is gated. An unanswered room,
+    outside or inbound call never reaches the check (no media before answer),
+    and a transferred leg was already in an answered call while its DIALSTATUS
+    describes the Dial() after the transfer. Literal tables, not the sets."""
+    statuses = ("ANSWER", "", "NOANSWER", "BUSY", "CANCEL", "CHANUNAVAIL", "answer")
+    for tag in ("operator", "directory"):
+        for status in statuses:
+            check(f"connect: {tag} with {status!r} -> {status == 'ANSWER'}",
+                  cq.jitter_alert_applies(tag, status) is (status == "ANSWER"))
+    for tag in ("room-to-room", "outbound", "from-trunk", "transfer", "page"):
+        for status in statuses:
+            check(f"connect: {tag} counts whatever its DIALSTATUS ({status!r})",
+                  cq.jitter_alert_applies(tag, status) is True)
     for tag in ("announce", "wakeup-deliver", "wakeup", "assistant", "rooms", "", None):
-        check(f"answered: {tag!r} never counts, even answered",
+        check(f"connect: {tag!r} never counts, even answered",
               cq.jitter_alert_applies(tag, "ANSWER") is False)
 
-    # The call site, not just the helper: an operator call that never connected.
-    lone = _jitter_leg("operator", "0.08788", dialstatus="")
-    check("answered: an operator leg that connected nothing stays silent",
-          lone["notify"] is False and lone["dialstatus"] == "")
-    rang = _jitter_leg("room-to-room", "0.08788", dialstatus="NOANSWER")
-    check("answered: an unanswered room call stays silent",
-          rang["notify"] is False and rang["dialstatus"] == "NOANSWER")
-    check("answered: the outcome is on the record",
-          _jitter_leg("room-to-room", "0.08788")["dialstatus"] == "ANSWER")
+    # The call site, not just the helper.
+    lone = _jitter_leg("operator", "0.08788", dialstatus="NOANSWER")
+    check("connect: an operator call whose connect was not answered stays silent",
+          lone["notify"] is False and lone["dialstatus"] == "NOANSWER")
+    menu = _jitter_leg("directory", "0.08788", dialstatus="")
+    check("connect: a directory call that connected nothing stays silent",
+          menu["notify"] is False and menu["dialstatus"] == "")
+    moved = _jitter_leg("transfer", "0.08788", dialstatus="NOANSWER")
+    check("connect: a transferred conversation still alerts though its target "
+          "did not answer", moved["notify"] is True
+          and "jitter peak 88ms" in moved["reasons"])
+    check("connect: the outcome is on the record",
+          _jitter_leg("operator", "0.08788")["dialstatus"] == "ANSWER")
 
 
 def test_the_jitter_alert_needs_no_score_and_ignores_the_far_ends_report() -> None:
@@ -1953,9 +1959,18 @@ def test_the_dialplan_hands_the_dial_outcome_to_callqos() -> None:
     alert could never fire on one, with nothing anywhere failing."""
     sbc = SourceFileLoader("sbc_for_dialstatus", str(
         CQ_PATH.parent / "switchboard-config")).load_module()
-    rendered = "\n".join(sbc.render_rtpqos_context())
-    check("dialstatus: the hangup handler passes it, filtered",
-          ' --dialstatus "${FILTER(A-Z,${DIALSTATUS})}"' in rendered)
+    lines = [ln for ln in sbc.render_rtpqos_context()
+             if "TrySystem(/usr/bin/switchboard-callqos" in ln]
+    media = [ln for ln in lines if " --nomedia " not in ln]
+    nomedia = [ln for ln in lines if " --nomedia " in ln]
+    arg = ' --dialstatus "${FILTER(A-Z,${DIALSTATUS})}"'
+    check("dialstatus: one scored and one no-media hangup line",
+          len(media) == 1 and len(nomedia) == 1)
+    # The SCORED line is the one classify() reads; on the no-media line it is
+    # only recorded. Both, and inside the TrySystem() before its closing `&)`.
+    for name, ln in (("the scored line", media[0]), ("the no-media line", nomedia[0])):
+        check(f"dialstatus: {name} passes it, filtered",
+              arg in ln and ln.index(arg) < ln.rindex(" &)"))
     check("dialstatus: and callqos accepts it",
           cq._parse_args(["--dialstatus", "ANSWER"]).dialstatus == "ANSWER")
 
