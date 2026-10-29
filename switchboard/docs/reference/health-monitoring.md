@@ -141,18 +141,25 @@ jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough c
 RTCP round), **one-way audio**, or a receive-jitter **peak over 60 ms** on a
 conversation.
 
-**Jitter alerts only on conversations, and never changes the grade.** The
-figure used is `jitter_rx_peak_local_ms`, the highest value Asterisk's own
-receive-jitter estimate reached during the call. It measures the stream the PBX
-receives, which reaches a listener only on room-to-room, outside (`outbound`),
-inbound (`from-trunk`) and transferred calls, and on calls the operator or
-directory connects. On a wake-up, page, announcement or voice menu it is the
-handset's microphone, and there the WiFi cordless routinely peaks at 40–58 ms
-with no loss. A jitter alert names the peak and leaves the excellent/good/fair/poor
-label where MES and loss put it, as an RTT alert does. Asterisk 20.11.1's MES
-gives jitter almost no weight, because it multiplies the jitter in seconds. The
-two other jitter fields, `jitter_rx_last_ms` and `jitter_tx_last_ms`, are
-recorded and drive nothing.
+**The jitter alert covers only legs a person hears, and does not set the
+grade.** The figure used is `jitter_rx_peak_local_ms`, the highest value
+Asterisk's own receive-jitter estimate reached during the call. It measures the
+stream the PBX receives, which reaches a listener on room-to-room, outside
+(`outbound`), inbound (`from-trunk`) and transferred calls, on calls the operator
+or directory connects, and on pages (both page shapes are full duplex). A call
+set up by dialling counts only when Asterisk's `DIALSTATUS` is `ANSWER`, recorded
+on each leg as `dialstatus`: an operator or directory call that connected nothing
+spoke only to the speech recogniser, and an unanswered call carried only the
+caller's microphone during ringback. On a wake-up, announcement or voice menu the
+figure is the handset's microphone. The WiFi cordless peaked at 40–58 ms on 55 of
+its 282 legs, nearly all of them of that kind, 50 with under 0.5 % loss either
+way. A jitter alert names the peak and leaves the excellent/good/fair/poor label
+where MES and loss put it, as an RTT alert does. Asterisk 20.11.1's MES gives
+jitter almost no weight, because it multiplies the jitter in seconds. The peak's
+one effect on the grade is through the credibility filter below: above 60 ms it
+keeps a collapsed score from being discarded as a glitch. The two other jitter
+fields, `jitter_rx_last_ms` and `jitter_tx_last_ms`, are recorded and drive
+nothing.
 
 **Not every call updates the sensor.** Each leg is appended to the durable JSONL
 ledger, but the sensor is only pushed when the leg produced a *credible* MES, and

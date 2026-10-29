@@ -692,7 +692,7 @@ def test_main_records_what_became_of_the_sensor_push() -> None:
     try:
         led, mir, p = run(good_call, result=True)
         check("sensor: an accepted push is recorded as posted, in the ledger",
-              led.get("sensor_status") == "posted" and led.get("v") == 6)
+              led.get("sensor_status") == "posted" and led.get("v") == 7)
         check("sensor: ...and in the /share mirror, the only view from outside",
               mir.get("sensor_status") == "posted")
         check(f"sensor: exactly one push per leg ({p})",
@@ -826,7 +826,7 @@ def test_rows_written_before_sensor_status_stay_readable() -> None:
         check("v6: the older row survives the rewrite unchanged",
               len(rows) == 2 and rows[0] == old and "sensor_status" not in rows[0])
         check("v6: the new row carries the field",
-              rows[1]["v"] == 6 and rows[1]["sensor_status"] == "posted")
+              rows[1]["v"] == 7 and rows[1]["sensor_status"] == "posted")
         legs = dh.load_callqos_legs(cq.PATH)
         check("v6: devhealth reads both rows as legs",
               [lg["ext"] for lg in legs] == [rows[0]["ext"], rows[1]["ext"]])
@@ -1390,14 +1390,14 @@ def test_every_record_says_which_schema_it_is() -> None:
     rec = cq.build_record(_Args(source="dialplan", tag="rooms",
                                 chan="PJSIP/12-1", rxcount="100",
                                 txcount="100", rxmes="88", txmes="88"))
-    check("F54: the ledger record is versioned", rec.get("v") == 6)
+    check("F54: the ledger record is versioned", rec.get("v") == 7)
     d = tempfile.mkdtemp()
     try:
         cq.SHARE_OUTCOME_PATH = os.path.join(d, "callqos-outcomes.jsonl")
         cq.append_outcome(rec)
         line = json.loads(open(cq.SHARE_OUTCOME_PATH).read().splitlines()[0])
         check("F54: and so is the /share mirror, which is the only view an "
-              "outside audit gets", line.get("v") == 6)
+              "outside audit gets", line.get("v") == 7)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1805,10 +1805,12 @@ def test_the_ledger_timestamp_carries_an_iso_twin() -> None:
 
 def _jitter_leg(tag, rxmaxjitter, **kw):
     """A clean 30-second leg on the WiFi cordless carrying a given receive-jitter
-    peak. Everything else is unremarkable, so the peak is the only thing that can
-    move the verdict."""
+    peak, answered (DIALSTATUS ANSWER, as the hangup extension passes it after
+    a connected Dial()). Everything else is unremarkable, so the peak is the
+    only thing that can move the verdict."""
     base = dict(source="dialplan", tag=tag, chan="PJSIP/19-000000a1", cid="19",
-                billsec="30", hcause="16", rxcount="1500", txcount="1500",
+                billsec="30", hcause="16", dialstatus="ANSWER",
+                rxcount="1500", txcount="1500",
                 rxploss="0", txploss="0", rxjitter="0.020000",
                 txjitter="0.004000", rtt="0.005", normdevrtt="0.006",
                 maxrtt="0.009", minrtt="0.004", stdevrtt="0.001",
@@ -1823,17 +1825,21 @@ def test_a_conversation_with_an_abnormal_jitter_peak_raises_a_card() -> None:
     """★ 2026-09-26T04:37:10Z, the cordless calling a wired room: 30 seconds,
     1.49 % receive loss, MES 82.8, and a receive-jitter peak of 68.88 ms. Graded
     `good` and silent. Nothing alerts on jitter, and Asterisk's MES cannot carry
-    it: calc_media_experience_score() multiplies the jitter in SECONDS, so the
-    68.88 ms peak moved that score by about a microsecond of "latency".
+    it: calc_media_experience_score() multiplies the jitter in SECONDS, and is
+    handed the current estimate at each report, never the peak, so even a jitter
+    the size of that peak would move the score by about a microsecond of
+    "latency".
 
     The peak is now an alert reason on conversations, and only there. The label
     stays where MES and loss put it, as it does for an RTT alert. The fixture is
     that leg's real metrics."""
     check("jitter: the line is 60 ms", cq.JITTER_PEAK_ALERT_MS == 60.0)
-    check("jitter: the legs it applies to are exactly the conversations",
+    check("jitter: the legs it applies to are the conversations and pages",
           cq.CONVERSATION_TAGS == frozenset({"room-to-room", "outbound",
                                              "from-trunk", "transfer",
-                                             "operator", "directory"}))
+                                             "operator", "directory", "page"}))
+    check("jitter: every one but the page is set up by Dial()",
+          cq.DIALLED_CONVERSATION_TAGS == cq.CONVERSATION_TAGS - {"page"})
 
     rec = cq.build_record(_Args(
         source="dialplan", tag="room-to-room", chan="PJSIP/19-0000004b",
@@ -1841,7 +1847,7 @@ def test_a_conversation_with_an_abnormal_jitter_peak_raises_a_card() -> None:
         rxploss="22", txploss="6", rxjitter="0.020000", txjitter="0.011125",
         rtt="0.00563", normdevrtt="0.03073", maxrtt="0.09976",
         minrtt="0.00563", stdevrtt="0.03604", rxmes="83.4", txmes="82.8",
-        rxmaxjitter="0.06888"))
+        rxmaxjitter="0.06888", dialstatus="ANSWER"))
     check("jitter: the live leg's own numbers land as they were",
           (rec["jitter_rx_peak_local_ms"], rec["loss_rx_pct"],
            rec["mes_worst"]) == (68.88, 1.492, 82.8))
@@ -1875,7 +1881,7 @@ def test_the_jitter_alert_is_only_for_legs_a_person_hears() -> None:
         r = _jitter_leg(tag, "0.08788")
         check(f"jitter: {tag} at 87.88 ms alerts",
               r["notify"] is True and "jitter peak 88ms" in r["reasons"])
-    for tag in ("announce", "wakeup-deliver", "page", "wakeup", "clock",
+    for tag in ("announce", "wakeup-deliver", "wakeup", "clock",
                 "assistant", "status", "automation", "announce-menu", "rooms"):
         r = _jitter_leg(tag, "0.08788")
         check(f"jitter: {tag} at 87.88 ms stays silent",
@@ -1889,6 +1895,69 @@ def test_the_jitter_alert_is_only_for_legs_a_person_hears() -> None:
     label, notify, reasons = cq.classify(88.0, 0.0, 5.0, jitter_peak_ms=500.0)
     check("jitter: a 500 ms peak alerts and leaves an excellent leg excellent",
           (label, notify, reasons) == ("excellent", True, ["jitter peak 500ms"]))
+
+
+def test_a_dialled_conversation_counts_only_once_it_was_answered() -> None:
+    """The operator and directory talk to the caller through the speech
+    recogniser and Dial() only on a connect; an unanswered room call carries the
+    caller's microphone during ringback. On none of those did the stream reach a
+    person, so the peak counts only when DIALSTATUS says ANSWER. A page has no
+    Dial() and is judged on its tag. Literal tables, not the sets under test."""
+    for tag in ("room-to-room", "outbound", "from-trunk", "transfer",
+                "operator", "directory"):
+        for status, applies in (("ANSWER", True), ("", False), ("NOANSWER", False),
+                                ("BUSY", False), ("CANCEL", False),
+                                ("CHANUNAVAIL", False), ("answer", False)):
+            check(f"answered: {tag} with {status!r} -> {applies}",
+                  cq.jitter_alert_applies(tag, status) is applies)
+    for status in ("", "ANSWER", "NOANSWER"):
+        check(f"answered: a page counts with {status!r}",
+              cq.jitter_alert_applies("page", status) is True)
+    for tag in ("announce", "wakeup-deliver", "wakeup", "assistant", "rooms", "", None):
+        check(f"answered: {tag!r} never counts, even answered",
+              cq.jitter_alert_applies(tag, "ANSWER") is False)
+
+    # The call site, not just the helper: an operator call that never connected.
+    lone = _jitter_leg("operator", "0.08788", dialstatus="")
+    check("answered: an operator leg that connected nothing stays silent",
+          lone["notify"] is False and lone["dialstatus"] == "")
+    rang = _jitter_leg("room-to-room", "0.08788", dialstatus="NOANSWER")
+    check("answered: an unanswered room call stays silent",
+          rang["notify"] is False and rang["dialstatus"] == "NOANSWER")
+    check("answered: the outcome is on the record",
+          _jitter_leg("room-to-room", "0.08788")["dialstatus"] == "ANSWER")
+
+
+def test_the_jitter_alert_needs_no_score_and_ignores_the_far_ends_report() -> None:
+    """Two shapes the alert must get right on its own. A trunk call has no MES
+    to grade: VoIP.ms echoes no RTCP, so rxmes is 0, the RTT family is 0 and the
+    local score is Asterisk's no-measurement constant. Its jitter peak is local
+    and real, and must still alert. And the far end's last report
+    (jitter_rx_last_ms) reads as high as 136 ms on AGI legs whose received
+    stream was steady; it must not be what the alert reads."""
+    trunk = _jitter_leg("from-trunk", "0.07500", chan="PJSIP/trunk-0000001a",
+                        cid="", rtt="0", normdevrtt="0", maxrtt="0", minrtt="0",
+                        stdevrtt="0", rxmes="0", txmes="88.087887")
+    check("trunk: no score, so the grade is unknown",
+          trunk["quality"] == "unknown" and trunk["mes_worst"] is None)
+    check("trunk: ...and the jitter peak still raises the card",
+          trunk["notify"] is True and trunk["reasons"] == ["jitter peak 75ms"])
+    steady = _jitter_leg("room-to-room", "0.00238", rxjitter="0.136380")
+    check("far end: a spiked far-end report with a steady stream stays silent",
+          steady["notify"] is False
+          and not any(r.startswith("jitter") for r in steady["reasons"]))
+
+
+def test_the_dialplan_hands_the_dial_outcome_to_callqos() -> None:
+    """Without --dialstatus every dialled conversation reads "", and the jitter
+    alert could never fire on one, with nothing anywhere failing."""
+    sbc = SourceFileLoader("sbc_for_dialstatus", str(
+        CQ_PATH.parent / "switchboard-config")).load_module()
+    rendered = "\n".join(sbc.render_rtpqos_context())
+    check("dialstatus: the hangup handler passes it, filtered",
+          ' --dialstatus "${FILTER(A-Z,${DIALSTATUS})}"' in rendered)
+    check("dialstatus: and callqos accepts it",
+          cq._parse_args(["--dialstatus", "ANSWER"]).dialstatus == "ANSWER")
 
 
 def test_every_conversation_tag_is_one_the_dialplan_writes() -> None:
@@ -1917,12 +1986,14 @@ def test_loss_alerts_where_it_stops_a_leg_being_good() -> None:
     """★ v0.116.0 — the loss alert moved from 3 % to 1.5 %, the line where loss
     alone already takes a leg from `good` to `fair`.
 
-    A short call that loses a few dozen packets should alert. At 3 % it alerted
-    only by accident of direction. Asterisk scores the stream it SENDS from the
-    far end's CUMULATIVE lost count, so 41 packets lost early in a 38-second
-    call collapse that score and the MES alert fires. It scores the stream it
+    A short call that loses a few dozen packets should alert. Through v0.115.0
+    it never did: the glitch filter dropped the collapsed score by judging it
+    against the other stream's loss. With that fixed and the line left at 3 %,
+    direction would decide. Asterisk scores the stream it SENDS from the far
+    end's CUMULATIVE lost count, so 41 packets lost early in a 38-second call
+    collapse that score and the MES alert fires. It scores the stream it
     RECEIVES from the count per RTCP interval, so the same 41 packets in one
-    burst leave that MES near 81, and nothing fired."""
+    burst leave that MES near 81, and nothing would fire."""
     # The line. Literals, not a constant read from the code.
     for loss, label, fires in ((1.49, "good", False), (1.5, "fair", True),
                                (2.19, "fair", True), (3.0, "fair", True)):
@@ -1999,6 +2070,10 @@ def test_the_glitch_filter_reads_the_jitter_peak() -> None:
     edge = _jitter_leg("clock", "0.06000", rxmes="27.6")
     check("glitch: a peak of exactly 60 ms is not corroboration",
           edge["mes_worst"] == 88.0)
+    # ...and just above it is: the same edge the classify() test pins.
+    just = _jitter_leg("clock", "0.06050", rxmes="27.6")
+    check("glitch: a peak of 60.5 ms keeps the collapsed MES",
+          just["mes_worst"] == 27.6)
 
 
 if __name__ == "__main__":

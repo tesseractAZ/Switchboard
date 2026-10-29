@@ -350,10 +350,15 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 #   - loss >= 1.0 % is where G.711 loss stops being inaudible;
 #   - mes < 78 is below callqos's floor for "good" and below every credible
 #     score for the handset-bound stream on a leg without that loss.
-# A handset score under mos_min (3.4, roughly MES 68) caused by the network or
-# by jitter would have to show in the handset's own receiver reports well before
-# either line. When it does not, the low score is published as
-# last_mos_uncorroborated and does not degrade the sensor.
+# A handset score under mos_min (3.4, roughly MES 68) caused by lost packets or
+# a long round trip would have to show in the handset's own receiver reports
+# well before either line. One caused by JITTER would not: Asterisk's MES gives
+# jitter almost no weight (it multiplies it in seconds), and packets the
+# handset's jitter buffer discards as late are not counted as lost in its
+# receiver reports. So these two lines cannot corroborate a jitter-caused low
+# score; that case stays uncorroborated by design. When neither line is
+# crossed, the low score is published as last_mos_uncorroborated and does not
+# degrade the sensor.
 CORROBORATE_LOSS_TX_PCT = 1.0
 CORROBORATE_MES_RX = 78.0
 

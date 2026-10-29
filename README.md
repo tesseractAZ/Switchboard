@@ -123,9 +123,11 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   measured.
 - **The worse direction decides.** The leg is graded on the *worse* of its two
   audio directions. The inputs are Asterisk's RTCP-derived Media Experience Score
-  and loss in each direction. Jitter never changes the grade. Asterisk 20.11.1's
+  and loss in each direction. Jitter is not a grading input. Asterisk 20.11.1's
   score multiplies jitter in seconds, which leaves it almost no weight, and a
-  jitter buffer absorbs jitter until it overflows.
+  jitter buffer absorbs jitter until it overflows. Its one effect on the grade is
+  through the credibility filter below, where a peak over 60 ms keeps a collapsed
+  score from being discarded as a glitch.
 - **Loss alerts at 1.5 % in either direction.** That is the point where loss
   alone takes a call from good to fair, so a short call that drops a few dozen
   packets raises an alert. Asterisk's score cannot be left to catch it, because it
@@ -134,13 +136,14 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   take it from 88 to 28. The score for the audio it receives falls on the loss per
   5-second report, so the same burst leaves it near 81.
 - **A conversation alerts on an abnormal jitter peak.** A receive-jitter peak
-  over 60 ms raises an alert on room-to-room, outside, inbound and transferred
-  calls, and on calls the operator or directory connects. The grade is left
-  alone. Other legs are not checked, because the figure measures the stream the
-  PBX receives, which on a wake-up or announcement is a handset microphone nobody
-  hears. On those legs the WiFi cordless routinely peaks at 40–58 ms with no
-  loss; the wired ports stay under 3 ms. Across the 300 legs recorded over
-  33 days the check would have raised one alert.
+  over 60 ms raises an alert on answered room-to-room, outside, inbound and
+  transferred calls, on calls the operator or directory connects, and on pages.
+  The grade is left alone. Other legs are not checked, because the figure
+  measures the stream the PBX receives, which on a wake-up or announcement is a
+  handset microphone nobody hears. The WiFi cordless peaked at 40–58 ms on 55 of
+  its 282 legs, 54 of them announcements, wake-up calls or calls to set one, and
+  50 with under 0.5 % loss either way; the wired ports stay under 3 ms. Across the
+  300 legs recorded over 33 days the check would have raised one alert.
 - **Round trip is scored across the whole call, not its last moment.** It alerts
   on a **mean over 250 ms** or a **peak over 500 ms** across every RTCP round. In
   this deployment one leg peaked at 845.93 ms and reported 10.65 ms on its final

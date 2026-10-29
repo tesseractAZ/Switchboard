@@ -31,14 +31,16 @@ Recent releases. Releases up to 0.109.0 are in the
   heard. Replayed on the 42 low scores captured since 2026-09-15, every verdict
   is unchanged.
 - A conversation whose receive-jitter peak goes above 60 ms now raises a
-  call-quality notification naming the peak. Conversations are room-to-room,
-  outside, inbound and transferred calls, and calls connected by the operator or
-  directory. The excellent/good/fair/poor grade is unchanged, as with a
-  round-trip alert. Wake-ups, announcements, paging and the voice menus are not
-  checked: the figure measures the stream the PBX receives, which on those legs
-  is a handset microphone nobody hears, and there the WiFi cordless routinely
-  peaks at 40–58 ms with no loss. Across the last 300 recorded legs (33 days)
-  the check would have raised one notification.
+  call-quality notification naming the peak. That covers answered room-to-room,
+  outside, inbound and transferred calls, calls connected by the operator or
+  directory, and pages. A dialled call counts only when Dial() reports
+  `ANSWER`, now recorded on each leg as `dialstatus` (ledger schema 7). The
+  excellent/good/fair/poor grade is unchanged, as with a round-trip alert.
+  Wake-ups, announcements and the voice menus are not checked: the figure
+  measures the stream the PBX receives, which on those legs is a handset
+  microphone nobody hears. There the WiFi cordless often peaks at 40–58 ms, 50
+  times in 33 days with under 0.5 % loss. Across the last 300 recorded legs the
+  check would have raised one notification.
 - The filter that discards a collapsed score caused by a re-INVITE or transfer
   now reads the same receive-jitter peak, at the same 60 ms line. It used two
   single-moment readings before. One of those, the far end's last report, read

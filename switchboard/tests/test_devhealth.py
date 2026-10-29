@@ -1008,7 +1008,9 @@ def test_the_corroboration_lines_are_pinned_and_judged_at_their_edges() -> None:
         assert j({"loss_tx_pct": 0.0, "mes_rx": mes, "jitter_tx_last_ms": jit}) == "clean"
     assert j({"loss_tx_pct": 0.99, "mes_rx": 88.0}) == "clean"
     assert j({"loss_tx_pct": 1.0, "mes_rx": 88.0}) == "impaired"
-    # The one non-playback leg in the ledger to reach 1 % (2026-08-25).
+    # The 2026-08-25 wake-up leg's 1.339 % (since rotated out of the ledger).
+    # Its handset-bound MES was not kept; loss alone decides, so the MES here
+    # is illustrative and deliberately above the line.
     assert j({"loss_tx_pct": 1.339, "mes_rx": 85.8}) == "impaired"
     assert j({"loss_tx_pct": 0.0, "mes_rx": 78.0}) == "clean"
     assert j({"loss_tx_pct": 0.0, "mes_rx": 77.9}) == "impaired"

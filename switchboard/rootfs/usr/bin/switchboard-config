@@ -1358,6 +1358,10 @@ def render_rtpqos_context() -> list:
         ' --codec "${CHANNEL(audionativeformat)}"'
         ' --readformat "${CHANNEL(audioreadformat)}" --billsec "${CDR(billsec)}"'
         ' --hcause "${HANGUPCAUSE}" --rxcount "${RXC}" --txcount "${TXC}"'
+        # Dial()'s outcome on this channel. A conversation's jitter peak counts
+        # only on an answered call (callqos jitter_alert_applies()); empty for a
+        # context that dials nothing. FILTERed because it reaches a shell arg.
+        ' --dialstatus "${FILTER(A-Z,${DIALSTATUS})}"'
         # How far a scripted leg got before hangup. Empty for contexts that set
         # no stage (a normal room call has no stages to reach).
         ' --stage "${FILTER(a-z,${SW_STAGE})}"'
