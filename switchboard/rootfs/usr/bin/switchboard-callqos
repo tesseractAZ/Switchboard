@@ -260,8 +260,10 @@ def _ms(sec):
 
 # --------------------------------------------------------------------------- #
 # Quality classification — the one knob worth tuning. Given the initiating leg
-# sees BOTH directions (rxmes = audio it heard, txmes = audio the far end heard),
-# we score on the WORSE direction and the WORSE loss, so a one-way problem (the
+# sees BOTH directions (rxmes = the audio Asterisk SENT, scored from the far
+# end's RTCP receiver reports; txmes = the audio Asterisk RECEIVED, scored from
+# its own counters), we score on the WORSE direction and the WORSE loss, so a
+# one-way problem (the
 # real-world failure mode — e.g. the MES-59 WiFi-cordless call) can't hide behind
 # a healthy reverse path.
 # --------------------------------------------------------------------------- #
@@ -304,7 +306,9 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
       `notify` fires on the ALERT thresholds only — conservative, so a
       notification means "worth a look", not "spam on every WiFi hiccup":
         - MES ~88 ≈ MOS 4.4 (toll quality); 70 ≈ MOS 3.5; 60 ≈ MOS 3.0 (fair).
-        - loss under ~1% is inaudible on G.711; 3%+ is audible clipping.
+        - loss under ~1% is inaudible on G.711; 3%+ is audible clipping. The
+          alert is at 1.5 %, the point where loss alone takes a leg below
+          `good` (v0.116.0; it was 3 %). See the ★ loss note below.
         - RTT under ~150 ms is unnoticed; 400 ms+ makes conversation stilted.
 
       `reasons` explains the LABEL. Through v0.76.0 it was built from the alert
@@ -354,7 +358,25 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
     alerts, reasons = [], []
     if worst_mes is not None and worst_mes < 70:
         alerts.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
-    if worst_loss_pct is not None and worst_loss_pct > 3.0:
+    # ★ LOSS ALERTS WHERE IT STOPS A LEG BEING `good`, IN EITHER DIRECTION
+    # (v0.116.0). The line was 3 %, and a short call that lost a few dozen
+    # packets fell under it: 41 of 1870 is 2.2 %. Whether such a call alerted
+    # was then decided by an accident of Asterisk's arithmetic, not by the loss.
+    # Both MES formulas subtract 2 R-points per lost PACKET, not per percent,
+    # but they count differently. The score for the stream Asterisk sends
+    # (rxmes) averages the far end's CUMULATIVE count, so 41 packets lost early
+    # in a 38-second call collapse it to about 28 and the MES alert fires. The
+    # score for the stream it receives (txmes) averages the count per RTCP
+    # interval, so the same 41 packets in one burst, averaged over seven
+    # 5-second reports, cost it about 12 R-points, leaving MES near 81, and
+    # nothing fires. Same loss, opposite verdicts, decided by direction.
+    #
+    # The line now sits at 1.5 %, the boundary the label already uses between
+    # `good` and `fair`. A leg that loss alone demotes now says so. Measured
+    # cost over the 300 legs of 2026-09-25..10-28: two more cards, both short
+    # cordless calls to set a wake-up (2.2 % and 2.6 % lost on the way to the
+    # handset).
+    if worst_loss_pct is not None and worst_loss_pct >= 1.5:
         alerts.append(f"loss {worst_loss_pct:.1f}%")
     # Prefer the distribution; fall back to the single draw only when no
     # distribution was supplied, so an old caller still gets the old check.
@@ -539,8 +561,23 @@ def build_record(a) -> dict:
                       and (rtt_ms is None or rtt_ms < 80))
         return None if incoherent else mes
 
-    mes_vals = [m for m in (_credible(rxmes, loss_rx),
-                            _credible(txmes, loss_tx)) if m is not None]
+    # ★ EACH SCORE IS CHECKED AGAINST ITS OWN STREAM'S LOSS (v0.116.0). This
+    # read `_credible(rxmes, loss_rx), _credible(txmes, loss_tx)`, pairing by
+    # name, and the names point opposite ways. From ast_rtp_get_stat() in
+    # Asterisk 20.11.1: rxploss counts what Asterisk lost RECEIVING and txploss
+    # is the far end's report of what it lost of the stream Asterisk SENDS, but
+    # rxmes is the score for the stream Asterisk SENDS (update_reported_mes_stats,
+    # "RTP we sent and they received") and txmes the one for the stream it
+    # RECEIVES. Every collapsed score was being judged against the other
+    # stream's loss.
+    #
+    # Live 2026-09-25T13:02:44Z: a wake-up to the cordless in which the handset
+    # reported losing 482 of 1101 packets (43.8 %) of the wake-up audio, and the
+    # score for that stream was 20. The filter compared that 20 with the 0 %
+    # loss on the handset's microphone, called it a glitch and dropped it. The
+    # leg still alerted, but only on the loss; the score was missing from it.
+    mes_vals = [m for m in (_credible(rxmes, loss_tx),
+                            _credible(txmes, loss_rx)) if m is not None]
     worst_mes = min(mes_vals) if mes_vals else None
     loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
     worst_loss = max(loss_vals) if loss_vals else None
@@ -692,8 +729,12 @@ def build_record(a) -> dict:
         # alert thresholds and raised nothing at all. The worst was an
         # announcement at 2026-09-15T00:26:35Z that played in FULL — stage
         # `complete`, 1114 packets transmitted, 0 % loss in BOTH directions — to
-        # the WiFi cordless, while the handset's own RTCP reported MES 68.4
-        # (MOS 3.42), RTT mean 287 ms and an RTT peak of 883 ms. Nothing else in
+        # the WiFi cordless, with RTT mean 287 ms and an RTT peak of 883 ms.
+        # Asterisk's score for the stream it received from the handset (txmes)
+        # was MES 68.4 (MOS 3.42); its score for the clip the handset heard
+        # (rxmes, from the handset's receiver reports) was 76.8. (Corrected in
+        # v0.116.0: this note had attributed the 68.4 to the handset's own
+        # RTCP.) Nothing else in
         # the add-on saw it either: the 5-minute reachability poller read 9/9
         # throughout, because the link was up the whole time — just bad.
         #

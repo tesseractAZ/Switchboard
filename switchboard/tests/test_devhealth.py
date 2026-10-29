@@ -988,8 +988,9 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
 # ── 2026-09-14: a low handset score needs the ledger's agreement, and is kept ─
 #
 # The WP826 scored moscq 2.2 on an assistant leg (02:51:58Z) and two dial-42
-# wake-up legs (12:42:31Z, 13:10:37Z). The ledger measured all three from the
-# handset's own receiver reports at 0 % transmit loss and MES 87.9-88.0, and
+# wake-up legs (12:42:31Z, 13:10:37Z). The handset's own receiver reports showed
+# 0 % loss on all three and the ledger scored them MES 87.9-88.0 (that was
+# mes_tx, the microphone stream; the judgement reads mes_rx since v0.116.0), and
 # three 'degraded' episodes followed. The mechanism is unknown. These pin what
 # the monitor does about it: no alert without corroboration, and a capture of
 # every low score so the mechanism can be read off the data.
@@ -998,25 +999,46 @@ def test_the_corroboration_lines_are_pinned_and_judged_at_their_edges() -> None:
     # Literals, not the constants: a test that reads its bound from its subject
     # passes for any value of it.
     assert dh.CORROBORATE_LOSS_TX_PCT == 1.0
-    assert dh.CORROBORATE_MES_TX == 78.0
+    assert dh.CORROBORATE_MES_RX == 78.0
     j = dh.ledger_tx_judgement
-    # The three live legs behind the false episodes.
+    # The shape of the live legs behind the false episodes: clean on loss and MES.
     for mes, jit in ((88.0, 2.38), (87.9, 5.88), (87.9, 6.5)):
-        assert j({"loss_tx_pct": 0.0, "mes_tx": mes, "jitter_tx_last_ms": jit}) == "clean"
-    assert j({"loss_tx_pct": 0.99, "mes_tx": 88.0}) == "clean"
-    assert j({"loss_tx_pct": 1.0, "mes_tx": 88.0}) == "impaired"
+        assert j({"loss_tx_pct": 0.0, "mes_rx": mes, "jitter_tx_last_ms": jit}) == "clean"
+    assert j({"loss_tx_pct": 0.99, "mes_rx": 88.0}) == "clean"
+    assert j({"loss_tx_pct": 1.0, "mes_rx": 88.0}) == "impaired"
     # The one non-playback leg in the ledger to reach 1 % (2026-08-25).
-    assert j({"loss_tx_pct": 1.339, "mes_tx": 85.8}) == "impaired"
-    assert j({"loss_tx_pct": 0.0, "mes_tx": 78.0}) == "clean"
-    assert j({"loss_tx_pct": 0.0, "mes_tx": 77.9}) == "impaired"
+    assert j({"loss_tx_pct": 1.339, "mes_rx": 85.8}) == "impaired"
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 78.0}) == "clean"
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 77.9}) == "impaired"
     # Asterisk writes 0.0 for a direction no RTCP round scored: not a clean leg.
-    assert j({"loss_tx_pct": 0.0, "mes_tx": 0.0}) == "unmeasured"
-    assert j({"loss_tx_pct": None, "mes_tx": None}) == "unmeasured"
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 0.0}) == "unmeasured"
+    assert j({"loss_tx_pct": None, "mes_rx": None}) == "unmeasured"
     # Loss is evidence on its own, measured MES or not.
-    assert j({"loss_tx_pct": 2.5, "mes_tx": 0.0}) == "impaired"
-    assert j({"loss_tx_pct": True, "mes_tx": True}) == "unmeasured"
+    assert j({"loss_tx_pct": 2.5, "mes_rx": 0.0}) == "impaired"
+    assert j({"loss_tx_pct": True, "mes_rx": True}) == "unmeasured"
     assert j({}) == "unmeasured"
     assert j(None) == "unmeasured"
+
+
+def test_the_handset_score_is_judged_on_the_stream_the_handset_heard() -> None:
+    """★ v0.116.0. ledger_tx_judgement read `mes_tx`, which is Asterisk's score
+    for the stream it RECEIVES, the handset's microphone. The score for what the
+    handset HEARD, built from the handset's own receiver reports, is `mes_rx`:
+    in ast_rtp_get_stat() (Asterisk 20.11.1) rxmes is reported_mes, "RTP we sent
+    and they received". The loss half was always right, since `loss_tx_pct` is
+    the handset's reported loss of the PBX's stream.
+
+    Each pair below disagrees on purpose, so only the right field can pass."""
+    j = dh.ledger_tx_judgement
+    # The stream the handset heard was bad and its microphone was fine.
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 70.0, "mes_tx": 88.0}) == "impaired"
+    # The microphone stream was bad and what the handset heard was fine.
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 88.0, "mes_tx": 70.0}) == "clean"
+    # Scored only in the microphone direction: nothing about what it heard.
+    assert j({"loss_tx_pct": 0.0, "mes_rx": 0.0, "mes_tx": 88.0}) == "unmeasured"
+    assert j({"loss_tx_pct": 0.0, "mes_tx": 88.0}) == "unmeasured"
+    # The loss that counts is the handset's, not the PBX's receive loss.
+    assert j({"loss_rx_pct": 5.0, "loss_tx_pct": 0.0, "mes_rx": 88.0}) == "clean"
 
 
 def test_a_playback_leg_beside_a_real_call_cannot_borrow_its_confirmation() -> None:
@@ -1024,8 +1046,8 @@ def test_a_playback_leg_beside_a_real_call_cannot_borrow_its_confirmation() -> N
     operator leg at 13:00:31Z. Dropping playback legs and accepting ANY leg
     within 90 s let the delivery's handset score ride in on the operator leg."""
     deliver, operator = 1789390819.0, 1789390831.0
-    ledger = [{"ts": deliver, "tag": "wakeup-deliver", "loss_tx_pct": 0.0, "mes_tx": 88.1},
-              {"ts": operator, "tag": "operator", "loss_tx_pct": 0.0, "mes_tx": 0.0}]
+    ledger = [{"ts": deliver, "tag": "wakeup-deliver", "loss_tx_pct": 0.0, "mes_rx": 88.1},
+              {"ts": operator, "tag": "operator", "loss_tx_pct": 0.0, "mes_rx": 0.0}]
     assert abs(operator - deliver) <= dh.CALLQOS_MATCH_WINDOW_S   # the old rule's hole
     judged = dh.judge_rtp_records({"r": {"moscq": "2.2", "stopTimeSecond": str(int(deliver))}}, ledger)
     assert judged[0]["match"] == "playback" and judged[0]["leg"]["ts"] == deliver, judged
@@ -1161,8 +1183,9 @@ def test_the_live_false_degraded_shape_no_longer_degrades_and_is_captured(tmp_pa
     check("capture: the verdict names why it did not count", r.get("verdict") == "uncorroborated")
     check("capture: the matched ledger leg's ts and tag",
           leg.get("ts") == end and leg.get("tag") == "wakeup")
-    check("capture: the ledger's transmit figures ride along",
-          leg.get("mes_tx") == 87.9 and leg.get("txcount") == 458)
+    check("capture: the ledger's figures for both streams ride along",
+          leg.get("mes_rx") == 88.0 and leg.get("mes_tx") == 87.9
+          and leg.get("txcount") == 458)
     check("capture: the whole handset record, verbatim",
           rec.get("packetLost") == "0" and rec.get("moscq") == "2.2" and rec.get("codec") == "PCMU")
     check("capture: the clock offset between handset and ledger", r.get("leg_offset_s") == 1.0)
@@ -1210,7 +1233,7 @@ def test_the_capture_is_private_capped_and_does_not_duplicate_across_a_restart(t
     check("capture: the cap is pinned", dh.CAPTURE_MAX_BYTES == 512 * 1024)
 
     p = tmp_path / "c.jsonl"
-    leg = {"ts": 5001.0, "tag": "wakeup", "loss_tx_pct": 0.0, "mes_tx": 88.0}
+    leg = {"ts": 5001.0, "tag": "wakeup", "loss_tx_pct": 0.0, "mes_rx": 88.0}
     judged = dh.judge_rtp_records(
         {"a": {"moscq": "2.2", "stopTimeSecond": "5000", "startTimeSecond": "4980"}}, [leg])
     saved = dict(dh._capture_seen)
@@ -1254,8 +1277,8 @@ def test_the_capture_is_private_capped_and_does_not_duplicate_across_a_restart(t
 
 
 def test_an_unmeasured_leg_publishes_the_low_score_as_uncorroborated(tmp_path) -> None:
-    """The 13:00:31Z operator leg's shape: Asterisk wrote mes_tx 0.0 because no
-    RTCP round scored that direction. That is no support for a low score and no
+    """The 13:00:31Z operator leg's shape: Asterisk wrote a score of 0.0 because
+    no RTCP round scored that direction. That is no support for a low score and no
     evidence the leg was clean either, and the flag must still say so."""
     end = int(time.time()) - 100
     cordless, notes, rows, _ = _drive_cordless(
@@ -1284,9 +1307,9 @@ def test_the_cordless_is_judged_by_its_own_leg_not_a_neighbours() -> None:
 
     def rec(stop, mos="2.2"):
         return {"r": {"moscq": mos, "stopTimeSecond": str(stop)}}
-    own_bad = {"ts": float(T), "tag": "wakeup", "ext": "19", "loss_tx_pct": 2.5, "mes_tx": 85.0}
+    own_bad = {"ts": float(T), "tag": "wakeup", "ext": "19", "loss_tx_pct": 2.5, "mes_rx": 85.0}
     wired_clean = {"ts": float(T + 3), "tag": "operator", "ext": "12",
-                   "loss_tx_pct": 0.0, "mes_tx": 88.0}
+                   "loss_tx_pct": 0.0, "mes_rx": 88.0}
     ledger = [own_bad, wired_clean]
     # Precondition: time alone picks the wired phone's leg, one second nearer.
     j0 = dh.judge_rtp_records(rec(T + 2), ledger)[0]
@@ -1296,7 +1319,7 @@ def test_the_cordless_is_judged_by_its_own_leg_not_a_neighbours() -> None:
         "call", "19", "own-ext", "impaired"), j
     assert dh.mos_verdict(j) == "corroborated"
     # ...and the reverse: a neighbour's loss cannot corroborate a clean own leg.
-    j = dh.judge_rtp_records(rec(T + 2), [dict(own_bad, loss_tx_pct=0.0, mes_tx=88.0),
+    j = dh.judge_rtp_records(rec(T + 2), [dict(own_bad, loss_tx_pct=0.0, mes_rx=88.0),
                                           dict(wired_clean, loss_tx_pct=4.0)], "19")[0]
     assert (j["leg"]["ext"], j["ledger_tx"]) == ("19", "clean"), j
 
@@ -1315,13 +1338,13 @@ def test_the_cordless_is_judged_by_its_own_leg_not_a_neighbours() -> None:
     # Preferring the own leg must not reopen the playback gate. A page dialled
     # from a handset is logged under the DIALLER, so a nearest playback leg of any
     # extension still skips...
-    page = [dict(own_bad, loss_tx_pct=0.0, mes_tx=88.0),
-            {"ts": float(T + 3), "tag": "page", "ext": "12", "mes_tx": 88.0}]
+    page = [dict(own_bad, loss_tx_pct=0.0, mes_rx=88.0),
+            {"ts": float(T + 3), "tag": "page", "ext": "12", "mes_rx": 88.0}]
     jg = dh.judge_rtp_records(rec(T + 3), page, "19")[0]
     assert (jg["match"], jg["leg"]["tag"]) == ("playback", "page"), jg
     # ...and an own playback leg within the slop skips even beside a nearer call.
-    deliver = [{"ts": float(T), "tag": "wakeup-deliver", "ext": "19", "mes_tx": 88.1},
-               {"ts": float(T + 3), "tag": "operator", "ext": "12", "mes_tx": 88.0}]
+    deliver = [{"ts": float(T), "tag": "wakeup-deliver", "ext": "19", "mes_rx": 88.1},
+               {"ts": float(T + 3), "tag": "operator", "ext": "12", "mes_rx": 88.0}]
     jd = dh.judge_rtp_records(rec(T + 2), deliver, "19")[0]
     assert (jd["match"], jd["leg"]["tag"]) == ("playback", "wakeup-deliver"), jd
     assert dh.judge_rtp_records(rec(T + 2), deliver)[0]["match"] == "call"   # time alone let it in
@@ -1384,7 +1407,7 @@ def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
         return {"r": {"moscq": mos, "stopTimeSecond": str(stop)}}
 
     genuine = {"ts": float(T), "tag": "rooms", "ext": "19",
-               "dur": 18, "loss_tx_pct": 0.0, "mes_tx": 70.0, "quality": "fair"}
+               "dur": 18, "loss_tx_pct": 0.0, "mes_rx": 70.0, "quality": "fair"}
     misdial = _misdial_leg(float(T + 10))
 
     # The record belongs to the genuine leg; the misdial hung up 10 s nearer.
@@ -1427,7 +1450,7 @@ def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
     # link, but it IS the reason a handset score must be skipped, so the filter
     # must never drop one in favour of a call further away.
     page = [{"ts": float(T + 10), "tag": "page", "ext": "12", "dur": 0,
-             "mes_tx": None, "quality": "unreachable"},
+             "mes_rx": None, "quality": "unreachable"},
             dict(genuine)]
     check("misdial: a playback leg is never filtered out of the way",
           dh.judge_rtp_records(rec(T + 12), page, "19")[0]["match"] == "playback")
@@ -1436,7 +1459,7 @@ def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
     # Asterisk could not score is a measurement that came back empty, not a call
     # that never happened. It stays eligible and stays 'unmeasured'.
     unscored = {"ts": float(T + 10), "tag": "operator", "ext": "19",
-                "dur": 18, "loss_tx_pct": 0.0, "mes_tx": 0.0, "quality": "unknown"}
+                "dur": 18, "loss_tx_pct": 0.0, "mes_rx": 0.0, "quality": "unknown"}
     check("misdial: an answered leg Asterisk could not score is still a leg",
           dh.leg_carries_no_measurement(unscored) is False)
     ju = dh.judge_rtp_records(rec(T + 12), [genuine, unscored], "19")[0]

@@ -345,24 +345,59 @@ def test_mes_zero_is_no_data() -> None:
 
 
 def test_incoherent_low_mes_filtered() -> None:
-    # #3: wired Kitchen leg, MES 27.6 but 0% loss, 1.57ms rtt, only-packetization
-    # jitter -> a re-INVITE/transfer glitch, physically impossible as real audio.
-    # The collapsed reading must not drive "poor".
-    rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-3",
-                                cid="12", billsec="38", rxcount="1907", txcount="1870",
-                                rxploss="0", txploss="41", rxjitter="0.019875",
-                                txjitter="0", rtt="0.00157", rxmes="27.6", txmes="88.1"))
-    check("incoherent: MES 27 w/ clean transport dropped -> not poor",
-          rec["mes_worst"] == 88.1 and rec["quality"] != "poor")
-    check("incoherent: raw mes_rx still recorded verbatim", rec["mes_rx"] == 27.6)
-    # A genuinely-lossy low MES (real loss present) MUST still flag.
+    """A collapsed MES (< 40) is dropped as a re-INVITE/transfer glitch only when
+    ITS OWN STREAM shows no loss, a low RTT and no abnormal jitter.
+
+    ★ v0.116.0 — the streams. rxmes scores the audio Asterisk SENDS, whose loss
+    is txploss (the far end's report); txmes scores the audio it RECEIVES, whose
+    loss is rxploss. The names point opposite ways, and the filter used to pair
+    them by name. This test used to pin the result: its first fixture, live leg
+    #3 on the wired Kitchen port, was "MES 27.6 but 0 % loss" and asserted the
+    27.6 was a glitch. The 0 % was rxploss. The stream the 27.6 scores lost 41 of
+    1870 packets (txploss), and Asterisk's MES subtracts 2 R-points per lost
+    packet of its cumulative count, which takes a clean 88.1 to 27.5 at a mean of
+    34.5 lost: the number is the loss, not a glitch."""
+    def leg(**kw):
+        base = dict(source="dialplan", tag="rooms", chan="PJSIP/12-3", cid="12",
+                    billsec="38", rxcount="1907", txcount="1870", rxploss="0",
+                    txploss="0", rxjitter="0.019875", txjitter="0",
+                    rtt="0.00157", rxmes="88.1", txmes="88.1")
+        base.update(kw)
+        return cq.build_record(_Args(**base))
+
+    # Live #3 as it was: now scored on its own stream's loss, and it alerts.
+    kitchen = leg(txploss="41", rxmes="27.6")
+    check("incoherent: live #3's 27.6 stands beside the 41 packets it lost",
+          kitchen["mes_worst"] == 27.6 and kitchen["loss_tx_pct"] == 2.193)
+    check("incoherent: ...so the short call that lost them is poor and alerts",
+          kitchen["quality"] == "poor" and kitchen["notify"] is True
+          and any(r.startswith("MES 28") for r in kitchen["reasons"]))
+    # The genuine glitch: the same collapse with its own stream clean.
+    glitch = leg(rxmes="27.6")
+    check("incoherent: a collapse with its own stream clean is dropped",
+          glitch["mes_worst"] == 88.1 and glitch["quality"] == "excellent"
+          and glitch["notify"] is False)
+    check("incoherent: raw mes_rx still recorded verbatim", glitch["mes_rx"] == 27.6)
+    # Loss on the OTHER stream explains nothing about this score.
+    crossed = leg(rxploss="41", rxmes="27.6")
+    check("incoherent: loss on the other stream does not keep a collapse",
+          crossed["mes_worst"] == 88.1 and crossed["quality"] == "fair"
+          and not any(r.startswith("MES ") for r in crossed["reasons"]))
+    # The local direction, both ways round: txmes is judged by rxploss.
+    own = leg(rxploss="60", txmes="25.0")
+    other = leg(txploss="60", txmes="25.0")
+    check("incoherent: a collapsed txmes beside its own stream's loss is kept",
+          own["mes_worst"] == 25.0 and own["quality"] == "poor")
+    check("incoherent: ...and beside the other stream's loss it is dropped",
+          other["mes_worst"] == 88.1)
+    # A genuinely lossy low MES on the stream it scores MUST still flag.
     rec = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/19-4",
                                 cid="19", billsec="30", rxcount="1500", txcount="1500",
-                                rxploss="90", txploss="0", rxjitter="0.02", txjitter="0",
+                                rxploss="0", txploss="90", rxjitter="0.02", txjitter="0",
                                 rtt="0.02", rxmes="20", txmes="88"))
-    check("incoherent: low MES WITH real loss is kept (still poor)",
-          rec["quality"] == "poor" and rec["notify"])
-    # A real WiFi dip (MES 59 with ~1% loss) is coherent -> kept, still poor.
+    check("incoherent: low MES WITH its own stream's loss is kept (still poor)",
+          rec["mes_worst"] == 20.0 and rec["quality"] == "poor" and rec["notify"])
+    # MES 59 is above the collapse line, so the coherence test never applies.
     rec = cq.build_record(_Args(source="dialplan", tag="operator", chan="PJSIP/19-5",
                                 cid="19", billsec="53", rxcount="2634", txcount="2088",
                                 rxploss="28", txploss="11", rxjitter="0.02", txjitter="0.013",
@@ -1861,6 +1896,61 @@ def test_every_conversation_tag_is_one_the_dialplan_writes() -> None:
     check("jitter: the render was read at all", "room-to-room" in emitted)
     for tag in sorted(cq.CONVERSATION_TAGS):
         check(f"jitter: the dialplan writes {tag!r}", tag in emitted)
+
+
+def test_loss_alerts_where_it_stops_a_leg_being_good() -> None:
+    """★ v0.116.0 — the loss alert moved from 3 % to 1.5 %, the line where loss
+    alone already takes a leg from `good` to `fair`.
+
+    A short call that loses a few dozen packets should alert. At 3 % it alerted
+    only by accident of direction. Asterisk scores the stream it SENDS from the
+    far end's CUMULATIVE lost count, so 41 packets lost early in a 38-second
+    call collapse that score and the MES alert fires. It scores the stream it
+    RECEIVES from the count per RTCP interval, so the same 41 packets in one
+    burst leave that MES near 81, and nothing fired."""
+    # The line. Literals, not a constant read from the code.
+    for loss, label, fires in ((1.49, "good", False), (1.5, "fair", True),
+                               (2.19, "fair", True), (3.0, "fair", True)):
+        got = cq.classify(88.0, loss, 5.0)
+        check(f"loss: {loss} % is {label} and {'alerts' if fires else 'is silent'}",
+              got[:2] == (label, fires))
+    check("loss: the card names it",
+          cq.classify(88.0, 2.19, 5.0)[2] == ["loss 2.2%"])
+
+    # The receive direction, as Asterisk would have scored it: the same 41
+    # packets lost by the PBX on the way in, a 38-second call, MES 81.4.
+    rx = cq.build_record(_Args(source="dialplan", tag="rooms", chan="PJSIP/12-9",
+                               cid="12", billsec="38", rxcount="1907",
+                               txcount="1870", rxploss="41", txploss="0",
+                               rtt="0.00157", rxmes="88.1", txmes="81.4"))
+    check("loss: 41 packets lost on the way IN now alert too",
+          rx["loss_rx_pct"] == 2.15 and rx["mes_worst"] == 81.4
+          and rx["notify"] is True and rx["quality"] == "fair"
+          and rx["reasons"][0] == "loss 2.1%")
+
+
+def test_a_wakeup_whose_audio_was_lost_names_its_score() -> None:
+    """★ Live 2026-09-25T13:02:44Z, a wake-up delivered to the cordless. The
+    handset reported losing 482 of the 1101 packets sent to it (43.8 %), and the
+    score for that stream was MES 20. The glitch filter compared the 20 with the
+    loss on the handset's microphone (0 %), called it a glitch and dropped it, so
+    the card said "loss 43.8%" and the record's worst MES read 87.6. The
+    fixture is that leg's real metrics."""
+    rec = cq.build_record(_Args(
+        source="dialplan", tag="wakeup-deliver", chan="PJSIP/19-000000c2",
+        cid="19", billsec="24", hcause="16", stage="complete",
+        rxcount="534", txcount="1101", rxploss="0", txploss="482",
+        rxjitter="0.019750", txjitter="0.000375", rtt="0.00452",
+        normdevrtt="0.00513", maxrtt="0.00574", minrtt="0.00452",
+        stdevrtt="0.00061", rxmes="20.0", txmes="87.6", rxmaxjitter="0.00525"))
+    check("wakeup: the live leg's loss lands as it was",
+          (rec["loss_rx_pct"], rec["loss_tx_pct"]) == (0.0, 43.778))
+    check("wakeup: ★ its worst score is the stream that lost the audio",
+          (rec["mes_worst"], rec["mos_worst"]) == (20.0, 1.0))
+    check("wakeup: and the card names both",
+          rec["quality"] == "poor" and rec["notify"] is True
+          and "loss 43.8%" in rec["reasons"]
+          and "MES 20 (~MOS 1.0)" in rec["reasons"])
 
 
 def test_the_glitch_filter_reads_the_jitter_peak() -> None:
