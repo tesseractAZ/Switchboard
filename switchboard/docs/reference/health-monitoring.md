@@ -87,10 +87,10 @@ short*, which is a fair thing to stay quiet about — but a cut-short clip is
 handled earlier and never reached the rule. All the rule could actually suppress
 was a **bad connection to the handset**, and that is the same connection the next
 real conversation on that phone will use. Over fifty days it hid five of them.
-The worst was an announcement at 00:26 that played all the way through while the
-cordless was hearing it at MOS 3.4 with round trips peaking near nine tenths of a
-second; nothing else noticed, because the phone was reachable the whole time — it
-just sounded bad. Those legs now raise a card like any other. On the same fifty
+The worst was an announcement at 00:26 that played all the way through with
+round trips peaking near nine tenths of a second. Asterisk scored the stream it
+received from the cordless at MOS 3.4, and the clip the cordless heard at about
+3.8. Nothing else noticed, because the phone was reachable the whole time. Those legs now raise a card like any other. On the same fifty
 days of real calls that is a change from about **1.8 to 4.8 cards a month**.
 
 **A clip that was cut short still stays quiet, with one exception, added in
@@ -120,7 +120,8 @@ recorder runs detached from the call with nowhere to write an error, so until
 could not be made) or `skipped` (the leg does not drive the sensor: not the dial
 plan's record, a playback leg, or no credible score). Before v0.111.0 a failed
 update left no trace. The field is in the `/share` mirror too; records carrying it
-are schema version `6`.
+are schema version `6` or later. Records from v0.116.0 also carry
+`dialstatus` (see the jitter paragraph below) and are schema version `7`.
 
 **Two spellings of the time, on purpose.** Each record's `ts` is plain epoch
 seconds, and has to stay that way because the cordless health monitor reads it as
@@ -129,15 +130,40 @@ its timestamp as an ordinary `2026-09-15T00:26:35+00:00` date string, so anyone
 filtering the folder by date quietly matched nothing here and read the file as
 empty — one review reported "no calls" for a stretch that held eighteen. Records
 from 2026-09-15 carry `ts_iso` as well: the same instant, in the same spelling as
-its neighbours. Those records are schema version `5`.
+its neighbours. Those records are schema version `5` or later.
 
 
 After each call, scores the worse of the two audio directions from the RTP/RTCP
 stats and publishes `sensor.switchboard_last_call` (an MES score, with loss,
 jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough call
-— low score, high loss, high latency (a round-trip **mean over 250 ms** or a
+— low score (MES under 70), loss of **1.5 % or more** in either direction (it was
+3 % through v0.115.0), high latency (a round-trip **mean over 250 ms** or a
 **peak over 500 ms**, scored across the whole call rather than from the last
-RTCP round), or **one-way audio**.
+RTCP round), **one-way audio**, or a receive-jitter **peak over 60 ms** on a
+conversation.
+
+**The jitter alert covers only legs a person hears, and does not set the
+grade.** The figure used is `jitter_rx_peak_local_ms`, the highest value
+Asterisk's own receive-jitter estimate reached during the call. It measures the
+stream the PBX receives, which reaches a listener on room-to-room, outside
+(`outbound`), inbound (`from-trunk`) and transferred calls, on calls the operator
+or directory connects, and on pages, which are full duplex, so a paged handset
+that picks up is heard. The operator and directory answer the caller themselves,
+so their legs count only when Asterisk's `DIALSTATUS` for the connecting Dial()
+is `ANSWER`: one that connected nothing spoke only to the speech recogniser.
+Each leg records the value as `dialstatus`. No other kind is gated. An
+unanswered room, outside or inbound call carries no audio and is recorded as
+no-media, and a transferred call was already answered; its `dialstatus`
+describes the Dial() after the transfer. On a wake-up, announcement or voice menu the
+figure is the handset's microphone. The WiFi cordless peaked at 40–58 ms on 55 of
+its 282 legs, nearly all of them of that kind, 50 with under 0.5 % loss either
+way. A jitter alert names the peak and leaves the excellent/good/fair/poor label
+where MES and loss put it, as an RTT alert does. Asterisk 20.11.1's MES gives
+jitter almost no weight, because it multiplies the jitter in seconds. The peak's
+one effect on the grade is through the credibility filter below: above 60 ms it
+keeps a collapsed score from being discarded as a glitch. The two other jitter
+fields, `jitter_rx_last_ms` and `jitter_tx_last_ms`, are recorded and drive
+nothing.
 
 **Not every call updates the sensor.** Each leg is appended to the durable JSONL
 ledger, but the sensor is only pushed when the leg produced a *credible* MES, and
@@ -145,7 +171,10 @@ only from the authoritative hangup record written by the dialplan
 (`source=dialplan`). A reading is discarded as not credible when Asterisk reports
 `0.0` for a direction it could not score — a short call, or RTCP that never
 converged, never a genuine 0 MOS — or when a collapsed MES (< 40) arrives
-alongside ~0 % loss, packetization-only jitter and a low RTT, which is the
+alongside ~0 % loss in the stream it scores (`mes_rx` with `loss_tx_pct`,
+`mes_tx` with `loss_rx_pct`; through v0.115.0 each was checked against the
+other stream's loss), a receive-jitter peak no higher than 60 ms and a low RTT,
+which is the
 signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
 v0.77.0, when it reports its *other* nothing-to-report constant, the literal
 `88.087887`, on a leg where no RTCP round completed. That one reads as a flawless
@@ -200,9 +229,13 @@ measurement that came back empty, and it still matches and still reads
 
 A score below `mos_min` (a fixed 3.4, not an add-on option) from a call that ended
 within the last 15 minutes degrades the sensor only when the same leg agrees in
-the ledger, in the direction the handset hears. That means at least 1 % transmit
-loss, or a transmit MES below 78. The ledger reads those from the handset's own
-receiver reports. A call made **to** the cordless is logged under the caller's
+the ledger, in the direction the handset hears. That means at least 1 % loss on
+the way to the handset (`loss_tx_pct`), or an MES below 78 for that same stream
+(`mes_rx`). Both come from the handset's own receiver reports. The two names
+point opposite ways because Asterisk names its loss counters after the direction
+of travel and its scores after the report they were built from. `mes_tx` is the
+PBX's score for the handset's microphone, and through v0.115.0 it was the MES
+this check read. A call made **to** the cordless is logged under the caller's
 extension, so its figures describe the caller's phone and never count either way.
 
 Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and

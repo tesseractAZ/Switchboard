@@ -310,14 +310,17 @@ def test_the_interactive_announce_menu_has_its_own_tag():
 
 def test_a_dead_transmit_path_on_the_menu_call_now_alerts():
     """The exact leg the audit named: a resident records a 12-second
-    announcement on a handset whose transmit path is dead — rxcount high,
-    txcount zero. That is precisely what the one-way-audio detector exists for,
-    and PLAYBACK_TAGS was switching it off."""
+    announcement and the recording arrives (rxcount high: the handset's
+    microphone reached the PBX), but the PBX sends the handset nothing back
+    (txcount zero). callqos names that 'transmit dead', from the PBX's side.
+    That is precisely what the one-way-audio detector exists for, and
+    PLAYBACK_TAGS was switching it off. The MES pair follows the counts: txmes
+    scores the stream the PBX received, rxmes the empty one it sent."""
     def leg(tag):
         return cq.build_record(_Args(
             source="dialplan", tag=tag, chan="PJSIP/16-0000000e", cid="16",
             billsec="12", hcause="16", rxcount="600", txcount="0",
-            rxmes="88", txmes="0"))
+            rxmes="0", txmes="88"))
     menu = leg("announce-menu")
     assert menu["notify"] is True, f"a dead-transmit menu call is still silent: {menu['reasons']}"
     assert any("one-way" in r for r in menu["reasons"]), menu["reasons"]

@@ -82,7 +82,10 @@ PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
 #
 # Both exemptions are about the SHAPE of the leg, not about how much it matters.
 # These legs are one-directional BY DESIGN: the PBX talks and the handset mostly
-# listens, so the one-way-audio detector — which exists to catch a BROKEN
+# listens. (A page is full duplex, so a paged handset that picks up is heard and
+# CONVERSATION_TAGS counts it; but most of a page is one voice and many silent
+# listeners, which is the shape that matters here.) So the one-way-audio
+# detector — which exists to catch a BROKEN
 # conversation — would fire on their perfectly normal shape. And a three-second
 # chime is not "the last call", so letting it overwrite that sensor would make
 # the sensor describe the PBX talking to itself.
@@ -94,6 +97,66 @@ PATH = os.environ.get("SWITCHBOARD_CALLQOS", "/data/state/callqos.jsonl")
 # still stays quiet — that decision lives in the `undelivered` branch, with
 # ALARM_TAG.
 PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
+
+# Legs on which the stream Asterisk RECEIVES can reach a person. The jitter-peak
+# alert is limited to these, because the only jitter figure that follows the
+# link (jitter_rx_peak_local_ms; see the ★ jitter note in build_record) measures
+# that one stream. On a conversation it is the caller's voice -- or, from-trunk,
+# the outside party's -- on its way to the person at the other end. On a page it
+# is heard by every paged handset that picks up: both page shapes are full
+# duplex, Page(...,d) dialled from a handset and the [page] ConfBridge. On every other
+# leg it is a handset microphone that nobody hears (a wake-up delivery, an
+# announcement, the talking clock) or one that only a recording or the speech
+# recogniser hears (the assistant, the status menu, setting a wake-up).
+#
+# `rooms` is absent on purpose: it is the fallback tag for a [rooms] leg the
+# dialplan did not classify. `page` stays in PLAYBACK_TAGS too. That set is
+# about a leg's SHAPE (the one-way-audio detector, the last-call sensor). MES,
+# loss and RTT alert on every leg, because they cover the direction the listener
+# hears, and this jitter figure does not.
+CONVERSATION_TAGS = frozenset({"room-to-room", "outbound", "from-trunk",
+                               "transfer", "operator", "directory", "page"})
+
+# ...of which these count only when their Dial() was answered. The operator and
+# directory Answer() the caller themselves and talk to them through the speech
+# recogniser, so their leg carries media whether or not a call follows; it
+# carries a conversation only if the Dial() that connects one was answered.
+# Dial() leaves DIALSTATUS on the calling channel, and the hangup extension
+# passes it as --dialstatus. On a connected call the peak also covers the
+# speech before the connect.
+#
+# No other tag is gated, on purpose. An unanswered room, outside or inbound call
+# never reaches the jitter check: those Dial()s indicate ringing with `r`, which
+# sends no audio, and the hangup handler routes a leg with no answer time to the
+# no-media record. And a transferred leg was already in an answered call, while
+# its DIALSTATUS describes the Dial() AFTER the transfer: a transfer target that
+# did not answer would wrongly silence the conversation before it. Page() sets
+# no DIALSTATUS at all.
+ANSWER_GATED_TAGS = frozenset({"operator", "directory"})
+
+
+def jitter_alert_applies(tag, dialstatus) -> bool:
+    """Whether this leg's receive-jitter peak describes audio a person heard."""
+    tag = tag or ""
+    if tag not in CONVERSATION_TAGS:
+        return False
+    return tag not in ANSWER_GATED_TAGS or (dialstatus or "") == "ANSWER"
+
+# The receive-jitter peak, in ms, above which the link was doing something it
+# does not normally do. Two readers: classify() raises a card on a conversation
+# whose peak exceeds it, and _credible() accepts jitter as corroboration for a
+# collapsed MES only above it. They are one constant because they ask one
+# question.
+#
+# Where it comes from, over the 300 legs of 2026-09-25..10-28: the wired gateway
+# ports peaked at 2.5 ms at most. The WiFi cordless peaked between 40 and 58 ms
+# on 55 of its 282 legs, 50 of them with under 0.5 % loss in both directions,
+# and nearly all of them wake-ups and announcements. That range is the
+# cordless's normal behaviour, not a fault, so the line sits above it. Three
+# legs crossed 60 ms. The one conversation among them is the one card this would
+# have raised in those 33 days: a cordless room-to-room call that peaked at
+# 68.88 ms beside 1.49 % receive loss.
+JITTER_PEAK_ALERT_MS = 60.0
 
 # The stages [wakeup-deliver] sets, IN THE ORDER THE DIALPLAN SETS THEM.
 # switchboard-config's render_wakeup_context() is the definition; this is a copy,
@@ -224,8 +287,10 @@ def _ms(sec):
 
 # --------------------------------------------------------------------------- #
 # Quality classification — the one knob worth tuning. Given the initiating leg
-# sees BOTH directions (rxmes = audio it heard, txmes = audio the far end heard),
-# we score on the WORSE direction and the WORSE loss, so a one-way problem (the
+# sees BOTH directions (rxmes = the audio Asterisk SENT, scored from the far
+# end's RTCP receiver reports; txmes = the audio Asterisk RECEIVED, scored from
+# its own counters), we score on the WORSE direction and the WORSE loss, so a
+# one-way problem (the
 # real-world failure mode — e.g. the MES-59 WiFi-cordless call) can't hide behind
 # a healthy reverse path.
 # --------------------------------------------------------------------------- #
@@ -259,7 +324,8 @@ def rtt_sampling(rtt_ms, max_ms, stdev_ms):
 
 
 def classify(worst_mes, worst_loss_pct, rtt_ms,
-             rtt_mean_ms=None, rtt_max_ms=None, sampling=None):
+             rtt_mean_ms=None, rtt_max_ms=None, sampling=None,
+             jitter_peak_ms=None):
     """Return (label, notify: bool, reasons: list[str]).
 
     Two separate jobs, deliberately kept apart:
@@ -267,7 +333,9 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
       `notify` fires on the ALERT thresholds only — conservative, so a
       notification means "worth a look", not "spam on every WiFi hiccup":
         - MES ~88 ≈ MOS 4.4 (toll quality); 70 ≈ MOS 3.5; 60 ≈ MOS 3.0 (fair).
-        - loss under ~1% is inaudible on G.711; 3%+ is audible clipping.
+        - loss under ~1% is inaudible on G.711; 3%+ is audible clipping. The
+          alert is at 1.5 %, the point where loss alone takes a leg below
+          `good` (v0.116.0; it was 3 %). See the ★ loss note below.
         - RTT under ~150 ms is unnoticed; 400 ms+ makes conversation stilted.
 
       `reasons` explains the LABEL. Through v0.76.0 it was built from the alert
@@ -304,11 +372,42 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
     and three scored `excellent`, decided purely by which constant happened to
     land in the field. `_credible()` now rejects both, so `worst_mes` is None and
     the honest `unknown` falls out of the ordinary ladder below.
+
+    `jitter_peak_ms` ALERTS but never moves the label (v0.116.0), the same way
+    an RTT alert leaves an excellent leg excellent. A jitter buffer absorbs
+    jitter until it overflows, and nothing here can see an overflow, so a high
+    peak is a reason to look rather than a grade. Nor is it already inside the
+    MES: Asterisk 20.11.1's calc_media_experience_score() multiplies the jitter
+    it is handed (its current local estimate, or the far end's last report) by
+    that jitter's standard deviation, both in SECONDS, so a 58 ms jitter adds
+    about a microsecond to the "effective latency" the score is built from. The
+    peak itself is never an input to it. The caller passes the peak only when
+    jitter_alert_applies(), and None skips the check.
     """
     alerts, reasons = [], []
     if worst_mes is not None and worst_mes < 70:
         alerts.append(f"MES {worst_mes:.0f} (~MOS {worst_mes / 20:.1f})")
-    if worst_loss_pct is not None and worst_loss_pct > 3.0:
+    # ★ LOSS ALERTS WHERE IT STOPS A LEG BEING `good`, IN EITHER DIRECTION
+    # (v0.116.0). The line was 3 %, and a short call that lost a few dozen
+    # packets fell under it: 41 of 1870 is 2.2 %. Through v0.115.0 no such call
+    # alerted at all, because the glitch filter judged each score against the
+    # other stream's loss (see the ★ note in build_record) and dropped the
+    # collapsed one. With that fixed, the MES alone would have decided it by
+    # direction, not by the loss. Both MES formulas subtract 2 R-points per lost
+    # PACKET, not per percent, but they count differently. The score for the
+    # stream Asterisk sends (rxmes) averages the far end's CUMULATIVE count, so
+    # 41 packets lost early in a 38-second call collapse it to about 28 and the
+    # MES alert fires. The score for the stream it receives (txmes) averages the
+    # count per RTCP interval, so the same 41 packets in one burst, averaged over
+    # seven 5-second reports, cost it about 12 R-points, leaving MES near 81, and
+    # nothing fires. Same loss, opposite verdicts.
+    #
+    # The line now sits at 1.5 %, the boundary the label already uses between
+    # `good` and `fair`. A leg that loss alone demotes now says so. Measured
+    # cost over the 300 legs of 2026-09-25..10-28: two more cards, both short
+    # cordless calls to set a wake-up (2.2 % and 2.6 % lost on the way to the
+    # handset).
+    if worst_loss_pct is not None and worst_loss_pct >= 1.5:
         alerts.append(f"loss {worst_loss_pct:.1f}%")
     # Prefer the distribution; fall back to the single draw only when no
     # distribution was supplied, so an old caller still gets the old check.
@@ -319,6 +418,8 @@ def classify(worst_mes, worst_loss_pct, rtt_ms,
             alerts.append(f"RTT peak {rtt_max_ms:.0f}ms")
     elif rtt_ms is not None and rtt_ms > 400:
         alerts.append(f"RTT {rtt_ms:.0f}ms")
+    if jitter_peak_ms is not None and jitter_peak_ms > JITTER_PEAK_ALERT_MS:
+        alerts.append(f"jitter peak {jitter_peak_ms:.0f}ms")
 
     if worst_mes is None:
         label = "unknown"
@@ -416,6 +517,7 @@ def build_record(a) -> dict:
     loss_tx = _pct(txploss, txcount)
     jit_rx = _ms(_num(a.rxjitter))
     jit_tx = _ms(_num(a.txjitter))
+    jit_peak = _ms(_num(a.rxmaxjitter))
 
     # When NO RTCP round completed, Asterisk reports rtt, rxjitter, rxmes and
     # txmes as 0.000000 together -- and 0.0 is a convincing number. _credible()
@@ -450,12 +552,15 @@ def build_record(a) -> dict:
     # A per-direction MES only drives the score if it is trustworthy. Asterisk
     # reports 0.0 for a direction it could not score (short call / RTCP not yet
     # converged) — never a genuine 0 MOS — and a COLLAPSED MES (<40 ≈ MOS 2.0)
-    # alongside ~0% loss, only-packetization jitter, and a low RTT is a
-    # re-INVITE/transfer glitch, not real audio (that MOS physically requires heavy
-    # loss/jitter). Either way, drop the reading from the worst-of aggregation so it
-    # can't fire a false "poor"; genuine degradation always brings real loss and/or
-    # jitter (kept) and one-way audio is caught separately by packet counts below.
-    # The RAW mes_rx/mes_tx are still recorded verbatim for transparency.
+    # with under 0.5 % loss in ITS OWN stream, a receive-jitter peak no higher
+    # than JITTER_PEAK_ALERT_MS and a low RTT is a re-INVITE/transfer glitch, not
+    # real audio. Asterisk's formula can only reach that score through lost
+    # packets or a very high mean RTT; it gives jitter almost no weight (see
+    # classify()). So the jitter clause is not a cause that could account for the
+    # score, only evidence that the link really was misbehaving. Either way, drop
+    # the reading from the worst-of aggregation so it can't fire a false "poor".
+    # One-way audio is caught separately by packet counts below. The RAW
+    # mes_rx/mes_tx are still recorded verbatim for transparency.
     # Asterisk's "I have nothing to report" MES constant. It is not a plausible
     # score that happens to be high — it is the same literal float on every leg
     # that completed no RTCP round (6 of 55 measured legs carried it, always
@@ -464,27 +569,57 @@ def build_record(a) -> dict:
     # call from being thrown away for landing near the same number.
     _MES_SENTINEL = 88.087887
 
-    def _credible(mes, loss, jit):
+    # ★ THE JITTER HALF OF THIS TEST READS THE PEAK (v0.116.0). Through v0.115.0
+    # it was handed jit_rx and jit_tx, the two *_last_ms fields, and neither is
+    # evidence about the link. jit_rx is the far end's last report: a constant
+    # 19.875 ms on announcements, and as high as 136 ms on talking-clock and
+    # assistant legs whose received stream peaked near 2 ms. A collapsed-MES
+    # glitch on one of those AGI legs therefore read as "explained by jitter" and
+    # stayed in the score as a false `poor`. jit_tx is a single draw taken at
+    # hangup.
+    #
+    # The local peak is the one jitter figure that follows the link, and it
+    # stands in for both readings because both streams cross the same link. The
+    # line moves with it, from 40 ms to JITTER_PEAK_ALERT_MS. The peak is at
+    # least jit_tx by construction (it is the maximum of the same estimate; jit_rx
+    # describes the other stream and is not bounded by it), and the WiFi
+    # cordless's ordinary peaks reach 58 ms, so a 40 ms line would have counted
+    # that ordinary behaviour as corroboration on about one cordless leg in five.
+    def _credible(mes, loss):
         if mes is None or mes == 0:
             return None
         if _sampling != "multi" and abs(mes - _MES_SENTINEL) < 1e-4:
             return None
         incoherent = (mes < 40
                       and (loss is None or loss < 0.5)
-                      # jit is a *_last_ms field, not the peak: see the ★
-                      # jitter note in the record for what that can keep.
-                      and (jit is None or jit < 40)
+                      and (jit_peak is None or jit_peak <= JITTER_PEAK_ALERT_MS)
                       and (rtt_ms is None or rtt_ms < 80))
         return None if incoherent else mes
 
-    mes_vals = [m for m in (_credible(rxmes, loss_rx, jit_rx),
-                            _credible(txmes, loss_tx, jit_tx)) if m is not None]
+    # ★ EACH SCORE IS CHECKED AGAINST ITS OWN STREAM'S LOSS (v0.116.0). This
+    # read `_credible(rxmes, loss_rx), _credible(txmes, loss_tx)`, pairing by
+    # name, and the names point opposite ways. From ast_rtp_get_stat() in
+    # Asterisk 20.11.1: rxploss counts what Asterisk lost RECEIVING and txploss
+    # is the far end's report of what it lost of the stream Asterisk SENDS, but
+    # rxmes is the score for the stream Asterisk SENDS (update_reported_mes_stats,
+    # "RTP we sent and they received") and txmes the one for the stream it
+    # RECEIVES. Every collapsed score was being judged against the other
+    # stream's loss.
+    #
+    # Live 2026-09-25T13:02:44Z: a wake-up to the cordless in which the handset
+    # reported losing 482 of 1101 packets (43.8 %) of the wake-up audio, and the
+    # score for that stream was 20. The filter compared that 20 with the 0 %
+    # loss on the handset's microphone, called it a glitch and dropped it. The
+    # leg still alerted, but only on the loss; the score was missing from it.
+    mes_vals = [m for m in (_credible(rxmes, loss_tx),
+                            _credible(txmes, loss_rx)) if m is not None]
     worst_mes = min(mes_vals) if mes_vals else None
     loss_vals = [l for l in (loss_rx, loss_tx) if l is not None]
     worst_loss = max(loss_vals) if loss_vals else None
 
-    label, notify, reasons = classify(worst_mes, worst_loss, rtt_ms,
-                                      rtt_mean, rtt_max, _sampling)
+    label, notify, reasons = classify(
+        worst_mes, worst_loss, rtt_ms, rtt_mean, rtt_max, _sampling,
+        jit_peak if jitter_alert_applies(a.tag, a.dialstatus) else None)
 
     rxc, txc = rxcount or 0, txcount or 0  # counts may be None (absent RTCP field)
 
@@ -629,8 +764,12 @@ def build_record(a) -> dict:
         # alert thresholds and raised nothing at all. The worst was an
         # announcement at 2026-09-15T00:26:35Z that played in FULL — stage
         # `complete`, 1114 packets transmitted, 0 % loss in BOTH directions — to
-        # the WiFi cordless, while the handset's own RTCP reported MES 68.4
-        # (MOS 3.42), RTT mean 287 ms and an RTT peak of 883 ms. Nothing else in
+        # the WiFi cordless, with RTT mean 287 ms and an RTT peak of 883 ms.
+        # Asterisk's score for the stream it received from the handset (txmes)
+        # was MES 68.4 (MOS 3.42); its score for the clip the handset heard
+        # (rxmes, from the handset's receiver reports) was 76.8. (Corrected in
+        # v0.116.0: this note had attributed the 68.4 to the handset's own
+        # RTCP.) Nothing else in
         # the add-on saw it either: the 5-minute reachability poller read 9/9
         # throughout, because the link was up the whole time — just bad.
         #
@@ -665,6 +804,9 @@ def build_record(a) -> dict:
         #   v6  2026-10-14 -- `sensor_status`: what became of this leg's
         #       sensor.switchboard_last_call push, added by main() the same way.
         #       Older rows simply lack it; no reader requires it.
+        #   v7  v0.116.0 -- `dialstatus`: Dial()'s DIALSTATUS as the leg hung up
+        #       ("" where no Dial() ran), which decides whether the jitter-peak
+        #       alert applied (jitter_alert_applies()).
         #
         # ★ TWO TIMESTAMP TYPES IN ONE /share FOLDER READ AS "NO CALLS".
         # `ts` here is EPOCH SECONDS (an int). Every sibling ledger in
@@ -682,7 +824,7 @@ def build_record(a) -> dict:
         #   ts      epoch seconds, int -- what code reads
         #   ts_iso  the same instant in UTC ISO-8601 to the second -- what a
         #           person or a cross-ledger filter reads
-        "v": 6,
+        "v": 7,
         "ts": _now,
         "ts_iso": datetime.datetime.fromtimestamp(
             _now, datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -704,6 +846,9 @@ def build_record(a) -> dict:
         "dur": dur,
         "billsec_raw": billsec_raw,
         "hcause": _int(a.hcause),
+        # Dial()'s outcome as the leg hung up, "" where none ran. It decides
+        # whether a conversation's jitter peak counts (jitter_alert_applies()).
+        "dialstatus": (a.dialstatus or "").strip(),
         # "" for an ordinary call; for a scripted leg this is the LAST milestone
         # reached, so a wake-up cut off before the greeting is finally
         # distinguishable from one that ran to completion.
@@ -767,12 +912,11 @@ def build_record(a) -> dict:
         # exactly the contrast a receive-jitter check would want.
         #
         # v0.77.0 renamed all three so no name asserts a relationship that does
-        # not hold. No alarm thresholds on jitter today, but one gate reads it:
-        # _credible()'s coherence test drops a collapsed MES as a glitch only
-        # while the jitter beside it is under 40 ms, and the jitter it is handed
-        # is jitter_rx_last_ms / jitter_tx_last_ms. A spiked rx_last on an AGI
-        # leg therefore keeps a collapsed-MES re-INVITE glitch in the score. That
-        # is latent; moving the gate to the peak is a separate code change.
+        # not hold. Since v0.116.0 the peak is the only one anything acts on:
+        # _credible()'s coherence test and the conversation alert in classify(),
+        # both at JITTER_PEAK_ALERT_MS. The two *_last_ms fields are recorded,
+        # published as sensor attributes and kept in devhealth's low-score
+        # capture, and no decision reads them.
         "jitter_rx_last_ms": jit_rx, "jitter_tx_last_ms": jit_tx,
         "rtt_ms": rtt_ms,
         # Jitter-buffer / variation telemetry (piece 4): peak & spread reveal a
@@ -785,7 +929,7 @@ def build_record(a) -> dict:
         # matters: statistically empty but visually identical to a real reading.
         # Consumers computing any aggregate should drop anything but 'multi'.
         "rtt_samples": _sampling,
-        "jitter_rx_peak_local_ms": _ms(_num(a.rxmaxjitter)),
+        "jitter_rx_peak_local_ms": jit_peak,
         "mes_rx": round(rxmes, 1) if rxmes is not None else None,
         "mes_tx": round(txmes, 1) if txmes is not None else None,
         "mes_worst": round(worst_mes, 1) if worst_mes is not None else None,
@@ -1190,6 +1334,9 @@ def _parse_args(argv):
     p.add_argument("--nomedia", action="store_true")
     p.add_argument("--billsec", default="")
     p.add_argument("--hcause", default="")
+    # DIALSTATUS from the last Dial() on this channel (ANSWER, BUSY, NOANSWER,
+    # ...). Empty where the context dials nothing.
+    p.add_argument("--dialstatus", default="")
     # How far a scripted leg (wake-up delivery, announce) got before hangup.
     # Empty for contexts that define no stages.
     p.add_argument("--stage", default="")

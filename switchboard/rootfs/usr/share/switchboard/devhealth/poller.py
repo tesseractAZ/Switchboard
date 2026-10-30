@@ -8,8 +8,9 @@ when >= half the fleet drops. But two blind spots remain:
 
   1. The cordless is a battery + Wi-Fi device that is ALSO where power alarms are
      announced. Its battery dying, its Wi-Fi weakening, or its per-call audio
-     quality degrading are invisible to Asterisk (the callee RTP leg is
-     unmeasurable from the PBX) — yet they directly threaten alarm delivery.
+     quality degrading are invisible to Asterisk (when another phone calls it,
+     the leg the PBX scores is the caller's, not the cordless's) — yet they
+     directly threaten alarm delivery.
      The WP826's own HTTP API reports all three (battery %, Wi-Fi RSSI, per-call
      MOS/jitter/loss). We poll it.
   2. A SINGLE critical device going offline (the cordless alone; the whole GXW)
@@ -238,9 +239,15 @@ CALLQOS_CLOCK_SLOP_S = 5
 PLAYBACK_TAGS = frozenset({"wakeup-deliver", "page", "announce"})
 
 # The ledger fields a handset score is judged against, plus the ones the capture
-# keeps beside it for studying the score. `*_tx` is PBX -> handset: the audio the
-# handset's own moscq is about, measured from the handset's OWN RTCP receiver
-# reports. Everything else here is kept for the record, not for judging.
+# keeps beside it for studying the score. The handset's moscq is about the audio
+# going PBX -> handset, and two ledger fields describe that stream from the
+# handset's OWN RTCP receiver reports: `loss_tx_pct` and `mes_rx`. The names
+# point opposite ways because Asterisk names its loss counters after the
+# direction of travel and its MES after the report it was built from: rxmes is
+# the score for the stream Asterisk SENDS (ast_rtp_get_stat(), Asterisk
+# 20.11.1). `mes_tx` and `jitter_tx_last_ms` are the PBX's own view of the
+# handset's MICROPHONE. Everything else here is kept for the record, not for
+# judging.
 LEG_FIELDS = ("ts", "tag", "ext", "dur", "rxcount", "txcount",
               "loss_rx_pct", "loss_tx_pct", "jitter_rx_last_ms", "jitter_tx_last_ms",
               "mes_rx", "mes_tx", "rtt_ms", "rtt_max_ms", "rtt_samples", "quality")
@@ -313,8 +320,12 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 # The WP826 scored moscq 2.2 on three legs in eleven hours — an assistant leg at
 # 02:51:58Z and two dial-42 wake-up legs at 12:42:31Z and 13:10:37Z — and each
 # raised a 'degraded' episode on the alarm handset. For those same legs the PBX
-# ledger, reading the handset's OWN RTCP receiver reports, recorded
-# loss_tx_pct 0.0, mes_tx 87.9-88.0 and jitter_tx 2.4-6.5 ms. Same-shaped wake-up
+# ledger recorded loss_tx_pct 0.0 from the handset's OWN RTCP receiver reports,
+# and mes_tx 87.9-88.0 and jitter_tx 2.4-6.5 ms. (Corrected in v0.116.0: mes_tx
+# and jitter_tx are the PBX's view of the handset's microphone, not of what the
+# handset heard; see LEG_FIELDS. Replayed on mes_rx, the score for what it
+# heard, all 42 low scores captured from 2026-09-15 to 10-28 get the verdict
+# they got on mes_tx; the two scores differ by at most 5.6 points there.) Same-shaped wake-up
 # legs that morning scored 4.4. WHY the handset says 2.2 is NOT known: an earlier
 # theory (a playback leg) does not cover these, and a tempting `rxmes/40` rule
 # was refuted in August. Nothing here claims a mechanism. What it does is refuse
@@ -327,21 +338,29 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
 #
 # The thresholds come from callqos, checked against the ledger. MES 78 is
 # classify()'s floor for "good". 1.0 % is NOT one of classify()'s cut-offs (it
-# labels at 0.5, 1.5 and 4 % and alerts above 3 %); it is the bound classify()'s
-# own docstring gives for loss that is inaudible on G.711. Over the 190 non-playback
-# legs from 2026-07-18 to 2026-09-14, the lowest credible mes_tx is 83.4 (78.5
-# across all 267 credible legs, playback included), and exactly ONE leg reached
-# 1 % transmit loss (1.339 %, a wake-up leg on 2026-08-25). So:
-#   - loss >= 1.0 % is where G.711 loss stops being inaudible, and it would have
-#     corroborated that one leg and no other;
+# labels at 0.5, 1.5 and 4 % and alerts at 1.5 %); it is the bound classify()'s
+# own docstring gives for loss that is inaudible on G.711. The figures below are
+# from the 300 legs of 2026-09-25..10-28, measured on mes_rx. (The original
+# calibration, 2026-07-18..09-14, was measured on mes_tx, the wrong stream,
+# and those legs have since rotated out of the ledger.) The lowest credible
+# mes_rx on the 125 scored non-playback legs is 80.0, a leg that also lost
+# 2.62 % on the way to the handset. No leg under 1 % loss scored below 78. Four
+# legs reached 1 % loss to the handset, every one of them a wake-up or a
+# wake-up delivery on the cordless. So:
+#   - loss >= 1.0 % is where G.711 loss stops being inaudible;
 #   - mes < 78 is below callqos's floor for "good" and below every credible
-#     transmit MES the ledger has ever recorded.
-# A handset score under mos_min (3.4, roughly MES 68) caused by the network or
-# by jitter would have to show in the handset's own receiver reports well before
-# either line. When it does not, the low score is published as
-# last_mos_uncorroborated and does not degrade the sensor.
+#     score for the handset-bound stream on a leg without that loss.
+# A handset score under mos_min (3.4, roughly MES 68) caused by lost packets or
+# a long round trip would have to show in the handset's own receiver reports
+# well before either line. One caused by JITTER would not: Asterisk's MES gives
+# jitter almost no weight (it multiplies it in seconds), and packets the
+# handset's jitter buffer discards as late are not counted as lost in its
+# receiver reports. So these two lines cannot corroborate a jitter-caused low
+# score; that case stays uncorroborated by design. When neither line is
+# crossed, the low score is published as last_mos_uncorroborated and does not
+# degrade the sensor.
 CORROBORATE_LOSS_TX_PCT = 1.0
-CORROBORATE_MES_TX = 78.0
+CORROBORATE_MES_RX = 78.0
 
 
 def _leg_num(v):
@@ -355,18 +374,24 @@ def ledger_tx_judgement(leg: dict | None) -> str:
     """What the PBX measured on a leg in the direction a handset score is about:
     'impaired', 'clean' or 'unmeasured'.
 
+    Both figures describe the PBX -> handset stream, taken from the handset's
+    own RTCP receiver reports: `loss_tx_pct` and `mes_rx` (see LEG_FIELDS for
+    why the names disagree). Through v0.115.0 this read `mes_tx`, the PBX's
+    score for the handset's microphone.
+
     Loss at or above CORROBORATE_LOSS_TX_PCT is positive evidence whatever the
     MES says. Otherwise the MES decides — but Asterisk writes mes 0.0 for a
-    direction it could not score (no RTCP round completed), and a missing field
-    is an older record, so neither can vouch for a clean leg: 'unmeasured'."""
+    direction it could not score (no receiver report arrived), and a missing
+    field is an older record, so neither can vouch for a clean leg:
+    'unmeasured'."""
     if not isinstance(leg, dict):
         return "unmeasured"
-    loss, mes = _leg_num(leg.get("loss_tx_pct")), _leg_num(leg.get("mes_tx"))
+    loss, mes = _leg_num(leg.get("loss_tx_pct")), _leg_num(leg.get("mes_rx"))
     if loss is not None and loss >= CORROBORATE_LOSS_TX_PCT:
         return "impaired"
     if mes is None or mes <= 0:
         return "unmeasured"
-    return "impaired" if mes < CORROBORATE_MES_TX else "clean"
+    return "impaired" if mes < CORROBORATE_MES_RX else "clean"
 
 
 def leg_carries_no_measurement(leg: dict | None) -> bool:
@@ -380,15 +405,17 @@ def leg_carries_no_measurement(leg: dict | None) -> bool:
 
     Live shape: ext 19 dialled an invalid room three times on 2026-09-15
     (12:50:54Z, 13:11:49Z, 13:11:52Z). Each was written `quality: "unreachable"`,
-    `hcause: 34`, `billsec: 0`, `mes_tx: null` — Congestion() rejected the dial,
-    no channel was ever created, no RTP flowed. There is nothing in such a record
-    for `ledger_tx_judgement` to read and there never will be.
+    `hcause: 34`, `billsec: 0`, and every score null — Congestion() rejected the
+    dial, no channel was ever created, no RTP flowed. There is nothing in such a
+    record for `ledger_tx_judgement` to read and there never will be.
 
     The test is DELIBERATELY NARROW: the leg must both be unable to have carried
     audio (zero duration, or `unreachable`) AND have no transmit figure. An
     ordinary answered call that Asterisk simply could not score — the 13:00:31Z
-    operator leg, `mes_tx: 0.0` on 18 seconds of real audio — is a leg, is still
-    matched, and still reads 'unmeasured'. That is a measurement that came back
+    operator leg scored 0.0 on 18 seconds of real audio — is a leg, is still
+    matched, and still reads 'unmeasured'. (That 0.0 was its `mes_tx`; since
+    v0.116.0 the judgement reads `mes_rx`, which Asterisk likewise leaves at 0.0
+    until the handset's first receiver report arrives.) That is a measurement that came back
     empty, which is a different fact from a call that never took place, and the
     matcher must not conflate the two."""
     if not isinstance(leg, dict):
@@ -536,7 +563,8 @@ def newest_call(judged: list[dict], now: float | None = None) -> dict | None:
     latest stopTimeSecond; a copy with `age_s`, the seconds since that call ended
     (None if `now` is not given or the record has no timestamp). None when no
     record matched a call. moscq is the phone's own conversational MOS for its
-    leg — the callee-side quality Asterisk cannot measure."""
+    leg. On a call made TO the cordless it is the only per-call score of the
+    cordless's link, because the leg the PBX scores is the caller's."""
     best = None
     for j in judged or []:
         if j.get("match") != "call":
@@ -762,9 +790,10 @@ def classify_cordless(snap: dict, th: dict) -> tuple[str, list[str]]:
         # call hours ago must not pin this sensor 'degraded' — and callqos already owns
         # per-call alerting; here it's a supporting, current-state signal only.
         # ...and only when the PBX's own measurement of that leg agrees. Three
-        # 'degraded' episodes on 2026-09-14 rested on a handset 2.2 for legs the
-        # ledger scored 0 % loss / MES 88 from the handset's own receiver
-        # reports (see CORROBORATE_*). A missing judgement counts as no support.
+        # 'degraded' episodes on 2026-09-14 rested on a handset 2.2 for legs on
+        # which the handset's own receiver reports showed 0 % loss and the
+        # ledger scored MES 88 (see CORROBORATE_* for which MES that was). A
+        # missing judgement counts as no support.
         m, age = snap.get("last_mos"), snap.get("last_mos_age_s")
         if (m is not None and m < th["mos_min"] and age is not None
                 and age <= th["mos_window"]

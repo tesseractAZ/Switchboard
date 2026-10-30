@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.115.0"
+version: "0.116.0"
 slug: switchboard
 description: >-
   Instrumented Asterisk 20 PBX for analog house phones on a Grandstream GXW4216

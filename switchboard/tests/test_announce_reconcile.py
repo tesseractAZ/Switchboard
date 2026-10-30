@@ -361,8 +361,9 @@ def test_a_truncated_announcement_still_counts_as_arrived(tmp_path, monkeypatch)
 
 
 def test_an_announcement_answered_in_silence_is_not_counted_as_arrived(tmp_path, monkeypatch):
-    """The same one-second floor the wake-up uses. A handset that answers and
-    emits two packets played nothing to anybody."""
+    """The same one-second floor the wake-up uses. A leg on which the PBX sent
+    the handset only two packets (txcount 2) played nothing to anybody, even
+    though the handset itself sent 30 (rxcount)."""
     mod = _delivery(tmp_path)
     monkeypatch.setitem(sys.modules, "delivery", mod)
     monkeypatch.setattr(cq, "append_record", lambda rec: None)

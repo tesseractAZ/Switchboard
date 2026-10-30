@@ -18,7 +18,7 @@ announcement, which it tracks until a ledger records whether it arrived.
 | --- | --- |
 | **Telephony** | Room-to-room calling, a speech-driven operator, directory assistance, a talking clock, wake-up calls, house-wide paging, announcements onto speakers *and* handsets, a local voice assistant, and an optional SIP-trunk outside line (dial `9` first, or, with direct dial, `1` and the 10-digit number) |
 | **Link measurement** | Registration and qualify round-trip time for every phone between calls; a second detector catches outages shorter than the poll interval; mass-outage detection with hysteresis; trunk watchdog with automatic re-registration |
-| **Call quality** | One leg of every call is scored from RTP/RTCP: the worse direction's MES, loss in both directions, mean and peak round trip across the whole call, and one-way audio, with jitter recorded alongside. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
+| **Call quality** | One leg of every call is scored from RTP/RTCP: the worse direction's MES, loss in both directions, mean and peak round trip across the whole call, one-way audio, and the receive-jitter peak on conversations. A filter discards the placeholder values Asterisk reports when it has nothing to measure |
 | **Device health** | Gateway port health, plus the cordless's battery, WiFi signal and own MOS. A low score from the handset counts only when the PBX's record of the same call corroborates it |
 | **Delivery integrity** | Wake-ups and handset announcements are written to a ledger. A reconciler judges each one it sees through, and a failure brings a re-ring, a retry or an escalation that names its cause |
 | **Security** | A Supervisor-only dashboard, a split Manager interface with secrets rotated every boot, a PBX that never holds the Home Assistant token, LAN-only room registration, toll-fraud controls and a confined runtime |
@@ -123,8 +123,27 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   measured.
 - **The worse direction decides.** The leg is graded on the *worse* of its two
   audio directions. The inputs are Asterisk's RTCP-derived Media Experience Score
-  and loss in each direction. Jitter is recorded beside them and feeds only the
-  glitch filter below.
+  and loss in each direction. Jitter is not a grading input. Asterisk 20.11.1's
+  score multiplies jitter in seconds, which leaves it almost no weight, and a
+  jitter buffer absorbs jitter until it overflows. Its one effect on the grade is
+  through the credibility filter below, where a peak over 60 ms keeps a collapsed
+  score from being discarded as a glitch.
+- **Loss alerts at 1.5 % in either direction.** That is the point where loss
+  alone takes a call from good to fair, so a short call that drops a few dozen
+  packets raises an alert. Asterisk's score cannot be left to catch it, because it
+  counts loss differently in each direction. The score for the audio the PBX sends
+  falls on the running total of lost packets, so 41 lost early in a 38-second call
+  take it from 88 to 28. The score for the audio it receives falls on the loss per
+  5-second report, so the same burst leaves it near 81.
+- **A conversation alerts on an abnormal jitter peak.** A receive-jitter peak
+  over 60 ms raises an alert on answered room-to-room, outside, inbound and
+  transferred calls, on calls the operator or directory connects, and on pages.
+  The grade is left alone. Other legs are not checked, because the figure
+  measures the stream the PBX receives, which on a wake-up or announcement is a
+  handset microphone nobody hears. The WiFi cordless peaked at 40–58 ms on 55 of
+  its 282 legs, 54 of them announcements, wake-up calls or calls to set one, and
+  50 with under 0.5 % loss either way; the wired ports stay under 3 ms. Across the
+  300 legs recorded over 33 days the check would have raised one alert.
 - **Round trip is scored across the whole call, not its last moment.** It alerts
   on a **mean over 250 ms** or a **peak over 500 ms** across every RTCP round. In
   this deployment one leg peaked at 845.93 ms and reported 10.65 ms on its final
@@ -136,8 +155,11 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   score and the literal `88.087887` when no RTCP round completed. The first reads
   as a dead call and the second as a flawless one. Both are recognised and
   discarded. So is the collapsed-score signature of a re-INVITE or transfer glitch
-  (MES under 40 with loss under 0.5 %, jitter under 40 ms and a round trip under
-  80 ms). Each record
+  (MES under 40 with under 0.5 % loss in the stream that score describes, a
+  receive-jitter peak no higher than 60 ms and a round trip under 80 ms).
+  Asterisk's names for the two scores point the opposite way to its loss
+  counters, and until v0.116.0 each score was checked against the other
+  stream's loss. Each record
   also says whether its RTT figures rest on one RTCP round or several.
 - **The alert path checks itself.** Each leg records whether its notification was
   actually posted (`notify_status`) and whether its sensor update was accepted

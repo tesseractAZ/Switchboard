@@ -167,8 +167,9 @@ def test_the_verdict_is_not_keyed_on_the_hangup_cause():
 
 
 def test_the_threshold_is_a_duration_not_a_boolean():
-    """`txcount > 0` would admit a handset that emitted two packets inside the
-    codec's own startup and heard nothing. One second of ulaw is 50 packets."""
+    """`txcount > 0` would admit a leg on which the PBX sent only a packet or
+    two inside the codec's own startup, so the handset heard nothing. One
+    second of ulaw is 50 packets."""
     assert cq.DELIVERED_MIN_TXCOUNT == 50
     assert _leg("greeting", 49)["quality"] == "undelivered"
     assert _leg("greeting", 50)["quality"] != "undelivered"

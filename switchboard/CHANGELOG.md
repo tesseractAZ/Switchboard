@@ -3,6 +3,56 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.116.0
+
+**Each call-quality score is judged against its own stream; loss alerts at
+1.5 %; a conversation with an abnormal jitter peak alerts.**
+
+- Asterisk names its two quality scores the opposite way round to its loss
+  counters: `rxmes` scores the audio the PBX sends and `txmes` the audio it
+  receives, while `rxploss` and `txploss` count the reverse. The filter that
+  discards a collapsed score as a re-INVITE glitch paired them by name, so each
+  score was checked against the other stream's loss. A wake-up on 2026-09-25 that
+  lost 43.8 % of its audio on the way to the cordless scored 20 for that stream;
+  the filter compared the 20 with the microphone's 0 % loss and dropped it. Each
+  score is now checked against its own stream, and that wake-up's record would
+  show the 20.
+- A short call that loses a few dozen packets now alerts in either direction:
+  the loss alert moves from 3 % to 1.5 %, where loss alone already takes a call
+  below `good`. Asterisk's score could not be relied on to catch it. The score
+  for the audio the PBX sends falls on the running total of lost packets (41
+  lost early in a 38-second call take it from 88 to 28); the score for the
+  audio it receives falls on the loss per 5-second report (the same burst leaves
+  it near 81). Across the last 300 recorded legs this adds two notifications,
+  both short calls from the cordless to set a wake-up.
+- The cordless's own low call score degrades its health sensor only when the
+  PBX's record agrees. That check read `mes_tx`, the PBX's score for the
+  handset's microphone, and now reads `mes_rx`, the score for what the handset
+  heard. Replayed on the 42 low scores captured since 2026-09-15, every verdict
+  is unchanged.
+- A conversation whose receive-jitter peak goes above 60 ms now raises a
+  call-quality notification naming the peak. That covers answered room-to-room,
+  outside, inbound and transferred calls, calls connected by the operator or
+  directory, and pages. An operator or directory call counts only when its
+  connecting Dial() reports `ANSWER`, since one that connected nothing spoke
+  only to the speech recogniser. Each leg now records that value as
+  `dialstatus` (ledger schema 7). The
+  excellent/good/fair/poor grade is unchanged, as with a round-trip alert.
+  Wake-ups, announcements and the voice menus are not checked: the figure
+  measures the stream the PBX receives, which on those legs is a handset
+  microphone nobody hears. There the WiFi cordless often peaks at 40–58 ms, 50
+  times in 33 days with under 0.5 % loss. Across the last 300 recorded legs the
+  check would have raised one notification.
+- The filter that discards a collapsed score caused by a re-INVITE or transfer
+  now reads the same receive-jitter peak, at the same 60 ms line. It used two
+  single-moment readings before. One of those, the far end's last report, read
+  as high as 136 ms on talking-clock and assistant legs whose received audio
+  was steady, so a glitch on such a leg could stay in the score as a false
+  "poor". No verdict in the current ledger changes.
+- Asterisk 20.11.1's own score (MES) gives jitter almost no weight, because it
+  multiplies the jitter in seconds. The README and the health-monitoring
+  reference now say so.
+
 ## 0.115.0
 
 **Documentation opens quickly in Home Assistant.** No change to how the add-on runs.

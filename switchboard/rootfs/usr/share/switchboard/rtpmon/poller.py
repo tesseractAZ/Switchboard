@@ -22,8 +22,9 @@ alertable state — instead of silently vanishing.
 
 Why this and not ``pjsip show channelstats`` for a call's far leg: on this system
 that command returns "not valid"/empty rows for bridged calls, and the initiating
-phone's per-call record already carries BOTH directions — so idle qualify RTT is
-the genuinely-additive signal a poller can provide.
+phone's per-call record already carries BOTH directions of that phone's own link
+(the answering phone's link is not measured per call at all) — so idle qualify
+RTT is the genuinely-additive signal a poller can provide.
 
 Pure helpers (rtt/status parsing, per-phone + rollup shaping) are import-safe and
 unit-tested; only run()'s loop does AMI/HA I/O.
