@@ -396,7 +396,7 @@ def _send(ha_client, message: str, title: str, nid: str) -> bool:
             sys.stderr.write(f"switchboard-rtpmon: notify_retry unavailable ({e}); "
                              "alerts are sent once, with no retry\n")
         return bool(ha_client.notify(message, title=title, notification_id=nid))
-    return notify_retry.send(ha_client, message, title, nid, tag="rtpmon")
+    return notify_retry.send(ha_client, message, title, nid, tag="switchboard-rtpmon")
 
 
 def _flush_notifications() -> None:
@@ -407,7 +407,7 @@ def _flush_notifications() -> None:
     except ImportError:
         return
     try:
-        notify_retry.flush(ha_client, tag="rtpmon")
+        notify_retry.flush(ha_client, tag="switchboard-rtpmon")
     except Exception as e:  # noqa: BLE001 — never let a retry stop the poll
         sys.stderr.write(f"switchboard-rtpmon: notification retry error: {e}\n")
 

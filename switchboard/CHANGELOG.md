@@ -15,17 +15,22 @@ Recent releases. Releases up to 0.109.0 are in the
   (cordless critical, all phones dropped briefly, cordless recovered) were
   refused and never shown. The phones recovered inside that window; a phone
   that went down during it and stayed down would have raised no alert at all.
-- A refused alert is now kept and posted at the start of each later poll cycle
-  (every 2 minutes for device health, every 5 for link health) for up to an
-  hour. The posted text says it is late and when it was raised.
+- A refused alert is now kept and posted at the start of each later cycle of
+  the monitor that raised it (by default every 2 minutes for device health and
+  every 5 for link health). It is dropped only if Home Assistant still refuses
+  it more than an hour after it was raised, so every alert gets at least one
+  retry whatever the poll interval. A late post says so, and gives the time it
+  was written.
 - A newer alert with the same `notification_id` replaces a kept one, as Home
   Assistant itself does, so a stale "critical" never lands after its
-  "recovered". The message that replaces it names the alert that was never
-  shown, and when it was raised.
-- Call-quality cards are not retried: each call's recorder runs once and exits.
-  Their `notify_status` still records `failed` when a card was refused. The
-  missed-wake-up notification keeps the retry it has had since the 2026-10-04
-  power cut.
+  "recovered". The message that replaces it names the alerts that were never
+  shown: the first, how many followed, and the latest three.
+- The "wake-up not delivered" card, which is posted when the critical push
+  cannot be sent, is retried the same way. The push itself is not: an alarm
+  that failed should not sound an hour later. Call-quality cards are not
+  retried, since each call's recorder runs once and exits; their
+  `notify_status` still records `failed`. The missed-wake-up notification keeps
+  the retry it has had since the 2026-10-04 power cut.
 
 ## 0.116.0
 

@@ -12,19 +12,27 @@ gone. The phones recovered inside the outage, so nothing was missed that time;
 but a phone that went down during a reboot and STAYED down would never have
 raised an alert at all, because its transition had already happened. The
 wake-up scheduler hit the same gap after the 2026-10-04 power cut and keeps its
-own retry (wakeup/scheduler.py, `_pending_missed`); this module is the same idea
-for the pollers.
+own retry for MISSED wake-ups (wakeup/scheduler.py, `_pending_missed`); its
+undelivered-wake-up card, the pollers' alerts and anything later use this one.
 
 HOW. `send()` posts at once and, if Home Assistant refuses, keeps the
 notification keyed by its `notification_id`. `flush()`, called at the top of
-each poll cycle, posts what is kept. Keying by id copies Home Assistant's own
-rule that a notification REPLACES an earlier one with the same id, so a
-"recovered" sent while a "critical" is still undelivered replaces it and a
-stale "critical" can never land after its recovery. The replaced alert is not
-dropped silently: the message that replaces it says it was not delivered, and
-when. Anything still undelivered after RETRY_FOR seconds is dropped with a log
-line. The queue lives in memory: an add-on restart starts it empty, as the
-scheduler's does.
+each cycle, posts what is kept, oldest first.
+
+- Keying by id copies Home Assistant's own rule that a notification REPLACES an
+  earlier one with the same id, so a "recovered" sent while a "critical" is
+  still undelivered replaces it and a stale "critical" can never land after its
+  recovery. The replaced alert is not dropped silently: the message that
+  replaces it names it, and when it was raised.
+- An alert is dropped only when Home Assistant has REFUSED a retry and the
+  alert is more than RETRY_FOR seconds past its OWN raise. Not the first
+  refusal of its id: the newest alert for an id is the current state, and it
+  must get its full window even if the id was refused an hour earlier. Not
+  before a retry: a poller that cycles once an hour must still get one.
+- Ages are measured on the monotonic clock, which an NTP step after boot does
+  not move; the wall clock is used only for the "written at" time in the text.
+- The queue lives in memory: an add-on restart starts it empty, as the
+  scheduler's does.
 
 The client is passed in rather than imported, so the module works with
 anything that has `notify(message, title=, notification_id=) -> bool`.
@@ -51,14 +59,23 @@ MAX_PENDING = 20
 # ha_client.notify() cuts a message at 500 characters, and a note at the end
 # would be the first thing lost, so the main text is shortened instead.
 MESSAGE_LIMIT = 500
-# How many replaced alerts one message names (newest last).
-MISSED_SHOWN = 3
+# Replaced alerts kept per id: the first (where the episode began) and the
+# newest few, with a count of the ones between.
+MISSED_KEEP = 4
 
 _pending: dict[str, dict] = {}
 
 
 def _log(tag: str, msg: str) -> None:
     print(f"[{tag}] {msg}", flush=True)
+
+
+def _clocks(now: float | None) -> tuple[float, float]:
+    """(wall time for the text, monotonic time for ages). A test passes `now`
+    and gets it for both."""
+    if now is not None:
+        return now, now
+    return time.time(), time.monotonic()
 
 
 def _hhmm(ts: float) -> str:
@@ -75,12 +92,16 @@ def compose(item: dict, late: bool) -> str:
     naming any alert it replaced that was never delivered."""
     notes = []
     if late:
-        notes.append(f"Sent late: raised at {_hhmm(item['raised'])}, while Home "
+        # "written at", not "raised at": the message may say "the phones are up
+        # now", and that was true when it was written, not when it lands.
+        notes.append(f"Sent late: written at {_hhmm(item['raised'])}, while Home "
                      "Assistant was not accepting notifications.")
-    if item["missed"]:
-        shown = ", ".join(f"{_short_title(t)} at {_hhmm(ts)}"
-                          for t, ts in item["missed"][-MISSED_SHOWN:])
-        notes.append(f"Not delivered at the time: {shown}.")
+    missed, omitted = item["missed"], item["omitted"]
+    if missed:
+        named = [f"{_short_title(t)} at {_hhmm(ts)}" for t, ts in missed]
+        if omitted:
+            named.insert(1, f"{omitted} more")
+        notes.append(f"Not delivered at the time: {', '.join(named)}.")
     text = str(item["message"])
     if not notes:
         return text[:MESSAGE_LIMIT]
@@ -104,50 +125,53 @@ def send(ha, message: str, title: str = "Switchboard", notification_id: str = ""
     """Post a notification now; keep it for `flush()` if Home Assistant refuses.
 
     Returns True only if Home Assistant accepted it on this call."""
-    now = time.time() if now is None else now
-    key = notification_id or f"(no id) {title} {now}"
+    wall, mono = _clocks(now)
+    key = notification_id or f"(no id) {title} {wall}"
     prior = _pending.pop(key, None)
-    item = {
-        "nid": notification_id,
-        "message": message,
-        "title": title,
-        "raised": now,
-        # The give-up clock runs from the FIRST refusal of this id, so an alert
-        # that keeps flapping while Home Assistant is down still ends.
-        "first": prior["first"] if prior else now,
-        "missed": (prior["missed"] + [(prior["title"], prior["raised"])]) if prior else [],
-    }
+    missed, omitted = [], 0
+    if prior is not None:
+        missed = prior["missed"] + [(prior["title"], prior["raised"])]
+        omitted = prior["omitted"]
+        if len(missed) > MISSED_KEEP:
+            omitted += len(missed) - MISSED_KEEP
+            missed = missed[:1] + missed[-(MISSED_KEEP - 1):]
+    item = {"nid": notification_id, "message": message, "title": title,
+            "raised": wall, "age_from": mono, "missed": missed, "omitted": omitted}
     if _post(ha, item, late=False):
         return True
     if len(_pending) >= MAX_PENDING:
-        oldest = min(_pending, key=lambda k: _pending[k]["raised"])
+        oldest = min(_pending, key=lambda k: _pending[k]["age_from"])
         _log(tag, f"notification queue full; dropping the oldest undelivered "
                   f"'{_pending[oldest]['title']}'")
         del _pending[oldest]
     _pending[key] = item
-    _log(tag, f"Home Assistant did not accept '{title}'; kept, retried every cycle "
-              f"for up to {RETRY_FOR // 60} min")
+    _log(tag, f"Home Assistant did not accept '{title}'; kept and retried each "
+              f"cycle until {RETRY_FOR // 60} min after it was raised")
     return False
 
 
 def flush(ha, *, tag: str = "notify", now: float | None = None) -> int:
-    """Post the kept notifications, oldest first. Stops at the first refusal:
-    if Home Assistant is still down, every other attempt would fail the same way.
-    Returns how many were posted."""
-    now = time.time() if now is None else now
+    """Post the kept notifications, oldest first, and return how many landed.
+
+    Stops at the first refusal: if Home Assistant is still not accepting, every
+    other attempt would fail the same way. That refusal is also what drops an
+    alert past its window, so nothing is dropped in a cycle where Home Assistant
+    answers, and nothing is dropped before it has had a retry."""
+    _wall, mono = _clocks(now)
     posted = 0
-    for key in sorted(_pending, key=lambda k: _pending[k]["raised"]):
+    for key in sorted(_pending, key=lambda k: _pending[k]["age_from"]):
         item = _pending[key]
-        if now - item["first"] > RETRY_FOR:
-            _log(tag, f"'{item['title']}' still not accepted after "
-                      f"{RETRY_FOR // 60} min; giving up")
+        if _post(ha, item, late=True):
             del _pending[key]
+            posted += 1
+            _log(tag, f"posted '{item['title']}' {int(mono - item['age_from'])} s late")
             continue
-        if not _post(ha, item, late=True):
-            break
-        del _pending[key]
-        posted += 1
-        _log(tag, f"posted '{item['title']}' {int(now - item['raised'])} s late")
+        for k in list(_pending):
+            if mono - _pending[k]["age_from"] > RETRY_FOR:
+                _log(tag, f"'{_pending[k]['title']}' still not accepted "
+                          f"{RETRY_FOR // 60} min after it was raised; giving up")
+                del _pending[k]
+        break
     return posted
 
 

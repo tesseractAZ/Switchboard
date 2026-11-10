@@ -29,14 +29,22 @@ update, so an alert raised in that window used to be refused and lost. On
 refused, and a phone that had stayed down would never have been reported.
 
 A refused link-health or device-health alert is now kept and posted at the start
-of each later poll cycle (device health every 2 minutes, link health every 5),
-for up to an hour, and its text says it is late and when it was raised. Kept
-alerts follow Home Assistant's own rule for a shared `notification_id`: a newer
-one replaces an older one, so a "recovered" sent while the "critical" is still
-undelivered is what lands, never the stale "critical" after it. The replacing
-message names the alert that was never shown, with its time. The queue is held
-in memory; an add-on restart starts it empty.
+of each later cycle of its monitor (by default device health every 2 minutes,
+link health every 5). It is dropped only if Home Assistant still refuses it more
+than an hour after it was raised, so it always gets at least one retry, whatever
+the poll interval. The late post says it is late and gives the time it was
+written; anything it says about the present (for example "the phones are up
+now") describes that time.
 
+Kept alerts follow Home Assistant's own rule for a shared `notification_id`: a
+newer one replaces an older one, so a "recovered" sent while the "critical" is
+still undelivered is what lands, never the stale "critical" after it. The
+replacing message names the alerts that were never shown: the first, how many
+followed, and the latest three, each with its time. The queue is held in
+memory; an add-on restart starts it empty.
+
+The "wake-up not delivered" card is retried the same way; the critical push in
+front of it is not, because a failed-alarm alert should not sound an hour late.
 Call-quality cards are not retried (each call's recorder runs once and exits);
 their `notify_status` records `failed` instead. Missed wake-ups have had their
 own retry since 2026-10-04.
