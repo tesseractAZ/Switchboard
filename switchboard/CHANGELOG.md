@@ -17,14 +17,16 @@ Recent releases. Releases up to 0.109.0 are in the
   that went down during it and stayed down would have raised no alert at all.
 - A refused alert is now kept and posted at the start of each later cycle of
   the monitor that raised it (by default every 2 minutes for device health and
-  every 5 for link health). It is dropped only if Home Assistant still refuses
-  it more than an hour after it was raised, so every alert gets at least one
-  retry whatever the poll interval. A late post says so, and gives the time it
-  was written.
+  every 5 for link health). It is dropped only if Home Assistant refuses a retry
+  of it more than an hour after it was raised, so every alert gets at least one
+  retry of its own whatever the poll interval. A late post says so, and gives
+  the time it was written.
 - A newer alert with the same `notification_id` replaces a kept one, as Home
   Assistant itself does, so a stale "critical" never lands after its
   "recovered". The message that replaces it names the alerts that were never
-  shown: the first, how many followed, and the latest three.
+  shown: the first, how many came between, and the latest three. An alert that
+  was dropped is still named by the next alert for the same device or line, for
+  12 hours.
 - The "wake-up not delivered" card, which is posted when the critical push
   cannot be sent, is retried the same way. The push itself is not: an alarm
   that failed should not sound an hour later. Call-quality cards are not

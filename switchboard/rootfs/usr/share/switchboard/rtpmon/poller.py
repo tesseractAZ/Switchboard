@@ -381,7 +381,7 @@ def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
 _retry_missing_logged = False
 
 
-def _send(ha_client, message: str, title: str, nid: str) -> bool:
+def _send(ha_client, message: str, title: str, nid: str, episodic: bool = False) -> bool:
     """Every alert this poller raises goes through here. Each is raised once, on a
     transition, so one Home Assistant refusal used to lose it for good
     (2026-11-07: the all-phones-dropped alert got a 502 while Core restarted
@@ -396,7 +396,8 @@ def _send(ha_client, message: str, title: str, nid: str) -> bool:
             sys.stderr.write(f"switchboard-rtpmon: notify_retry unavailable ({e}); "
                              "alerts are sent once, with no retry\n")
         return bool(ha_client.notify(message, title=title, notification_id=nid))
-    return notify_retry.send(ha_client, message, title, nid, tag="switchboard-rtpmon")
+    return notify_retry.send(ha_client, message, title, nid, tag="switchboard-rtpmon",
+                             episodic=episodic)
 
 
 def _flush_notifications() -> None:
@@ -437,7 +438,7 @@ def _notify_mass_drop(went_unreachable: list, summ: dict) -> None:
            f"current outage.")
     try:
         _send(ha_client, msg, "Switchboard: all phones dropped briefly",
-              f"switchboard_mass_drop_{int(time.time())}")
+              f"switchboard_mass_drop_{int(time.time())}", episodic=True)
     except Exception:
         pass
 

@@ -18,9 +18,10 @@ real `_notify` / `_notify_outage` / `_notify_mass_drop` / `_escalate` and the re
 has been the shape of this repo's escapes, and a flush that only ran once (before
 the loop) would pass a one-cycle test.
 
-notify_retry is registered in sys.modules only inside the tests that need the
-pollers to find it, and restored after, so other test files exercise the same
-code path whatever order they run in.
+Here notify_retry is registered in sys.modules only inside the tests that need
+the pollers to find it, and restored after. (Other test files can still reach
+the real module in a full-suite run, through a webui/ path another file adds;
+their fakes accept every post, so nothing is kept either way.)
 """
 import ast
 import contextlib
@@ -230,6 +231,61 @@ def test_the_window_runs_from_the_alerts_own_raise():
           last["title"] == "Switchboard: cordless CRITICAL" and "cordless degraded at" in last["message"])
 
 
+def test_an_alert_behind_a_refused_one_gets_its_own_retry():
+    """Two alerts refused in one cycle; at the next (hourly) cycle the first is
+    refused again and dropped, and the second must still get its own attempt."""
+    nr.clear()
+    ha = FakeHA(accept=False)
+    nr.send(ha, "Cordless critical", "Switchboard: cordless CRITICAL", "switchboard_cordless_health", now=T0)
+    nr.send(ha, "Gateway critical", "Switchboard: gxw gateway CRITICAL", "switchboard_gateway_health", now=T0 + 1)
+    nr.flush(ha, now=T0 + nr.RETRY_FOR + 5)
+    kept = [p["nid"] for p in nr.pending()]
+    check("behind: the refused head is dropped, the one behind it is kept",
+          kept == ["switchboard_gateway_health"])
+    ha.accept = True
+    nr.flush(ha, now=T0 + 2 * nr.RETRY_FOR + 5)
+    check("behind: it lands at its own retry", ha.calls[-1]["id"] == "switchboard_gateway_health"
+          and nr.pending() == [])
+
+
+def test_a_dropped_alert_is_named_by_the_next_one_for_its_id():
+    nr.clear()
+    ha = FakeHA(accept=False)
+    nid = "switchboard_cordless_health"
+    nr.send(ha, "Cordless critical", "Switchboard: cordless CRITICAL", nid, now=T0)
+    nr.flush(ha, now=T0 + nr.RETRY_FOR + 120)  # refused past its hour: dropped
+    check("lost: dropped from the queue", nr.pending() == [])
+    ha.accept = True
+    nr.send(ha, "Cordless recovered — back to normal.", "Switchboard: cordless OK", nid,
+            now=T0 + nr.RETRY_FOR + 1500)
+    check("lost: the recovery names the CRITICAL nobody saw",
+          "Not delivered at the time: cordless CRITICAL at " + HHMM(T0) in ha.calls[-1]["message"])
+    nr.send(ha, "Cordless recovered — back to normal.", "Switchboard: cordless OK", nid,
+            now=T0 + nr.RETRY_FOR + 1600)
+    check("lost: named once, not on every later alert", "Not delivered" not in ha.calls[-1]["message"])
+    nr.clear()
+    nr.send(FakeHA(accept=False), "Cordless critical", "Switchboard: cordless CRITICAL", nid, now=T0)
+    nr.flush(FakeHA(accept=False), now=T0 + nr.RETRY_FOR + 120)
+    nr.send(ha, "Cordless recovered", "Switchboard: cordless OK", nid, now=T0 + nr.LOST_KEEP + nr.RETRY_FOR + 600)
+    check("lost: the note expires, so an undated time cannot mislead a day later",
+          "Not delivered" not in ha.calls[-1]["message"])
+    nr.clear()
+
+
+def test_a_full_queue_evicts_one_off_cards_before_the_current_state():
+    nr.clear()
+    ha = FakeHA(accept=False)
+    nr.send(ha, "Outside line down", "Switchboard: outside line down", "switchboard_trunk_registration", now=T0)
+    for i in range(nr.MAX_PENDING + 3):
+        nr.send(ha, f"drop {i}", "Switchboard: all phones dropped briefly",
+                f"switchboard_mass_drop_{i}", now=T0 + 60 * (i + 1), episodic=True)
+    kept = [p["nid"] for p in nr.pending()]
+    check("evict: the outside-line alert survives a run of one-off cards",
+          "switchboard_trunk_registration" in kept and len(kept) == nr.MAX_PENDING)
+    check("evict: the oldest one-off cards are the ones dropped", "switchboard_mass_drop_0" not in kept)
+    nr.clear()
+
+
 def test_flush_stops_at_the_first_refusal():
     nr.clear()
     ha = FakeHA(accept=False)
@@ -375,6 +431,10 @@ def test_rtpmon_alerts_refused_then_posted_by_its_flush():
         pm._notify_mass_drop([str(e) for e in range(11, 20)], summ)
         pm._notify_outage("down", summ)
         check("rtpmon: both refused and kept", len(nr.pending()) == 2)
+        kinds = {p["title"]: p["episodic"] for p in nr.pending()}
+        check("rtpmon: only the one-off mass-drop card is episodic",
+              kinds == {"Switchboard: all phones dropped briefly": True,
+                        "Switchboard: phones unreachable": False})
         ha.accept = True
         pm._flush_notifications()
         left = nr.pending()

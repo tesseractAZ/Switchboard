@@ -24,11 +24,17 @@ each cycle, posts what is kept, oldest first.
   still undelivered replaces it and a stale "critical" can never land after its
   recovery. The replaced alert is not dropped silently: the message that
   replaces it names it, and when it was raised.
-- An alert is dropped only when Home Assistant has REFUSED a retry and the
-  alert is more than RETRY_FOR seconds past its OWN raise. Not the first
-  refusal of its id: the newest alert for an id is the current state, and it
-  must get its full window even if the id was refused an hour earlier. Not
-  before a retry: a poller that cycles once an hour must still get one.
+- An alert is dropped only when a retry OF THAT ALERT is refused and it is
+  more than RETRY_FOR seconds past its OWN raise. Not the first refusal of its
+  id: the newest alert for an id is the current state, and it must get its full
+  window even if the id was refused an hour earlier. Not before its own retry:
+  a poller that cycles once an hour must still get one, and an alert queued
+  behind a refused one waits its turn rather than being swept out with it.
+- A dropped alert still leaves a note for its id (for LOST_KEEP seconds), so the
+  next alert for that id, typically the recovery, names it.
+- When MAX_PENDING alerts are kept, a one-off ("episodic") alert such as the
+  mass-drop card goes first, so a run of them cannot push out the current state
+  of a device or line.
 - Ages are measured on the monotonic clock, which an NTP step after boot does
   not move; the wall clock is used only for the "written at" time in the text.
 - The queue lives in memory: an add-on restart starts it empty, as the
@@ -62,8 +68,12 @@ MESSAGE_LIMIT = 500
 # Replaced alerts kept per id: the first (where the episode began) and the
 # newest few, with a count of the ones between.
 MISSED_KEEP = 4
+# How long a dropped alert is remembered for the next alert of its id. Bounded,
+# because the note gives only a time of day ("at 19:05"), not a date.
+LOST_KEEP = 12 * 3600
 
 _pending: dict[str, dict] = {}
+_lost: dict[str, dict] = {}
 
 
 def _log(tag: str, msg: str) -> None:
@@ -112,6 +122,25 @@ def compose(item: dict, late: bool) -> str:
     return (text + tail)[:MESSAGE_LIMIT]
 
 
+def _remember_lost(key: str, item: dict, mono: float) -> None:
+    """Keep what a dropped alert would have told, for the next alert of its id."""
+    if not item["nid"]:
+        return
+    if len(_lost) >= MAX_PENDING and key not in _lost:
+        del _lost[min(_lost, key=lambda k: _lost[k]["until"])]
+    _lost[key] = {"title": item["title"], "raised": item["raised"], "missed": item["missed"],
+                  "omitted": item["omitted"], "until": mono + LOST_KEEP}
+
+
+def _take_prior(key: str, mono: float):
+    """The earlier undelivered alert for this id: still kept, or recently dropped."""
+    prior = _pending.pop(key, None)
+    lost = _lost.pop(key, None)
+    if prior is None and lost is not None and lost["until"] >= mono:
+        prior = lost
+    return prior
+
+
 def _post(ha, item: dict, late: bool) -> bool:
     try:
         return bool(ha.notify(compose(item, late), title=item["title"],
@@ -121,13 +150,15 @@ def _post(ha, item: dict, late: bool) -> bool:
 
 
 def send(ha, message: str, title: str = "Switchboard", notification_id: str = "",
-         *, tag: str = "notify", now: float | None = None) -> bool:
+         *, tag: str = "notify", now: float | None = None, episodic: bool = False) -> bool:
     """Post a notification now; keep it for `flush()` if Home Assistant refuses.
 
-    Returns True only if Home Assistant accepted it on this call."""
+    `episodic`: a one-off report under a fresh id each time (the mass-drop
+    card), evicted first when the queue is full. Returns True only if Home
+    Assistant accepted it on this call."""
     wall, mono = _clocks(now)
     key = notification_id or f"(no id) {title} {wall}"
-    prior = _pending.pop(key, None)
+    prior = _take_prior(key, mono)
     missed, omitted = [], 0
     if prior is not None:
         missed = prior["missed"] + [(prior["title"], prior["raised"])]
@@ -136,13 +167,16 @@ def send(ha, message: str, title: str = "Switchboard", notification_id: str = ""
             omitted += len(missed) - MISSED_KEEP
             missed = missed[:1] + missed[-(MISSED_KEEP - 1):]
     item = {"nid": notification_id, "message": message, "title": title,
-            "raised": wall, "age_from": mono, "missed": missed, "omitted": omitted}
+            "raised": wall, "age_from": mono, "missed": missed, "omitted": omitted,
+            "episodic": episodic}
     if _post(ha, item, late=False):
         return True
     if len(_pending) >= MAX_PENDING:
-        oldest = min(_pending, key=lambda k: _pending[k]["age_from"])
+        pool = [k for k in _pending if _pending[k]["episodic"]] or list(_pending)
+        oldest = min(pool, key=lambda k: _pending[k]["age_from"])
         _log(tag, f"notification queue full; dropping the oldest undelivered "
                   f"'{_pending[oldest]['title']}'")
+        _remember_lost(oldest, _pending[oldest], mono)
         del _pending[oldest]
     _pending[key] = item
     _log(tag, f"Home Assistant did not accept '{title}'; kept and retried each "
@@ -154,9 +188,10 @@ def flush(ha, *, tag: str = "notify", now: float | None = None) -> int:
     """Post the kept notifications, oldest first, and return how many landed.
 
     Stops at the first refusal: if Home Assistant is still not accepting, every
-    other attempt would fail the same way. That refusal is also what drops an
-    alert past its window, so nothing is dropped in a cycle where Home Assistant
-    answers, and nothing is dropped before it has had a retry."""
+    other attempt would fail the same way. Only the alert whose retry was just
+    refused can be dropped there (if it is past its window), so nothing is
+    dropped in a cycle where Home Assistant answers, and nothing is dropped
+    before a retry of its own; the alerts behind it wait for later cycles."""
     _wall, mono = _clocks(now)
     posted = 0
     for key in sorted(_pending, key=lambda k: _pending[k]["age_from"]):
@@ -166,11 +201,11 @@ def flush(ha, *, tag: str = "notify", now: float | None = None) -> int:
             posted += 1
             _log(tag, f"posted '{item['title']}' {int(mono - item['age_from'])} s late")
             continue
-        for k in list(_pending):
-            if mono - _pending[k]["age_from"] > RETRY_FOR:
-                _log(tag, f"'{_pending[k]['title']}' still not accepted "
-                          f"{RETRY_FOR // 60} min after it was raised; giving up")
-                del _pending[k]
+        if mono - item["age_from"] > RETRY_FOR:
+            _log(tag, f"'{item['title']}' still not accepted "
+                      f"{RETRY_FOR // 60} min after it was raised; giving up")
+            _remember_lost(key, item, mono)
+            del _pending[key]
         break
     return posted
 
@@ -182,3 +217,4 @@ def pending() -> list[dict]:
 
 def clear() -> None:
     _pending.clear()
+    _lost.clear()
