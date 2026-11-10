@@ -101,13 +101,15 @@ A fleet that drops **between** two samples is caught from Asterisk's own log
 since the last sample; the log is read just before each sample). The card is
 judged per phone against that sample:
 
-- every phone that dropped is reachable again: "all phones dropped briefly",
-  saying they are up now;
+- every phone that dropped is reachable again: "phones dropped briefly" (or
+  "all phones dropped briefly" when every registered phone dropped), saying
+  they are up now;
 - some are still unreachable: "phones dropped", posted at once and naming them.
-  The next check replaces it under the same `notification_id`, saying who was
+  A later check replaces it under the same `notification_id`, saying who was
   back and who, if anyone, still was not; "not a current outage" only once all
-  are back. If the phones stay down, the outage alert above follows and the card
-  is left as posted (it says so, when the outage threshold is met).
+  are back. If the phones stay down, the outage alert above can take over, and
+  the card says so when the outage threshold is met. A second drop while a card
+  is open gets its own card and its own update.
 
 Until v0.118.0 the card claimed "the phones are up now" whenever enough phones
 had dropped, even when its own sample showed them down: on 2026-11-02 01:01 MST

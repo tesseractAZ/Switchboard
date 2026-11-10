@@ -5,7 +5,7 @@ Recent releases. Releases up to 0.109.0 are in the
 
 ## 0.118.0
 
-**The "all phones dropped" card says only what is true of each phone it names.**
+**The "phones dropped" card says only what is true of each phone it names.**
 
 - The link-health monitor also catches a fleet that drops between two samples,
   from Asterisk's log. Its card said the phones "came back before the next
@@ -15,18 +15,22 @@ Recent releases. Releases up to 0.109.0 are in the
   (08:01 UTC), the gateway's weekly reboot caught mid-reboot (8 wired ports
   down), and 2026-11-07 19:06 MST (02:06 UTC on 11-08), a router reboot (all 9
   phones down). Both fleets were back by the next sample.
-- The card is now judged per phone against the sample. "All phones dropped
-  briefly ... up now" is posted only when every phone that dropped is reachable
-  in it. Otherwise a "phones dropped" card is posted at once, naming the phones
-  still unreachable at that check, and the next check replaces it under the same
-  id: who was back, and who, if anyone, still was not. "Not a current outage" is
-  said only once every one of them is back. Phones re-register one at a time, so
-  a sample can show one to three still down while the fleet is below the outage
-  threshold; judged per fleet, that read as healed.
+- The card is now judged per phone against the sample. A "dropped briefly ...
+  up now" card is posted only when every phone that dropped is reachable in
+  it. Otherwise a "phones dropped" card is posted at once, naming the phones
+  still unreachable at that check, and a later check replaces it under the
+  same id: who was back, and who, if anyone, still was not. "Not a current
+  outage" is said only once every one of them is back and the sample is not a
+  fleet outage. Phones re-register one at a time, so a sample can show one to
+  three still down while the fleet is below the outage threshold; judged per
+  fleet, that read as healed.
+- "All phones" and "nothing was reachable" are said only when every
+  registered phone dropped. The threshold is half the fleet, and a phone that
+  stayed up (often the cordless, which the outside line rings) kept working.
 - If the phones stay down, the outage alert ("phones unreachable") follows as
-  before and the card is left as posted; it says so when the outage threshold
-  is met, and only then. The cycle in which the outage alert clears raises no
-  card of its own.
+  before and the card says so when the outage threshold is met. A second drop
+  while a card is open gets a card of its own; each is updated under its own
+  id.
 - Asterisk's log is now read just before each sample rather than after it, so
   every drop counted was logged before the sample that judges it.
 

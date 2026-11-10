@@ -384,7 +384,7 @@ def _down_now(summ: dict) -> set:
 
 
 def mass_drop_reports(went: list, summ: dict | None, st: dict, settled: bool,
-                      now: float, outage_event: str = "") -> list:
+                      now: float) -> list:
     """The between-samples detector's cards for this cycle, as dicts:
     {"kind", "nid", "exts", "down", "at", "still"}.
 
@@ -410,30 +410,36 @@ def mass_drop_reports(went: list, summ: dict | None, st: dict, settled: bool,
     The open card is not a hold: it is posted at once, so nothing waits in
     memory for an add-on restart to lose; the restart only loses the update.
     If the point-sample outage alert fires meanwhile (st["alerted"]), the open
-    card is left as posted: it already says that alert follows. The cycle in
-    which the outage alert clears (outage_event "up") still belongs to it, so
-    the recovery transitions logged in that window raise no card of their own.
-    A cycle with no sample (summ None, AMI down) judges nothing and keeps the
-    open card."""
+    card is left as posted: its text allows for that alert taking over. A cycle
+    with no sample (summ None, AMI down) judges nothing and keeps the open
+    cards. The cycle in which the outage alert clears is judged like any other:
+    phones recovering from an outage log only Reachable lines (the 11-07
+    recovery window: nine Reachable, no Unreachable), so a mass drop counted
+    there is a real second drop, and excluding the outage's phones from it
+    lost true reports."""
     if summ is None:
         return []
     down_now = _down_now(summ)
     out = []
-    open_card = st.get("drop_card")
-    if open_card is not None:
+    # A LIST: a second drop can arrive while an earlier card is still open (held
+    # through a fleet-outage sample), and each card must get its own update.
+    open_cards = st.get("drop_card") or []
+    if open_cards:
         if st.get("alerted"):
             del st["drop_card"]
         elif not is_mass_outage(summ):
             del st["drop_card"]
-            out.append({**open_card, "kind": "update",
-                        "still": sorted(set(open_card["exts"]) & down_now)})
-    if (outage_event != "up" and is_mass_drop(went, summ) and settled
-            and not st.get("alerted")):
-        still = sorted(set(went) & down_now)
-        card = {"nid": f"switchboard_mass_drop_{int(now)}", "exts": sorted(went),
-                "down": still, "at": now, "still": still}
+            out += [{**c, "kind": "update", "still": sorted(set(c["exts"]) & down_now)}
+                    for c in open_cards]
+    fresh = sorted(went)
+    if is_mass_drop(fresh, summ) and settled and not st.get("alerted"):
+        still = sorted(set(fresh) & down_now)
+        registered = summ.get("total", 0) - len(summ.get("never_registered_exts") or [])
+        card = {"nid": f"switchboard_mass_drop_{int(now)}", "exts": fresh,
+                "down": still, "at": now, "still": still,
+                "all": registered > 0 and len(fresh) >= registered}
         if still:
-            st["drop_card"] = card
+            st.setdefault("drop_card", []).append(card)
             out.append({**card, "kind": "down"})
         else:
             out.append({**card, "kind": "healed"})
@@ -444,21 +450,33 @@ def mass_drop_card(card: dict, summ: dict, now: float) -> tuple[str, str]:
     """(title, message) for a mass_drop_reports card. Every sentence is true at
     the moment it is posted, about each phone it names."""
     hhmm = lambda ts: time.strftime("%H:%M", time.localtime(ts))  # noqa: E731
+    were = lambda n: "was" if n == 1 else "were"  # noqa: E731
     exts, down = card["exts"], card["down"]
     names = lambda xs: ", ".join(xs)  # noqa: E731
     stakes = "an incoming call, a wake-up or a 911 dial would have failed"
     if card["kind"] == "healed":
-        return ("Switchboard: all phones dropped briefly",
-                f"All {len(exts)} of these phones dropped their SIP registration at "
-                f"once and came back before the next health check (exts "
-                f"{names(exts)}). Nothing was reachable while it lasted — {stakes}. "
-                f"The phones are up now; this is a warning about the gateway or its "
-                f"uplink, not a current outage.")
+        # "All" and "nothing was reachable" only when every registered phone is
+        # in the drop: the threshold is half the fleet, and a phone that stayed
+        # up (often the cordless, which the outside line rings) kept working.
+        # "Not a current outage" only when this sample is not one.
+        tail = ("this is a warning about the gateway or its uplink"
+                + ("" if is_mass_outage(summ) else ", not a current outage") + ".")
+        if card.get("all"):
+            return ("Switchboard: all phones dropped briefly",
+                    f"All {len(exts)} phones dropped their SIP registration at once "
+                    f"and came back before the next health check (exts "
+                    f"{names(exts)}). Nothing was reachable while it lasted — "
+                    f"{stakes}. The phones are up now; {tail}")
+        return ("Switchboard: phones dropped briefly",
+                f"{len(exts)} phones dropped their SIP registration at once and came "
+                f"back before the next health check (exts {names(exts)}). While they "
+                f"were down, an incoming call, a wake-up or a 911 dial on them would "
+                f"have failed. They are up now; {tail}")
     head = f"{len(exts)} phones dropped their SIP registration at once (exts {names(exts)})"
     at1 = (f"all were still unreachable at the {hhmm(card['at'])} health check"
            if down == exts else
-           f"{len(down)} of them were still unreachable at the {hhmm(card['at'])} "
-           f"health check (exts {names(down)})")
+           f"{len(down)} of them {were(len(down))} still unreachable at the "
+           f"{hhmm(card['at'])} health check (exts {names(down)})")
     if card["kind"] == "down":
         return ("Switchboard: phones dropped",
                 f"{head}; {at1}. While they are down, an incoming call, a wake-up "
@@ -466,7 +484,8 @@ def mass_drop_card(card: dict, summ: dict, now: float) -> tuple[str, str]:
                 + ("If they stay down, a 'phones unreachable' alert follows instead; "
                    "otherwise this card is updated at the next check."
                    if is_mass_outage(summ) else
-                   "This card is updated at the next check."))
+                   "This card is updated at a later check, unless a 'phones "
+                   "unreachable' alert takes over."))
     still = card["still"]
     if not still:
         return ("Switchboard: phones dropped",
@@ -474,8 +493,8 @@ def mass_drop_card(card: dict, summ: dict, now: float) -> tuple[str, str]:
                 f"While they were down, {stakes}. This is a warning about the gateway "
                 f"or its uplink, not a current outage.")
     return ("Switchboard: phones dropped",
-            f"{head}; {at1}. At the {hhmm(now)} check {len(still)} were still "
-            f"unreachable (exts {names(still)}); calls to and from them fail until "
+            f"{head}; {at1}. At the {hhmm(now)} check {len(still)} {were(len(still))} "
+            f"still unreachable (exts {names(still)}); calls to and from them fail until "
             f"they re-register. This is a warning about the gateway or its uplink.")
 
 
@@ -514,7 +533,7 @@ def _flush_notifications() -> None:
         sys.stderr.write(f"switchboard-rtpmon: notification retry error: {e}\n")
 
 
-def _notify_mass_drop(card: dict, summ: dict) -> None:
+def _notify_mass_drop(card: dict, summ: dict, now: float | None = None) -> None:
     """Post a mass_drop_reports card.
 
     Deliberately the drawer card and not the audible push: a drop that is still
@@ -529,7 +548,7 @@ def _notify_mass_drop(card: dict, summ: dict) -> None:
         import ha_client
     except Exception:
         return
-    title, msg = mass_drop_card(card, summ, time.time())
+    title, msg = mass_drop_card(card, summ, time.time() if now is None else now)
     try:
         _send(ha_client, msg, title, card["nid"], episodic=True)
     except Exception:
@@ -1409,6 +1428,7 @@ def run() -> int:
         # whoever calls it first is the only caller that sees anything.
         trans = endpoint_transitions()
         phones, summ = poll_once(names, wired, measured_before, ever_registered)
+        sampled_at = time.time()  # the "HH:MM health check" the cards cite
         if phones:
             measured_before |= {p["ext"] for p in phones
                                 if p["reachable"] and p["rtt_ms"] is not None}
@@ -1446,8 +1466,7 @@ def run() -> int:
         # Judged per phone against this sample (see mass_drop_reports);
         # outage_transition() above has already advanced outage_st.
         for card in mass_drop_reports(went, summ if phones is not None else None,
-                                      outage_st, settled, time.time(),
-                                      outage_event=event if phones is not None else ""):
+                                      outage_st, settled, sampled_at):
             what = {"healed": "between samples and recovered",
                     "down": "and are still down at this sample: "
                             + ", ".join(card["down"]),
@@ -1456,7 +1475,7 @@ def run() -> int:
             sys.stderr.write(f"switchboard-rtpmon: PHONES DROPPED {what} — exts "
                              f"{', '.join(card['exts'])}\n")
             if opts.get("link_health_alerts", True):
-                _notify_mass_drop(card, summ)
+                _notify_mass_drop(card, summ, now=sampled_at)
         trunk_status = None
         if trunk_enabled(opts):
             trunk_status = _trunk_check(trunk_st, settled,
