@@ -43,7 +43,7 @@ replacing message names the alerts that were never shown: the first, how many
 came between, and the latest three, each with its time. An alert that was
 dropped is still named by the next alert for the same device or line, for 12
 hours (the note gives a time of day, not a date). At most 20 alerts are kept;
-past that, one-off "all phones dropped briefly" cards are dropped first, so they
+past that, one-off "phones dropped" cards are dropped first, so they
 cannot push out the current state of a device or line. The queue is held in
 memory; an add-on restart starts it empty.
 
@@ -98,14 +98,21 @@ and by device health below.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable
-since the last sample). If the drop has healed by the sample, one card says so
-at once: "all phones dropped briefly". If the sample still shows the phones
-down, the card waits for the next sample. Should the outage alert fire by then,
-it covers the event and the card is dropped; otherwise the card ("all phones
-dropped") says the phones were still unreachable at the first sample and how
-many were reachable at the next. Until v0.118.0 the card claimed "the phones
-are up now" even when its own sample showed them down: on 2026-11-02 (the
-gateway's weekly reboot, caught mid-reboot) and on 2026-11-07 (a router reboot).
+since the last sample; the log is read just before each sample). The card is
+judged per phone against that sample:
+
+- every phone that dropped is reachable again: "all phones dropped briefly",
+  saying they are up now;
+- some are still unreachable: "phones dropped", posted at once and naming them.
+  The next check replaces it under the same `notification_id`, saying who was
+  back and who, if anyone, still was not; "not a current outage" only once all
+  are back. If the phones stay down, the outage alert above follows and the card
+  is left as posted (it says so, when the outage threshold is met).
+
+Until v0.118.0 the card claimed "the phones are up now" whenever enough phones
+had dropped, even when its own sample showed them down: on 2026-11-02 01:01 MST
+(the gateway's weekly reboot, caught mid-reboot) and on 2026-11-07 19:06 MST (a
+router reboot).
 
 ## Per-call quality (`call_quality_alerts`)
 

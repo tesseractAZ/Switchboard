@@ -39,7 +39,7 @@ configuration:
     description: How often the link-health monitor checks every phone. 300 s (5 min) is a good balance; lower for faster detection at the cost of a little more traffic. Range 30–86400.
   link_health_alerts:
     name: Fleet-Outage Alerts
-    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. This includes a mass drop that recovered between polls. It also controls the outside line's 'down' and 'recovered' notifications. Independent of the per-call alerts above.
+    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. This includes phones that drop at once between polls, even if they are back by the next one. It also controls the outside line's 'down' and 'recovered' notifications. Independent of the per-call alerts above.
   device_health_enabled:
     name: Device-Health Monitor
     description: Watch the two "smart" devices Asterisk can't see inside — the WP826 cordless (battery, Wi-Fi signal, per-call MOS) and the GXW gateway's port health — and alert when a single critical device degrades. Needs Cordless Admin Password below for the deep checks.

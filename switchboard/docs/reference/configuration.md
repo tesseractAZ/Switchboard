@@ -42,7 +42,7 @@ its default is fine.
 | `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
 | `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
 | `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
-| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage), including a mass drop between polls (reported once a poll shows the phones back), and when the outside line stops or resumes registering. |
+| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage), including a mass drop between polls (its card names any phones still down at that poll and is updated at the next), and when the outside line stops or resumes registering. |
 | `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
 | `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 

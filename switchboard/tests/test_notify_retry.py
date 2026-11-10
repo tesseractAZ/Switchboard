@@ -367,8 +367,9 @@ def test_the_real_mass_drop_text_fits_late_without_a_cut():
     sent = []
     ha = FakeHA(accept=False)
     with installed(ha):
-        pm._notify_mass_drop([str(e) for e in range(11, 20)],
-                             {"reachable": 9, "total": 10})
+        pm._notify_mass_drop({"kind": "healed", "nid": "switchboard_mass_drop_1",
+                              "exts": [str(e) for e in range(11, 20)], "down": [],
+                              "at": T0, "still": []}, {"reachable": 9, "total": 10})
         ha.accept = True
         pm._flush_notifications()
         sent = ha.calls[-1]["message"]
@@ -428,7 +429,9 @@ def test_rtpmon_alerts_refused_then_posted_by_its_flush():
     summ = {"reachable": 0, "total": 10, "unreachable": 9,
             "unreachable_exts": [str(e) for e in range(11, 20)]}
     with installed(ha):
-        pm._notify_mass_drop([str(e) for e in range(11, 20)], summ)
+        pm._notify_mass_drop({"kind": "healed", "nid": "switchboard_mass_drop_2",
+                              "exts": [str(e) for e in range(11, 20)], "down": [],
+                              "at": T0, "still": []}, summ)
         pm._notify_outage("down", summ)
         check("rtpmon: both refused and kept", len(nr.pending()) == 2)
         kinds = {p["title"]: p["episodic"] for p in nr.pending()}
