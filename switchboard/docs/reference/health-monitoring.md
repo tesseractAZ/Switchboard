@@ -20,6 +20,39 @@ notifications — the sensors keep publishing either way.
 > SECURITY.md). With link health off it runs that scrub alone, every 300 s,
 > rather than idling.
 
+## When Home Assistant is not answering
+
+Each alert below is raised once, when a state changes. The add-on starts before
+Home Assistant Core, and Core can be away for minutes after a host reboot or an
+update, so an alert raised in that window used to be refused and lost. On
+2026-11-07 a reboot left Core unanswered from 19:00 to 19:12; three alerts were
+refused, and a phone that had stayed down would never have been reported.
+
+A refused link-health or device-health alert is now kept and posted at the start
+of each later cycle of its monitor (by default device health every 2 minutes,
+link health every 5). It is dropped only if Home Assistant refuses a retry of it
+more than an hour after it was raised, so it always gets at least one retry of
+its own, whatever the poll interval. The late post says it is late and gives the time it was
+written; anything it says about the present (for example "the phones are up
+now") describes that time.
+
+Kept alerts follow Home Assistant's own rule for a shared `notification_id`: a
+newer one replaces an older one, so a "recovered" sent while the "critical" is
+still undelivered is what lands, never the stale "critical" after it. The
+replacing message names the alerts that were never shown: the first, how many
+came between, and the latest three, each with its time. An alert that was
+dropped is still named by the next alert for the same device or line, for 12
+hours (the note gives a time of day, not a date). At most 20 alerts are kept;
+past that, one-off "all phones dropped briefly" cards are dropped first, so they
+cannot push out the current state of a device or line. The queue is held in
+memory; an add-on restart starts it empty.
+
+The "wake-up not delivered" card is retried the same way; the critical push in
+front of it is not, because a failed-alarm alert should not sound an hour late.
+Call-quality cards are not retried (each call's recorder runs once and exits);
+their `notify_status` records `failed` instead. Missed wake-ups have had their
+own retry since 2026-10-04.
+
 ## Link health (`link_health_*`)
 
 Polls every phone's PJSIP registration and qualify round-trip latency **between

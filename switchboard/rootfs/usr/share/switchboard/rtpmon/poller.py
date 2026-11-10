@@ -378,6 +378,41 @@ def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
     return total > 0 and n >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
 
 
+_retry_missing_logged = False
+
+
+def _send(ha_client, message: str, title: str, nid: str, episodic: bool = False) -> bool:
+    """Every alert this poller raises goes through here. Each is raised once, on a
+    transition, so one Home Assistant refusal used to lose it for good
+    (2026-11-07: the all-phones-dropped alert got a 502 while Core restarted
+    after a host reboot). notify_retry keeps a refused alert and run() re-posts
+    it each cycle."""
+    global _retry_missing_logged
+    try:
+        import notify_retry
+    except ImportError as e:
+        if not _retry_missing_logged:
+            _retry_missing_logged = True
+            sys.stderr.write(f"switchboard-rtpmon: notify_retry unavailable ({e}); "
+                             "alerts are sent once, with no retry\n")
+        return bool(ha_client.notify(message, title=title, notification_id=nid))
+    return notify_retry.send(ha_client, message, title, nid, tag="switchboard-rtpmon",
+                             episodic=episodic)
+
+
+def _flush_notifications() -> None:
+    """Re-post the alerts Home Assistant refused earlier (see _send)."""
+    try:
+        import ha_client
+        import notify_retry
+    except ImportError:
+        return
+    try:
+        notify_retry.flush(ha_client, tag="switchboard-rtpmon")
+    except Exception as e:  # noqa: BLE001 — never let a retry stop the poll
+        sys.stderr.write(f"switchboard-rtpmon: notification retry error: {e}\n")
+
+
 def _notify_mass_drop(went_unreachable: list, summ: dict) -> None:
     """Report a fleet-wide drop that had already recovered by sample time.
 
@@ -402,8 +437,8 @@ def _notify_mass_drop(went_unreachable: list, summ: dict) -> None:
            f"now; this is a warning about the gateway or its uplink, not a "
            f"current outage.")
     try:
-        ha_client.notify(msg, title="Switchboard: all phones dropped briefly",
-                         notification_id=f"switchboard_mass_drop_{int(time.time())}")
+        _send(ha_client, msg, "Switchboard: all phones dropped briefly",
+              f"switchboard_mass_drop_{int(time.time())}", episodic=True)
     except Exception:
         pass
 
@@ -449,13 +484,13 @@ def _notify_outage(event: str, summ: dict) -> None:
                f"(exts {exts}). If these are the wired gateway ports, the GXW gateway "
                f"likely dropped its SIP registrations — check the gateway's power/uplink.")
         try:
-            ha_client.notify(msg, title="Switchboard: phones unreachable", notification_id=nid)
+            _send(ha_client, msg, "Switchboard: phones unreachable", nid)
         except Exception:
             pass
     elif event == "up":
         try:
-            ha_client.notify(f"Phones recovered — {summ['reachable']} of {summ['total']} reachable.",
-                             title="Switchboard: phones recovered", notification_id=nid)
+            _send(ha_client, f"Phones recovered — {summ['reachable']} of {summ['total']} reachable.",
+                  "Switchboard: phones recovered", nid)
         except Exception:
             pass
 
@@ -590,16 +625,15 @@ def _trunk_check(st: dict, settled: bool, alerts_on: bool) -> str | None:
         import ha_client
         nid = "switchboard_trunk_registration"
         if event == "down":
-            ha_client.notify(
-                f"The outside line's SIP registration is {status or 'missing'} — "
-                "inbound calls will fail until it recovers. An automatic "
-                "re-register has been sent; if this alert does not clear within "
-                "a few minutes, check the WAN link and the VoIP.ms portal.",
-                title="Switchboard: outside line down", notification_id=nid)
+            _send(ha_client,
+                  f"The outside line's SIP registration is {status or 'missing'} — "
+                  "inbound calls will fail until it recovers. An automatic "
+                  "re-register has been sent; if this alert does not clear within "
+                  "a few minutes, check the WAN link and the VoIP.ms portal.",
+                  "Switchboard: outside line down", nid)
         elif event == "up":
-            ha_client.notify("The outside line re-registered — inbound calling is back.",
-                             title="Switchboard: outside line recovered",
-                             notification_id=nid)
+            _send(ha_client, "The outside line re-registered — inbound calling is back.",
+                  "Switchboard: outside line recovered", nid)
     except Exception:
         pass
     return status or "unknown"
@@ -1267,6 +1301,8 @@ def run() -> int:
     # measured_before deliberately does not. See summarize().
     ever_registered: set = load_ever_registered()
     while True:
+        # First, whatever Home Assistant refused on an earlier cycle.
+        _flush_notifications()
         opts = _load_options()
         names = room_names(opts)
         wired = wired_exts(opts)

@@ -295,9 +295,12 @@ def test_every_undelivered_record_goes_through_the_escalation():
     assert len(writes) == 1, (
         f"{len(writes)} places write an `undelivered` record; it must be written "
         f"only by _escalate(), which notifies before it returns")
-    body = code[code.index("def _escalate"):code.index("def _reconcile_rings")]
+    # _escalate's own body only: _card (the card, kept and retried if Home
+    # Assistant refuses it) is defined right after it, and its fallback line
+    # must not be what satisfies this check.
+    body = code[code.index("def _escalate"):code.index("def _card")]
     assert '_record(ext, "undelivered"' in body
-    assert "ha_client.push(" in body and "ha_client.notify(" in body
+    assert "ha_client.push(" in body and "_card(" in body
 
 
 def test_the_escalation_falls_back_to_a_card_when_the_push_fails(tmp_path):

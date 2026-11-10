@@ -1154,6 +1154,39 @@ def _publish_gateway_unknown(reason: str, gw_exts: list[str]) -> None:
     })
 
 
+_retry_missing_logged = False
+
+
+def _send(ha_client, message: str, title: str, nid: str) -> bool:
+    """Every alert this poller raises goes through here. The alert is raised once,
+    on a transition, so one Home Assistant refusal used to lose it for good
+    (2026-11-07: three alerts got a 502 while Core restarted after a host reboot).
+    notify_retry keeps a refused alert and run() re-posts it each cycle."""
+    global _retry_missing_logged
+    try:
+        import notify_retry
+    except ImportError as e:
+        if not _retry_missing_logged:
+            _retry_missing_logged = True
+            print(f"[devhealth] notify_retry unavailable ({e}); alerts are sent "
+                  "once, with no retry", flush=True)
+        return bool(ha_client.notify(message, title=title, notification_id=nid))
+    return notify_retry.send(ha_client, message, title, nid, tag="devhealth")
+
+
+def _flush_notifications() -> None:
+    """Re-post the alerts Home Assistant refused earlier (see _send)."""
+    try:
+        import ha_client
+        import notify_retry
+    except ImportError:
+        return
+    try:
+        notify_retry.flush(ha_client, tag="devhealth")
+    except Exception as e:  # noqa: BLE001 — never let a retry stop the poll
+        print(f"[devhealth] notification retry error: {e}", flush=True)
+
+
 def _notify(device: str, event: str, reasons: list[str]) -> None:
     if os.environ.get("DEVICE_HEALTH_ALERTS", "true").lower() in ("false", "0", "no"):
         return
@@ -1164,20 +1197,20 @@ def _notify(device: str, event: str, reasons: list[str]) -> None:
     nid = f"switchboard_{device}_health"
     label = "Cordless" if device == "cordless" else "GXW gateway"
     if event == "recovered":
-        ha_client.notify(f"{label} recovered — back to normal.",
-                         title=f"Switchboard: {label.lower()} OK", notification_id=nid)
+        _send(ha_client, f"{label} recovered — back to normal.",
+              f"Switchboard: {label.lower()} OK", nid)
     elif event == "stale-clear":
         # NOT "back to normal" -- nothing was re-measured. Say what actually
         # happened so the reader does not infer a fresh all-clear.
-        ha_client.notify(
-            f"The {label.lower()} alert cleared because its evidence aged out — "
-            "nothing new was measured. Treat the current state as unknown until "
-            "the next call.",
-            title=f"Switchboard: {label.lower()} alert lapsed", notification_id=nid)
+        _send(ha_client,
+              f"The {label.lower()} alert cleared because its evidence aged out — "
+              "nothing new was measured. Treat the current state as unknown until "
+              "the next call.",
+              f"Switchboard: {label.lower()} alert lapsed", nid)
     else:
         why = "; ".join(reasons) or event
         title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
-        ha_client.notify(f"{label} {event}: {why}", title=title, notification_id=nid)
+        _send(ha_client, f"{label} {event}: {why}", title, nid)
 
 
 def run() -> None:
@@ -1205,6 +1238,8 @@ def run() -> None:
           f"api={'yes' if cordless_pw else 'no-password'} "
           f"gateway_ports={','.join(gw_exts)} every {interval}s", flush=True)
     while True:
+        # First, whatever Home Assistant refused on an earlier cycle.
+        _flush_notifications()
         # --- cordless (IP auto-followed from its live SIP registration) ---
         probe_ip = resolve_cordless_ip(cordless_ext, cordless_ip)
         if probe_ip != last_ip:

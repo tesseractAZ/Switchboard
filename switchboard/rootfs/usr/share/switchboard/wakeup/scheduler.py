@@ -51,6 +51,10 @@ try:
     import ha_client  # noqa: E402  (surface a missed wake-up as an HA notification)
 except Exception:  # noqa: BLE001 — HA integration is optional; never break the loop
     ha_client = None
+try:
+    import notify_retry  # noqa: E402  (keep a card Home Assistant refused; see _card)
+except Exception:  # noqa: BLE001 — without it a card is sent once, as before
+    notify_retry = None
 
 POLL = int(os.environ.get("WAKEUP_POLL_SECONDS", "20"))
 RING = int(os.environ.get("WAKEUP_RING_SECONDS", "60"))
@@ -179,11 +183,32 @@ def _escalate(ext: str, hhmm: str, detail: str, reason: str, attempt: int) -> No
             log(f"could not push the undelivered wake-up: {exc}")
     if not pushed and ha_client is not None:
         # Fall back to the drawer card rather than losing the signal entirely.
+        # The card is kept and retried if Home Assistant refuses it (the push is
+        # not: an alarm-failed alert sounding an hour late is the wrong signal).
         try:
-            ha_client.notify(msg, title="Switchboard: wake-up not delivered",
-                             notification_id=f"switchboard_undelivered_wakeup_{ext}")
+            _card(msg, "Switchboard: wake-up not delivered",
+                  f"switchboard_undelivered_wakeup_{ext}")
         except Exception as exc:  # noqa: BLE001
             log(f"could not post the undelivered-wake-up card: {exc}")
+
+
+def _card(msg: str, title: str, nid: str) -> bool:
+    """A drawer card that survives Home Assistant being away: notify_retry keeps
+    it if refused and tick() re-posts it (_flush_cards). The scheduler starts
+    before Home Assistant Core, so a refusal is most likely right after a boot."""
+    if notify_retry is None:
+        return bool(ha_client.notify(msg, title=title, notification_id=nid))
+    return notify_retry.send(ha_client, msg, title, nid, tag="switchboard-wakeup")
+
+
+def _flush_cards() -> None:
+    """Re-post the cards Home Assistant refused earlier (see _card)."""
+    if ha_client is None or notify_retry is None:
+        return
+    try:
+        notify_retry.flush(ha_client, tag="switchboard-wakeup")
+    except Exception as exc:  # noqa: BLE001 — never let a retry stop the scheduler
+        log(f"could not retry kept notifications: {exc}")
 
 
 def _reconcile_rings(now: float) -> None:
@@ -933,6 +958,7 @@ def tick() -> None:
             _pending_missed[ext] = {"since": now,
                                     "message": _missed_message(ext, hhmm, late, not_running)}
     _flush_missed_notifications(now)
+    _flush_cards()
     if not fired:
         return
 
