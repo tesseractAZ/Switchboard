@@ -272,7 +272,10 @@ health** (each phone's registration and round-trip time, and the outside line),
 cordless's battery and Wi-Fi, and the gateway). The `*_alerts` options switch
 only the notifications; the sensors keep publishing. Turning
 `link_health_enabled` off also silences gateway health, the trunk sensor and the
-cordless half of device health, so leave it on unless you mean all of that.
+cordless half of device health, so leave it on unless you mean all of that. A
+link-health or device-health alert raised while Home Assistant is not answering
+(after a host reboot, for example) is kept and posted once it answers, for up to
+an hour.
 
 Full details: [Health monitoring & sensors](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/health-monitoring.md).
 
