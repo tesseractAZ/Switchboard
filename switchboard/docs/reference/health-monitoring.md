@@ -96,6 +96,17 @@ replaces the outage entry rather than dismissing it; the same replace-on-recover
 pattern is used by the trunk watchdog ([Registration resilience](sip-trunk.md#registration-resilience))
 and by device health below.
 
+A fleet that drops **between** two samples is caught from Asterisk's own log
+(the same half-the-fleet threshold, applied to the phones that went Unreachable
+since the last sample). If the drop has healed by the sample, one card says so
+at once: "all phones dropped briefly". If the sample still shows the phones
+down, the card waits for the next sample. Should the outage alert fire by then,
+it covers the event and the card is dropped; otherwise the card ("all phones
+dropped") says the phones were still unreachable at the first sample and how
+many were reachable at the next. Until v0.118.0 the card claimed "the phones
+are up now" even when its own sample showed them down: on 2026-11-02 (the
+gateway's weekly reboot, caught mid-reboot) and on 2026-11-07 (a router reboot).
+
 ## Per-call quality (`call_quality_alerts`)
 
 Every context that can carry audio writes a record to the ledger

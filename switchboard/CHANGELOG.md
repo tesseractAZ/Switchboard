@@ -3,6 +3,27 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.118.0
+
+**The "all phones dropped" card says only what its own sample shows.**
+
+- The link-health monitor also catches a fleet that drops between two samples,
+  from Asterisk's log. Its card said the phones "came back before the next
+  health check" and were "up now, not a current outage" whenever enough phones
+  had gone Unreachable since the last sample, without looking at the sample it
+  was judged on. Twice that sample showed them down: 2026-11-02 08:01 UTC, the
+  gateway's weekly reboot caught mid-reboot (8 wired ports down), and
+  2026-11-08 02:06 UTC, a router reboot (all 9 phones down). Both fleets were
+  back by the next sample.
+- A drop that has healed by the sample is still reported at once, as before.
+  A drop that still shows in the sample is now held for one sample. If the
+  outage alert fires by then, the card is dropped, so the event is not
+  reported twice. Otherwise the card, titled "all phones dropped", says the
+  phones were still unreachable at the first sample and how many were
+  reachable at the next. Suppressing the card instead would have reported
+  nothing for either event, since both healed before the outage alert's
+  second sample.
+
 ## 0.117.0
 
 **An alert Home Assistant could not accept is posted once it answers.**
