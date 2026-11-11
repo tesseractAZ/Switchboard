@@ -43,7 +43,7 @@ replacing message names the alerts that were never shown: the first, how many
 came between, and the latest three, each with its time. An alert that was
 dropped is still named by the next alert for the same device or line, for 12
 hours (the note gives a time of day, not a date). At most 20 alerts are kept;
-past that, one-off "all phones dropped briefly" cards are dropped first, so they
+past that, one-off "phones dropped" cards are dropped first, so they
 cannot push out the current state of a device or line. The queue is held in
 memory; an add-on restart starts it empty.
 
@@ -95,6 +95,26 @@ notification ("phones recovered") under the **same** `notification_id`, which
 replaces the outage entry rather than dismissing it; the same replace-on-recovery
 pattern is used by the trunk watchdog ([Registration resilience](sip-trunk.md#registration-resilience))
 and by device health below.
+
+A fleet that drops **between** two samples is caught from Asterisk's own log
+(the same half-the-fleet threshold, applied to the phones that went Unreachable
+since the last sample; the log is read just before each sample). The card is
+judged per phone against that sample:
+
+- every phone that dropped is reachable again: "phones dropped briefly" (or
+  "all phones dropped briefly" when every registered phone dropped), saying
+  they are up now;
+- some are still unreachable: "phones dropped", posted at once and naming them.
+  A later check replaces it under the same `notification_id`, saying who was
+  back and who, if anyone, still was not; "not a current outage" only once all
+  are back. If the phones stay down, the outage alert above can take over, and
+  the card says so when the outage threshold is met. A second drop while a card
+  is open gets its own card and its own update.
+
+Until v0.118.0 the card claimed "the phones are up now" whenever enough phones
+had dropped, even when its own sample showed them down: on 2026-11-02 01:01 MST
+(the gateway's weekly reboot, caught mid-reboot) and on 2026-11-07 19:06 MST (a
+router reboot).
 
 ## Per-call quality (`call_quality_alerts`)
 

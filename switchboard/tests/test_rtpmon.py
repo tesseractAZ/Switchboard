@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -1347,6 +1348,335 @@ def test_the_mass_drop_threshold_matches_the_point_sample_one() -> None:
         pt = pm.is_mass_outage({"total": 10, "unreachable": n})
         tr = pm.is_mass_drop(exts, {"total": 10, "unreachable": 0})
         check(f"mass-drop: the two detectors agree at n={n}", pt == tr)
+
+
+# The two times the between-samples card fired with the phones still down at the
+# sample, read from /share/switchboard/heartbeat.jsonl (counts and exts only).
+_WIRED8 = ["11", "12", "13", "14", "15", "16", "17", "18"]
+_ALL9 = _WIRED8 + ["19"]
+_HEALTHY = {"total": 10, "reachable": 9, "unreachable": 1, "unreachable_exts": ["20"],
+            "never_registered_exts": ["20"]}
+# 2026-11-02T08:01:00Z: the weekly GXW reboot sampled mid-reboot; 08:06:00Z all back.
+_GXW_REBOOT = {"total": 10, "reachable": 1, "unreachable": 9, "unreachable_exts": _WIRED8 + ["20"],
+               "never_registered_exts": ["20"]}
+# 2026-11-08T02:06:52Z: a router reboot after a host reboot; 02:11:52Z all back.
+_ROUTER_REBOOT = {"total": 10, "reachable": 0, "unreachable": 10, "unreachable_exts": _ALL9 + ["20"],
+                  "never_registered_exts": ["20"]}
+
+
+def _cards(went, summ, st, settled=True, now=1000.0):
+    return pm.mass_drop_reports(went, summ, st, settled, now)
+
+
+def test_a_drop_still_showing_in_the_sample_is_posted_as_down_then_updated() -> None:
+    """★ The card said "came back ... the phones are up now" while the very sample
+    it was judged on showed them down. Both real events now: a true card at the
+    first sample, replaced under the same id at the second."""
+    for name, down, went in (("11-02 GXW reboot", _GXW_REBOOT, _WIRED8),
+                             ("11-07 router reboot", _ROUTER_REBOOT, _ALL9)):
+        st = {"cycles": 1, "alerted": False}   # outage_transition ran: 1st down sample
+        first = _cards(went, down, st, now=1794103612.0)
+        check(f"{name}: one card at once, of kind 'down'",
+              [c["kind"] for c in first] == ["down"])
+        check(f"{name}: it names every dropped phone as still down",
+              first and first[0]["down"] == sorted(went))
+        check(f"{name}: it stays open for the next sample", "drop_card" in st)
+        st.update(cycles=0)                    # the next sample: all back
+        second = _cards([], _HEALTHY, st, now=1794103912.0)
+        check(f"{name}: the next sample updates it under the SAME id",
+              [c["kind"] for c in second] == ["update"]
+              and second[0]["nid"] == first[0]["nid"] and second[0]["still"] == [])
+        check(f"{name}: and closes it", "drop_card" not in st)
+
+
+def test_a_partial_recovery_is_never_called_healed() -> None:
+    """The review's case: all 8 wired drop, 5 come back, the sample shows 15, 17,
+    18 down (with ext 20, 4 < 5: below the fleet threshold). Judged per fleet it
+    read as healed; judged per phone it is not."""
+    tail = {"total": 10, "reachable": 6, "unreachable": 4,
+            "unreachable_exts": ["15", "17", "18", "20"]}
+    st = {"cycles": 0, "alerted": False}
+    out = _cards(_WIRED8, tail, st)
+    check("partial: not the healed card", [c["kind"] for c in out] == ["down"])
+    check("partial: names only the phones still down", out and out[0]["down"] == ["15", "17", "18"])
+    title, msg = pm.mass_drop_card(out[0], tail, 1300.0)
+    check("partial: no 'up now', no 'not a current outage'",
+          "up now" not in msg and "not a current outage" not in msg)
+    check("partial: no promise of an outage alert the threshold will not give",
+          "alert follows" not in msg)
+    check("partial: the text names who was still down, not all eight",
+          "3 of them were still unreachable" in msg and "(exts 15, 17, 18)" in msg)
+    st.update(cycles=0)
+    upd = _cards([], tail, st, now=1300.0)     # a stuck port: same three still down
+    check("stuck: updated at the next sample, naming who is still down",
+          [c["kind"] for c in upd] == ["update"] and upd[0]["still"] == ["15", "17", "18"])
+    _t, umsg = pm.mass_drop_card(upd[0], tail, 1300.0)
+    check("stuck: the update does not call it over", "not a current outage" not in umsg
+          and "15, 17, 18" in umsg)
+
+
+def test_an_open_card_belongs_to_the_outage_alert_if_that_fires() -> None:
+    st = {"cycles": 1, "alerted": False}
+    _cards(_ALL9, _ROUTER_REBOOT, st)
+    st.update(cycles=2, alerted=True)          # 2nd down sample: the outage alert fired
+    check("still down: no second mass-drop card beside the outage alert",
+          _cards([], _ROUTER_REBOOT, st) == [])
+    check("still down: the open card is closed, not updated later", "drop_card" not in st)
+    st = {"cycles": 1, "alerted": False}
+    _cards(_ALL9, _ROUTER_REBOOT, st)
+    st.update(cycles=2)                        # still a fleet outage, alert not yet met
+    check("still down, not yet alerted: the card stays open",
+          _cards([], _ROUTER_REBOOT, st) == [] and "drop_card" in st)
+
+
+def test_a_second_drop_while_a_card_is_open_leaves_neither_card_stale() -> None:
+    """The harness's orphan: card A open below the threshold, a second drop B on a
+    fleet-outage sample (A held), then a healthy sample: both must be updated."""
+    a_tail = {"total": 10, "reachable": 6, "unreachable": 4,
+              "unreachable_exts": ["15", "17", "18", "20"], "never_registered_exts": ["20"]}
+    big = {"total": 10, "reachable": 1, "unreachable": 9,
+           "unreachable_exts": _WIRED8 + ["20"], "never_registered_exts": ["20"]}
+    st = {"cycles": 0, "alerted": False}
+    a = _cards(_WIRED8, a_tail, st, now=1000.0)
+    st.update(cycles=1)
+    b = _cards(["11", "12", "13", "14", "16"], big, st, now=1300.0)
+    check("orphan: A held through the outage sample, B posted", [c["kind"] for c in b] == ["down"])
+    st.update(cycles=0)
+    upd = _cards([], _HEALTHY, st, now=1600.0)
+    check("orphan: BOTH open cards get their update, each under its own id",
+          sorted(c["nid"] for c in upd) == sorted([a[0]["nid"], b[0]["nid"]])
+          and all(c["kind"] == "update" and c["still"] == [] for c in upd))
+
+
+def test_a_cycle_with_no_sample_keeps_the_open_card() -> None:
+    st = {"cycles": 1, "alerted": False}
+    first = _cards(_ALL9, _ROUTER_REBOOT, st)
+    check("no sample: nothing judged", _cards([], None, st) == [])
+    check("no sample: the card stays open", "drop_card" in st)
+    st.update(cycles=0)
+    upd = _cards([], _HEALTHY, st, now=1600.0)
+    check("no sample: updated once a sample shows the fleet back",
+          [c["kind"] for c in upd] == ["update"] and upd[0]["nid"] == first[0]["nid"])
+
+
+def test_a_drop_that_healed_before_the_sample_is_still_reported_at_once() -> None:
+    st = {"cycles": 0, "alerted": False}
+    out = _cards(_WIRED8, _HEALTHY, st)
+    check("healed: sent at once as the 'briefly' card", [c["kind"] for c in out] == ["healed"])
+    check("healed: the 8 wired ports with the cordless up is not 'all phones'",
+          out and out[0]["all"] is False)
+    every = _cards(_ALL9, _HEALTHY, {"cycles": 0, "alerted": False})
+    check("healed: every registered phone (ext 20 never registered) is 'all phones'",
+          every and every[0]["all"] is True)
+    check("healed: nothing left open", "drop_card" not in st)
+    check("not settled: nothing", _cards(_WIRED8, _ROUTER_REBOOT, {"cycles": 0}, settled=False) == [])
+    st2 = {"cycles": 3, "alerted": True}
+    check("outage already alerted: a new drop is not reported again",
+          _cards(_ALL9, _ROUTER_REBOOT, st2) == [] and "drop_card" not in st2)
+    # The cycle the outage alert clears is judged like any other: a mass drop
+    # counted there is a real second drop (recovering phones log only Reachable
+    # lines), and its card is true.
+    redrop = _cards(_ALL9, _HEALTHY, {"cycles": 0, "alerted": False})
+    check("the clearing cycle: a real second drop is still reported",
+          [c["kind"] for c in redrop] == ["healed"])
+
+
+def test_each_card_says_only_what_is_true_when_it_is_sent() -> None:
+    t1, t2 = 1794103612.0, 1794103912.0
+    hhmm = lambda ts: time.strftime("%H:%M", time.localtime(ts))  # noqa: E731
+    base = {"nid": "n", "exts": _ALL9, "at": t1}
+    down = {**base, "kind": "down", "down": _ALL9, "still": _ALL9}
+    title, msg = pm.mass_drop_card(down, _ROUTER_REBOOT, t1)
+    check("down card: says they were still unreachable at this check",
+          title == "Switchboard: phones dropped"
+          and f"all were still unreachable at the {hhmm(t1)} health check" in msg)
+    check("down card: promises the outage alert only when the threshold is met",
+          "alert follows" in msg)
+    check("down card: never claims a recovery", "up now" not in msg and "came back" not in msg)
+    upd = {**base, "kind": "update", "down": _ALL9, "still": []}
+    _t, umsg = pm.mass_drop_card(upd, _HEALTHY, t2)
+    check("update, all back: both check times and the stakes",
+          f"By the {hhmm(t2)} check all were reachable again" in umsg and "911" in umsg)
+    healed = {**base, "kind": "healed", "exts": _WIRED8, "down": [], "still": [], "all": False}
+    title_b, brief = pm.mass_drop_card(healed, _HEALTHY, t2)
+    check("healed card, the cordless stayed up: not 'all', not 'nothing was reachable'",
+          title_b == "Switchboard: phones dropped briefly" and "up now" in brief
+          and "Nothing was reachable" not in brief and "on them would have failed" in brief)
+    every = {**healed, "exts": _ALL9, "all": True}
+    title_all, all_msg = pm.mass_drop_card(every, _HEALTHY, t2)
+    check("healed card, every registered phone: 'all' and 'nothing was reachable'",
+          title_all == "Switchboard: all phones dropped briefly" and "Nothing was reachable" in all_msg
+          and all_msg.endswith("not a current outage."))
+    _t, on_outage = pm.mass_drop_card(every, _ROUTER_REBOOT, t2)
+    check("healed card on a fleet-outage sample: no 'not a current outage'",
+          "not a current outage" not in on_outage)
+    one = {**base, "kind": "down", "exts": _WIRED8, "down": ["15"], "still": ["15"]}
+    _t, one_msg = pm.mass_drop_card(one, _HEALTHY, t1)
+    check("one phone: singular, and the promise allows for the outage alert",
+          "1 of them was still unreachable" in one_msg
+          and "updated at a later check, unless a 'phones unreachable' alert takes over" in one_msg)
+    worst = {**base, "kind": "update", "down": ["15", "16", "17", "18"], "still": ["15", "17", "18"]}
+    longest = max(len(pm.mass_drop_card(c, _ROUTER_REBOOT, t2)[1]) for c in (down, upd, healed, worst))
+    # notify_retry adds a ~95-character "Sent late" note inside a 500 limit.
+    check("every card leaves room for a late note", longest <= 400)
+
+
+def _drive_samples(samples, alerts=True):
+    """run() over len(samples) cycles with the REAL outage_transition. Each sample
+    is (summ, transitions); cycle 0 is warm-up. Returns (title, message) posts."""
+    import types
+    notes = []
+    ha = types.ModuleType("ha_client")
+    ha.notify = lambda msg, **kw: notes.append((kw.get("title", ""), msg)) or True
+    ha.set_state = lambda *a, **k: True
+
+    class _Stop(Exception):
+        pass
+    n = {"c": 0}
+
+    def _sleep(_):
+        n["c"] += 1
+        if n["c"] >= len(samples):
+            raise _Stop
+
+    def _poll(*a, **k):
+        summ = samples[min(n["c"], len(samples) - 1)][0]
+        down = set(summ.get("unreachable_exts", []))
+        phones = [{"ext": e, "reachable": e not in down, "rtt_ms": 5.0, "name": e} for e in _ALL9]
+        return phones, summ
+
+    keys = ("_load_options", "room_names", "wired_exts", "poll_once", "_append_history",
+            "_publish", "_heartbeat", "trunk_enabled", "endpoint_transitions", "warmup_done")
+    saved = {k: getattr(pm, k) for k in keys}
+    real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
+    try:
+        sys.modules["ha_client"] = ha
+        pm._load_options = lambda: {"link_health_alerts": alerts}
+        pm.room_names = lambda o: {}
+        pm.wired_exts = lambda o: list(_WIRED8)
+        pm.poll_once = _poll
+        pm._append_history = lambda p: None
+        pm._publish = lambda p, s: None
+        pm._heartbeat = lambda *a, **k: None
+        pm.trunk_enabled = lambda o: False
+        pm.endpoint_transitions = lambda: samples[min(n["c"], len(samples) - 1)][1]
+        pm.warmup_done = lambda *a, **k: True
+        pm.time.sleep = _sleep
+        try:
+            pm.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+        pm.time.sleep = real_sleep
+        if real_ha is None:
+            sys.modules.pop("ha_client", None)
+        else:
+            sys.modules["ha_client"] = real_ha
+    return notes
+
+
+def test_the_real_loop_reports_the_11_07_drop_truthfully() -> None:
+    drop = [{"ext": e, "state": "Unreachable"} for e in _ALL9]
+    notes = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_HEALTHY, [])])
+    check("loop: a 'down' card at the drop, then its update",
+          [t for t, _m in notes] == ["Switchboard: phones dropped"] * 2)
+    first = notes[0][1] if notes else ""
+    last = notes[-1][1] if notes else ""
+    check("loop: neither claims the drop healed before a sample",
+          "up now" not in first and "up now" not in last)
+    check("loop: the update says all were back", "all were reachable again" in last)
+
+
+def test_the_real_loop_leaves_a_lasting_outage_to_the_outage_alert() -> None:
+    drop = [{"ext": e, "state": "Unreachable"} for e in _ALL9]
+    notes = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, [])])
+    check("lasting: the down card, then the outage alert, and no update",
+          [t for t, _m in notes] == ["Switchboard: phones dropped", "Switchboard: phones unreachable"])
+    notes_off = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_HEALTHY, [])], alerts=False)
+    check("lasting: the opt-out silences every mass-drop card", notes_off == [])
+
+
+def test_the_real_loop_after_an_outage_judges_the_clearing_cycle_like_any_other() -> None:
+    """Recovering phones log only Reachable lines (the 11-07 recovery window: nine
+    Reachable, no Unreachable): the clearing cycle raises no card of its own. A
+    real second drop in that window is reported, as the old code did."""
+    drop = [{"ext": e, "state": "Unreachable"} for e in _ALL9]
+    back = [{"ext": e, "state": "Reachable"} for e in _ALL9]
+    notes = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, []),
+                            (_HEALTHY, back)])
+    check("clearing: down card, outage alert, recovery, and nothing else",
+          [t for t, _m in notes] == ["Switchboard: phones dropped", "Switchboard: phones unreachable",
+                                     "Switchboard: phones recovered"])
+    redrop = back + drop + back
+    notes2 = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, []),
+                             (_HEALTHY, redrop)])
+    check("clearing: a real second drop healed by the sample is reported",
+          [t for t, _m in notes2][-1:] == ["Switchboard: phones dropped briefly"]
+          or [t for t, _m in notes2][-1:] == ["Switchboard: all phones dropped briefly"])
+
+
+def test_the_log_is_harvested_before_the_sample_that_judges_it() -> None:
+    """A drop logged after the sample would count as dropped yet read as
+    reachable: the harvest must come first in every cycle."""
+    import types
+    order = []
+
+    class _Stop(Exception):
+        pass
+    n = {"c": 0}
+
+    def _sleep(_):
+        n["c"] += 1
+        if n["c"] >= 2:
+            raise _Stop
+    ha = types.ModuleType("ha_client")
+    ha.notify = lambda *a, **k: True
+    ha.set_state = lambda *a, **k: True
+    keys = ("_load_options", "room_names", "wired_exts", "poll_once", "_append_history",
+            "_publish", "_heartbeat", "trunk_enabled", "endpoint_transitions", "warmup_done")
+    saved = {k: getattr(pm, k) for k in keys}
+    real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
+    try:
+        sys.modules["ha_client"] = ha
+        pm._load_options = lambda: {"link_health_alerts": False}
+        pm.room_names = lambda o: {}
+        pm.wired_exts = lambda o: list(_WIRED8)
+        pm.poll_once = lambda *a, **k: (order.append("sample") or
+                                        ([{"ext": e, "reachable": True, "rtt_ms": 5.0, "name": e}
+                                          for e in _ALL9], _HEALTHY))
+        pm._append_history = lambda p: None
+        pm._publish = lambda p, s: None
+        pm._heartbeat = lambda *a, **k: None
+        pm.trunk_enabled = lambda o: False
+        pm.endpoint_transitions = lambda: order.append("harvest") or []
+        pm.warmup_done = lambda *a, **k: True
+        pm.time.sleep = _sleep
+        try:
+            pm.run()
+        except _Stop:
+            pass
+    finally:
+        for k, v in saved.items():
+            setattr(pm, k, v)
+        pm.time.sleep = real_sleep
+        if real_ha is None:
+            sys.modules.pop("ha_client", None)
+        else:
+            sys.modules["ha_client"] = real_ha
+    check("order: harvest, then sample, every cycle", order == ["harvest", "sample"] * 2)
+
+
+def test_the_real_loop_never_calls_a_partial_recovery_healed() -> None:
+    drop = [{"ext": e, "state": "Unreachable"} for e in _WIRED8]
+    tail = {"total": 10, "reachable": 6, "unreachable": 4,
+            "unreachable_exts": ["15", "17", "18", "20"]}
+    notes = _drive_samples([(_HEALTHY, []), (tail, drop), (_HEALTHY, [])])
+    check("loop partial: no 'briefly' card while three dropped phones are down",
+          all(t != "Switchboard: all phones dropped briefly" for t, _m in notes))
+    check("loop partial: the update lands when they are back",
+          notes and "all were reachable again" in notes[-1][1])
 
 
 def test_the_detector_actually_reaches_a_notification() -> None:

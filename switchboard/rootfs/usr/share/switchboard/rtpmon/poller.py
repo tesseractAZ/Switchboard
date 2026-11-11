@@ -378,6 +378,126 @@ def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
     return total > 0 and n >= max(OUTAGE_MIN_PORTS, (total + 1) // 2)
 
 
+def _down_now(summ: dict) -> set:
+    """The phones this sample shows as not reachable (failing or de-registered)."""
+    return set(summ.get("unreachable_exts") or []) | set(summ.get("offline_exts") or [])
+
+
+def mass_drop_reports(went: list, summ: dict | None, st: dict, settled: bool,
+                      now: float) -> list:
+    """The between-samples detector's cards for this cycle, as dicts:
+    {"kind", "nid", "exts", "down", "at", "still"}.
+
+      healed  every phone that dropped is reachable in this sample;
+      down    some of them are not: they are named, and the card is kept open
+              in st["drop_card"] so the next sample can update it;
+      update  the next sample's verdict on an open card, posted under the SAME
+              notification_id so Home Assistant replaces it: who was back, and
+              who (if anyone) still was not.
+
+    ★ THE CARD WAS FALSE. It said the phones "came back before the next health
+    check ... are up now ... not a current outage" whenever enough phones had
+    gone Unreachable since the last sample, without looking at the sample.
+    Twice that sample showed them down: 2026-11-02 01:01 MST (08:01 UTC), the
+    weekly GXW reboot caught mid-reboot (8 wired ports down), and 2026-11-07
+    19:06 MST (02:06 UTC on 11-08), a router reboot (all 9 phones down). Both
+    fleets were back by the next sample. A per-FLEET check is not enough: ports
+    re-register one at a time (qualify every 60 s), so a sample can show one to
+    three of the dropped phones still down with the fleet below the outage
+    threshold. Every claim on the card is therefore judged per PHONE against
+    this sample.
+
+    The open card is not a hold: it is posted at once, so nothing waits in
+    memory for an add-on restart to lose; the restart only loses the update.
+    If the point-sample outage alert fires meanwhile (st["alerted"]), the open
+    card is left as posted: its text allows for that alert taking over. A cycle
+    with no sample (summ None, AMI down) judges nothing and keeps the open
+    cards. The cycle in which the outage alert clears is judged like any other:
+    phones recovering from an outage log only Reachable lines (the 11-07
+    recovery window: nine Reachable, no Unreachable), so a mass drop counted
+    there is a real second drop, and excluding the outage's phones from it
+    lost true reports."""
+    if summ is None:
+        return []
+    down_now = _down_now(summ)
+    out = []
+    # A LIST: a second drop can arrive while an earlier card is still open (held
+    # through a fleet-outage sample), and each card must get its own update.
+    open_cards = st.get("drop_card") or []
+    if open_cards:
+        if st.get("alerted"):
+            del st["drop_card"]
+        elif not is_mass_outage(summ):
+            del st["drop_card"]
+            out += [{**c, "kind": "update", "still": sorted(set(c["exts"]) & down_now)}
+                    for c in open_cards]
+    fresh = sorted(went)
+    if is_mass_drop(fresh, summ) and settled and not st.get("alerted"):
+        still = sorted(set(fresh) & down_now)
+        registered = summ.get("total", 0) - len(summ.get("never_registered_exts") or [])
+        card = {"nid": f"switchboard_mass_drop_{int(now)}", "exts": fresh,
+                "down": still, "at": now, "still": still,
+                "all": registered > 0 and len(fresh) >= registered}
+        if still:
+            st.setdefault("drop_card", []).append(card)
+            out.append({**card, "kind": "down"})
+        else:
+            out.append({**card, "kind": "healed"})
+    return out
+
+
+def mass_drop_card(card: dict, summ: dict, now: float) -> tuple[str, str]:
+    """(title, message) for a mass_drop_reports card. Every sentence is true at
+    the moment it is posted, about each phone it names."""
+    hhmm = lambda ts: time.strftime("%H:%M", time.localtime(ts))  # noqa: E731
+    were = lambda n: "was" if n == 1 else "were"  # noqa: E731
+    exts, down = card["exts"], card["down"]
+    names = lambda xs: ", ".join(xs)  # noqa: E731
+    stakes = "an incoming call, a wake-up or a 911 dial would have failed"
+    if card["kind"] == "healed":
+        # "All" and "nothing was reachable" only when every registered phone is
+        # in the drop: the threshold is half the fleet, and a phone that stayed
+        # up (often the cordless, which the outside line rings) kept working.
+        # "Not a current outage" only when this sample is not one.
+        tail = ("this is a warning about the gateway or its uplink"
+                + ("" if is_mass_outage(summ) else ", not a current outage") + ".")
+        if card.get("all"):
+            return ("Switchboard: all phones dropped briefly",
+                    f"All {len(exts)} phones dropped their SIP registration at once "
+                    f"and came back before the next health check (exts "
+                    f"{names(exts)}). Nothing was reachable while it lasted — "
+                    f"{stakes}. The phones are up now; {tail}")
+        return ("Switchboard: phones dropped briefly",
+                f"{len(exts)} phones dropped their SIP registration at once and came "
+                f"back before the next health check (exts {names(exts)}). While they "
+                f"were down, an incoming call, a wake-up or a 911 dial on them would "
+                f"have failed. They are up now; {tail}")
+    head = f"{len(exts)} phones dropped their SIP registration at once (exts {names(exts)})"
+    at1 = (f"all were still unreachable at the {hhmm(card['at'])} health check"
+           if down == exts else
+           f"{len(down)} of them {were(len(down))} still unreachable at the "
+           f"{hhmm(card['at'])} health check (exts {names(down)})")
+    if card["kind"] == "down":
+        return ("Switchboard: phones dropped",
+                f"{head}; {at1}. While they are down, an incoming call, a wake-up "
+                f"or a 911 dial on them fails. "
+                + ("If they stay down, a 'phones unreachable' alert follows instead; "
+                   "otherwise this card is updated at the next check."
+                   if is_mass_outage(summ) else
+                   "This card is updated at a later check, unless a 'phones "
+                   "unreachable' alert takes over."))
+    still = card["still"]
+    if not still:
+        return ("Switchboard: phones dropped",
+                f"{head}; {at1}. By the {hhmm(now)} check all were reachable again. "
+                f"While they were down, {stakes}. This is a warning about the gateway "
+                f"or its uplink, not a current outage.")
+    return ("Switchboard: phones dropped",
+            f"{head}; {at1}. At the {hhmm(now)} check {len(still)} {were(len(still))} "
+            f"still unreachable (exts {names(still)}); calls to and from them fail until "
+            f"they re-register. This is a warning about the gateway or its uplink.")
+
+
 _retry_missing_logged = False
 
 
@@ -413,32 +533,24 @@ def _flush_notifications() -> None:
         sys.stderr.write(f"switchboard-rtpmon: notification retry error: {e}\n")
 
 
-def _notify_mass_drop(went_unreachable: list, summ: dict) -> None:
-    """Report a fleet-wide drop that had already recovered by sample time.
+def _notify_mass_drop(card: dict, summ: dict, now: float | None = None) -> None:
+    """Post a mass_drop_reports card.
 
-    Deliberately the drawer card and not the audible push: by the time this
-    fires the phones are back, so it is a diagnostic about a gateway or uplink
-    that dropped every registration at once, not an emergency. A drop that is
-    STILL down at sample time is the point-sample detector's job, and that one
-    escalates; this must not double-report it.
-
-    The notification_id carries the timestamp, so a second event days later does
-    not silently overwrite the first one nobody has read yet.
+    Deliberately the drawer card and not the audible push: a drop that is still
+    in effect is the point-sample detector's to escalate, and that one alerts;
+    this is a diagnostic about a gateway or uplink that dropped every
+    registration at once. Each event gets its own notification_id (it carries
+    the event's time), so a second event days later does not overwrite the
+    first one nobody has read yet; the update for an event reuses its id, so it
+    REPLACES that event's card.
     """
     try:
         import ha_client
     except Exception:
         return
-    exts = ", ".join(went_unreachable)
-    msg = (f"All {len(went_unreachable)} of these phones dropped their SIP "
-           f"registration at once and came back before the next health check "
-           f"(exts {exts}). Nothing was reachable while it lasted — an incoming "
-           f"call, a wake-up or a 911 dial would have failed. The phones are up "
-           f"now; this is a warning about the gateway or its uplink, not a "
-           f"current outage.")
+    title, msg = mass_drop_card(card, summ, time.time() if now is None else now)
     try:
-        _send(ha_client, msg, "Switchboard: all phones dropped briefly",
-              f"switchboard_mass_drop_{int(time.time())}", episodic=True)
+        _send(ha_client, msg, title, card["nid"], episodic=True)
     except Exception:
         pass
 
@@ -1306,7 +1418,17 @@ def run() -> int:
         opts = _load_options()
         names = room_names(opts)
         wired = wired_exts(opts)
+        # ★ THE BETWEEN-SAMPLES DETECTOR's harvest comes BEFORE the sample, so
+        # every drop it counts was logged before the sample that judges it. After
+        # the sample, a dozen sensor pushes can take seconds each, and a phone
+        # dropping then would count as dropped yet read as reachable in a sample
+        # taken before it: the "healed" card would be wrong about it. Harvested
+        # once per cycle, so both the heartbeat record and the cards read the
+        # same list -- endpoint_transitions() advances a byte watermark, so
+        # whoever calls it first is the only caller that sees anything.
+        trans = endpoint_transitions()
         phones, summ = poll_once(names, wired, measured_before, ever_registered)
+        sampled_at = time.time()  # the "HH:MM health check" the cards cite
         if phones:
             measured_before |= {p["ext"] for p in phones
                                 if p["reachable"] and p["rtt_ms"] is not None}
@@ -1326,11 +1448,7 @@ def run() -> int:
             event = outage_transition(summ, outage_st, settled)
             if event and opts.get("link_health_alerts", True):
                 _notify_outage(event, summ)
-        # ★ THE BETWEEN-SAMPLES DETECTOR. Harvested here, once per cycle, so
-        # both the heartbeat record and the alert below read the same list --
-        # endpoint_transitions() advances a byte watermark, so whoever calls it
-        # first is the only caller that sees anything.
-        trans = endpoint_transitions()
+        # ★ THE BETWEEN-SAMPLES DETECTOR (`trans` was harvested before the sample).
         # ★ PHONES ONLY. `trans` also carries the outside line — the rows after a
         # restart can open with {"ext": "trunk", "state": "Reachable"} (one of two
         # restarts on 2026-10-14; the other logged it before this process's first
@@ -1345,17 +1463,19 @@ def run() -> int:
         fleet = {p["ext"] for p in (phones or [])}
         went = sorted({t["ext"] for t in trans
                        if t["state"] == "Unreachable" and t["ext"] in fleet})
-        if (phones is not None and is_mass_drop(went, summ) and settled
-                and not outage_st.get("alerted")):
-            # `not alerted` is what keeps this from double-reporting an outage
-            # that is still in effect: that one is the point-sample detector's,
-            # and it escalates. This card is for the drop that already healed --
-            # the case no sample could ever have seen.
-            sys.stderr.write(
-                f"switchboard-rtpmon: ALL PHONES DROPPED between samples and "
-                f"recovered — exts {', '.join(went)}\n")
+        # Judged per phone against this sample (see mass_drop_reports);
+        # outage_transition() above has already advanced outage_st.
+        for card in mass_drop_reports(went, summ if phones is not None else None,
+                                      outage_st, settled, sampled_at):
+            what = {"healed": "between samples and recovered",
+                    "down": "and are still down at this sample: "
+                            + ", ".join(card["down"]),
+                    "update": "earlier; still down now: "
+                              + (", ".join(card["still"]) or "none")}[card["kind"]]
+            sys.stderr.write(f"switchboard-rtpmon: PHONES DROPPED {what} — exts "
+                             f"{', '.join(card['exts'])}\n")
             if opts.get("link_health_alerts", True):
-                _notify_mass_drop(went, summ)
+                _notify_mass_drop(card, summ, now=sampled_at)
         trunk_status = None
         if trunk_enabled(opts):
             trunk_status = _trunk_check(trunk_st, settled,
