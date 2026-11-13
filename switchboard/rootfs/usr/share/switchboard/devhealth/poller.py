@@ -797,7 +797,8 @@ def classify_cordless(snap: dict, th: dict,
     `snap["sip_unregistered_samples"]` is how many consecutive distinct rollup
     samples have shown it unregistered (note_registration): False counts only
     from the REGISTRATION_MIN_SAMPLES-th, so a handset rebooting inside one
-    sample raises nothing. Absent (direct callers), False counts at once.
+    sample raises no registration critical (its LAN probe, when it has an IP,
+    can still read unreachable). Absent (direct callers), False counts at once.
     `uptime_s` is this service's age: inside GATEWAY_STARTUP_GRACE_S an
     unregistered cordless may still be re-registering after a restart (38-53 s
     after Asterisk is ready, and the rollup has shown it offline for over five
@@ -900,12 +901,13 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
     rather than a critical "the gateway lost power" claim.
 
     `cordless_dropped_too`: the cordless, which is on Wi-Fi and not on the
-    gateway, went down within one rollup of the ports (dropped_together). Then
-    the critical names the Switchboard host or the network, not the gateway
-    (2026-11-12: the host moved to a new address, every phone dropped, and this
-    said the GXW "likely lost power or its uplink"). A cordless merely down in
-    the same rollup is not enough: one asleep half an hour before the gateway
-    lost power did not drop with it. "Down", not "unregistered": the rollup's
+    gateway, went down with the ports or one rollup after them
+    (dropped_together). Then the critical names the Switchboard host or the
+    network, not the gateway (2026-11-12: the host moved to a new address,
+    every phone dropped, and this said the GXW "likely lost power or its
+    uplink"). A cordless merely down in the same rollup is not enough: one
+    asleep half an hour before the gateway lost power, or gone a sample
+    before it, did not drop with it. "Down", not "unregistered": the rollup's
     list also holds ports that are still registered but fail their qualify."""
     if not gw_exts:
         return "ok", []
@@ -1199,12 +1201,20 @@ def note_down_run(run: dict, down: bool | None, at: float) -> None:
 
 
 def dropped_together(cordless_run: dict, ports_run: dict, interval_s: float) -> bool:
-    """The cordless's down run and the ports' all-down run began within one
-    rollup of each other (`interval_s`, rtpmon's poll interval, with half an
-    interval for jitter): what a router restart or a host address change does
-    to both paths at once. Both starts must have been seen."""
+    """The cordless's down run began on the rollup sample where every port was
+    first down, or on the next one (`interval_s`, rtpmon's poll interval, with
+    half an interval for jitter): what a router restart or a host address
+    change does to both paths at once. Both starts must have been seen. Two
+    runs that began on one sample carry its one `measured_at`.
+
+    The window is one-sided, as rtpmon's outage_cause_is_host is: there the
+    cordless must be up in the sample before the outage and down by the one
+    that confirms it. The first version allowed a rollup either way, so a
+    cordless that left the Wi-Fi a sample BEFORE the gateway lost power had
+    this alert name the host or the network while rtpmon's card and push
+    named the gateway."""
     c, p = cordless_run.get("since"), ports_run.get("since")
-    return c is not None and p is not None and abs(c - p) <= 1.5 * interval_s
+    return c is not None and p is not None and 0 <= c - p <= 1.5 * interval_s
 
 
 def resolve_cordless_ip(cordless_ext: str, fallback_ip: str) -> str:
@@ -1485,7 +1495,20 @@ def run() -> None:
                 snap["sip_registered"] = registered
                 snap["sip_unregistered_samples"] = unregistered_samples
                 level, reasons = classify_cordless(snap, th, time.monotonic() - _started)
-                _publish_cordless(level, reasons, snap, th)
+                # An outstanding alert is neither raised nor cleared while
+                # registration is unknown (no usable rollup) and the alert
+                # rests on it: the LAN probe alone cannot say the cordless can
+                # ring again. Nor is any alert cleared while this cycle's
+                # rollup has the cordless unregistered: 'ok' then means only
+                # that one sample is below the registration gate (or inside the
+                # startup grace), and a second would make it critical again.
+                held = bool(cst.get("alerted")) and (
+                    (registered is None and UNREGISTERED_REASON in (cst.get("reasons") or []))
+                    or (level == "ok" and registered is False))
+                # With nothing probed such a cycle measured nothing at all, so
+                # its 'ok' is not published over the alert either.
+                if probe_ip or not held:
+                    _publish_cordless(level, reasons, snap, th)
                 # Every low handset score goes on the record, judged or skipped.
                 # Its own guard: a capture failure must never cost the alert
                 # state machine below its cycle.
@@ -1503,11 +1526,6 @@ def run() -> None:
                 # Judged on the reasons of the last unhealthy cycle: only a poor
                 # call can lapse without a new measurement (clear_is_fresh).
                 fresh = clear_is_fresh(cst.get("reasons"), call_end, prev_end)
-                # An outstanding registration alert is neither raised nor
-                # cleared while registration is unknown (no usable rollup):
-                # the LAN probe alone cannot say the cordless can ring again.
-                held = (registered is None and cst.get("alerted")
-                        and UNREGISTERED_REASON in (cst.get("reasons") or []))
                 if level != "ok" and not held:
                     cst["reasons"] = list(reasons)
                     if call_end is not None:
@@ -1541,9 +1559,10 @@ def run() -> None:
                 except (TypeError, ValueError):
                     rollup_interval = 300.0
                 # The cause is decided when the critical fires: the cordless
-                # dropping within one rollup of every port points past the
-                # gateway. A cause learned later is not re-sent (the cordless
-                # dropping one rtpmon sample after the ports, say), because
+                # dropping on the sample where every port went down, or the
+                # next one, points past the gateway. A cause learned later is
+                # not re-sent (the cordless dropping one rtpmon sample after
+                # the ports, read after the critical fired, say), because
                 # health_transition fires again only when the level rises.
                 level, reasons = classify_gateway(
                     down, gw_exts, time.monotonic() - _started,

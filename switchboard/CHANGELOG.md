@@ -33,13 +33,17 @@ Recent releases. Releases up to 0.109.0 are in the
 - Cordless health reads the cordless's SIP registration off the link-health
   rollup: unregistered on two consecutive rollup samples read after the 360 s
   startup grace is `critical`, even with no IP to probe. A reboot inside one
-  sample, or a rollup that cannot say, raises nothing. The sensor gains
+  sample, or a rollup that cannot say, raises no registration alert; the LAN
+  probe can still report a rebooting handset unreachable. The sensor gains
   `sip_registered`. A cleared registration, reachability, battery or Wi-Fi
-  alert now reads as a recovery, not "alert lapsed".
+  alert now reads as a recovery, not "alert lapsed". No cordless alert clears
+  while the newest sample shows the handset unregistered, and with nothing to
+  probe, such a cycle does not publish `ok` over the alert.
 - When every gateway port and the cordless drop together, the outage,
   mass-drop and gateway alerts name the Switchboard host or the network
-  rather than the gateway. A port still up, a cordless that was already down,
-  or a drop healed before the next sample keeps the gateway wording.
+  rather than the gateway. A port still up, a cordless that was already down
+  (even one sample before the ports), or a drop healed before the next sample
+  keeps the gateway wording.
 - `link_health` reads `unavailable` when no phone that should be up is
   reachable, and `wired_link_health` when no gateway port is; `unknown` now
   means only reachable but not yet measured. Units and `state_class` do not

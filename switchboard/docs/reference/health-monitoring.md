@@ -317,13 +317,14 @@ Covers the two blind spots the above can't see:
 - The **GXW gateway**'s port health, derived from the link-health rollup →
   `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
   lost power or its uplink. All wired ports down **with the cordless having
-  dropped within one rollup of them** = more likely the Switchboard host or the
-  network, since the cordless is on Wi-Fi, not on the gateway, and the alert
-  says so. A cordless that was already down well before the ports, or one whose
-  drop the monitor did not see (it was down at the monitor's first reading),
-  keeps the gateway wording. The cause is decided when the alert fires; the
-  wording says "ports down", not "unregistered", because the rollup's down list
-  also holds ports that are still registered but fail their qualify.
+  dropped in the same rollup sample or the next one** = more likely the
+  Switchboard host or the network, since the cordless is on Wi-Fi, not on the
+  gateway, and the alert says so. A cordless that was already down before the
+  ports, even one sample before, or one whose drop the monitor did not see (it
+  was down at the monitor's first reading), keeps the gateway wording. The
+  cause is decided when the alert fires; the wording says "ports down", not
+  "unregistered", because the rollup's down list also holds ports that are
+  still registered but fail their qualify.
 
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless
@@ -335,18 +336,24 @@ since the handset takes up to a minute to re-register after a restart. Samples
 are counted, not this monitor's cycles: by default it runs every 120 s against
 a rollup published every 300 s, so two of its cycles usually read one sample
 twice, and a WP826 firmware auto-upgrade reboot takes about two to four minutes,
-which one sample can catch and two cannot. The alert goes out on the first read
-of the second sample, and the registration reason clears on the first sample
-that shows the handset registered. `sip_registered` reads `false` from the
-first such sample, while the state can still be `ok`. No usable rollup, a blank
-`cordless_ext`, or an extension that has never registered is *unknown*, which
-raises nothing; it restarts the count when no alert is out, and an outstanding
-registration alert is not cleared while it is unknown. Before v0.119.0 nothing
-read registration: on 2026-11-12 the cordless was unregistered with every other
-phone and read `ok` throughout, because its network and admin API still
-answered. It is judged even with nothing to probe (`cordless_ip` blank and no
-live `contact_ip`, the case for an unregistered handset); `reachable` then
-reads `null`, not `false`.
+which one sample can catch and two cannot. The LAN probe keeps its own gate of
+two cycles, so a handset with an IP to probe can still read unreachable through
+such a reboot. The alert goes out on the first read of the second sample, and
+the registration reason clears on the first sample that shows the handset
+registered. No cordless alert, whatever its reason,
+clears while the newest sample shows the handset unregistered: one that answers
+on the LAN again a sample before it re-registers keeps its alert until a sample
+shows it registered. With nothing to probe, such a cycle publishes nothing
+rather than an `ok` it did not measure. `sip_registered` reads `false` from the
+first unregistered sample, while the state can still be `ok`. No usable rollup,
+a blank `cordless_ext`, or an extension that has never registered is *unknown*,
+which raises nothing; it restarts the count when no alert is out, and an
+outstanding registration alert is not cleared while it is unknown. Before
+v0.119.0 nothing read registration: on 2026-11-12 the cordless was unregistered
+with every other phone and read `ok` throughout, because its network and admin
+API still answered. It is judged even with nothing to probe (`cordless_ip`
+blank and no live `contact_ip`, the case for an unregistered handset);
+`reachable` then reads `null`, not `false`.
 
 Both use a 2-cycle hysteresis so a transient blip doesn't alert, apart from the
 cordless's registration, which has its two samples instead; a worsening from
