@@ -1679,6 +1679,15 @@ def test_the_real_loop_raises_nothing_for_the_cordless_without_a_rollup() -> Non
           stale_notes == [] and notes == []
           and not any(e == "sensor.switchboard_cordless_health" for e, _s, _a in stale_sets))
 
+    def malformed(cycle, clk):
+        return {"measured_at": _iso(max(clk.time() - 5, clk.start_wall)),
+                "poll_interval_s": 300, "unreachable_exts": [], "offline_exts": 5}
+    bad_sets, bad_notes = _drive_loop(malformed, cycles=3, interval=200,
+                                      env={"CORDLESS_EXT": "19"})
+    gw = [st for e, st, _a in bad_sets if e == "sensor.switchboard_gateway_health"]
+    check("loop B: a malformed rollup reads as none: the loop runs on, gateway unknown",
+          gw == ["unknown"] * 3 and bad_notes == [])
+
 
 def test_unknown_registration_neither_clears_nor_raises_a_registration_alert() -> None:
     """The LAN probe alone cannot say the cordless can ring again: while the

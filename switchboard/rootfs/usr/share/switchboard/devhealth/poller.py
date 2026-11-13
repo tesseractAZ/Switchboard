@@ -1366,8 +1366,12 @@ def run() -> None:
         # CURRENT wall clock each cycle, from the monotonic one, so a
         # wall-clock step after start cannot make every fresh rollup look
         # older than this process and hold the sensor at 'unknown'.
-        rollup = read_rollup(not_before=time.time() - (time.monotonic() - _started))
-        registered = cordless_registration(rollup, cordless_ext)
+        try:
+            rollup = read_rollup(not_before=time.time() - (time.monotonic() - _started))
+            registered = cordless_registration(rollup, cordless_ext)
+        except Exception as e:  # a malformed rollup reads as no rollup
+            print(f"[devhealth] link-health rollup error: {e}", flush=True)
+            rollup, registered = None, None
         # --- cordless (IP auto-followed from its live SIP registration) ---
         probe_ip = resolve_cordless_ip(cordless_ext, cordless_ip)
         if probe_ip != last_ip:
