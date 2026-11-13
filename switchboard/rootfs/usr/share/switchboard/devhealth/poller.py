@@ -1538,10 +1538,18 @@ def run() -> None:
                 held = bool(cst.get("alerted")) and (
                     (registered is None and UNREGISTERED_REASON in (cst.get("reasons") or []))
                     or (level == "ok" and registered is False))
-                # With nothing probed such a cycle measured nothing at all, so
-                # its 'ok' is not published over the alert either.
+                # With nothing probed such a cycle measured only the
+                # registration, so its 'ok' is not published over the alert
+                # either. The last judged level and reasons stay on the sensor
+                # (cst, unhealthy while an alert is out), beside what this
+                # cycle did read, sip_registered false and reachable null, with
+                # a fresh stamp. Publishing nothing left the previous cycle's
+                # sip_registered true, and reachable false from a probe of an
+                # address the unregistered handset no longer had.
                 if probe_ip or not held:
                     _publish_cordless(level, reasons, snap, th)
+                else:
+                    _publish_cordless(cst["level"], list(cst.get("reasons") or []), snap, th)
                 # Every low handset score goes on the record, judged or skipped.
                 # Its own guard: a capture failure must never cost the alert
                 # state machine below its cycle.

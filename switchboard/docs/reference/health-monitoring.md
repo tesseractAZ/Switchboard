@@ -347,10 +347,13 @@ the registration reason clears on the first sample that shows the handset
 registered. No cordless alert, whatever its reason,
 clears while the newest sample shows the handset unregistered: one that answers
 on the LAN again a sample before it re-registers keeps its alert until a sample
-shows it registered. With nothing to probe, such a cycle publishes nothing
-rather than an `ok` it did not measure. `sip_registered` reads `false` from the
-first unregistered sample, while the state can still be `ok`. No usable rollup,
-a blank `cordless_ext`, or an extension that has never registered is *unknown*,
+shows it registered. With nothing to probe, such a cycle publishes the level
+and reasons of the last cycle judged unhealthy rather than an `ok` it did not
+measure, beside its own readings: `sip_registered` `false` and `reachable`
+`null`.
+`sip_registered` reads `false` from the first unregistered sample, while the
+state can still be `ok`. No usable rollup, a blank `cordless_ext`, or an
+extension that has never registered is *unknown*,
 which raises nothing; it restarts the count when no alert is out, and an
 outstanding registration alert is not cleared while it is unknown. Before
 v0.119.0 nothing read registration: on 2026-11-12 the cordless was unregistered

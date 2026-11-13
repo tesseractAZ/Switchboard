@@ -1999,10 +1999,13 @@ _POOR_CALL = {**_HEALTHY_SNAP, "last_mos": 2.2, "last_mos_age_s": 30,
               "last_mos_ledger_tx": "impaired"}
 
 
-def _phased_cordless(phases, interval=200):
+def _phased_cordless(phases, interval=200, period=None, cycles=None):
     """The real loop with cordless_ip blank (the default) and ext 19's IP
     followed from the contact_ip rtpmon publishes for it, which an unregistered
-    handset does not have. Each read is a fresh rollup sample. phases[c]:
+    handset does not have. Each read is a fresh rollup sample, unless `period`
+    (rtpmon's) is given: then sample k is measured `period` seconds after
+    sample k - 1 and read by every cycle until the next, phases[k] is that
+    sample's, and `cycles` cycles run. phases[c]:
       up       registered, LAN and API healthy;
       unreach  registered but failing its qualify (an 'Unavail' contact), and
                its LAN probe answers nothing;
@@ -2011,35 +2014,41 @@ def _phased_cordless(phases, interval=200):
     Returns the cordless's (state, attrs) publishes per cycle (None for a
     cycle that published nothing) and its notifications."""
     clk = _Clock()
+    cycles = cycles or len(phases)
 
-    def phase(cycle):
-        return phases[min(cycle, len(phases) - 1)]
+    def sample():
+        # The loop's clock moves only in its sleep, by `interval`.
+        since = clk.mono - clk.start_mono
+        return int(since // period) if period else int(round(since / interval))
 
-    def rollup(cycle, _clk):
-        p = phase(cycle)
+    def phase():
+        return phases[min(sample(), len(phases) - 1)]
+
+    def rollup(_cycle, _clk):
+        p = phase()
         down = p in ("offline", "unreach")
-        return {"measured_at": _iso(max(clk.time() - 5, clk.start_wall)),
-                "poll_interval_s": 300,
+        return {"measured_at": _iso(clk.start_wall + period * sample() if period
+                                    else max(clk.time() - 5, clk.start_wall)),
+                "poll_interval_s": period or 300,
                 "unreachable_exts": ["19"] if down else [],
                 "offline_exts": ["19"] if p == "offline" else [],
                 "never_registered_exts": [],
                 "other_rtt_ms": {} if down else {"19": 9.1}}
 
     def probe(ip, pw, pin, cordless_ext=""):
-        # The loop's clock moves only in its sleep, by `interval`.
-        p = phase(int(round((clk.mono - clk.start_mono) / interval)))
+        p = phase()
         if p == "unreach":
             return {"reachable": False, "api_ok": False}
         return dict(_POOR_CALL if p == "badcall" else _HEALTHY_SNAP)
 
-    def contact(cycle, _clk):
-        return None if phase(cycle) == "offline" else "192.0.2.19"
-    sets, notes = _drive_loop(rollup, cycles=len(phases), interval=interval, clock=clk,
+    def contact(_cycle, _clk):
+        return None if phase() == "offline" else "192.0.2.19"
+    sets, notes = _drive_loop(rollup, cycles=cycles, interval=interval, clock=clk,
                               probe=probe, contact_at=contact,
                               env={"CORDLESS_EXT": "19"})
     # The gateway is published once at the end of every cycle, after the
     # cordless.
-    per_cycle: list = [None] * len(phases)
+    per_cycle: list = [None] * cycles
     cycle = 0
     for e, st, a in sets:
         if e == "sensor.switchboard_cordless_health":
@@ -2062,8 +2071,8 @@ def test_an_open_cordless_alert_is_not_cleared_by_a_cycle_with_nothing_probed() 
           and "unreachable" in notes[0][1])
     check("nothing probed: one alert, then one recovery once it is registered again",
           [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
-    check("nothing probed: the cycle that measured nothing publishes no fresh 'ok'",
-          per[4] is None)
+    check("nothing probed: the cycle that probed nothing publishes the alert, not an 'ok'",
+          _held(per[4], "critical", "unreachable"))
     check("nothing probed: the second unregistered sample reads critical, the return ok",
           per[5] and per[5][0] == "critical" and per[6] and per[6][0] == "ok")
     # A poor-call 'degraded' alert open when the handset unregisters: its
@@ -2075,6 +2084,8 @@ def test_an_open_cordless_alert_is_not_cleared_by_a_cycle_with_nothing_probed() 
                                      "Switchboard: cordless CRITICAL",
                                      "Switchboard: cordless OK"])
     check("nothing probed: ...to the registration reason", "not registered" in notes[1][1])
+    check("nothing probed: the cycle between keeps the poor-call alert on the sensor",
+          _held(per[4], "degraded", dh.MOS_REASON))
     # The registration CRITICAL, then a sample with the handset registered but
     # failing its qualify (the count restarts, the LAN keeps the alert open),
     # then unregistered again on one sample.
@@ -2082,7 +2093,51 @@ def test_an_open_cordless_alert_is_not_cleared_by_a_cycle_with_nothing_probed() 
                                    "up"])
     check("nothing probed: an 'Unavail' sample between does not unlock a false recovery",
           [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
-          and per[5] is None and per[6] and per[6][0] == "ok")
+          and _held(per[5], "critical", "unreachable") and per[6] and per[6][0] == "ok")
+    # The 'unreachable' CRITICAL, then a cycle that reads only a poor call
+    # (degraded, below the alert, so nothing is sent), then one unregistered
+    # sample: the sensor keeps what it last read, not the alert's level.
+    per, notes = _phased_cordless(["up", "unreach", "unreach", "badcall", "offline", "offline",
+                                   "up"])
+    check("nothing probed: precondition — one CRITICAL and its recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
+          and per[3] and per[3][0] == "degraded")
+    check("nothing probed: the held cycle keeps the last unhealthy cycle's level and reason",
+          _held(per[4], "degraded", dh.MOS_REASON))
+
+
+def _held(published, level, reason):
+    """A cycle that held an open alert with nothing to probe: the last judged
+    level and reason stay on the sensor, beside that cycle's own readings, the
+    handset unregistered and not probed."""
+    if not published:
+        return False
+    state, attrs = published
+    return (state == level and any(reason in r for r in attrs.get("reasons") or [])
+            and attrs.get("sip_registered") is False and attrs.get("reachable") is None)
+
+
+def test_a_held_cycle_with_nothing_probed_publishes_what_it_read() -> None:
+    """A held cycle with nothing to probe published nothing, so for up to one
+    sample the sensor kept sip_registered true, and reachable false from a
+    probe of an address the unregistered handset no longer had, while the
+    rollup had it offline. At the default cadence (120 s against a 300 s
+    rollup): the handset fails its qualify and its probe on sample 2, which
+    raises 'unreachable', and is unregistered from sample 3."""
+    per, notes = _phased_cordless(["up", "up", "unreach", "offline"], interval=120,
+                                  period=300, cycles=12)
+    check("held: precondition — one CRITICAL, 'unreachable'",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"]
+          and "unreachable" in notes[0][1])
+    check("held: precondition — the CRITICAL was read registered and unreachable",
+          per[7] and per[7][0] == "critical" and per[7][1].get("sip_registered") is True
+          and per[7][1].get("reachable") is False)
+    check("held: both reads of the first unregistered sample publish it, under the alert",
+          _held(per[8], "critical", "unreachable") and _held(per[9], "critical", "unreachable"))
+    check("held: ...each with a fresh stamp", per[9][1].get("measured_at")
+          and per[9][1].get("measured_at") != per[8][1].get("measured_at"))
+    check("held: the second sample reads critical on the registration reason",
+          _held(per[10], "critical", "not registered"))
 
 
 def test_an_open_cordless_alert_is_not_cleared_while_the_rollup_has_it_unregistered() -> None:
