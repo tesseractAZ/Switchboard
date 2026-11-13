@@ -3,6 +3,39 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.119.0
+
+**A phone-system outage reaches the phone, and its alerts name what is down.**
+
+- On 2026-11-12 the host moved to a new address at 18:28 MST (01:28 UTC on
+  11-13) and all nine phones were unregistered from 18:31. Every alert was a
+  silent notification card. The outage card counted "10 of 10", including
+  ext 20, which has never registered; the gateway alert said the GXW had
+  likely lost power; cordless health read `ok` throughout; and both
+  link-health rollups read `unknown`.
+- The fleet-outage alert and its recovery are also pushed to
+  `wakeup_push_target` ("phones down", "phones back"): ordinary pushes, not
+  critical ones, and not retried. The key is unchanged; its label is now
+  "Phone Push Target". `link_health_alerts: false` silences the push too.
+- The outage latch is kept in `/data/state`, so an add-on restart during an
+  outage does not raise or push it a second time, and its recovery still
+  comes.
+- Extensions that have never registered no longer count toward the outage
+  threshold or appear in its text ("9 of 9"). `link_health` gains `expected`
+  and `never_registered_exts` attributes.
+- Cordless health reads the cordless's SIP registration off the link-health
+  rollup. Unregistered past the 360 s startup grace is `critical`, even with
+  no IP to probe; a rollup that cannot say is unknown and raises nothing. The
+  sensor gains `sip_registered`. A cleared registration, reachability,
+  battery or Wi-Fi alert now reads as a recovery, not "alert lapsed".
+- When the gateway ports and the cordless are down together, the outage,
+  mass-drop and gateway alerts name the Switchboard host or the network
+  rather than the gateway.
+- `link_health` reads `unavailable` when no phone that should be up is
+  reachable, and `wired_link_health` when no gateway port is; `unknown` now
+  means only reachable but not yet measured. Units and `state_class` do not
+  change.
+
 ## 0.118.0
 
 **The "phones dropped" card says only what is true of each phone it names.**
