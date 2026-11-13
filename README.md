@@ -177,11 +177,13 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   ports down reads as the gateway losing power or its uplink, or, when the
   cordless dropped with them, as the Switchboard host or the network.
 - **WP826 cordless.** The monitor reads the handset's battery, WiFi signal and its
-  own MOS for the last call, and its SIP registration: an unregistered cordless
-  cannot ring and reads critical. A low MOS from the handset marks it degraded only
-  when the PBX's record of the same call corroborates it. The cordless's IP
+  own MOS for the last call, and its SIP registration: a cordless unregistered on
+  two link-health samples in a row cannot ring and reads critical, so a reboot
+  inside one sample raises nothing. A low MOS from the handset marks it degraded
+  only when the PBX's record of the same call corroborates it. The cordless's IP
   address is followed automatically when it changes.
-- **Two-cycle hysteresis** applies on both devices. A worsening from degraded to
+- **Two-cycle hysteresis** applies on both devices, apart from the cordless's
+  registration, which has its two samples instead. A worsening from degraded to
   critical alerts again, and a recovery notice closes the episode.
 - **Speech engine.** The dashboard and console probe the resident whisper.cpp
   server and read the result against the configuration. A server idled on purpose

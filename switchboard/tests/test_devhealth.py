@@ -1646,14 +1646,15 @@ def _reg_rollup(offline_19, ports_down=False, stale=False):
 
 def test_the_real_loop_raises_and_clears_an_unregistered_cordless() -> None:
     """Through run(), with nothing to probe (cordless_ip blank, no contact_ip):
-    the registration-only path publishes, alerts after the grace and two
-    cycles, and reports the re-registration as a recovery, not a lapse."""
+    the registration-only path publishes, alerts on the second unregistered
+    sample read after the grace (each read here is a new sample), and reports
+    the re-registration as a recovery, not a lapse."""
     sets, notes = _drive_loop(_reg_rollup(lambda c: c < 4), cycles=6, interval=200,
                               env={"CORDLESS_EXT": "19"})
     cl = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
     check("loop B: the cordless is published every cycle with nothing to probe", len(cl) == 6)
-    check("loop B: inside the grace, ok; past it, critical; back, ok",
-          [st for st, _a in cl] == ["ok", "ok", "critical", "critical", "ok", "ok"])
+    check("loop B: inside the grace, ok; one sample past it, still ok; two, critical; back, ok",
+          [st for st, _a in cl] == ["ok", "ok", "ok", "critical", "ok", "ok"])
     check("loop B: sip_registered tracks the rollup",
           [a.get("sip_registered") for _st, a in cl] == [False] * 4 + [True] * 2)
     check("loop B: LAN reachability is unknown, not False",
@@ -1737,13 +1738,162 @@ def test_a_blind_cycle_neither_unlocks_a_false_all_clear_nor_counts_toward_an_al
           cl[4] == "critical" and cl[5] == "ok")
     check("hold: no all-clear while registration is unknown",
           [t for t, _m in notes if "cordless" in t] == ["Switchboard: cordless CRITICAL"])
-    # Unregistered on cycles 2 and 4 (past the grace) with a blind cycle 3
-    # between: two unregistered cycles, but not consecutive ones.
-    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (0, 1, 2, 4), stale=lambda c: c == 3),
-                            cycles=5, interval=200, probe=lambda *a, **k: dict(_HEALTHY_SNAP),
-                            env=env)
+    # Unregistered in the samples of cycles 2 and 4 (past the grace) with a
+    # blind cycle 3 between: two unregistered samples, but not consecutive ones.
+    blind = _reg_rollup(lambda c: c in (2, 4), stale=lambda c: c == 3)
+    _s, notes = _drive_loop(blind, cycles=5, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
     check("hold: a blind cycle before the alert resets the count",
           [t for t, _m in notes if "cordless" in t] == [])
+    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (2, 4)), cycles=5, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
+    check("hold: a registered sample between resets it too",
+          [t for t, _m in notes if "cordless" in t] == [])
+    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (2, 4, 5), stale=lambda c: c == 3),
+                            cycles=6, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
+    check("hold: control — two fresh samples in a row after the blind cycle raise it",
+          [t for t, _m in notes if "cordless" in t] == ["Switchboard: cordless CRITICAL"])
+
+
+def test_the_registration_count_is_by_distinct_rollup_sample() -> None:
+    note, MIN = dh.note_registration, dh.REGISTRATION_MIN_SAMPLES
+    check("count: two samples", MIN == 2)
+    st = {}
+    check("count: the first unregistered sample counts one", note(st, False, 1000.0) == 1)
+    check("count: the same sample read again does not count again",
+          note(st, False, 1000.0) == 1 and note(st, False, 1000.0) == 1)
+    check("count: the next sample counts two", note(st, False, 1300.0) == 2)
+    check("count: a registered sample resets it", note(st, True, 1600.0) == 0)
+    check("count: ...and a later loss starts again from one", note(st, False, 1900.0) == 1)
+    check("count: unknown below the minimum resets it",
+          note(st, None, None) == 0 and note(st, False, 2200.0) == 1)
+    st = {}
+    note(st, False, 1000.0)
+    note(st, False, 1300.0)
+    check("count: unknown at the minimum keeps it (the alert is held)",
+          note(st, None, None) == 2 and note(st, False, 1300.0) == 2)
+    check("count: the sample after the blind cycle counts on", note(st, False, 1600.0) == 3)
+    st = {}
+    check("count: a rollup with no stamp never counts",
+          note(st, False, None) == 0 and note(st, False, None) == 0)
+    st = {}
+    check("count: ...nor after a stamped one",
+          note(st, False, 1000.0) == 1 and note(st, False, None) == 1)
+    snap = {**_HEALTHY_SNAP, "sip_registered": False}
+    check("count: one sample is not enough for the critical",
+          dh.classify_cordless({**snap, "sip_unregistered_samples": 1}, TH,
+                               uptime_s=_PAST_GRACE) == ("ok", []))
+    check("count: two are",
+          dh.classify_cordless({**snap, "sip_unregistered_samples": 2}, TH,
+                               uptime_s=_PAST_GRACE)[0] == "critical")
+    check("count: one sample beside an unreachable LAN names only the LAN",
+          dh.classify_cordless({"reachable": False, "api_ok": False, "sip_registered": False,
+                                "sip_unregistered_samples": 1}, TH, uptime_s=_PAST_GRACE)
+          == ("critical", ["cordless unreachable (alarm/announce endpoint offline)"]))
+
+
+def _sampled_rollup(offline_in, period=300, stale=None):
+    """rtpmon's rollup as Home Assistant holds it: sample k is measured `period`
+    seconds after sample k - 1 (sample 0 in this process's start second) and
+    stays until the next, so a 120 s poller reads most samples two or three
+    times. `offline_in(k)`: ext 19 unregistered in sample k. `stale(cycle)`: no
+    usable rollup on that read."""
+    def at(cycle, clk):
+        k = int((clk.time() - clk.start_wall) // period)
+        off = offline_in(k)
+        is_stale = stale(cycle) if stale else False
+        return {"measured_at": _iso(clk.start_wall + period * k - (5000 if is_stale else 0)),
+                "poll_interval_s": period,
+                "unreachable_exts": (["19"] if off else []) + ["20"],
+                "offline_exts": (["19"] if off else []) + ["20"],
+                "never_registered_exts": ["20"],
+                "other_rtt_ms": None if off else {"19": 9.1}}
+    return at
+
+
+def _cordless_at_cadence(offline_in, cycles, stale=None, probed=False):
+    """The real loop at the default 120 s against a 300 s rollup: the
+    cordless's published states, its sip_registered attribute, and its
+    notification titles and texts. `probed`: a handset with an IP whose LAN
+    probe always reads healthy, so the cordless is published on a blind read."""
+    env = {"CORDLESS_EXT": "19"}
+    if probed:
+        env["CORDLESS_IP"] = "192.0.2.1"
+    sets, notes = _drive_loop(_sampled_rollup(offline_in, stale=stale), cycles=cycles,
+                              interval=120, env=env,
+                              probe=(lambda *a, **k: dict(_HEALTHY_SNAP)) if probed else None)
+    cl = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
+    return ([st for st, _a in cl], [a.get("sip_registered") for _st, a in cl],
+            [(t, m) for t, m in notes if "cordless" in t])
+
+
+def test_a_handset_rebooting_inside_one_sample_raises_nothing() -> None:
+    """A WP826 firmware auto-upgrade reboots it at 01:00 for two to four
+    minutes. One 300 s sample catches it; this poller reads that sample two or
+    three times, and two of its own cycles used to make the CRITICAL."""
+    # Reads at 0, 120, ... s; sample k covers [300k, 300k + 300). Sample 2 is
+    # read at 600, 720 and 840 s, all past the 360 s grace.
+    states, reg, notes = _cordless_at_cadence(lambda k: k == 2, cycles=10)
+    check("reboot: precondition — the unregistered sample was read three times",
+          reg.count(False) == 3)
+    check("reboot: nothing is raised", notes == [])
+    check("reboot: the sensor stays ok throughout, with the rollup's reading beside it",
+          states == ["ok"] * 10 and reg[5:8] == [False, False, False])
+
+
+def test_a_registration_lost_on_two_samples_is_critical_until_a_fresh_one_clears_it() -> None:
+    states, _reg, notes = _cordless_at_cadence(lambda k: k in (2, 3), cycles=11)
+    check("two samples: critical from the first read of the second sample (960 s), "
+          "and back with the next sample (1200 s)",
+          states == ["ok"] * 8 + ["critical", "critical", "ok"])
+    check("two samples: one CRITICAL, then a recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
+    check("two samples: the recovery is a recovery",
+          len(notes) == 2 and "back to normal" in notes[1][1])
+    _s, _r, early = _cordless_at_cadence(lambda k: k in (2, 3), cycles=9)
+    check("two samples: the CRITICAL goes out on that first read, not a cycle later",
+          [t for t, _m in early] == ["Switchboard: cordless CRITICAL"])
+    # Unregistered from the start: inside the 360 s grace nothing counts, so the
+    # two samples are the ones read after it (300 s at 360 s, 600 s at 600 s).
+    states, _reg, notes = _cordless_at_cadence(lambda k: True, cycles=7)
+    check("grace: nothing counts inside it; the second sample read after it is critical",
+          states == ["ok"] * 5 + ["critical", "critical"]
+          and [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"])
+    # A blind read while the alert is out holds it, though the LAN probe alone
+    # reads ok, and re-reading the sample that raised it does not clear it.
+    states, reg, notes = _cordless_at_cadence(lambda k: k in (2, 3), cycles=11,
+                                              stale=lambda c: c == 9, probed=True)
+    check("hold: precondition — the blind read published ok off the LAN probe",
+          reg[9] is None and states[9] == "ok")
+    check("hold: a blind read neither clears nor repeats the alert",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
+          and states[8] == "critical" and states[10] == "ok")
+    states, _reg, notes = _cordless_at_cadence(lambda k: k in (2, 3, 4), cycles=11,
+                                               stale=lambda c: c == 9, probed=True)
+    check("hold: still unregistered after the blind read -> still critical, no recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"] and states[10] == "critical")
+
+
+def test_only_a_registration_loss_skips_the_two_cycle_gate() -> None:
+    """The registration CRITICAL has its own gate (two samples); every other
+    reason still needs two consecutive cycles, as before."""
+    def flaky(bad):
+        calls = {"n": 0}
+
+        def probe(ip, pw, pin, cordless_ext=""):
+            c = calls["n"]
+            calls["n"] += 1
+            return {"reachable": False, "api_ok": False} if c in bad else dict(_HEALTHY_SNAP)
+        return probe
+    env = {"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"}
+    for bad, want in (({6}, []), ({6, 7}, ["Switchboard: cordless CRITICAL",
+                                            "Switchboard: cordless OK"])):
+        _s, notes = _drive_loop(_sampled_rollup(lambda k: False), cycles=9, interval=120,
+                                probe=flaky(bad), env=env)
+        check(f"gate: unreachable on the LAN for {len(bad)} cycle(s) -> "
+              f"{'an alert' if want else 'nothing'}",
+              [t for t, _m in notes if "cordless" in t] == want)
 
 
 def _gateway_critical(offline_19, ports_down, cycles, stale=False):

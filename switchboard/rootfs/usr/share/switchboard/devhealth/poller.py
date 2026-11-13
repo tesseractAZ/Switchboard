@@ -770,6 +770,15 @@ def _tcp_open(ip: str, port: int, timeout: float = 3.0) -> bool:
 MOS_REASON = "last call quality poor"
 UNREGISTERED_REASON = ("not registered with Switchboard — it cannot ring "
                        "(alarm/announce endpoint offline)")
+# The registration critical needs the cordless unregistered in this many
+# consecutive rtpmon SAMPLES, told apart by their `measured_at`
+# (note_registration), all read after the startup grace. Counting this
+# poller's own cycles was not the same thing: by default it runs every 120 s
+# against a rollup published every 300 s, so its two cycles usually read one
+# sample twice. A WP826 firmware auto-upgrade reboots the handset at 01:00 for
+# about two to four minutes, which one sample can catch and two cannot, since
+# two samples are 300 s apart.
+REGISTRATION_MIN_SAMPLES = 2
 
 
 def classify_cordless(snap: dict, th: dict,
@@ -785,6 +794,10 @@ def classify_cordless(snap: dict, th: dict,
     anything. Before v0.119.0 nothing here read registration at all: on
     2026-11-12 every phone was unregistered from 18:31:04 MST and the cordless
     read 'ok' throughout, because its LAN and admin API still answered.
+    `snap["sip_unregistered_samples"]` is how many consecutive distinct rollup
+    samples have shown it unregistered (note_registration): False counts only
+    from the REGISTRATION_MIN_SAMPLES-th, so a handset rebooting inside one
+    sample raises nothing. Absent (direct callers), False counts at once.
     `uptime_s` is this service's age: inside GATEWAY_STARTUP_GRACE_S an
     unregistered cordless may still be re-registering after a restart (38-53 s
     after Asterisk is ready, and the rollup has shown it offline for over five
@@ -795,6 +808,8 @@ def classify_cordless(snap: dict, th: dict,
     probe): its LAN reachability and API are unknown, not 'unreachable'."""
     reasons: list[str] = []
     unregistered = (snap.get("sip_registered") is False
+                    and snap.get("sip_unregistered_samples", REGISTRATION_MIN_SAMPLES)
+                    >= REGISTRATION_MIN_SAMPLES
                     and (uptime_s is None or uptime_s >= GATEWAY_STARTUP_GRACE_S))
     if (snap.get("reachable") is not None and not snap.get("reachable")
             and not snap.get("api_ok")):
@@ -1138,6 +1153,33 @@ def rollup_measured_at(attrs: dict | None) -> float | None:
     return when.timestamp()
 
 
+def note_registration(st: dict, registered: bool | None,
+                      measured_at: float | None) -> int:
+    """Count the consecutive distinct rollup samples that show the cordless
+    unregistered, and return the count (see REGISTRATION_MIN_SAMPLES).
+
+    `st` carries {"n": the count, "at": the `measured_at` of the newest sample
+    counted}. A sample is told from the last one by its `measured_at`, so a
+    rollup read again on a later cycle counts once; one with no stamp never
+    advances the count. A sample showing it registered resets the count: that
+    is the recovery, and it is always a fresh sample. Unknown registration (no
+    usable rollup) resets a count that has not yet reached the minimum, so the
+    samples on either side of a blind cycle are not taken for consecutive
+    ones; a count at the minimum is kept, and run() holds the alert it raised
+    until a fresh sample says either way."""
+    n = st.get("n", 0)
+    if registered is None:
+        if n < REGISTRATION_MIN_SAMPLES:
+            st["n"], st["at"] = 0, None
+        return st.get("n", 0)
+    if registered:
+        st["n"], st["at"] = 0, measured_at
+        return 0
+    if measured_at is not None and measured_at != st.get("at"):
+        st["n"], st["at"] = n + 1, measured_at
+    return st.get("n", 0)
+
+
 def note_down_run(run: dict, down: bool | None, at: float) -> None:
     """Keep when a device's current down run began, by rollup time.
 
@@ -1394,6 +1436,9 @@ def run() -> None:
     th = _thresholds()
     cst: dict = {}
     gst: dict = {}
+    # Consecutive distinct rollup samples showing the cordless unregistered
+    # (note_registration).
+    reg_st: dict = {}
     # When the cordless's down run and the ports' all-down run began, by rollup
     # time, for the gateway alert's cause (see dropped_together).
     runs: dict = {"cordless": {}, "ports": {}}
@@ -1418,6 +1463,11 @@ def run() -> None:
         except Exception as e:  # a malformed rollup reads as no rollup
             print(f"[devhealth] link-health rollup error: {e}", flush=True)
             rollup, registered = None, None
+        # Inside the startup grace a reading counts for nothing, so the samples
+        # behind a registration CRITICAL are all read after it.
+        in_grace = time.monotonic() - _started < GATEWAY_STARTUP_GRACE_S
+        unregistered_samples = note_registration(
+            reg_st, None if in_grace else registered, rollup_measured_at(rollup))
         # --- cordless (IP auto-followed from its live SIP registration) ---
         probe_ip = resolve_cordless_ip(cordless_ext, cordless_ip)
         if probe_ip != last_ip:
@@ -1433,6 +1483,7 @@ def run() -> None:
                 snap = (probe_cordless(probe_ip, cordless_pw, cordless_cert_pin, cordless_ext)
                         if probe_ip else {"reachable": None, "api_ok": False})
                 snap["sip_registered"] = registered
+                snap["sip_unregistered_samples"] = unregistered_samples
                 level, reasons = classify_cordless(snap, th, time.monotonic() - _started)
                 _publish_cordless(level, reasons, snap, th)
                 # Every low handset score goes on the record, judged or skipped.
@@ -1461,7 +1512,13 @@ def run() -> None:
                     cst["reasons"] = list(reasons)
                     if call_end is not None:
                         cst["mos_call_end"] = call_end
-                ev = "" if held else health_transition(level, cst, fresh_evidence=fresh)
+                # A registration loss has already passed its own gate, two
+                # distinct rollup samples, so it is not made to wait for a
+                # second cycle here as well: that cycle usually re-reads the
+                # same sample, which adds no evidence.
+                ev = "" if held else health_transition(
+                    level, cst, min_cycles=1 if UNREGISTERED_REASON in reasons else 2,
+                    fresh_evidence=fresh)
                 if ev:
                     if ev == "stale-clear":
                         cst.pop("mos_call_end", None)

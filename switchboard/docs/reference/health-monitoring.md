@@ -324,19 +324,29 @@ Covers the two blind spots the above can't see:
 
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless
-is not registered when it is in the rollup's `offline_exts`; that reads
-CRITICAL ("not registered with Switchboard — it cannot ring") once the monitor
-has been running 360 s, the gateway's startup grace, since the handset takes up
-to a minute to re-register after a restart. No usable rollup, a blank
+is not registered when it is in the rollup's `offline_exts`. That reads
+CRITICAL ("not registered with Switchboard — it cannot ring") once two
+consecutive link-health samples show it, told apart by their `measured_at`, and
+both read after the monitor has been running 360 s, the gateway's startup grace,
+since the handset takes up to a minute to re-register after a restart. Samples
+are counted, not this monitor's cycles: by default it runs every 120 s against
+a rollup published every 300 s, so two of its cycles usually read one sample
+twice, and a WP826 firmware auto-upgrade reboot takes about two to four minutes,
+which one sample can catch and two cannot. The alert goes out on the first read
+of the second sample, and the registration reason clears on the first sample
+that shows the handset registered. `sip_registered` reads `false` from the
+first such sample, while the state can still be `ok`. No usable rollup, a blank
 `cordless_ext`, or an extension that has never registered is *unknown*, which
-raises nothing, and an outstanding registration alert is not cleared while it is
-unknown. Before v0.119.0 nothing read registration: on 2026-11-12 the cordless
-was unregistered with every other phone and read `ok` throughout, because its
-network and admin API still answered. It is judged even with nothing to probe
-(`cordless_ip` blank and no live `contact_ip`, the case for an unregistered
-handset); `reachable` then reads `null`, not `false`.
+raises nothing; it restarts the count when no alert is out, and an outstanding
+registration alert is not cleared while it is unknown. Before v0.119.0 nothing
+read registration: on 2026-11-12 the cordless was unregistered with every other
+phone and read `ok` throughout, because its network and admin API still
+answered. It is judged even with nothing to probe (`cordless_ip` blank and no
+live `contact_ip`, the case for an unregistered handset); `reachable` then
+reads `null`, not `false`.
 
-Both use a 2-cycle hysteresis so a transient blip doesn't alert; a worsening from
+Both use a 2-cycle hysteresis so a transient blip doesn't alert, apart from the
+cordless's registration, which has its two samples instead; a worsening from
 degraded to critical alerts again. Both post a recovery notice when they return
 to normal, again under that device's shared `notification_id`, so the recovery
 replaces the alert rather than removing it. For the cordless, a clear is
@@ -405,7 +415,7 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 
 | Sensor | What it tells you |
 |--------|-------------------|
-| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). `sip_registered` is its SIP registration per the link-health rollup (`true`/`false`, or `null` when unknown); `reachable` is the handset answering on the network (HTTPS or its admin API), `null` when there was nothing to probe. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
+| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). `sip_registered` is its SIP registration per the latest link-health rollup (`true`/`false`, or `null` when unknown; the state turns `critical` only on two `false` samples in a row); `reachable` is the handset answering on the network (HTTPS or its admin API), `null` when there was nothing to probe. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 | `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but never drive this sensor. They are also exempt from the one-way-audio check, because their one-directional shape would trip it by design. Since v0.104.0 a poor line under one of them (low MES, loss or latency) raises an ordinary call-quality card like any other leg, while a clip that was merely cut short stays quiet. The exception to that silence is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |

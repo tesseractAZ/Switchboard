@@ -30,10 +30,11 @@ Recent releases. Releases up to 0.109.0 are in the
   threshold or appear in its text ("9 of 9"). `link_health` gains `expected`
   and `never_registered_exts` attributes.
 - Cordless health reads the cordless's SIP registration off the link-health
-  rollup. Unregistered past the 360 s startup grace is `critical`, even with
-  no IP to probe; a rollup that cannot say is unknown and raises nothing. The
-  sensor gains `sip_registered`. A cleared registration, reachability,
-  battery or Wi-Fi alert now reads as a recovery, not "alert lapsed".
+  rollup: unregistered on two consecutive rollup samples read after the 360 s
+  startup grace is `critical`, even with no IP to probe. A reboot inside one
+  sample, or a rollup that cannot say, raises nothing. The sensor gains
+  `sip_registered`. A cleared registration, reachability, battery or Wi-Fi
+  alert now reads as a recovery, not "alert lapsed".
 - When every gateway port and the cordless drop together, the outage,
   mass-drop and gateway alerts name the Switchboard host or the network
   rather than the gateway. A port still up, a cordless that was already down,
