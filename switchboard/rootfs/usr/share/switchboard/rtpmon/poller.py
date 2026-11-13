@@ -297,9 +297,9 @@ def summarize(phones: list, wired_exts: list | None = None,
     # v0.119.0 — the phones that SHOULD be up and are not, split by path: the
     # gateway's wired ports, and everything else (in practice the Wi-Fi
     # cordless). Never-registered extensions are left out, as from `expected`.
-    # Wired ports and an off-gateway phone down in the SAME sample point past
-    # the gateway, at the host or the network both paths share; the outage
-    # alert's cause sentence reads this. `unreachable` already holds `offline`.
+    # The outage alert's cause sentence reads this split together with the
+    # sample taken before the outage began (see outage_cause_is_host).
+    # `unreachable` already holds `offline`.
     down_expected = [p["ext"] for p in unreachable if p["ext"] not in never_registered]
     # The wired fleet's own counts, so the wired sensor can key "no gateway port
     # is up" on reachability rather than on an RTT that is merely not measured.
@@ -332,6 +332,7 @@ def summarize(phones: list, wired_exts: list | None = None,
         "down_wired_exts": [e for e in down_expected if str(e) in wired_set],
         "down_other_exts": [e for e in down_expected if str(e) not in wired_set],
         "wired_expected": len(wired_expected),
+        "wired_expected_exts": [p["ext"] for p in wired_expected],
         "wired_reachable": len([p for p in wired_expected if p["reachable"]]),
         "worst_rtt_ms": worst[0] if worst else None,
         "worst_ext": worst[1]["ext"] if worst else None,
@@ -360,8 +361,8 @@ def summarize(phones: list, wired_exts: list | None = None,
 # phone push to `wakeup_push_target` when one is set; a recovery card and push
 # follow when it clears. A consecutive-cycle gate rejects the single-sample "all
 # Unregistered" collector blips that AMI occasionally emits. The latch is kept in
-# /data/state, so an add-on restart neither repeats a 'down' that is already out
-# nor loses the 'up' that closes it (see load_outage_alerted).
+# /data/state, so an add-on restart neither repeats a 'down' that was already
+# shown nor loses the 'up' that closes it (see load_outage_alerted).
 #
 # Only phones that have ever registered count, on both sides of the fraction:
 # a configured extension that never has (ext 20 on this plant) is absent by
@@ -407,26 +408,88 @@ def is_mass_outage(summ: dict) -> bool:
     return expected > 0 and down >= max(OUTAGE_MIN_PORTS, (expected + 1) // 2)
 
 
-# The cause sentences. Wired gateway ports and a phone OFF the gateway down
+# The cause sentences. Every gateway port and a phone OFF the gateway dropping
 # together are unlikely to be the gateway's doing: what they share is the
 # Switchboard host and the network between it and them. That was the 2026-11-12
 # shape (the host moved to a new address, and all nine phones, the Wi-Fi
 # cordless with them, dropped from 18:31:04 MST) and the 2026-11-07 router
-# reboot's. Otherwise the gateway wording stands. The card phrase is kept short:
-# a mass-drop card must stay within 400 characters (notify_retry's late note
-# goes inside a 500 limit), and the update card naming nine phones is the longest.
+# reboot's. Otherwise the gateway wording stands.
+#
+# ★ "DOWN IN ONE SAMPLE" IS NOT "DROPPED TOGETHER". The first version named the
+# host whenever any one port and any off-gateway phone were down in the same
+# sample. Three shapes made that false: half the ports down with the other half
+# answering (through the same host and network); a cordless asleep for half an
+# hour before the gateway lost power; and the weekly GXW reboot in the same
+# window as the cordless's contact swap, which logs an Unreachable/Reachable
+# pair for a phone that never went away. So the host is named only when EVERY
+# port that has ever registered is down, and an off-gateway phone that was up
+# before the drop went down with them (outage_cause_is_host, _card_host_side).
+#
+# The card phrase is kept short: a mass-drop card must stay within 400
+# characters (notify_retry's late note goes inside a 500 limit), and the
+# update card naming every phone is the longest. The outage card and push keep
+# the parenthetical.
 _CAUSE_GATEWAY = "the gateway or its uplink"
-_CAUSE_HOST = "the Switchboard host or the network (a router restart, an address change)"
+_CAUSE_HOST = "the Switchboard host or the network"
 _OUTAGE_CAUSE_GATEWAY = ("If these are the wired gateway ports, the GXW gateway likely "
                          "dropped its SIP registrations — check the gateway's power/uplink.")
-_OUTAGE_CAUSE_HOST = ("Gateway ports and phones off the gateway are down together, so the "
-                      "likely cause is the Switchboard host or the network (a router or "
-                      "switch restart, an address change), not the gateway.")
+_OUTAGE_CAUSE_HOST = ("Every gateway port and a phone off the gateway dropped together, so "
+                      "the likely cause is the Switchboard host or the network (a router "
+                      "or switch restart, an address change), not the gateway.")
 
 
-def _host_side(down_wired, down_other) -> bool:
-    """True when gateway ports and an off-gateway phone are down together."""
-    return bool(down_wired) and bool(down_other)
+def _every_port_down(summ: dict | None) -> bool:
+    """Every gateway port that has ever registered is down in this sample. One
+    port still answering reaches Switchboard through the same host and the same
+    network, so neither can be the whole cause."""
+    s = summ or {}
+    return s.get("wired_expected", 0) > 0 and s.get("wired_reachable", 0) == 0
+
+
+def outage_cause_is_host(summ: dict, st: dict) -> bool:
+    """Whether the outage alert's cause names the Switchboard host or the
+    network rather than the gateway. All three must hold:
+
+      * every gateway port that has ever registered is down in this sample;
+      * the sample taken before the outage began (st["before_outage"], kept by
+        outage_transition) was taken by this process, with no AMI-down cycle
+        since, and did not already have every port down;
+      * a phone off the gateway that was up in that sample is down now.
+
+    So a cordless that was already asleep when the gateway lost power, and an
+    outage this process found already in progress (a restart), keep the
+    gateway wording: nothing measured says they dropped together."""
+    if not _every_port_down(summ):
+        return False
+    before = st.get("before_outage")
+    if not before or before.get("ports_down"):
+        return False
+    return bool(set(summ.get("down_other_exts") or [])
+                - set(before.get("other_down") or []))
+
+
+def _card_host_side(card: dict, summ: dict | None, wired_set: set) -> bool:
+    """The between-samples card's version: every gateway port that has ever
+    registered dropped in the window, and a phone off the gateway dropped with
+    them and was still down at the card's first check (card["down"]).
+
+    An off-gateway phone's Unreachable line alone is not enough. The cordless
+    logs an Unreachable/Reachable pair when it swaps its contact, so a GXW
+    reboot in the same window would read as a host or network event. A drop
+    that had healed by its check (the 'briefly' card) has no phone seen down,
+    and keeps the gateway wording."""
+    if not wired_set:
+        return False
+    s = summ or {}
+    never = {str(e) for e in (s.get("never_registered_exts") or [])}
+    ports = s.get("wired_expected_exts")
+    ports = ({str(e) for e in ports} if ports is not None
+             else {e for e in wired_set if e not in never})
+    exts = {str(e) for e in (card.get("exts") or [])}
+    if not ports or not ports <= exts:
+        return False
+    seen_down = {str(e) for e in (card.get("down") or [])}
+    return any(e not in wired_set and e not in never for e in exts & seen_down)
 
 
 def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
@@ -527,20 +590,18 @@ def mass_drop_card(card: dict, summ: dict, now: float,
     """(title, message) for a mass_drop_reports card. Every sentence is true at
     the moment it is posted, about each phone it names.
 
-    `wired` is the gateway's port list. When the drop holds gateway ports AND a
-    phone off the gateway, the warning names the host or the network rather
-    than the gateway (see _CAUSE_HOST); without the list it names the gateway."""
+    `wired` is the gateway's port list. When every port and a phone off the
+    gateway dropped together (_card_host_side), the warning names the host or
+    the network rather than the gateway; without the list it names the gateway.
+    Only the healed and update cards carry that warning: the 'down' card says
+    what is down now and what follows."""
     hhmm = lambda ts: time.strftime("%H:%M", time.localtime(ts))  # noqa: E731
     were = lambda n: "was" if n == 1 else "were"  # noqa: E731
     exts, down = card["exts"], card["down"]
     names = lambda xs: ", ".join(xs)  # noqa: E731
     stakes = "an incoming call, a wake-up or a 911 dial would have failed"
     wired_set = {str(e) for e in (wired or [])}
-    never = set((summ or {}).get("never_registered_exts") or [])
-    dropped = [e for e in exts if e not in never]
-    cause = (_CAUSE_HOST if wired_set and _host_side(
-        [e for e in dropped if str(e) in wired_set],
-        [e for e in dropped if str(e) not in wired_set]) else _CAUSE_GATEWAY)
+    cause = _CAUSE_HOST if _card_host_side(card, summ, wired_set) else _CAUSE_GATEWAY
     if card["kind"] == "healed":
         # "All" and "nothing was reachable" only when every registered phone is
         # in the drop: the threshold is half the fleet, and a phone that stayed
@@ -575,6 +636,12 @@ def mass_drop_card(card: dict, summ: dict, now: float,
                    "unreachable' alert takes over."))
     still = card["still"]
     if not still:
+        # Everyone is back, so which of them the first check still found down
+        # is history: the count stays and the list goes, which keeps the card
+        # inside its 400 characters with ten phones and the host cause.
+        if down != exts:
+            at1 = (f"{len(down)} of them {were(len(down))} still unreachable at the "
+                   f"{hhmm(card['at'])} health check")
         return ("Switchboard: phones dropped",
                 f"{head}; {at1}. By the {hhmm(now)} check all were reachable again. "
                 f"While they were down, {stakes}. This is a warning about {cause}, "
@@ -662,32 +729,42 @@ def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     cannot be set during warm-up (it takes two settled cycles), so this governs
     only a latch restored from disk after a restart (load_outage_alerted): the
     recovery card and push it owes come from the first settled sample that is
-    not an outage."""
+    not an outage.
+
+    It also keeps, for outage_cause_is_host, what the last sample that was not
+    an outage showed (st["last_clear"]), and freezes that as
+    st["before_outage"] when an outage's first cycle is counted. The caller
+    drops st["last_clear"] on a cycle with no sample (AMI down), so a sample
+    from before a gap is never taken for the one before the outage."""
     if is_mass_outage(summ):
         if not settled:
             return ""
+        if not st.get("cycles"):
+            st["before_outage"] = st.get("last_clear")
         st["cycles"] = st.get("cycles", 0) + 1
         if st["cycles"] >= OUTAGE_MIN_CYCLES and not st.get("alerted"):
             st["alerted"] = True
             return "down"
         return ""
     st["cycles"] = 0
+    st["last_clear"] = {"other_down": list(summ.get("down_other_exts") or []),
+                        "ports_down": _every_port_down(summ)}
     if st.get("alerted") and settled:
         st["alerted"] = False
         return "up"
     return ""
 
 
-def _outage_texts(event: str, summ: dict) -> tuple[str, str, str, str]:
+def _outage_texts(event: str, summ: dict,
+                  host: bool = False) -> tuple[str, str, str, str]:
     """(card title, card message, push title, push message) for an outage event.
-    Counts and names only phones that have ever registered ("9 of 9")."""
+    Counts and names only phones that have ever registered ("9 of 9"). `host`
+    is outage_cause_is_host's verdict; the gateway wording is the default."""
     expected = _expected_of(summ)
     if event == "down":
         exts = ", ".join(_down_expected_exts(summ))
         n = _down_expected_count(summ)
-        cause = (_OUTAGE_CAUSE_HOST
-                 if _host_side(summ.get("down_wired_exts"), summ.get("down_other_exts"))
-                 else _OUTAGE_CAUSE_GATEWAY)
+        cause = _OUTAGE_CAUSE_HOST if host else _OUTAGE_CAUSE_GATEWAY
         return ("Switchboard: phones unreachable",
                 f"{n} of {expected} phones are unreachable (exts {exts}). {cause}",
                 "Switchboard: phones down",
@@ -700,29 +777,33 @@ def _outage_texts(event: str, summ: dict) -> tuple[str, str, str, str]:
              f"{up} of {expected} phones are reachable again."))
 
 
-def _notify_outage(event: str, summ: dict, push_target: str = "") -> None:
+def _notify_outage(event: str, summ: dict, push_target: str = "",
+                   host: bool = False) -> bool:
     """The outage card, and with a `push_target` a phone push beside it.
+    Returns True when the alert was SHOWN: Home Assistant accepted the card on
+    this call, or the push was delivered. A card refused and kept by
+    notify_retry is not shown yet, and is lost if the add-on restarts first;
+    run() records the answer with the latch (see load_outage_alerted).
 
-    The push is not critical (it does not sound through Do Not Disturb):
-    ha_client.push reserves that for a delivery that genuinely failed, and a
-    wake-up that then fails to ring still escalates with its own critical push.
-    It is not retried either: an audible alert must not sound late, and the
-    card, which notify_retry does keep, carries the same news."""
+    The push is not critical, so it does not sound through Do Not Disturb:
+    ha_client.push reserves that for a delivery that genuinely failed. It is
+    not retried either: an audible alert must not sound late, and the card,
+    which notify_retry does keep, carries the same news."""
     if event not in ("down", "up"):
-        return
+        return False
     try:
         import ha_client
     except Exception:
-        return
-    title, msg, push_title, push_msg = _outage_texts(event, summ)
+        return False
+    title, msg, push_title, push_msg = _outage_texts(event, summ, host=host)
     # Same notification_id both ways so the recovery REPLACES the outage in the bell
     # menu (no stale "unreachable" left behind).
     try:
-        _send(ha_client, msg, title, "switchboard_link_outage")
+        carded = bool(_send(ha_client, msg, title, "switchboard_link_outage"))
     except Exception:
-        pass
+        carded = False
     if not push_target:
-        return
+        return carded
     try:
         pushed = bool(ha_client.push(push_msg, title=push_title, target=push_target,
                                      critical=False))
@@ -731,6 +812,7 @@ def _notify_outage(event: str, summ: dict, push_target: str = "") -> None:
     if not pushed:
         sys.stderr.write(f"switchboard-rtpmon: the phone push for the outage alert "
                          f"({event}) was not delivered\n")
+    return carded or pushed
 
 
 # --------------------------------------------------------------------------- #
@@ -1012,6 +1094,15 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # closes the alert could never fire, and an outage still in progress raised
 # 'down' a second time once warm-up was over. With the phone push (v0.119.0)
 # that second 'down' would sound. Written on each 'down' and 'up', muted or not.
+#
+# ★ THE LATCH SAYS WHETHER THE 'DOWN' WAS SHOWN. Its first version wrote
+# `alerted` alone, on the transition, so a restart trusted a 'down' nobody had
+# received: one raised with link_health_alerts off (turning them on takes a
+# restart), or one Home Assistant refused whose retry, kept in memory, died with
+# the process. That outage was then never announced, and its recovery was.
+# `announced` is true only when the card was accepted or the push delivered;
+# a latch without it is not "already out", and the 'down' is raised again once
+# the restarted process has two settled outage cycles.
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
@@ -1022,14 +1113,17 @@ OUTAGE_STATE_MAX_AGE_S = 7 * 86400
 
 def load_outage_alerted(path: str = None, now: float | None = None) -> bool:
     """True when the outage alert a previous process raised is still out: the
-    file says alerted, with a 'down' time no more than OUTAGE_STATE_MAX_AGE_S
-    ago. Never raises; a missing or corrupt file reads as not alerted."""
+    file says alerted AND announced (the 'down' was shown), with a 'down' time
+    no more than OUTAGE_STATE_MAX_AGE_S ago. Never raises; a missing or corrupt
+    file reads as not alerted, and so does one whose 'down' was never shown."""
     try:
         with open(path or OUTAGE_STATE_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return False
     if not isinstance(data, dict) or data.get("alerted") is not True:
+        return False
+    if data.get("announced") is not True:
         return False
     try:
         down_at = float(data.get("down_at"))
@@ -1043,15 +1137,19 @@ def load_outage_alerted(path: str = None, now: float | None = None) -> bool:
     return True
 
 
-def save_outage_state(alerted: bool, at: float, path: str = None) -> bool:
-    """Write the latch, atomically. Returns True only if it reached the disk."""
+def save_outage_state(alerted: bool, at: float, path: str = None,
+                      announced: bool = False) -> bool:
+    """Write the latch, atomically. Returns True only if it reached the disk.
+    `announced`: the 'down' was shown (see _notify_outage); it is recorded only
+    with `alerted`."""
     target = path or OUTAGE_STATE_PATH
     try:
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
         tmp = target + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"alerted": bool(alerted),
-                       "down_at": int(at) if alerted else None}, fh)
+                       "down_at": int(at) if alerted else None,
+                       "announced": bool(alerted and announced)}, fh)
         os.replace(tmp, target)
         return True
     except OSError:
@@ -1609,7 +1707,7 @@ def run() -> int:
     polls = 0
     prev_reachable = -1
     # The latch survives a restart (see load_outage_alerted): a 'down' already
-    # out is not raised again, and the 'up' that closes it still fires.
+    # shown is not raised again, and the 'up' that closes it still fires.
     outage_st = {"cycles": 0, "alerted": load_outage_alerted()}
     trunk_st = {"cycles": 0, "alerted": False}
     scrub_st = {"to": 0, "problem": ""}
@@ -1655,13 +1753,19 @@ def run() -> int:
             # consecutive-cycle gate and one-shot latch stay correct even when
             # alerts are muted); only the notification itself honors the opt-out.
             event = outage_transition(summ, outage_st, settled)
-            if event:
-                save_outage_state(outage_st["alerted"], sampled_at)
+            announced = False
             if event and opts.get("link_health_alerts", True):
                 # The phone push goes to the wake-up's push target: the one
                 # option naming the phone that should hear the phone system.
-                _notify_outage(event, summ,
-                               push_target=str(opts.get("wakeup_push_target") or "").strip())
+                announced = _notify_outage(
+                    event, summ,
+                    push_target=str(opts.get("wakeup_push_target") or "").strip(),
+                    host=event == "down" and outage_cause_is_host(summ, outage_st))
+            if event:
+                save_outage_state(outage_st["alerted"], sampled_at, announced=announced)
+        else:
+            # No sample (AMI down): the next one cannot tell what dropped when.
+            outage_st.pop("last_clear", None)
         # ★ THE BETWEEN-SAMPLES DETECTOR (`trans` was harvested before the sample).
         # ★ PHONES ONLY. `trans` also carries the outside line — the rows after a
         # restart can open with {"ext": "trunk", "state": "Reachable"} (one of two

@@ -114,18 +114,28 @@ Since v0.119.0:
   so they do not sound through Do Not Disturb, and they are not retried.
   `link_health_alerts: false` silences them with the cards. A push that fails is
   logged once in the add-on log.
-- **The cause follows the phones that are down.** When gateway ports and a
-  phone off the gateway (the Wi-Fi cordless) are down in the same sample, the
+- **The cause follows what dropped together.** When every gateway port that
+  has ever registered is down, and a phone off the gateway (the Wi-Fi cordless)
+  that was up in the last sample before the outage went down with them, the
   text names the Switchboard host or the network (a router or switch restart,
-  an address change) instead of the gateway; otherwise it names the gateway as
-  before. On 2026-11-12 the host moved to a new address and every phone, the
-  cordless included, was unregistered from 18:31:04 MST. Every alert named the
-  gateway, and every one was a silent card.
+  an address change) instead of the gateway. Otherwise it names the gateway as
+  before: a port still answering reaches Switchboard through the same host and
+  network, a cordless that was already down did not drop with the ports, and an
+  outage already in progress when the monitor started (or after a cycle in
+  which it could not reach Asterisk) gives no sample to tell. On 2026-11-12 the
+  host moved to a new address and every phone, the cordless included, was
+  unregistered from 18:31:04 MST. Every alert named the gateway, and every one
+  was a silent card.
 - **The alert survives a restart.** Its latch is kept in
-  `/data/state/link-outage.json`. An add-on restart during an outage no longer
-  raises "phones unreachable" (and its push) a second time, and the recovery
-  still comes. A latch restored at start-up is cleared by the first sample after
-  warm-up, never by a warm-up one. One more than 7 days old is ignored.
+  `/data/state/link-outage.json`, with whether the alert was shown: the card
+  accepted by Home Assistant, or the push delivered. An add-on restart during an
+  outage no longer raises a shown "phones unreachable" (and its push) a second
+  time, and the recovery still comes. One that was not shown (raised while
+  `link_health_alerts` was off, or refused by Home Assistant and lost with the
+  restart before its retry) is raised once the restarted monitor has two
+  settled outage samples. A latch restored at start-up is cleared by the first
+  sample after warm-up, never by a warm-up one. One more than 7 days old is
+  ignored.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable
@@ -138,13 +148,19 @@ judged per phone against that sample:
 - some are still unreachable: "phones dropped", posted at once and naming them.
   A later check replaces it under the same `notification_id`, saying who was
   back and who, if anyone, still was not; "not a current outage" only once all
-  are back. If the phones stay down, the outage alert above can take over, and
+  are back (that update gives how many the first check found down, not their
+  list). If the phones stay down, the outage alert above can take over, and
   the card says so when the outage threshold is met. A second drop while a card
   is open gets its own card and its own update.
 
-Each card ends by calling the drop a warning about the gateway or its uplink,
-or, when gateway ports and a phone off the gateway dropped together, about the
-Switchboard host or the network. These cards are never pushed to the phone.
+The healed and update cards end by calling the drop a warning about the gateway
+or its uplink. They name the Switchboard host or the network instead when every
+gateway port dropped, and a phone off the gateway dropped with them and was
+still down at the card's first check. A drop healed by its check ("dropped
+briefly") keeps the gateway wording: the cordless logs an Unreachable and a
+Reachable line when it swaps its contact, so its log line alone does not show it
+went away. The card posted while phones are still down names no cause. These
+cards are never pushed to the phone.
 
 Until v0.118.0 the card claimed "the phones are up now" whenever enough phones
 had dropped, even when its own sample showed them down: on 2026-11-02 01:01 MST
@@ -286,12 +302,14 @@ Covers the two blind spots the above can't see:
   recent poor call.
 - The **GXW gateway**'s port health, derived from the link-health rollup →
   `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
-  lost power or its uplink. All wired ports down **with the cordless down too**
-  (in the same rollup) = more likely the Switchboard host or the network, since
-  the cordless is on Wi-Fi, not on the gateway, and the alert says so. The cause
-  is decided when the alert fires; the wording says "ports down", not
-  "unregistered", because the rollup's down list also holds ports that are still
-  registered but fail their qualify.
+  lost power or its uplink. All wired ports down **with the cordless having
+  dropped within one rollup of them** = more likely the Switchboard host or the
+  network, since the cordless is on Wi-Fi, not on the gateway, and the alert
+  says so. A cordless that was already down well before the ports, or one whose
+  drop the monitor did not see (it was down at the monitor's first reading),
+  keeps the gateway wording. The cause is decided when the alert fires; the
+  wording says "ports down", not "unregistered", because the rollup's down list
+  also holds ports that are still registered but fail their qualify.
 
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless

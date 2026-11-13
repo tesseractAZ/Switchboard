@@ -172,7 +172,7 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
 
 - **Gateway.** Port health is derived from the link-health rollup, and all wired
   ports down reads as the gateway losing power or its uplink, or, when the
-  cordless is down too, as the Switchboard host or the network.
+  cordless dropped with them, as the Switchboard host or the network.
 - **WP826 cordless.** The monitor reads the handset's battery, WiFi signal and its
   own MOS for the last call, and its SIP registration: an unregistered cordless
   cannot ring and reads critical. A low MOS from the handset marks it degraded only

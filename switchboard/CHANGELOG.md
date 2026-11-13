@@ -17,9 +17,10 @@ Recent releases. Releases up to 0.109.0 are in the
   `wakeup_push_target` ("phones down", "phones back"): ordinary pushes, not
   critical ones, and not retried. The key is unchanged; its label is now
   "Phone Push Target". `link_health_alerts: false` silences the push too.
-- The outage latch is kept in `/data/state`, so an add-on restart during an
-  outage does not raise or push it a second time, and its recovery still
-  comes.
+- The outage latch is kept in `/data/state`, with whether the alert was
+  shown. A restart during an outage does not raise or push a shown alert
+  again, and its recovery still comes; one muted or lost unshown is raised
+  after the restart.
 - Extensions that have never registered no longer count toward the outage
   threshold or appear in its text ("9 of 9"). `link_health` gains `expected`
   and `never_registered_exts` attributes.
@@ -28,9 +29,10 @@ Recent releases. Releases up to 0.109.0 are in the
   no IP to probe; a rollup that cannot say is unknown and raises nothing. The
   sensor gains `sip_registered`. A cleared registration, reachability,
   battery or Wi-Fi alert now reads as a recovery, not "alert lapsed".
-- When the gateway ports and the cordless are down together, the outage,
+- When every gateway port and the cordless drop together, the outage,
   mass-drop and gateway alerts name the Switchboard host or the network
-  rather than the gateway.
+  rather than the gateway. A port still up, a cordless that was already down,
+  or a drop healed before the next sample keeps the gateway wording.
 - `link_health` reads `unavailable` when no phone that should be up is
   reachable, and `wired_link_health` when no gateway port is; `unknown` now
   means only reachable but not yet measured. Units and `state_class` do not
