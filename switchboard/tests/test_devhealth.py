@@ -1562,9 +1562,9 @@ def test_the_cordless_registration_is_read_off_the_rollup() -> None:
           and down(None, "19") is False and down(base, "") is False)
 
 
-def test_the_gateway_critical_names_the_host_when_the_cordless_is_down_too() -> None:
+def test_the_gateway_critical_names_the_host_when_the_cordless_dropped_too() -> None:
     gw = list(_GW)
-    lvl, why = dh.classify_gateway(gw, gw, uptime_s=_PAST_GRACE, cordless_down=True)
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=_PAST_GRACE, cordless_dropped_too=True)
     check("C: every port and the cordless down -> critical, naming the host or network",
           lvl == "critical" and "Switchboard host or the network" in why[0]
           and "not the GXW gateway" in why[0] and "lost power" not in why[0])
@@ -1573,10 +1573,10 @@ def test_the_gateway_critical_names_the_host_when_the_cordless_is_down_too() -> 
           lvl == "critical" and "GXW" in why[0] and "lost power" in why[0])
     check("C: 'ports down', not 'unregistered' (the list holds unreachable ports too)",
           "8 gateway ports down" in why[0] and "unregistered" not in why[0])
-    lvl, why = dh.classify_gateway(["11", "12"], gw, uptime_s=_PAST_GRACE, cordless_down=True)
+    lvl, why = dh.classify_gateway(["11", "12"], gw, uptime_s=_PAST_GRACE, cordless_dropped_too=True)
     check("C: a partial outage is unchanged by the cordless",
           lvl == "degraded" and "2 of 8" in why[0])
-    lvl, why = dh.classify_gateway(gw, gw, uptime_s=30, cordless_down=True)
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=30, cordless_dropped_too=True)
     check("C: inside the grace it is still the re-registering wording",
           lvl == "degraded" and "re-registers" in why[0])
 
@@ -1716,18 +1716,119 @@ def test_unknown_registration_neither_clears_nor_raises_a_registration_alert() -
     check("hold: the recovery is a recovery", ok_note and "back to normal" in ok_note[0])
 
 
+def test_a_blind_cycle_neither_unlocks_a_false_all_clear_nor_counts_toward_an_alert() -> None:
+    """The hold's own guard: a blind cycle whose LAN probe is unhealthy must
+    not replace the registration reason it is holding, or the next blind,
+    healthy cycle has nothing to hold and posts 'Cordless recovered — back to
+    normal' while registration is still unknown."""
+    env = {"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"}
+    calls = {"n": 0}
+
+    def probe(ip, pw, pin, cordless_ext=""):
+        c = calls["n"]
+        calls["n"] += 1
+        return {"reachable": False, "api_ok": False} if c == 4 else dict(_HEALTHY_SNAP)
+    # Cycles 2-3 unregistered past the grace (the CRITICAL); 4 blind with the
+    # handset unreachable on the LAN; 5 blind and healthy.
+    sets, notes = _drive_loop(_reg_rollup(lambda c: c < 4, stale=lambda c: c in (4, 5)),
+                              cycles=6, interval=200, probe=probe, env=env)
+    cl = [st for e, st, _a in sets if e == "sensor.switchboard_cordless_health"]
+    check("hold: precondition — the blind cycle read critical on the LAN probe",
+          cl[4] == "critical" and cl[5] == "ok")
+    check("hold: no all-clear while registration is unknown",
+          [t for t, _m in notes if "cordless" in t] == ["Switchboard: cordless CRITICAL"])
+    # Unregistered on cycles 2 and 4 (past the grace) with a blind cycle 3
+    # between: two unregistered cycles, but not consecutive ones.
+    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (0, 1, 2, 4), stale=lambda c: c == 3),
+                            cycles=5, interval=200, probe=lambda *a, **k: dict(_HEALTHY_SNAP),
+                            env=env)
+    check("hold: a blind cycle before the alert resets the count",
+          [t for t, _m in notes if "cordless" in t] == [])
+
+
+def _gateway_critical(offline_19, ports_down, cycles, stale=False):
+    """The real loop at 200 s a cycle (a fresh rollup each read, rtpmon's
+    interval 300 s): the gateway CRITICAL texts, and the gateway sensor's
+    reasons on the last cycle."""
+    sets, notes = _drive_loop(_reg_rollup(offline_19, ports_down=ports_down, stale=stale),
+                              cycles=cycles, interval=200, env={"CORDLESS_EXT": "19"})
+    gw = [st_a for e, *st_a in sets if e == "sensor.switchboard_gateway_health"]
+    return ([m for t, m in notes if t == "Switchboard: gxw gateway CRITICAL"],
+            gw[-1][1].get("reasons") if gw else None)
+
+
 def test_the_real_loop_names_the_host_when_the_ports_and_the_cordless_drop() -> None:
-    _sets, notes = _drive_loop(_reg_rollup(True, ports_down=True), cycles=4, interval=200,
-                               env={"CORDLESS_EXT": "19"})
-    gw = [m for t, m in notes if t == "Switchboard: gxw gateway CRITICAL"]
+    gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 1, cycles=5)
     check("loop C: one gateway CRITICAL", len(gw) == 1)
     check("loop C: it names the host or the network, not a gateway power loss",
           gw and "Switchboard host or the network" in gw[0] and "lost power" not in gw[0])
-    _sets, notes2 = _drive_loop(_reg_rollup(False, ports_down=True), cycles=4, interval=200,
-                                env={"CORDLESS_EXT": "19"})
-    gw2 = [m for t, m in notes2 if t == "Switchboard: gxw gateway CRITICAL"]
+    gw2, _r = _gateway_critical(False, lambda c: c >= 1, cycles=5)
     check("loop C: the cordless up -> the gateway wording",
           len(gw2) == 1 and "GXW gateway likely lost power" in gw2[0])
+
+
+def test_the_gateway_critical_names_the_host_only_for_a_cordless_that_dropped_with_the_ports() -> None:
+    """The cordless merely down in the same rollup was enough: one asleep (or
+    with a dead battery) half an hour before the gateway lost power made the
+    gateway CRITICAL say "not the GXW gateway"."""
+    host = lambda m: "Switchboard host or the network" in m and "not the GXW gateway" in m  # noqa: E731
+    gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 6, cycles=9)
+    check("cause 10: a cordless down 1000 s before the ports -> the gateway wording",
+          len(gw) == 1 and "GXW gateway likely lost power" in gw[0] and not host(gw[0]))
+    gw, _r = _gateway_critical(lambda c: c >= 2, lambda c: c >= 1, cycles=5)
+    check("cause: the cordless one rollup after the ports still dropped with them",
+          len(gw) == 1 and host(gw[0]))
+    gw, _r = _gateway_critical(True, True, cycles=5)
+    check("cause: both already down at the first reading -> the gateway wording",
+          len(gw) == 1 and not host(gw[0]))
+    gw, _r = _gateway_critical(lambda c: c >= 2, lambda c: c >= 2, cycles=6,
+                               stale=lambda c: c == 1)
+    check("cause: both first seen down after a blind cycle -> the gateway wording",
+          len(gw) == 1 and not host(gw[0]))
+    gw, reasons = _gateway_critical(lambda c: c >= 6, lambda c: c >= 1, cycles=9)
+    check("cause: a cordless that drops long after the ports leaves the alert as it was",
+          len(gw) == 1 and not host(gw[0]))
+    check("cause: ...and the sensor's reasons do not turn to the host later",
+          reasons and "GXW gateway likely lost power" in reasons[0])
+    # Two ports down for a while (handsets unplugged), then the rest of the
+    # ports and the cordless at once: the ports' run starts when the LAST one
+    # drops, which is when the gateway reads all-down.
+    together = _reg_rollup(lambda c: c >= 5, ports_down=lambda c: c >= 5)
+
+    def two_first(cycle, clk):
+        attrs = together(cycle, clk)
+        if 1 <= cycle < 5:
+            for key in ("unreachable_exts", "offline_exts"):
+                attrs[key] = ["11", "12"] + attrs[key]
+        return attrs
+    _sets, notes = _drive_loop(two_first, cycles=8, interval=200, env={"CORDLESS_EXT": "19"})
+    gw = [m for t, m in notes if t == "Switchboard: gxw gateway CRITICAL"]
+    check("cause: two ports down earlier, then the rest with the cordless -> the host",
+          len(gw) == 1 and host(gw[0]))
+    run, other = {}, {}
+    dh.note_down_run(run, True, 1000.0)
+    check("runs: a run in progress at the first reading has no start",
+          run.get("since") is None)
+    dh.note_down_run(run, False, 1300.0)
+    dh.note_down_run(run, True, 1600.0)
+    dh.note_down_run(run, True, 1900.0)
+    check("runs: seen up, then down -> the first down rollup's time", run["since"] == 1600.0)
+    dh.note_down_run(other, False, 1300.0)
+    dh.note_down_run(other, True, 2050.0)
+    check("runs: 450 s apart is one rollup (300 s) with jitter",
+          dh.dropped_together(run, other, 300.0))
+    dh.note_down_run(other, False, 2100.0)
+    dh.note_down_run(other, True, 2200.0)
+    check("runs: 600 s apart is two rollups", not dh.dropped_together(run, other, 300.0))
+    blind = {}
+    dh.note_down_run(blind, False, 1000.0)
+    dh.note_down_run(blind, None, 0.0)
+    dh.note_down_run(blind, True, 1600.0)
+    check("runs: a blind cycle between up and down hides the start", blind.get("since") is None)
+    check("runs: the rollup's stamp is read as an epoch",
+          dh.rollup_measured_at({"measured_at": _iso(1_760_000_000)}) == 1_760_000_000.0
+          and dh.rollup_measured_at({}) is None
+          and dh.rollup_measured_at({"measured_at": "not a time"}) is None)
 
 
 if __name__ == "__main__":

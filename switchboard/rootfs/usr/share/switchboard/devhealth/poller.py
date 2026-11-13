@@ -874,7 +874,7 @@ GATEWAY_STARTUP_GRACE_S = 360
 
 def classify_gateway(down_exts: list[str], gw_exts: list[str],
                      uptime_s: float | None = None,
-                     cordless_down: bool = False) -> tuple[str, list[str]]:
+                     cordless_dropped_too: bool = False) -> tuple[str, list[str]]:
     """(level, reasons) for the GXW, DERIVED from which of its FXS-port extensions
     are currently down per rtpmon's rollup. All ports down = the gateway itself
     dropped (critical); some down = degraded (a handset unplugged or a partial
@@ -884,12 +884,14 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
     all-down reading is reported as 'degraded' (still visible, still published)
     rather than a critical "the gateway lost power" claim.
 
-    `cordless_down`: the cordless, which is on Wi-Fi and not on the gateway, is
-    down in the same rollup. Then the critical names the Switchboard host or
-    the network, not the gateway (2026-11-12: the host moved to a new address,
-    every phone dropped, and this said the GXW "likely lost power or its
-    uplink"). "Down", not "unregistered": the rollup's list also holds ports
-    that are still registered but fail their qualify."""
+    `cordless_dropped_too`: the cordless, which is on Wi-Fi and not on the
+    gateway, went down within one rollup of the ports (dropped_together). Then
+    the critical names the Switchboard host or the network, not the gateway
+    (2026-11-12: the host moved to a new address, every phone dropped, and this
+    said the GXW "likely lost power or its uplink"). A cordless merely down in
+    the same rollup is not enough: one asleep half an hour before the gateway
+    lost power did not drop with it. "Down", not "unregistered": the rollup's
+    list also holds ports that are still registered but fail their qualify."""
     if not gw_exts:
         return "ok", []
     down = [e for e in gw_exts if e in set(down_exts or [])]
@@ -900,7 +902,7 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
             return "degraded", [
                 f"all {len(gw_exts)} gateway ports still unregistered "
                 f"{int(uptime_s)}s after start — normal while the GXW re-registers"]
-        if cordless_down:
+        if cordless_dropped_too:
             return "critical", [
                 f"all {len(gw_exts)} gateway ports down, and the cordless too — likely "
                 "the Switchboard host or the network (a router or switch restart, an "
@@ -1120,6 +1122,47 @@ def cordless_down_in(attrs: dict | None, ext: str) -> bool:
         return False
     return (ext not in _ext_set(attrs, "never_registered_exts")
             and ext in set(rollup_down_exts(attrs)))
+
+
+def rollup_measured_at(attrs: dict | None) -> float | None:
+    """The rollup's `measured_at` as an epoch, or None without a usable stamp."""
+    stamped = (attrs or {}).get("measured_at")
+    if not stamped:
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(str(stamped))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.timestamp()
+
+
+def note_down_run(run: dict, down: bool | None, at: float) -> None:
+    """Keep when a device's current down run began, by rollup time.
+
+    run["since"] is the `measured_at` of the run's first rollup, or None: while
+    the device is up, and also when the run's start was not seen, because it was
+    already down at this process's first reading or was first seen down after a
+    cycle with no usable rollup. `down` None is such a cycle. A run whose start
+    was not seen can never be called simultaneous with another."""
+    if down is None:
+        if run.get("since") is None:
+            run["seen_up"] = False
+        return
+    if not down:
+        run["seen_up"], run["since"] = True, None
+    elif run.get("since") is None and run.get("seen_up"):
+        run["since"] = at
+
+
+def dropped_together(cordless_run: dict, ports_run: dict, interval_s: float) -> bool:
+    """The cordless's down run and the ports' all-down run began within one
+    rollup of each other (`interval_s`, rtpmon's poll interval, with half an
+    interval for jitter): what a router restart or a host address change does
+    to both paths at once. Both starts must have been seen."""
+    c, p = cordless_run.get("since"), ports_run.get("since")
+    return c is not None and p is not None and abs(c - p) <= 1.5 * interval_s
 
 
 def resolve_cordless_ip(cordless_ext: str, fallback_ip: str) -> str:
@@ -1351,6 +1394,9 @@ def run() -> None:
     th = _thresholds()
     cst: dict = {}
     gst: dict = {}
+    # When the cordless's down run and the ports' all-down run began, by rollup
+    # time, for the gateway alert's cause (see dropped_together).
+    runs: dict = {"cordless": {}, "ports": {}}
     last_ip = None
     follow = f"auto-follow ext {cordless_ext}" if cordless_ext else "static"
     print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
@@ -1426,15 +1472,26 @@ def run() -> None:
         # --- gateway (derived from rtpmon rollup) ---
         try:
             down = rollup_down_exts(rollup) if rollup is not None else None
+            if down is None:
+                for run in runs.values():
+                    note_down_run(run, None, 0.0)
             if down is not None:
-                # The cause is decided when the critical fires, from this
-                # rollup: the cordless down beside every port points past the
+                at = rollup_measured_at(rollup) or time.time()
+                note_down_run(runs["cordless"], cordless_down_in(rollup, cordless_ext), at)
+                note_down_run(runs["ports"], bool(gw_exts) and set(gw_exts) <= set(down), at)
+                try:
+                    rollup_interval = float(rollup.get("poll_interval_s") or 300)
+                except (TypeError, ValueError):
+                    rollup_interval = 300.0
+                # The cause is decided when the critical fires: the cordless
+                # dropping within one rollup of every port points past the
                 # gateway. A cause learned later is not re-sent (the cordless
                 # dropping one rtpmon sample after the ports, say), because
                 # health_transition fires again only when the level rises.
                 level, reasons = classify_gateway(
                     down, gw_exts, time.monotonic() - _started,
-                    cordless_down=cordless_down_in(rollup, cordless_ext))
+                    cordless_dropped_too=dropped_together(runs["cordless"], runs["ports"],
+                                                          rollup_interval))
                 _publish_gateway(level, reasons, down, gw_exts)
                 ev = health_transition(level, gst)
                 if ev:
