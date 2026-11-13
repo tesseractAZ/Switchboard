@@ -2876,6 +2876,106 @@ def test_a_down_nobody_was_shown_is_raised_after_a_restart() -> None:
     check("latch d: an accepted card counts as shown", json.load(open(path))["announced"] is True)
 
 
+class _RefuseFirst:
+    """notify()'s answer: refused the first time it is asked, accepted after."""
+
+    def __init__(self):
+        self.asked = 0
+
+    def __bool__(self):
+        self.asked += 1
+        return self.asked > 1
+
+
+def test_a_down_card_posted_by_its_retry_counts_as_shown_across_a_restart() -> None:
+    """Home Assistant refused the 'down' card (kept by notify_retry) and the
+    push; the next cycle's flush posted the card, so the reader had it, but the
+    latch still said it was not shown. A restart then raised and pushed the
+    'down' again (with the gateway cause, since the restarted process saw no
+    sample before the outage), or, with the phones back, never sent the
+    recovery that closes the card."""
+    nr = SourceFileLoader("notify_retry_late_card", str(
+        P_PATH.parents[1] / "webui" / "notify_retry.py")).load_module()
+    titles = lambda xs: [x[0] for x in xs]  # noqa: E731
+
+    def first_run():
+        path = os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+        nr.clear()
+        pushes = []
+        posts = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []),
+                                (_S_ALL_DOWN, [])], target=_TARGET, pushes=pushes,
+                               push_ok=False, notify_ok=_RefuseFirst(), retry=nr,
+                               state_path=path)
+        return path, posts, pushes
+    path, posts, pushes = first_run()
+    check("late card: precondition — refused at the 'down', posted late by the next flush",
+          titles(posts) == ["Switchboard: phones unreachable"] * 2
+          and "Sent late" in posts[1][1] and nr.pending() == [])
+    check("late card: precondition — the push failed", titles(pushes) == ["Switchboard: phones down"])
+    saved = json.load(open(path))
+    check("late card: once posted, the latch says it was shown, with its 'down' time",
+          saved["alerted"] is True and saved["announced"] is True
+          and isinstance(saved["down_at"], int))
+    # Restart with the outage still on, then the phones back.
+    nr.clear()
+    p2 = []
+    second = _drive_samples([(_S_ALL_DOWN, [])] * 4 + [(_S_UP, [])] * 2, target=_TARGET,
+                            pushes=p2, retry=nr, state_path=path)
+    check("late card: no second 'down' card or push after the restart",
+          titles(second) == ["Switchboard: phones recovered"]
+          and titles(p2) == ["Switchboard: phones back"])
+    # Restart with every phone already back: the recovery still comes.
+    path, _posts, _p = first_run()
+    nr.clear()
+    p2 = []
+    second = _drive_samples([(_S_UP, [])] * 3, target=_TARGET, pushes=p2, retry=nr,
+                            state_path=path)
+    check("late card: after a restart into a recovered fleet the recovery still comes",
+          titles(second) == ["Switchboard: phones recovered"]
+          and titles(p2) == ["Switchboard: phones back"])
+    # A card the retry gave up on was never shown: raised again after a restart.
+    path = os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+    nr.clear()
+    real_window = nr.RETRY_FOR
+    try:
+        nr.RETRY_FOR = -1                          # the first refused retry drops it
+        _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])],
+                       target=_TARGET, pushes=[], push_ok=False, notify_ok=False, retry=nr,
+                       state_path=path)
+        dropped = nr.status("switchboard_link_outage")
+    finally:
+        nr.RETRY_FOR = real_window
+    check("dropped card: precondition — the retry gave up on it", dropped == "dropped")
+    check("dropped card: the latch still says it was not shown",
+          json.load(open(path))["announced"] is False)
+    nr.clear()
+    p2 = []
+    second = _drive_samples([(_S_ALL_DOWN, [])] * 4 + [(_S_UP, [])] * 2, target=_TARGET,
+                            pushes=p2, retry=nr, state_path=path)
+    check("dropped card: after the restart the outage is raised, then its recovery",
+          titles(second) == ["Switchboard: phones unreachable", "Switchboard: phones recovered"])
+    nr.clear()
+
+
+def test_no_served_text_says_a_restart_delays_the_recovery_by_one_sample() -> None:
+    """After a restart the recovery needs two settled clear samples of the
+    restarted process, and the first comes an interval after its warm-up, so a
+    restart between the two clear samples delays the 'up' by one to two
+    sample intervals plus the warm-up (591 s at 300 s, measured), not "a
+    sample"."""
+    root = P_PATH.parents[5]
+    served = [root / "docs" / "reference" / "health-monitoring.md", root / "CHANGELOG.md",
+              root.parent / "README.md"]
+    for path in served:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        check(f"restart delay: {path.name} does not say the recovery is delayed by a sample",
+              "delays the recovery by a sample" not in text
+              and "delays the 'up' by a sample" not in text)
+    doc = " ".join(__import__("inspect").getdoc(pm.outage_transition).split())
+    check("restart delay: nor does outage_transition's docstring",
+          "delays the 'up' by a sample" not in doc)
+
+
 def test_no_served_text_promises_a_critical_alert_for_a_wake_up_that_cannot_ring() -> None:
     """During a phone outage a wake-up whose room is unregistered is deferred
     every tick, then missed once its grace runs out, and a missed wake-up posts

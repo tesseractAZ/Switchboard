@@ -767,9 +767,12 @@ def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     governs only a latch restored from disk after a restart
     (load_outage_alerted): the recovery card and push it owes come from the
     restarted process's own two settled clear samples. The count of clear
-    samples is not saved, so a restart between the two delays the 'up' by a
-    sample but neither loses nor repeats it: the latch on disk is cleared only
-    when the 'up' fires.
+    samples is not saved, and the restarted process's first settled sample
+    comes one interval after its warm-up, so a restart between the two clear
+    samples delays the 'up' by one to two sample intervals plus the warm-up
+    (591 s at the default 300 s for a restart just before the second sample)
+    but neither loses nor repeats it: the latch on disk is cleared only when
+    the 'up' fires.
 
     It also keeps, for outage_cause_is_host, what the last sample that was not
     an outage showed (st["last_clear"]), and freezes that as
@@ -831,13 +834,29 @@ def _outage_texts(event: str, summ: dict,
              else f"{up} of {expected} phones are reachable again{tail}."))
 
 
+# One id both ways, so the recovery REPLACES the outage card.
+OUTAGE_NOTIFICATION_ID = "switchboard_link_outage"
+
+
+def _outage_card_status() -> str:
+    """notify_retry's status for the outage card: "pending" while a refused
+    card waits for its retry, "dropped" once the retry gave up, "" otherwise
+    (posted, never kept, or no notify_retry to keep it)."""
+    try:
+        import notify_retry
+        return str(notify_retry.status(OUTAGE_NOTIFICATION_ID) or "")
+    except Exception:  # noqa: BLE001 — an older or absent module keeps nothing
+        return ""
+
+
 def _notify_outage(event: str, summ: dict, push_target: str = "",
                    host: bool = False) -> bool:
     """The outage card, and with a `push_target` a phone push beside it.
     Returns True when the alert was SHOWN: Home Assistant accepted the card on
     this call, or the push was delivered. A card refused and kept by
     notify_retry is not shown yet, and is lost if the add-on restarts first;
-    run() records the answer with the latch (see load_outage_alerted).
+    run() records the answer with the latch (see load_outage_alerted), and
+    marks it shown once a retry posts the kept 'down' card.
 
     The push is not critical, so it does not sound through Do Not Disturb:
     ha_client.push reserves that for a delivery that genuinely failed. It is
@@ -853,7 +872,7 @@ def _notify_outage(event: str, summ: dict, push_target: str = "",
     # Same notification_id both ways so the recovery REPLACES the outage in the bell
     # menu (no stale "unreachable" left behind).
     try:
-        carded = bool(_send(ha_client, msg, title, "switchboard_link_outage"))
+        carded = bool(_send(ha_client, msg, title, OUTAGE_NOTIFICATION_ID))
     except Exception:
         carded = False
     if not push_target:
@@ -1156,7 +1175,11 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # the process. That outage was then never announced, and its recovery was.
 # `announced` is true only when the card was accepted or the push delivered;
 # a latch without it is not "already out", and the 'down' is raised again once
-# the restarted process has two settled outage cycles.
+# the restarted process has two settled outage cycles. A refused card that
+# notify_retry posts on a later cycle has been shown from then, and run()
+# rewrites the latch to say so (_outage_card_status): left unannounced, a
+# restart raised and pushed that 'down' a second time, or, with the phones
+# back, never sent the recovery that closes the card.
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
@@ -1764,6 +1787,10 @@ def run() -> int:
     # shown is not raised again, and the 'up' that closes it still fires.
     outage_st = {"cycles": 0, "clear": 0, "alerted": load_outage_alerted()}
     trunk_st = {"cycles": 0, "alerted": False}
+    # The 'down' time of an outage card Home Assistant refused and notify_retry
+    # kept. Once a retry posts it the alert has been shown, and the latch is
+    # rewritten to say so, with its original 'down' time.
+    kept_down_at = None
     scrub_st = {"to": 0, "problem": ""}
     # Extensions this process has actually seen answer a qualify. A phone that
     # has never answered cannot have "dropped out" of the RTT sample, so it must
@@ -1776,6 +1803,13 @@ def run() -> int:
     while True:
         # First, whatever Home Assistant refused on an earlier cycle.
         _flush_notifications()
+        if kept_down_at is not None:
+            fate = _outage_card_status()
+            if fate != "pending":
+                # Posted (""), or given up on ("dropped": never shown).
+                if fate == "" and outage_st.get("alerted"):
+                    save_outage_state(True, kept_down_at, announced=True)
+                kept_down_at = None
         opts = _load_options()
         names = room_names(opts)
         wired = wired_exts(opts)
@@ -1808,7 +1842,8 @@ def run() -> int:
             # alerts are muted); only the notification itself honors the opt-out.
             event = outage_transition(summ, outage_st, settled)
             announced = False
-            if event and opts.get("link_health_alerts", True):
+            sent = bool(event) and opts.get("link_health_alerts", True)
+            if sent:
                 # The phone push goes to the wake-up's push target: the one
                 # option naming the phone that should hear the phone system.
                 announced = _notify_outage(
@@ -1817,6 +1852,8 @@ def run() -> int:
                     host=event == "down" and outage_cause_is_host(summ, outage_st))
             if event:
                 save_outage_state(outage_st["alerted"], sampled_at, announced=announced)
+                kept_down_at = (sampled_at if event == "down" and sent and not announced
+                                and _outage_card_status() == "pending" else None)
         else:
             # No sample (AMI down): the next one cannot tell what dropped when.
             outage_st.pop("last_clear", None)

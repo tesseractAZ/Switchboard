@@ -23,9 +23,10 @@ Recent releases. Releases up to 0.109.0 are in the
   threshold, so four ports dead and a fifth flapping raised and cleared it
   every 15 minutes.
 - The outage latch is kept in `/data/state`, with whether the alert was
-  shown. A restart during an outage does not raise or push a shown alert
-  again, and its recovery still comes; one muted or lost unshown is raised
-  after the restart.
+  shown. A refused card counts as shown once its retry posts it. A restart
+  during an outage does not raise or push a shown alert again, and its
+  recovery still comes; one muted or lost unshown is raised after the
+  restart.
 - Extensions that have never registered no longer count toward the outage
   threshold or appear in its text ("9 of 9"). `link_health` gains `expected`
   and `never_registered_exts` attributes.

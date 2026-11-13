@@ -140,13 +140,16 @@ Since v0.119.0:
   `/data/state/link-outage.json`, with whether the alert was shown: the card
   accepted by Home Assistant, or the push delivered. An add-on restart during an
   outage no longer raises a shown "phones unreachable" (and its push) a second
-  time, and the recovery still comes. One that was not shown (raised while
+  time, and the recovery still comes. A card Home Assistant refused counts as
+  shown once its retry posts it. One that was not shown (raised while
   `link_health_alerts` was off, or refused by Home Assistant and lost with the
   restart before its retry) is raised once the restarted monitor has two
   settled outage samples. A latch restored at start-up is cleared by two
-  settled clear samples after warm-up, never by warm-up ones; a restart between
-  the two delays the recovery by a sample and does not lose or repeat it. One
-  more than 7 days old is ignored.
+  settled clear samples of the restarted monitor, never by warm-up ones, and
+  the first of those comes one interval after its warm-up. A restart between
+  the two clear samples therefore delays the recovery by one to two sample
+  intervals plus the warm-up; it neither loses nor repeats it. One more than 7
+  days old is ignored.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable

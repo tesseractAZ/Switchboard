@@ -215,6 +215,19 @@ def pending() -> list[dict]:
     return [dict(v) for v in _pending.values()]
 
 
+def status(notification_id: str) -> str:
+    """What is kept for an id: "pending" while it waits for a retry, "dropped"
+    once a retry past its window gave up on it, or "" for neither. For an alert
+    the caller knows was kept, "" means a retry posted it (or a newer alert for
+    the id replaced it). rtpmon asks this after each flush, so its outage latch
+    can record a refused 'down' card as shown once it is posted."""
+    if notification_id in _pending:
+        return "pending"
+    if notification_id in _lost:
+        return "dropped"
+    return ""
+
+
 def clear() -> None:
     _pending.clear()
     _lost.clear()
