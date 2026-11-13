@@ -520,7 +520,7 @@ def test_devhealth_run_retries_on_a_later_cycle():
         nr.send(ha, "Cordless critical: unreachable", "Switchboard: cordless CRITICAL",
                 "switchboard_cordless_health")
         sleeps = _two_cycles(dh, ha, {"resolve_cordless_ip": lambda *a, **k: None,
-                                      "gateway_down_exts_from_rollup": lambda **k: None,
+                                      "read_rollup": lambda **k: None,
                                       "_publish_gateway_unknown": lambda *a, **k: None})
         left = nr.pending()
     posted = [c for c in ha.calls if c["id"] == "switchboard_cordless_health"]
