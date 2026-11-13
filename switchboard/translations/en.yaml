@@ -39,7 +39,7 @@ configuration:
     description: How often the link-health monitor checks every phone. 300 s (5 min) is a good balance; lower for faster detection at the cost of a little more traffic. Range 30–86400.
   link_health_alerts:
     name: Fleet-Outage Alerts
-    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops) — the sign of a shared failure rather than one handset asleep. This includes phones that drop at once between polls, even if they are back by the next one. It also controls the outside line's 'down' and 'recovered' notifications. Independent of the per-call alerts above.
+    description: Notify when many phones lose registration at once (e.g. the wired GXW gateway drops, or the network between Switchboard and the phones) — the sign of a shared failure rather than one handset asleep. With a Phone Push Target set, the outage and its recovery also go to the phone as a push. This includes phones that drop at once between polls, even if they are back by the next one (a card only). It also controls the outside line's 'down' and 'recovered' notifications. Independent of the per-call alerts above.
   device_health_enabled:
     name: Device-Health Monitor
     description: Watch the two "smart" devices Asterisk can't see inside — the WP826 cordless (battery, Wi-Fi signal, per-call MOS) and the GXW gateway's port health — and alert when a single critical device degrades. Needs Cordless Admin Password below for the deep checks.
@@ -54,7 +54,7 @@ configuration:
     description: LAN address of the WP826 cordless, used by the device-health monitor to read its battery / Wi-Fi / call-quality. Used as a fallback — if Cordless Extension is set, the monitor auto-follows the cordless's current IP from its live registration, so you don't need this to be exact.
   cordless_ext:
     name: Cordless Extension (auto-follow IP)
-    description: The extension the WP826 cordless registers as (e.g. 19). When set, the device-health monitor takes the cordless's CURRENT IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer breaks battery/Wi-Fi/MOS monitoring. Falls back to Cordless IP Address if the cordless is unregistered. Leave blank to use only the static IP.
+    description: The extension the WP826 cordless registers as (e.g. 19). When set, the device-health monitor takes the cordless's CURRENT IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer breaks battery/Wi-Fi/MOS monitoring. Falls back to Cordless IP Address if the cordless is unregistered. Its SIP registration is also checked, and an unregistered cordless (after a 6-minute grace at start-up) reads as critical, since it cannot ring. Leave blank to use only the static IP and skip the registration check.
   cordless_password:
     name: Cordless Admin Password
     description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
@@ -212,13 +212,16 @@ configuration:
       placed into nothing. At least the ring time plus 20 seconds; a shorter
       value is raised to that and a warning is logged at start-up. Default 90.
   wakeup_push_target:
-    name: Wake-up Failure Push Target
+    name: Phone Push Target
     description: >-
-      Home Assistant notify service (without the "notify." prefix) that an
-      undelivered wake-up escalates to after two unanswered rings — e.g.
-      mobile_app_iphone. Sent as a critical alert so it sounds through Do Not
-      Disturb, because a failed alarm clock is exactly what silent mode should
-      not swallow. Leave empty and the escalation falls back to a Home Assistant notification card instead — the signal is not lost, it just stops sounding through Do Not Disturb.
+      Home Assistant notify service (without the "notify." prefix) for the
+      phone pushes: undelivered wake-ups and phone-system outages — e.g.
+      mobile_app_iphone. An undelivered wake-up (after two unanswered rings) is
+      sent as a critical alert so it sounds through Do Not Disturb, because a
+      failed alarm clock is exactly what silent mode should not swallow. A fleet
+      outage ("phones down") and its recovery ("phones back") are ordinary
+      pushes beside their notification cards, and follow Fleet-Outage Alerts.
+      Leave empty and nothing is pushed: the wake-up escalation falls back to a Home Assistant notification card instead — the signal is not lost, it just stops sounding through Do Not Disturb — and the outage keeps its card.
   status_power_grid:
     name: Status Menu — Grid Power Entity
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.

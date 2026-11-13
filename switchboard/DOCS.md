@@ -275,7 +275,9 @@ only the notifications; the sensors keep publishing. Turning
 cordless half of device health, so leave it on unless you mean all of that. A
 link-health, device-health or undelivered-wake-up alert raised while Home
 Assistant is not answering (after a host reboot, for example) is kept and posted
-once it answers, unless it is still refused an hour after it was raised.
+once it answers, unless it is still refused an hour after it was raised. A
+phone-system outage, and its recovery, also go to `wakeup_push_target` as a
+push; a push is never retried.
 
 Full details: [Health monitoring & sensors](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/health-monitoring.md).
 
@@ -298,7 +300,7 @@ the options people change most often; all of them, with their limits, are in the
 | `operator_synonyms` | `[]` | Extra spoken names for a room: `ext` plus a list of `phrases`. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings (10–600 s). |
 | `wakeup_retry_seconds` | `90` | When an unheard wake-up is rung again, counted from the first ring. Raised to at least the ring time + 20 s. |
-| `wakeup_push_target` | `mobile_app_iphone` | Notify service (without `notify.`) for the critical alert about an undelivered wake-up. Empty sends a Home Assistant notification card instead. |
+| `wakeup_push_target` | `mobile_app_iphone` | Notify service (without `notify.`) for the phone pushes: the critical alert about an undelivered wake-up, and a phone-system outage and its recovery. Empty pushes nothing; the wake-up sends a Home Assistant notification card instead. |
 | `wakeup_scene` | `""` | A `scene.*` activated when a wake-up is answered. `wakeup_scenes` sets one per room. |
 | `wakeup_weather` | `true` | Speak a short local forecast during the wake-up. |
 | `wakeup_calendar` | `""` | A `calendar.*` entity whose next event in the coming 18 hours is read out. |

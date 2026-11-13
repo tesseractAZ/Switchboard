@@ -2,7 +2,8 @@
 
 Three monitors watch different things and publish Home Assistant
 sensors. Within each monitor the **alert** toggles only control the pop-up
-notifications — the sensors keep publishing either way.
+notifications (and, for link health, the outage push to the phone) — the
+sensors keep publishing either way.
 
 > **They are not independent.** The link-health poller is the only one of these
 > three monitors with AMI access, so three things it publishes are inputs to the
@@ -49,6 +50,8 @@ memory; an add-on restart starts it empty.
 
 The "wake-up not delivered" card is retried the same way; the critical push in
 front of it is not, because a failed-alarm alert should not sound an hour late.
+The phone-system outage push (see [Link health](#link-health-link_health_)) is
+not retried either, for the same reason; its card is.
 Call-quality cards are not retried (each call's recorder runs once and exits);
 their `notify_status` records `failed` instead. Missed wake-ups have had their
 own retry since 2026-10-04.
@@ -62,7 +65,8 @@ a call ever drops. Publishes:
 - `sensor.switchboard_link_<ext>` — per phone; state is the RTT in ms, or
   `offline` / `unavailable`.
 - `sensor.switchboard_link_health` — a rollup (worst RTT; counts of reachable /
-  unreachable / offline; the down extensions).
+  unreachable / offline; the down extensions). `unavailable` when no phone that
+  has ever registered is reachable (v0.119.0).
 
 A **second detector**, added in v0.79.0, covers the outage no sample can see.
 Asterisk logs every reachability change as it happens, and those lines are read
@@ -96,6 +100,33 @@ replaces the outage entry rather than dismissing it; the same replace-on-recover
 pattern is used by the trunk watchdog ([Registration resilience](sip-trunk.md#registration-resilience))
 and by device health below.
 
+Since v0.119.0:
+
+- **Only phones that have ever registered count**, on both sides of the
+  fraction. A configured extension that never has (a softphone that is never
+  used) is neither down nor part of the fleet, so the card reads "9 of 9 phones
+  are unreachable (exts 11, …, 19)" rather than "10 of 10" with the softphone
+  listed. Counted, it let four real phones down out of nine trip the alert. The
+  between-samples detector below uses the same denominator.
+- **The outage reaches the phone.** With `wakeup_push_target` set, the outage
+  is also pushed there ("Switchboard: phones down"), and so is its recovery
+  ("Switchboard: phones back"), beside the cards. The pushes are not critical,
+  so they do not sound through Do Not Disturb, and they are not retried.
+  `link_health_alerts: false` silences them with the cards. A push that fails is
+  logged once in the add-on log.
+- **The cause follows the phones that are down.** When gateway ports and a
+  phone off the gateway (the Wi-Fi cordless) are down in the same sample, the
+  text names the Switchboard host or the network (a router or switch restart,
+  an address change) instead of the gateway; otherwise it names the gateway as
+  before. On 2026-11-12 the host moved to a new address and every phone, the
+  cordless included, was unregistered from 18:31:04 MST. Every alert named the
+  gateway, and every one was a silent card.
+- **The alert survives a restart.** Its latch is kept in
+  `/data/state/link-outage.json`. An add-on restart during an outage no longer
+  raises "phones unreachable" (and its push) a second time, and the recovery
+  still comes. A latch restored at start-up is cleared by the first sample after
+  warm-up, never by a warm-up one. One more than 7 days old is ignored.
+
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable
 since the last sample; the log is read just before each sample). The card is
@@ -110,6 +141,10 @@ judged per phone against that sample:
   are back. If the phones stay down, the outage alert above can take over, and
   the card says so when the outage threshold is met. A second drop while a card
   is open gets its own card and its own update.
+
+Each card ends by calling the drop a warning about the gateway or its uplink,
+or, when gateway ports and a phone off the gateway dropped together, about the
+Switchboard host or the network. These cards are never pushed to the phone.
 
 Until v0.118.0 the card claimed "the phones are up now" whenever enough phones
 had dropped, even when its own sample showed them down: on 2026-11-02 01:01 MST
@@ -245,20 +280,44 @@ loss, latency, or one-way audio, since one-way is detected from packet counts.
 Covers the two blind spots the above can't see:
 
 - The **WP826 cordless**'s own battery %, WiFi signal, and most-recent-call MOS
-  (needs `cordless_password`) → `sensor.switchboard_cordless_health`. Flags
-  CRITICAL when unreachable or the battery is dying, degraded on low battery / weak
-  WiFi / a recent poor call.
+  (needs `cordless_password`), and its SIP registration →
+  `sensor.switchboard_cordless_health`. Flags CRITICAL when unreachable, not
+  registered, or the battery is dying, degraded on low battery / weak WiFi / a
+  recent poor call.
 - The **GXW gateway**'s port health, derived from the link-health rollup →
   `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
-  lost power or its uplink.
+  lost power or its uplink. All wired ports down **with the cordless down too**
+  (in the same rollup) = more likely the Switchboard host or the network, since
+  the cordless is on Wi-Fi, not on the gateway, and the alert says so. The cause
+  is decided when the alert fires; the wording says "ports down", not
+  "unregistered", because the rollup's down list also holds ports that are still
+  registered but fail their qualify.
+
+**Registration** (v0.119.0) is read off the link-health rollup for
+`cordless_ext`, under the same freshness rules as gateway health. The cordless
+is not registered when it is in the rollup's `offline_exts`; that reads
+CRITICAL ("not registered with Switchboard — it cannot ring") once the monitor
+has been running 360 s, the gateway's startup grace, since the handset takes up
+to a minute to re-register after a restart. No usable rollup, a blank
+`cordless_ext`, or an extension that has never registered is *unknown*, which
+raises nothing, and an outstanding registration alert is not cleared while it is
+unknown. Before v0.119.0 nothing read registration: on 2026-11-12 the cordless
+was unregistered with every other phone and read `ok` throughout, because its
+network and admin API still answered. It is judged even with nothing to probe
+(`cordless_ip` blank and no live `contact_ip`, the case for an unregistered
+handset); `reachable` then reads `null`, not `false`.
 
 Both use a 2-cycle hysteresis so a transient blip doesn't alert; a worsening from
 degraded to critical alerts again. Both post a recovery notice when they return
 to normal, again under that device's shared `notification_id`, so the recovery
-replaces the alert rather than removing it. For the cordless, "recovered" is
-reserved for a clear backed by a newer scored call. A clear with no newer call
-(typically because the poor call simply aged out of the 15-minute window) is
-titled "alert lapsed" instead, and says the state is unknown until the next call.
+replaces the alert rather than removing it. For the cordless, a clear is
+"recovered" unless the alert rested on a poor call alone. That is the only
+reason that clears with nothing new measured: the call ages out of the 15-minute
+window. Such a clear, with no newer scored call, is titled "alert lapsed"
+instead, and says the state is unknown until the next call. Every other reason
+(registration, reachability, battery, Wi-Fi) is measured again each cycle, so
+its clearing is a recovery; before v0.119.0 those read as lapses too whenever
+no newer call had been scored.
 
 **When a poor call counts.** The handset scores every call itself. Each score is
 matched to a call-quality ledger leg that hung up within 90 s of it: the
@@ -317,13 +376,13 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 
 | Sensor | What it tells you |
 |--------|-------------------|
-| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
+| `sensor.switchboard_cordless_health` | Cordless health **level** (`ok`/`degraded`/`critical`) as the state — battery %, Wi-Fi signal, and the reason live in the attributes. `last_mos` is the handset's own score for its most recent matched call, `last_mos_age_s` how many seconds ago that call ended, and `last_mos_uncorroborated` is `true` when that score is below `mos_min` but the call-quality ledger did not measure the same problem (see *When a poor call counts* above). `sip_registered` is its SIP registration per the link-health rollup (`true`/`false`, or `null` when unknown); `reachable` is the handset answering on the network (HTTPS or its admin API), `null` when there was nothing to probe. (Before v0.48.0 the state was the raw battery number, which made a battery-driven `critical` invisible without opening the attributes.) |
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 | `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but never drive this sensor. They are also exempt from the one-way-audio check, because their one-directional shape would trip it by design. Since v0.104.0 a poor line under one of them (low MES, loss or latency) raises an ordinary call-quality card like any other leg, while a clip that was merely cut short stays quiet. The exception to that silence is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
-| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down) **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
+| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down). The state is `unavailable` when no phone that has ever registered is reachable (v0.119.0), and `unknown` only when phones are reachable but none has a measured RTT yet. `expected` is the number of phones that have ever registered and `never_registered_exts` the configured extensions that never have; those still appear in `unreachable_exts`, unchanged. **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/`Unregistered`/…). Published only when the trunk is enabled **and** registers (`registns: true`); a trunk that authenticates per-INVITE has nothing to watch. `unknown` means Asterisk answered but reported no registration object, which counts as down. A cycle in which Asterisk could not answer at all (for example in the seconds after a restart) publishes nothing, and the sensor keeps its last value. `auto_reregister_attempts` counts the re-registers Asterisk accepted (a refused one is not counted), and `next_reg_s` is the refresh countdown when one is running. A ~24 h silent inbound outage motivated this sensor — see [Registration resilience](sip-trunk.md#registration-resilience). The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
-| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. |
+| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. The state is `unavailable` when no gateway port that has ever registered is reachable (v0.119.0; it read `unknown` before), and `unknown` only when ports are up with no RTT measured yet. The unit and `state_class` never change, and Home Assistant leaves both `unavailable` and `unknown` out of its statistics. |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant
 > restart until the next push — that's expected. A pushed sensor never expires,
@@ -337,7 +396,14 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 > 60 s), or measured before the device-health monitor last started. That last case
 > covers the rollup a previous run left behind across an add-on restart; it reads
 > `unknown` until the link-health poller publishes again, and `unknown` never
-> raises an alert.
+> raises an alert. The cordless's registration is read off the same rollup under
+> the same rules, and a registration it cannot read is unknown too.
+>
+> `unavailable` on `link_health` and `wired_link_health` is a measurement: the
+> poller reached Asterisk and found no phone (or no gateway port) up. It is keyed
+> on the reachable count, never on a missing RTT. A cycle in which the poller
+> cannot reach Asterisk at all still publishes nothing, so both keep their last
+> value, and only `measured_at` shows the age.
 
 ---
 

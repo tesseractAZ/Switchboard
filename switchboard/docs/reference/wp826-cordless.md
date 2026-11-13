@@ -31,7 +31,8 @@ cordless integrates in three extra ways:
   signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
   `cordless_ext` set it **auto-follows the phone's IP** from its live registration,
   so DHCP moving the handset never breaks monitoring (`cordless_ip` is just the
-  fallback)
+  fallback), and it checks that the handset is registered: an unregistered
+  cordless cannot ring and reads `critical`
   ([Device health](health-monitoring.md#device-health-device_health_)).
 
 For scripting the cordless's own settings (remote phonebook, distinctive ring,

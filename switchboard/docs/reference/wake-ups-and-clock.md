@@ -91,6 +91,12 @@ for when the handset itself is the problem. Set `wakeup_push_target` to empty an
 the escalation falls back to a Home Assistant notification card instead — the
 signal is not lost, it just stops sounding through Do Not Disturb.
 
+The same target also receives the phone-system outage push (v0.119.0): when the
+link-health monitor raises "phones unreachable" it pushes "phones down" there,
+and "phones back" when they recover. Those are ordinary pushes, not critical
+ones: a wake-up that then fails to ring still escalates with its own critical
+alert. See [Link health](health-monitoring.md#link-health-link_health_).
+
 If `wakeup_retry_seconds` is shorter than `wakeup_ring_seconds` plus one 20 s poll,
 the scheduler judges rings at ring + 20 s instead and logs a WARNING at start-up
 naming both values, so a call still ringing is never judged unanswered.

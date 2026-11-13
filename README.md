@@ -101,8 +101,11 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   happen, and it reports half the fleet going dark *between* samples even when
   both samples look healthy.
 - **Mass-outage alerting with hysteresis.** It needs at least half the fleet
-  *and* at least three phones unreachable for two consecutive cycles. A shared
-  gateway failure can't go unnoticed, and a single blip doesn't page anyone.
+  *and* at least three phones unreachable for two consecutive cycles, counting
+  only phones that have ever registered. A shared gateway failure can't go
+  unnoticed, and a single blip doesn't page anyone. The outage and its recovery
+  are also pushed to the phone (`wakeup_push_target`), and the alert survives an
+  add-on restart without being raised twice.
 - **Restart-aware sampling.** After a restart the poller checks every 15 s until
   every gateway port and every phone that has ever registered is back, bounded to
   eight checks. Contacts are restored from a persisted Asterisk database and
@@ -168,9 +171,11 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
 ### Device health
 
 - **Gateway.** Port health is derived from the link-health rollup, and all wired
-  ports down reads as the gateway losing power or its uplink.
+  ports down reads as the gateway losing power or its uplink, or, when the
+  cordless is down too, as the Switchboard host or the network.
 - **WP826 cordless.** The monitor reads the handset's battery, WiFi signal and its
-  own MOS for the last call. A low MOS from the handset marks it degraded only
+  own MOS for the last call, and its SIP registration: an unregistered cordless
+  cannot ring and reads critical. A low MOS from the handset marks it degraded only
   when the PBX's record of the same call corroborates it. The cordless's IP
   address is followed automatically when it changes.
 - **Two-cycle hysteresis** applies on both devices. A worsening from degraded to
