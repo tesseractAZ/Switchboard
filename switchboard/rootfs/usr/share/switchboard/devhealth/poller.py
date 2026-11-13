@@ -901,14 +901,15 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
     rather than a critical "the gateway lost power" claim.
 
     `cordless_dropped_too`: the cordless, which is on Wi-Fi and not on the
-    gateway, went down with the ports or one rollup after them
+    gateway, went down with the ports, by rtpmon's outage rule
     (dropped_together). Then the critical names the Switchboard host or the
     network, not the gateway (2026-11-12: the host moved to a new address,
     every phone dropped, and this said the GXW "likely lost power or its
     uplink"). A cordless merely down in the same rollup is not enough: one
     asleep half an hour before the gateway lost power, or gone a sample
-    before it, did not drop with it. "Down", not "unregistered": the rollup's
-    list also holds ports that are still registered but fail their qualify."""
+    before the outage began, did not drop with it. "Down", not "unregistered":
+    the rollup's list also holds ports that are still registered but fail
+    their qualify."""
     if not gw_exts:
         return "ok", []
     down = [e for e in gw_exts if e in set(down_exts or [])]
@@ -1200,21 +1201,52 @@ def note_down_run(run: dict, down: bool | None, at: float) -> None:
         run["since"] = at
 
 
-def dropped_together(cordless_run: dict, ports_run: dict, interval_s: float) -> bool:
-    """The cordless's down run began on the rollup sample where every port was
-    first down, or on the next one (`interval_s`, rtpmon's poll interval, with
-    half an interval for jitter): what a router restart or a host address
-    change does to both paths at once. Both starts must have been seen. Two
-    runs that began on one sample carry its one `measured_at`.
+# rtpmon's fleet-outage threshold (rtpmon/poller.py OUTAGE_MIN_PORTS and
+# outage_threshold): half the phones that have ever registered, rounded up, and
+# never fewer than this. test_devhealth holds fleet_outage_in to rtpmon's
+# is_mass_outage on every combination of the nine phones.
+OUTAGE_MIN_PORTS = 3
 
-    The window is one-sided, as rtpmon's outage_cause_is_host is: there the
-    cordless must be up in the sample before the outage and down by the one
-    that confirms it. The first version allowed a rollup either way, so a
-    cordless that left the Wi-Fi a sample BEFORE the gateway lost power had
-    this alert name the host or the network while rtpmon's card and push
-    named the gateway."""
-    c, p = cordless_run.get("since"), ports_run.get("since")
-    return c is not None and p is not None and 0 <= c - p <= 1.5 * interval_s
+
+def fleet_outage_in(attrs: dict | None) -> bool | None:
+    """Whether the rollup sample is a fleet outage by rtpmon's rule
+    (is_mass_outage): at least half the phones that have ever registered
+    (`expected`), and at least OUTAGE_MIN_PORTS, are down, never-registered
+    extensions left out. None when the rollup does not say how many have
+    registered."""
+    if not isinstance(attrs, dict):
+        return None
+    expected = attrs.get("expected")
+    if not isinstance(expected, int):
+        return None
+    never = _ext_set(attrs, "never_registered_exts")
+    down = {e for e in rollup_down_exts(attrs) if e not in never}
+    return expected > 0 and len(down) >= max(OUTAGE_MIN_PORTS, (expected + 1) // 2)
+
+
+def dropped_together(cordless_run: dict, ports_run: dict, fleet_run: dict,
+                     interval_s: float) -> bool:
+    """rtpmon's outage_cause_is_host, in rollup time: the fleet outage
+    (`fleet_run`, fleet_outage_in) began on a sample in which the cordless was
+    up and a port still answered, and the cordless and every port were down by
+    its second sample, the one rtpmon's alert fires on (`interval_s`, rtpmon's
+    poll interval, with half an interval for jitter). That is what a router
+    restart or a host address change does to both paths at once. All three
+    starts must have been seen. Runs that began on one sample carry its one
+    `measured_at`.
+
+    Anchored on the outage's start, as rtpmon's rule is (the sample before the
+    outage), not on the last port's drop. Anchored on that drop, the cordless
+    dropping with a first wave of ports that was already an outage (four ports
+    and the cordless, 5 of 9) read as a sample early, and this alert named the
+    gateway while rtpmon's card and push named the host. Before that, a window
+    of a rollup either way had a cordless that left the Wi-Fi a sample before
+    the gateway lost power name the host here and the gateway in rtpmon."""
+    c, p, m = (r.get("since") for r in (cordless_run, ports_run, fleet_run))
+    if c is None or p is None or m is None:
+        return False
+    late = m + 1.5 * interval_s
+    return m <= c <= late and m <= p <= late
 
 
 def resolve_cordless_ip(cordless_ext: str, fallback_ip: str) -> str:
@@ -1449,9 +1481,10 @@ def run() -> None:
     # Consecutive distinct rollup samples showing the cordless unregistered
     # (note_registration).
     reg_st: dict = {}
-    # When the cordless's down run and the ports' all-down run began, by rollup
-    # time, for the gateway alert's cause (see dropped_together).
-    runs: dict = {"cordless": {}, "ports": {}}
+    # When the cordless's down run, the ports' all-down run and the fleet
+    # outage began, by rollup time, for the gateway alert's cause (see
+    # dropped_together).
+    runs: dict = {"cordless": {}, "ports": {}, "fleet": {}}
     last_ip = None
     follow = f"auto-follow ext {cordless_ext}" if cordless_ext else "static"
     print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
@@ -1554,20 +1587,22 @@ def run() -> None:
                 at = rollup_measured_at(rollup) or time.time()
                 note_down_run(runs["cordless"], cordless_down_in(rollup, cordless_ext), at)
                 note_down_run(runs["ports"], bool(gw_exts) and set(gw_exts) <= set(down), at)
+                note_down_run(runs["fleet"], fleet_outage_in(rollup), at)
                 try:
                     rollup_interval = float(rollup.get("poll_interval_s") or 300)
                 except (TypeError, ValueError):
                     rollup_interval = 300.0
                 # The cause is decided when the critical fires: the cordless
-                # dropping on the sample where every port went down, or the
-                # next one, points past the gateway. A cause learned later is
-                # not re-sent (the cordless dropping one rtpmon sample after
-                # the ports, read after the critical fired, say), because
-                # health_transition fires again only when the level rises.
+                # and every port down by the fleet outage's second sample,
+                # with the cordless up before it began, points past the
+                # gateway. A cause learned later is not re-sent (the cordless
+                # dropping one rtpmon sample after the ports, read after the
+                # critical fired, say), because health_transition fires again
+                # only when the level rises.
                 level, reasons = classify_gateway(
                     down, gw_exts, time.monotonic() - _started,
                     cordless_dropped_too=dropped_together(runs["cordless"], runs["ports"],
-                                                          rollup_interval))
+                                                          runs["fleet"], rollup_interval))
                 _publish_gateway(level, reasons, down, gw_exts)
                 ev = health_transition(level, gst)
                 if ev:

@@ -1636,7 +1636,8 @@ def test_the_cordless_sensor_carries_its_registration() -> None:
 def _reg_rollup(offline_19, ports_down=False, stale=False):
     """A link-health rollup at each cycle: ext 19 offline or up, the gateway's
     ports up or all down, measured 5 s before the read but not before this
-    process started (the first, in the start's own second), or long ago."""
+    process started (the first, in the start's own second), or long ago. Nine
+    phones have ever registered, as on the live plant (ext 20 never has)."""
     def at(cycle, clk):
         off = offline_19(cycle) if callable(offline_19) else offline_19
         down = list(_GW) if (ports_down(cycle) if callable(ports_down) else ports_down) else []
@@ -1646,7 +1647,7 @@ def _reg_rollup(offline_19, ports_down=False, stale=False):
                 "poll_interval_s": 300,
                 "unreachable_exts": down + (["19"] if off else []) + ["20"],
                 "offline_exts": down + (["19"] if off else []) + ["20"],
-                "never_registered_exts": ["20"],
+                "never_registered_exts": ["20"], "expected": 9,
                 "other_rtt_ms": None if off else {"19": 9.1}}
     return at
 
@@ -1814,7 +1815,7 @@ def _sampled_rollup(offline_in, period=300, stale=None):
                 "poll_interval_s": period,
                 "unreachable_exts": (["19"] if off else []) + ["20"],
                 "offline_exts": (["19"] if off else []) + ["20"],
-                "never_registered_exts": ["20"],
+                "never_registered_exts": ["20"], "expected": 9,
                 "other_rtt_ms": None if off else {"19": 9.1}}
     return at
 
@@ -1972,12 +1973,13 @@ def test_the_gateway_critical_names_the_host_only_for_a_cordless_that_dropped_wi
     check("runs: seen up, then down -> the first down rollup's time", run["since"] == 1600.0)
     dh.note_down_run(other, False, 1300.0)
     dh.note_down_run(other, True, 2050.0)
+    # The ports' all-down run here is also the fleet outage's (the third run).
     check("runs: the cordless 450 s after the ports is one rollup (300 s) with jitter",
-          dh.dropped_together(other, run, 300.0))
-    check("runs: ...450 s before them is not", not dh.dropped_together(run, other, 300.0))
+          dh.dropped_together(other, run, run, 300.0))
+    check("runs: ...450 s before them is not", not dh.dropped_together(run, other, other, 300.0))
     dh.note_down_run(other, False, 2100.0)
     dh.note_down_run(other, True, 2200.0)
-    check("runs: 600 s apart is two rollups", not dh.dropped_together(other, run, 300.0))
+    check("runs: 600 s apart is two rollups", not dh.dropped_together(other, run, run, 300.0))
     blind = {}
     dh.note_down_run(blind, False, 1000.0)
     dh.note_down_run(blind, None, 0.0)
@@ -2114,12 +2116,13 @@ def test_devhealth_and_rtpmon_name_one_cause_for_one_outage() -> None:
     """The cordless left the Wi-Fi a sample before the GXW lost power: devhealth
     named the host (the cordless dropped "within one rollup" of the ports)
     while rtpmon's outage card and push named the gateway. Both components
-    now use one rule: the cordless was up in the last sample before every
-    port was down, and was down by the next one."""
+    now use rtpmon's rule: the cordless was up, and a port still answered, in
+    the last sample before the fleet outage began, and the cordless and every
+    port were down by the outage's second sample."""
     import test_rtpmon as trt
     period = 300
 
-    def verdicts(samples):
+    def verdicts(samples, cycles=14):
         pushes = []
         rt_notes = trt._drive_samples([(s, []) for s in samples],
                                       target=trt._TARGET, pushes=pushes)
@@ -2130,7 +2133,7 @@ def test_devhealth_and_rtpmon_name_one_cause_for_one_outage() -> None:
             attrs["measured_at"] = _iso(clk.start_wall + period * k)
             attrs["poll_interval_s"] = period
             return attrs
-        _sets, dh_notes = _drive_loop(rollup_at, cycles=14, interval=120,
+        _sets, dh_notes = _drive_loop(rollup_at, cycles=cycles, interval=120,
                                       env={"CORDLESS_EXT": "19"})
         gw = [m for t, m in dh_notes if t == "Switchboard: gxw gateway CRITICAL"]
         out = [m for t, m in rt_notes if t == "Switchboard: phones unreachable"]
@@ -2147,21 +2150,81 @@ def test_devhealth_and_rtpmon_name_one_cause_for_one_outage() -> None:
     same = verdicts([trt._S_UP] * 4 + [trt._S_ALL_DOWN] * 4)
     check("one cause: the cordless and the ports in one sample -> the host, in both",
           same == (1, 1, 1, True, True, True))
+    # The ports down across two samples, the cordless with the first wave:
+    # four ports and the cordless are 5 of 9, already the fleet outage, and
+    # rtpmon's sample before it has the cordless up. devhealth anchored on the
+    # last port's drop, a sample later, and named the gateway.
+    first_wave = trt._sum(trt._WIRED8[4:])
+    check("one cause: precondition — the first wave is an outage with four ports up",
+          trt.pm.is_mass_outage(first_wave) and first_wave["wired_reachable"] == 4)
+    check("one cause: the cordless with the first wave of ports -> the host, in both",
+          verdicts([trt._S_UP] * 3 + [first_wave] + [trt._S_ALL_DOWN] * 4)
+          == (1, 1, 1, True, True, True))
+    # A first wave below the threshold (two ports and the cordless, 3 of 9):
+    # the outage begins with the other ports, and the cordless was down in the
+    # sample before it.
+    small = trt._sum(trt._WIRED8[2:])
+    check("one cause: precondition — a smaller first wave is not an outage",
+          not trt.pm.is_mass_outage(small))
+    check("one cause: the cordless with a first wave below the threshold -> the gateway, in both",
+          verdicts([trt._S_UP] * 3 + [small] + [trt._S_ALL_DOWN] * 4)
+          == (1, 1, 1, False, False, False))
+    # The last port down on the outage's third sample: rtpmon's alert fires on
+    # the second, where that port still answers.
+    one_port = trt._sum(trt._WIRED8[7:])
+    check("one cause: the last port down a sample after the alert's -> the gateway, in both",
+          verdicts([trt._S_UP] * 3 + [first_wave, one_port] + [trt._S_ALL_DOWN] * 4, cycles=17)
+          == (1, 1, 1, False, False, False))
     gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 2, cycles=6)
     check("one cause: devhealth alone, the cordless one sample early -> the gateway wording",
           len(gw) == 1 and "GXW gateway likely lost power" in gw[0])
-    run, ports = {}, {}
-    for r in (run, ports):
-        dh.note_down_run(r, False, 1000.0)
+    # In rollup time at rtpmon's 300 s, with the fleet outage from 1600.
+    fleet = {"since": 1600.0}
+
+    def together(c, p, m=fleet):
+        return dh.dropped_together({"since": c}, {"since": p}, m, 300.0)
+    check("runs: the cordless and every port down on the outage's first sample",
+          together(1600.0, 1600.0))
+    check("runs: ...or by its second, either of them",
+          together(1900.0, 1600.0) and together(1600.0, 1900.0) and together(1900.0, 1900.0))
+    check("runs: the cordless down a sample before the outage began is not together",
+          not together(1300.0, 1600.0) and not together(1300.0, 1900.0))
+    check("runs: nor every port down before it began (fewer ports than the threshold)",
+          not together(1600.0, 1300.0))
+    check("runs: nor the cordless or the last port down on its third sample",
+          not together(2200.0, 1600.0) and not together(1600.0, 2200.0))
+    check("runs: nor an outage whose start was not seen",
+          not together(1600.0, 1600.0, {}) and not together(1600.0, 1600.0, {"since": None}))
+    run = {}
+    dh.note_down_run(run, False, 1000.0)
     dh.note_down_run(run, True, 1300.0)
-    dh.note_down_run(ports, True, 1600.0)
-    check("runs: the cordless's run beginning a sample before the ports' is not together",
-          not dh.dropped_together(run, ports, 300.0))
-    check("runs: ...one beginning a sample after them is",
-          dh.dropped_together(ports, {"since": 1900.0}, 300.0) is False
-          and dh.dropped_together({"since": 1900.0}, ports, 300.0))
-    check("runs: ...and one beginning on the ports' own sample is",
-          dh.dropped_together({"since": 1600.0}, ports, 300.0))
+    check("runs: ...nor a cordless or ports run whose start was not seen",
+          not dh.dropped_together({}, run, run, 300.0)
+          and not dh.dropped_together(run, {}, run, 300.0))
+
+
+def test_devhealth_reads_a_fleet_outage_off_the_rollup_as_rtpmon_does() -> None:
+    """The gateway alert's cause rests on when the fleet outage began, which
+    rtpmon decides (is_mass_outage) and devhealth reads off the rollup rtpmon
+    publishes. Every combination of the nine phones up and down, with every
+    phone, eight, or three of them ever registered, through rtpmon's own
+    summary and publish."""
+    import itertools
+    import test_rtpmon as trt
+    differ = []
+    for ever in (trt._EVER9, trt._EVER9 - {"19"}, set(trt._WIRED8[:3])):
+        for n in range(len(trt._ALL9) + 1):
+            for up in itertools.combinations(trt._ALL9, n):
+                summ = trt._sum(up, ever=ever)
+                attrs = trt._published(summ)["sensor.switchboard_link_health"][1]
+                if dh.fleet_outage_in(attrs) is not trt.pm.is_mass_outage(summ):
+                    differ.append((sorted(ever), up))
+    check(f"fleet: devhealth and rtpmon agree on every sample ({differ[:3]})", not differ)
+    check("fleet: a rollup that does not say how many have registered -> unknown",
+          dh.fleet_outage_in({"unreachable_exts": ["11", "12", "13"], "offline_exts": []}) is None
+          and dh.fleet_outage_in(None) is None)
+    check("fleet: one that says none has registered is no outage, whatever it lists",
+          dh.fleet_outage_in({"expected": 0, "unreachable_exts": ["11", "12", "13"]}) is False)
 
 
 def test_no_served_text_says_a_reboot_inside_one_sample_raises_nothing() -> None:

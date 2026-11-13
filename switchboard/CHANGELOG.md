@@ -41,9 +41,9 @@ Recent releases. Releases up to 0.109.0 are in the
   probe, such a cycle does not publish `ok` over the alert.
 - When every gateway port and the cordless drop together, the outage,
   mass-drop and gateway alerts name the Switchboard host or the network
-  rather than the gateway. A port still up, a cordless that was already down
-  (even one sample before the ports), or a drop healed before the next sample
-  keeps the gateway wording.
+  rather than the gateway. A port still up, a cordless already down before
+  the outage began (even one sample before), or a drop healed before the next
+  sample keeps the gateway wording.
 - `link_health` reads `unavailable` when no phone that should be up is
   reachable, and `wired_link_health` when no gateway port is; `unknown` now
   means only reachable but not yet measured. Units and `state_class` do not

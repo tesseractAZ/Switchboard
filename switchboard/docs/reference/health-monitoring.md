@@ -317,14 +317,18 @@ Covers the two blind spots the above can't see:
 - The **GXW gateway**'s port health, derived from the link-health rollup →
   `sensor.switchboard_gateway_health`. All wired ports down = the gateway likely
   lost power or its uplink. All wired ports down **with the cordless having
-  dropped in the same rollup sample or the next one** = more likely the
-  Switchboard host or the network, since the cordless is on Wi-Fi, not on the
-  gateway, and the alert says so. A cordless that was already down before the
-  ports, even one sample before, or one whose drop the monitor did not see (it
-  was down at the monitor's first reading), keeps the gateway wording. The
-  cause is decided when the alert fires; the wording says "ports down", not
-  "unregistered", because the rollup's down list also holds ports that are
-  still registered but fail their qualify.
+  dropped with them** = more likely the Switchboard host or the network, since
+  the cordless is on Wi-Fi, not on the gateway, and the alert says so. "With
+  them" is the outage alert's rule above, read off the same rollup samples: in
+  the last sample before the mass outage began, the cordless was up and a
+  port still answered, and the cordless and every port were down by the
+  outage's second sample. A cordless that was already down when the outage
+  began, even one sample before, or one whose drop the monitor did not see (it
+  was down at the monitor's first reading), keeps the gateway wording, as does
+  a port still answering on the outage's second sample. The cause is decided
+  when the alert fires; the wording says "ports down", not "unregistered",
+  because the rollup's down list also holds ports that are still registered
+  but fail their qualify.
 
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless
