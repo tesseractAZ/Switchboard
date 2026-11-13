@@ -2290,6 +2290,12 @@ def test_a_never_registered_extension_does_not_count_toward_an_outage() -> None:
     check("D: the denominator is `expected`, not the configured count",
           pm.is_mass_drop(["11", "12", "13"], {"total": 10, "expected": 4}) is True
           and pm.is_mass_drop(["11", "12", "13"], {"total": 10}) is False)
+    # On this plant 9 and 10 give the same threshold (5), so pin it where they
+    # differ: three of six that register is half; three of eight configured is not.
+    check("D: the point-sample denominator is `expected` too",
+          pm.is_mass_outage({"total": 8, "expected": 6, "unreachable": 5,
+                             "unreachable_exts": ["11", "12", "13", "17", "18"],
+                             "never_registered_exts": ["17", "18"]}) is True)
     check("D: a summary without never_registered_exts counts every unreachable phone",
           pm.is_mass_outage({"total": 10, "unreachable": 5}) is True)
 
@@ -2564,6 +2570,14 @@ def test_the_rollups_read_unavailable_when_nothing_is_reachable() -> None:
     no_ports = _published(pm.summarize(_fleet(()), [], ever_registered=_EVER9))
     check("E: with no gateway ports configured the wired sensor is not called failed",
           no_ports["sensor.switchboard_wired_link_health"][0] == "unknown")
+    # Ports configured that have never registered (a gateway not set up yet)
+    # are absent, not failed, as ext 20 is for the rollup.
+    never_ports = pm.summarize(_fleet(("19",)), _WIRED8, ever_registered={"19"})
+    check("E: precondition — every gateway port is never-registered",
+          set(_WIRED8) <= set(never_ports["never_registered_exts"])
+          and never_ports["wired_expected"] == 0)
+    check("E: ...so the wired sensor does not read unavailable",
+          _published(never_ports)["sensor.switchboard_wired_link_health"][0] == "unknown")
 
 
 def test_the_rollup_publishes_expected_and_never_registered() -> None:
