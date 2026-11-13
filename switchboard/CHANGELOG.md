@@ -17,6 +17,11 @@ Recent releases. Releases up to 0.109.0 are in the
   `wakeup_push_target` ("phones down", "phones back"): ordinary pushes, not
   critical ones, and not retried. The key is unchanged; its label is now
   "Phone Push Target". `link_health_alerts: false` silences the push too.
+- The outage alert clears only once two fewer phones than its threshold are
+  down (3 of 9) on two consecutive samples, and the recovery names any still
+  down ("still down: ext 14"). It cleared on the first sample under the
+  threshold, so four ports dead and a fifth flapping raised and cleared it
+  every 15 minutes.
 - The outage latch is kept in `/data/state`, with whether the alert was
   shown. A restart during an outage does not raise or push a shown alert
   again, and its recovery still comes; one muted or lost unshown is raised

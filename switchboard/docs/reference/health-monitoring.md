@@ -108,6 +108,16 @@ Since v0.119.0:
   are unreachable (exts 11, …, 19)" rather than "10 of 10" with the softphone
   listed. Counted, it let four real phones down out of nine trip the alert. The
   between-samples detector below uses the same denominator.
+- **The alert clears below where it fires.** On a fleet of nine, five down
+  raises it; it clears only once at most three are down (two fewer than the
+  threshold) on 2 consecutive settled samples, the same two the alert needs.
+  In between, an alert that is out stays out and none is raised, whichever way
+  the count moves. It used to clear on the first sample under the threshold,
+  so four gateway ports dead and a fifth re-registering every 15 minutes raised
+  and cleared it every 15 minutes, each recovery counting five phones reachable
+  while four could not ring. A recovery with phones still down names them ("8
+  of 9 phones are reachable again; still down: ext 14"); with none down it
+  says all are back.
 - **The outage reaches the phone.** With `wakeup_push_target` set, the outage
   is also pushed there ("Switchboard: phones down"), and so is its recovery
   ("Switchboard: phones back"), beside the cards. The pushes are not critical,
@@ -133,9 +143,10 @@ Since v0.119.0:
   time, and the recovery still comes. One that was not shown (raised while
   `link_health_alerts` was off, or refused by Home Assistant and lost with the
   restart before its retry) is raised once the restarted monitor has two
-  settled outage samples. A latch restored at start-up is cleared by the first
-  sample after warm-up, never by a warm-up one. One more than 7 days old is
-  ignored.
+  settled outage samples. A latch restored at start-up is cleared by two
+  settled clear samples after warm-up, never by warm-up ones; a restart between
+  the two delays the recovery by a sample and does not lose or repeat it. One
+  more than 7 days old is ignored.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable

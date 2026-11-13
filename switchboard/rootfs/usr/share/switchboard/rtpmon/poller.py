@@ -368,9 +368,22 @@ def summarize(phones: list, wired_exts: list | None = None,
 # a configured extension that never has (ext 20 on this plant) is absent by
 # nature, not down. Counting it let four real phones down out of nine trip the
 # point-sample alert while the between-samples detector needed five.
+#
+# ★ THE ALERT CLEARS BELOW WHERE IT FIRES (v0.119.0). It used to clear on the
+# first settled sample under the entry threshold T, so a fleet hovering AT T
+# alternated. Replayed through run(), four GXW ports dead and a fifth
+# re-registering every 15 minutes gave four 'phones down' and four 'phones
+# back' pushes in 100 minutes, and every 'phones back' said "5 of 9 phones are
+# reachable again" while four could not ring. So the latch clears only once at
+# most T - OUTAGE_CLEAR_MARGIN phones are down, on OUTAGE_CLEAR_CYCLES
+# consecutive settled samples: the same two samples the 'down' needs. Between
+# the two levels a latched alert stays out and an unlatched one stays quiet,
+# whichever way the count moves.
 # --------------------------------------------------------------------------- #
 OUTAGE_MIN_PORTS = 3       # at least this many phones down ...
 OUTAGE_MIN_CYCLES = 2      # ... for this many consecutive cycles before alerting
+OUTAGE_CLEAR_MARGIN = 2    # clear only at T - 2 down (T: outage_threshold) ...
+OUTAGE_CLEAR_CYCLES = 2    # ... on this many consecutive settled samples
 
 
 def _expected_of(summ: dict | None) -> int:
@@ -398,14 +411,26 @@ def _down_expected_count(summ: dict | None) -> int:
     return max(0, down)
 
 
+def outage_threshold(summ: dict | None) -> int:
+    """T, the down count that is a fleet outage: half the phones that have ever
+    registered, rounded up, and never fewer than OUTAGE_MIN_PORTS."""
+    return max(OUTAGE_MIN_PORTS, (_expected_of(summ) + 1) // 2)
+
+
 def is_mass_outage(summ: dict) -> bool:
     """A fleet-level outage: at least half the phones (and >= OUTAGE_MIN_PORTS)
     unreachable at once — i.e. a shared gateway dropped, not one handset asleep or a
     lone unconfigured port. One cordless napping (+ an empty port) never qualifies.
     Both sides of the fraction leave out the never-registered extensions."""
     expected = _expected_of(summ)
-    down = _down_expected_count(summ)
-    return expected > 0 and down >= max(OUTAGE_MIN_PORTS, (expected + 1) // 2)
+    return expected > 0 and _down_expected_count(summ) >= outage_threshold(summ)
+
+
+def outage_is_clear(summ: dict) -> bool:
+    """Few enough phones down for a latched outage alert to clear: at most
+    T - OUTAGE_CLEAR_MARGIN (3 of 9 on this plant, where T is 5). A sample
+    between that and T is neither an outage nor a recovery."""
+    return _down_expected_count(summ) <= max(0, outage_threshold(summ) - OUTAGE_CLEAR_MARGIN)
 
 
 # The cause sentences. Every gateway port and a phone OFF the gateway dropping
@@ -514,7 +539,7 @@ def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
     """
     expected = _expected_of(summ)
     n = len(went_unreachable or [])
-    return expected > 0 and n >= max(OUTAGE_MIN_PORTS, (expected + 1) // 2)
+    return expected > 0 and n >= outage_threshold(summ)
 
 
 def _down_now(summ: dict) -> set:
@@ -551,11 +576,14 @@ def mass_drop_reports(went: list, summ: dict | None, st: dict, settled: bool,
     If the point-sample outage alert fires meanwhile (st["alerted"]), the open
     card is left as posted: its text allows for that alert taking over. A cycle
     with no sample (summ None, AMI down) judges nothing and keeps the open
-    cards. The cycle in which the outage alert clears is judged like any other:
-    phones recovering from an outage log only Reachable lines (the 11-07
-    recovery window: nine Reachable, no Unreachable), so a mass drop counted
-    there is a real second drop, and excluding the outage's phones from it
-    lost true reports."""
+    cards. While the outage alert is out no card is raised: its own card and
+    push cover the fleet, and since v0.119.0 it stays out until the fleet has
+    cleared on two samples (see OUTAGE_CLEAR_MARGIN), so a drop in the first
+    of those two windows is the alert's too. The cycle in which the outage
+    alert clears is judged like any other: phones recovering from an outage
+    log only Reachable lines (the 11-07 recovery window: nine Reachable, no
+    Unreachable), so a mass drop counted there is a real second drop, and
+    excluding the outage's phones from it lost true reports."""
     if summ is None:
         return []
     down_now = _down_now(summ)
@@ -713,9 +741,18 @@ def _notify_mass_drop(card: dict, summ: dict, now: float | None = None,
 
 def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     """Pure state machine for the availability alert. `st` carries
-    {'cycles', 'alerted'} across calls. Returns 'down' (fire the outage alert, once,
-    after OUTAGE_MIN_CYCLES consecutive mass-outage cycles), 'up' (fire recovery,
-    once, when it clears after having alerted), or '' (nothing to do).
+    {'cycles', 'alerted', 'clear'} across calls. Returns 'down' (fire the outage
+    alert, once, after OUTAGE_MIN_CYCLES consecutive mass-outage samples), 'up'
+    (fire recovery, once, after having alerted, when OUTAGE_CLEAR_CYCLES
+    consecutive settled samples are outage_is_clear), or '' (nothing to do).
+
+    The two levels differ (see OUTAGE_CLEAR_MARGIN): a sample at or above T
+    counts toward 'down', one at or below T - 2 toward 'up', and one between
+    them resets the 'up' count and raises nothing. A latched alert therefore
+    stays out while the count wanders inside that band, and only an outage
+    sample counts toward a new 'down' once it has cleared. "Consecutive" counts
+    samples, as for the 'down': a cycle with no sample (AMI down) never reaches
+    this function and neither advances nor resets either count.
 
     `settled=False` (startup warm-up) must NOT count outage cycles: warm-up polls
     run every WARMUP_DELAY=15 s, so the "consecutive cycles" gate — sized for the
@@ -723,13 +760,16 @@ def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     turning a GXW that takes a minute to re-register into a false fleet-outage
     alarm.
 
-    Nor does a warm-up sample clear the latch: 'up' waits for a settled one.
-    Warm-up samples are taken while the fleet is still converging after a
-    restart, so neither direction is judged on them. In one process the latch
-    cannot be set during warm-up (it takes two settled cycles), so this governs
-    only a latch restored from disk after a restart (load_outage_alerted): the
-    recovery card and push it owes come from the first settled sample that is
-    not an outage.
+    Nor does a warm-up sample count toward clearing the latch: 'up' waits for
+    settled ones. Warm-up samples are taken while the fleet is still converging
+    after a restart, so neither direction is judged on them. In one process the
+    latch cannot be set during warm-up (it takes two settled cycles), so this
+    governs only a latch restored from disk after a restart
+    (load_outage_alerted): the recovery card and push it owes come from the
+    restarted process's own two settled clear samples. The count of clear
+    samples is not saved, so a restart between the two delays the 'up' by a
+    sample but neither loses nor repeats it: the latch on disk is cleared only
+    when the 'up' fires.
 
     It also keeps, for outage_cause_is_host, what the last sample that was not
     an outage showed (st["last_clear"]), and freezes that as
@@ -742,6 +782,7 @@ def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
         if not st.get("cycles"):
             st["before_outage"] = st.get("last_clear")
         st["cycles"] = st.get("cycles", 0) + 1
+        st["clear"] = 0
         if st["cycles"] >= OUTAGE_MIN_CYCLES and not st.get("alerted"):
             st["alerted"] = True
             return "down"
@@ -749,17 +790,27 @@ def outage_transition(summ: dict, st: dict, settled: bool = True) -> str:
     st["cycles"] = 0
     st["last_clear"] = {"other_down": list(summ.get("down_other_exts") or []),
                         "ports_down": _every_port_down(summ)}
-    if st.get("alerted") and settled:
-        st["alerted"] = False
-        return "up"
-    return ""
+    if not st.get("alerted") or not settled:
+        return ""
+    if not outage_is_clear(summ):
+        st["clear"] = 0
+        return ""
+    st["clear"] = st.get("clear", 0) + 1
+    if st["clear"] < OUTAGE_CLEAR_CYCLES:
+        return ""
+    st["alerted"] = False
+    return "up"
 
 
 def _outage_texts(event: str, summ: dict,
                   host: bool = False) -> tuple[str, str, str, str]:
     """(card title, card message, push title, push message) for an outage event.
     Counts and names only phones that have ever registered ("9 of 9"). `host`
-    is outage_cause_is_host's verdict; the gateway wording is the default."""
+    is outage_cause_is_host's verdict; the gateway wording is the default.
+
+    The recovery can come with phones still down (up to T - 2 of them, see
+    outage_is_clear), and then it names them: a bare "6 of 9 are reachable
+    again" reads as all clear to anyone who does not do the subtraction."""
     expected = _expected_of(summ)
     if event == "down":
         exts = ", ".join(_down_expected_exts(summ))
@@ -770,11 +821,14 @@ def _outage_texts(event: str, summ: dict,
                 "Switchboard: phones down",
                 f"{n} of {expected} phones can't ring (exts {exts}). {cause}")
     up = summ.get("reachable", 0)
+    still = _down_expected_exts(summ)
+    tail = (f"; still down: {'ext' if len(still) == 1 else 'exts'} {', '.join(still)}"
+            if still else "")
     return ("Switchboard: phones recovered",
-            f"Phones recovered — {up} of {expected} reachable.",
+            f"Phones recovered — {up} of {expected} reachable{tail}.",
             "Switchboard: phones back",
-            (f"All {expected} phones are reachable again." if up >= expected else
-             f"{up} of {expected} phones are reachable again."))
+            (f"All {expected} phones are reachable again." if up >= expected
+             else f"{up} of {expected} phones are reachable again{tail}."))
 
 
 def _notify_outage(event: str, summ: dict, push_target: str = "",
@@ -1708,7 +1762,7 @@ def run() -> int:
     prev_reachable = -1
     # The latch survives a restart (see load_outage_alerted): a 'down' already
     # shown is not raised again, and the 'up' that closes it still fires.
-    outage_st = {"cycles": 0, "alerted": load_outage_alerted()}
+    outage_st = {"cycles": 0, "clear": 0, "alerted": load_outage_alerted()}
     trunk_st = {"cycles": 0, "alerted": False}
     scrub_st = {"to": 0, "problem": ""}
     # Extensions this process has actually seen answer a qualify. A phone that

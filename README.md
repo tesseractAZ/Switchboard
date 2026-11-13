@@ -102,10 +102,13 @@ in [Health monitoring & sensors](switchboard/docs/reference/health-monitoring.md
   both samples look healthy.
 - **Mass-outage alerting with hysteresis.** It needs at least half the fleet
   *and* at least three phones unreachable for two consecutive cycles, counting
-  only phones that have ever registered. A shared gateway failure can't go
-  unnoticed, and a single blip doesn't page anyone. The outage and its recovery
-  are also pushed to the phone (`wakeup_push_target`), and the alert survives an
-  add-on restart without being raised twice.
+  only phones that have ever registered, and it clears only once two fewer than
+  that are down for two consecutive cycles, naming any phone still down. A
+  shared gateway failure can't go unnoticed, a single blip doesn't page anyone,
+  and a fleet hovering at the threshold raises one alert, not a stream of them.
+  The outage and its recovery are also pushed to the phone
+  (`wakeup_push_target`), and the alert survives an add-on restart without being
+  raised twice.
 - **Restart-aware sampling.** After a restart the poller checks every 15 s until
   every gateway port and every phone that has ever registered is back, bounded to
   eight checks. Contacts are restored from a persisted Asterisk database and

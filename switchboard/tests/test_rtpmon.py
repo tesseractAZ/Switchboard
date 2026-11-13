@@ -288,8 +288,10 @@ def test_outage_transition() -> None:
     check("transition: 2nd consecutive cycle fires 'down'", pm.outage_transition(big, st) == "down")
     # Still down: don't re-page.
     check("transition: sustained outage does not re-page", pm.outage_transition(big, st) == "")
-    # Recovery: fire 'up' once, then silent.
-    check("transition: recovery fires 'up' once", pm.outage_transition(ok, st) == "up")
+    # Recovery: two consecutive clear samples, the same gate as the 'down'.
+    check("transition: the first clear sample holds the alert",
+          pm.outage_transition(ok, st) == "" and st["alerted"] is True)
+    check("transition: the second fires 'up' once", pm.outage_transition(ok, st) == "up")
     check("transition: after recovery, steady state silent", pm.outage_transition(ok, st) == "")
     # A single-sample blip (one bad cycle then recovery) must NOT page.
     st2 = {"cycles": 0, "alerted": False}
@@ -314,13 +316,16 @@ def test_outage_transition_warmup_never_counts() -> None:
     check("warmup: 1st settled cycle silent", pm.outage_transition(big, st, settled=True) == "")
     check("warmup: 2nd settled cycle fires", pm.outage_transition(big, st, settled=True) == "down")
     # An alert latched before a restart (restored from disk since v0.119.0) is
-    # cleared by the first SETTLED sample. Warm-up samples are taken while the
+    # cleared by two SETTLED clear samples. Warm-up samples are taken while the
     # fleet is still converging, so they judge neither direction. In one process
     # the latch cannot exist during warm-up: it takes two settled cycles to set.
     st2 = {"cycles": 0, "alerted": True}
     check("warmup: a warm-up sample does not clear a restored latch",
           pm.outage_transition(ok, st2, settled=False) == "" and st2["alerted"] is True)
-    check("warmup: the first settled sample that is not an outage clears it",
+    check("warmup: ...nor counts toward clearing it", st2.get("clear", 0) == 0)
+    check("warmup: the first settled clear sample holds it",
+          pm.outage_transition(ok, st2, settled=True) == "" and st2["alerted"] is True)
+    check("warmup: the second clears it",
           pm.outage_transition(ok, st2, settled=True) == "up" and st2["alerted"] is False)
 
 
@@ -1635,20 +1640,27 @@ def test_the_real_loop_leaves_a_lasting_outage_to_the_outage_alert() -> None:
 def test_the_real_loop_after_an_outage_judges_the_clearing_cycle_like_any_other() -> None:
     """Recovering phones log only Reachable lines (the 11-07 recovery window: nine
     Reachable, no Unreachable): the clearing cycle raises no card of its own. A
-    real second drop in that window is reported, as the old code did."""
+    real second drop in that window is reported, as the old code did.
+
+    Since v0.119.0 the alert clears on the second of two clear samples, and it
+    is out until then: a drop in the first window is the alert's, and only the
+    window that clears it is judged afresh."""
     drop = [{"ext": e, "state": "Unreachable"} for e in _ALL9]
     back = [{"ext": e, "state": "Reachable"} for e in _ALL9]
-    notes = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, []),
-                            (_HEALTHY, back)])
+    outage = [(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, [])]
+    notes = _drive_samples(outage + [(_HEALTHY, back), (_HEALTHY, [])])
     check("clearing: down card, outage alert, recovery, and nothing else",
           [t for t, _m in notes] == ["Switchboard: phones dropped", "Switchboard: phones unreachable",
                                      "Switchboard: phones recovered"])
-    redrop = back + drop + back
-    notes2 = _drive_samples([(_HEALTHY, []), (_ROUTER_REBOOT, drop), (_ROUTER_REBOOT, []),
-                             (_HEALTHY, redrop)])
-    check("clearing: a real second drop healed by the sample is reported",
-          [t for t, _m in notes2][-1:] == ["Switchboard: phones dropped briefly"]
-          or [t for t, _m in notes2][-1:] == ["Switchboard: all phones dropped briefly"])
+    redrop = drop + back
+    notes2 = _drive_samples(outage + [(_HEALTHY, back), (_HEALTHY, redrop)])
+    check("clearing: a real second drop healed by the clearing sample is reported",
+          [t for t, _m in notes2][-1:] == ["Switchboard: all phones dropped briefly"]
+          and "Switchboard: phones recovered" in [t for t, _m in notes2])
+    notes3 = _drive_samples(outage + [(_HEALTHY, back + redrop), (_HEALTHY, [])])
+    check("clearing: one in the first clear window, with the alert still out, is the alert's",
+          [t for t, _m in notes3] == ["Switchboard: phones dropped", "Switchboard: phones unreachable",
+                                      "Switchboard: phones recovered"])
 
 
 def test_the_log_is_harvested_before_the_sample_that_judges_it() -> None:
@@ -2328,8 +2340,19 @@ def test_the_outage_texts_count_and_name_only_phones_that_register() -> None:
           ptitle_up == "Switchboard: phones back" and pup == "All 9 phones are reachable again.")
     partial = pm.summarize(_fleet(("11", "12", "13", "14", "15", "19")), _WIRED8,
                            ever_registered=_EVER9)
-    check("texts: a partial recovery push gives the count",
-          pm._outage_texts("up", partial)[3] == "6 of 9 phones are reachable again.")
+    _t, pcard, _pt, ppush = pm._outage_texts("up", partial)
+    check("texts: a partial recovery push gives the count and names who is still down",
+          ppush == "6 of 9 phones are reachable again; still down: exts 16, 17, 18.")
+    check("texts: ...and so does its card",
+          pcard == "Phones recovered — 6 of 9 reachable; still down: exts 16, 17, 18.")
+    one = pm.summarize(_fleet(tuple(e for e in _ALL9 if e != "14")), _WIRED8,
+                       ever_registered=_EVER9)
+    check("texts: one phone still down is 'ext', singular, and ext 20 is never named",
+          pm._outage_texts("up", one)[3]
+          == "8 of 9 phones are reachable again; still down: ext 14.")
+    check("texts: a summary without the down list keeps the bare count",
+          pm._outage_texts("up", {"total": 10, "unreachable": 1, "reachable": 9})[3]
+          == "9 of 10 phones are reachable again.")
 
 
 def _down_texts(samples, st=None):
@@ -2399,8 +2422,8 @@ def test_an_outage_and_its_recovery_push_to_the_phone() -> None:
     """A: all three 11-12 alerts were silent drawer cards. The outage alert and
     its recovery now also go to the phone, as a NON-critical push."""
     pushes = []
-    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, [])],
-                           target=_TARGET, pushes=pushes)
+    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, []),
+                            (_S_UP, [])], target=_TARGET, pushes=pushes)
     check("push: the cards are exactly as before",
           [t for t, _m in notes] == ["Switchboard: phones unreachable",
                                      "Switchboard: phones recovered"])
@@ -2414,7 +2437,7 @@ def test_an_outage_and_its_recovery_push_to_the_phone() -> None:
 
 
 def test_no_push_without_a_target_or_with_alerts_off() -> None:
-    sequence = [(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, [])]
+    sequence = [(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, []), (_S_UP, [])]
     for label, kw in (("no target option", {}), ("an empty target", {"target": ""}),
                       ("a blank target", {"target": "   "})):
         pushes = []
@@ -2462,7 +2485,8 @@ def test_a_restart_during_an_outage_neither_repeats_the_down_nor_loses_the_up() 
     pushes.clear()
     # The restart: warm-up, then settled samples with the phones still down.
     second = _drive_samples([(_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []),
-                             (_S_UP, [])], target=_TARGET, pushes=pushes, state_path=path)
+                             (_S_UP, []), (_S_UP, [])], target=_TARGET, pushes=pushes,
+                            state_path=path)
     check("restart: no second 'down' card or push for the outage already out",
           "Switchboard: phones unreachable" not in [t for t, _m in second]
           and "Switchboard: phones down" not in [t for t, _m, _k in pushes])
@@ -2482,8 +2506,11 @@ def test_a_restored_latch_waits_for_a_settled_sample_to_recover() -> None:
     warm = _drive_samples([(_S_UP, [])], state_path=path)
     check("restored: a warm-up sample showing the phones up posts nothing", warm == [])
     check("restored: ...and leaves the latch on disk", json.load(open(path))["alerted"] is True)
-    settled = _drive_samples([(_S_UP, []), (_S_UP, [])], state_path=path)
-    check("restored: the first settled sample posts the recovery, once",
+    one = _drive_samples([(_S_UP, []), (_S_UP, [])], state_path=path)
+    check("restored: one settled clear sample posts nothing yet", one == [])
+    check("restored: ...and the latch stays on disk", json.load(open(path))["alerted"] is True)
+    settled = _drive_samples([(_S_UP, []), (_S_UP, []), (_S_UP, [])], state_path=path)
+    check("restored: two settled clear samples post the recovery, once",
           [t for t, _m in settled] == ["Switchboard: phones recovered"])
 
 
@@ -2800,7 +2827,7 @@ def test_a_down_nobody_was_shown_is_raised_after_a_restart() -> None:
     titles = lambda xs: [x[0] for x in xs]  # noqa: E731
     nr = SourceFileLoader("notify_retry_latch", str(
         P_PATH.parents[1] / "webui" / "notify_retry.py")).load_module()
-    restarted = [(_S_ALL_DOWN, [])] * 4 + [(_S_UP, [])]
+    restarted = [(_S_ALL_DOWN, [])] * 4 + [(_S_UP, [])] * 2
 
     def latch_file():
         return os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
@@ -2886,6 +2913,138 @@ def test_the_docs_name_the_cards_that_carry_the_cause() -> None:
           "Each card ends by calling the drop a warning" not in doc)
     check("cause doc: it names the healed and update cards",
           "The healed and update cards end by calling the drop a warning" in doc)
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.0 — the outage alert clears below where it fires.
+#
+# It cleared on the first settled sample under the entry threshold T (5 of the
+# 9 phones that register), so a fleet hovering at T alternated: four GXW ports
+# dead and a fifth re-registering every 15 minutes gave four 'phones down' and
+# four 'phones back' pushes in 100 minutes, every 'phones back' reading "5 of 9
+# phones are reachable again" while four could not ring.
+# --------------------------------------------------------------------------- #
+def _down_of(*down):
+    """The plant's own summary with `down` (wired ports or the cordless) down."""
+    return _sum([e for e in _ALL9 if e not in down])
+
+
+_FOUR = ("11", "12", "13", "14")
+
+
+def test_the_outage_clears_only_well_below_where_it_fires() -> None:
+    check("hysteresis: T is 5 of the 9 that register; it clears at 3",
+          pm.outage_threshold(_S_UP) == 5
+          and [pm.outage_is_clear(_down_of(*_WIRED8[:n])) for n in range(6)]
+          == [True, True, True, True, False, False])
+    check("hysteresis: four down is the band, neither an outage nor clear",
+          not pm.is_mass_outage(_down_of(*_FOUR)) and not pm.outage_is_clear(_down_of(*_FOUR)))
+    check("hysteresis: a small fleet's band — 3 of 4 fires, 1 of 4 clears",
+          pm.outage_threshold({"expected": 4}) == 3
+          and pm.outage_is_clear({"expected": 4, "unreachable": 1})
+          and not pm.outage_is_clear({"expected": 4, "unreachable": 2}))
+    check("hysteresis: an empty summary is clear", pm.outage_is_clear({}))
+    five, four, three = _down_of(*_FOUR, "15"), _down_of(*_FOUR), _down_of(*_FOUR[:3])
+    st = {}
+    seq = [five, five, four, four, five, five, four, three, four, three, five, three, three,
+           four, five, five]
+    events = [pm.outage_transition(s, st) for s in seq]
+    check("hysteresis: one 'down'; nothing while it wanders in the band or back "
+          "over T; a band or outage sample restarts the clearing pair; 'up' only on "
+          "two consecutive clear samples; a new outage after",
+          events == ["", "down", "", "", "", "", "", "", "", "", "", "", "up", "", "", "down"])
+    st = {}
+    check("hysteresis: unlatched, the band raises nothing however long it lasts",
+          [pm.outage_transition(four, st) for _ in range(6)] == [""] * 6)
+
+
+def test_a_fleet_hovering_at_the_threshold_pushes_once_and_recovers_once() -> None:
+    """The 100-minute shape through run(): four ports dead, a fifth down for 15
+    minutes and back for 15, at the 300 s cadence; then everything back."""
+    five, four = _down_of(*_FOUR, "15"), _down_of(*_FOUR)
+    samples = [(_S_UP, [])] + [((five if (i // 3) % 2 == 0 else four), []) for i in range(20)]
+    pushes = []
+    notes = _drive_samples(samples + [(_S_UP, [])] * 2, target=_TARGET, pushes=pushes)
+    check("hover: one 'phones down' push, and one 'phones back' only once all are back",
+          [t for t, _m, _k in pushes] == ["Switchboard: phones down", "Switchboard: phones back"])
+    check("hover: the recovery push says all of them",
+          len(pushes) == 2 and pushes[1][1] == "All 9 phones are reachable again.")
+    check("hover: the cards match: one outage, one recovery",
+          [t for t, _m in notes] == ["Switchboard: phones unreachable",
+                                     "Switchboard: phones recovered"])
+    pushes = []
+    _drive_samples(samples, target=_TARGET, pushes=pushes)
+    check("hover: no 'phones back' while four phones cannot ring",
+          [t for t, _m, _k in pushes] == ["Switchboard: phones down"])
+
+
+def test_a_staggered_recovery_names_the_phones_still_down() -> None:
+    """Ports re-register one at a time. The recovery comes on the second clear
+    sample, and with phones still down it names them."""
+    stages = [_down_of(*_WIRED8[:k]) for k in (8, 8, 7, 6, 5, 4, 3, 2, 1, 0)]
+    pushes = []
+    notes = _drive_samples([(_S_UP, [])] + [(s, []) for s in stages], target=_TARGET,
+                           pushes=pushes)
+    ups = [m for t, m, _k in pushes if t == "Switchboard: phones back"]
+    check("stagger: one recovery push, on the second sample with at most three down",
+          ups == ["7 of 9 phones are reachable again; still down: exts 11, 12."])
+    check("stagger: the recovery card names them too",
+          [m for t, m in notes if t == "Switchboard: phones recovered"]
+          == ["Phones recovered — 7 of 9 reachable; still down: exts 11, 12."])
+    check("stagger: nothing more when the last two come back",
+          [t for t, _m, _k in pushes] == ["Switchboard: phones down", "Switchboard: phones back"])
+
+
+def test_a_cycle_with_no_sample_does_not_break_the_clearing_pair() -> None:
+    """'Consecutive' counts samples, as the 'down' does: an AMI-down cycle says
+    nothing about the phones."""
+    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, []),
+                            (None, []), (_S_UP, [])])
+    check("no sample: the recovery comes on the next clear sample after the gap",
+          [t for t, _m in notes] == ["Switchboard: phones unreachable",
+                                     "Switchboard: phones recovered"])
+    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, []),
+                            (_down_of(*_FOUR), []), (_S_UP, [])])
+    check("band: a sample in the band between the two restarts the pair",
+          [t for t, _m in notes] == ["Switchboard: phones unreachable"])
+
+
+def test_a_restart_mid_recovery_neither_loses_nor_repeats_the_up() -> None:
+    def latch_file():
+        return os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+    titles = lambda xs: [x[0] for x in xs]  # noqa: E731
+    # One clear sample in, then the restart.
+    path, p1, p2, p3 = latch_file(), [], [], []
+    first = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, [])],
+                           target=_TARGET, pushes=p1, state_path=path)
+    check("mid-recovery: precondition — the outage is out, its recovery not yet",
+          titles(first) == ["Switchboard: phones unreachable"] and titles(p1) == ["Switchboard: phones down"]
+          and json.load(open(path))["alerted"] is True)
+    second = _drive_samples([(_S_UP, [])] * 3, target=_TARGET, pushes=p2, state_path=path)
+    check("mid-recovery: the restarted process sends the recovery once, card and push",
+          titles(second) == ["Switchboard: phones recovered"]
+          and titles(p2) == ["Switchboard: phones back"])
+    check("mid-recovery: ...and clears the latch on disk", json.load(open(path))["alerted"] is False)
+    third = _drive_samples([(_S_UP, [])] * 3, target=_TARGET, pushes=p3, state_path=path)
+    check("mid-recovery: a later restart sends nothing", third == [] and p3 == [])
+    # In the band at the restart, back over T after it, then down to three.
+    path, p1, p2 = latch_file(), [], []
+    four, five, three = _down_of(*_FOUR), _down_of(*_FOUR, "15"), _down_of(*_FOUR[:3])
+    _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (four, [])],
+                   target=_TARGET, pushes=p1, state_path=path)
+    second = _drive_samples([(four, []), (five, []), (five, []), (four, []), (three, []),
+                             (three, [])], target=_TARGET, pushes=p2, state_path=path)
+    check("band restart: no second 'down' for the outage already out",
+          titles(p2) == ["Switchboard: phones back"]
+          and titles(second) == ["Switchboard: phones recovered"])
+    check("band restart: the recovery names the three still down",
+          p2 and p2[0][1] == "6 of 9 phones are reachable again; still down: exts 11, 12, 13.")
+    # The recovery sent before the restart is not sent again after it.
+    path, p2 = latch_file(), []
+    _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, []), (_S_UP, [])],
+                   target=_TARGET, state_path=path)
+    second = _drive_samples([(_S_UP, [])] * 3, target=_TARGET, pushes=p2, state_path=path)
+    check("after recovery: a restart sends nothing", second == [] and p2 == [])
 
 
 if __name__ == "__main__":
