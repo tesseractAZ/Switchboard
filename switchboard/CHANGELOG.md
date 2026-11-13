@@ -48,6 +48,7 @@ Recent releases. Releases up to 0.109.0 are in the
   reachable, and `wired_link_health` when no gateway port is; `unknown` now
   means only reachable but not yet measured. Units and `state_class` do not
   change.
+- A failed push no longer names its target in the add-on log.
 
 ## 0.118.0
 
