@@ -33,6 +33,12 @@ os.environ.setdefault("SWITCHBOARD_DELIVERY_OUTCOME",
 # the add-on; on a test machine it must land in the temp state dir instead.
 os.environ.setdefault("SWITCHBOARD_ANNOUNCE_TAG_KEY",
                       os.path.join(_STATE_DIR, "announce-tag.key"))
+# The link-health poller's fleet-outage latch (v0.119.0) is written on each
+# outage alert and read at every run() start. A test that drives run() through
+# an outage gives itself a private path (test_rtpmon._drive_samples); this keeps
+# any other run() driver off /data/state.
+os.environ.setdefault("SWITCHBOARD_LINK_OUTAGE",
+                      os.path.join(_STATE_DIR, "link-outage.json"))
 
 
 # --------------------------------------------------------------------------- #

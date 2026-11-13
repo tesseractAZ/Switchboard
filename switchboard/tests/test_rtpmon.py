@@ -313,10 +313,15 @@ def test_outage_transition_warmup_never_counts() -> None:
     # Settling with the outage ongoing: the gate starts fresh — still 2 cycles.
     check("warmup: 1st settled cycle silent", pm.outage_transition(big, st, settled=True) == "")
     check("warmup: 2nd settled cycle fires", pm.outage_transition(big, st, settled=True) == "down")
-    # An alert latched before a restart must clear during warm-up, not wait it out.
+    # An alert latched before a restart (restored from disk since v0.119.0) is
+    # cleared by the first SETTLED sample. Warm-up samples are taken while the
+    # fleet is still converging, so they judge neither direction. In one process
+    # the latch cannot exist during warm-up: it takes two settled cycles to set.
     st2 = {"cycles": 0, "alerted": True}
-    check("warmup: recovery clears even while warming up",
-          pm.outage_transition(ok, st2, settled=False) == "up")
+    check("warmup: a warm-up sample does not clear a restored latch",
+          pm.outage_transition(ok, st2, settled=False) == "" and st2["alerted"] is True)
+    check("warmup: the first settled sample that is not an outage clears it",
+          pm.outage_transition(ok, st2, settled=True) == "up" and st2["alerted"] is False)
 
 
 def test_partial_flag_actually_reaches_home_assistant() -> None:
@@ -1521,14 +1526,26 @@ def test_each_card_says_only_what_is_true_when_it_is_sent() -> None:
     check("every card leaves room for a late note", longest <= 400)
 
 
-def _drive_samples(samples, alerts=True):
+def _drive_samples(samples, alerts=True, target=None, pushes=None, state_path=None,
+                   push_ok=True):
     """run() over len(samples) cycles with the REAL outage_transition. Each sample
-    is (summ, transitions); cycle 0 is warm-up. Returns (title, message) posts."""
+    is (summ, transitions); cycle 0 is warm-up. Returns (title, message) posts.
+
+    `target` sets the wakeup_push_target option. `pushes`, a list, gives the
+    fake ha_client a push() that records (title, message, kwargs) and returns
+    `push_ok`; without it the fake has no push at all, as every older fake.
+    `state_path` is the outage latch file; by default each call gets a fresh
+    one, so one test's outage never reaches the next test's run()."""
     import types
     notes = []
     ha = types.ModuleType("ha_client")
     ha.notify = lambda msg, **kw: notes.append((kw.get("title", ""), msg)) or True
     ha.set_state = lambda *a, **k: True
+    if pushes is not None:
+        ha.push = lambda msg, **kw: pushes.append((kw.get("title", ""), msg, kw)) or push_ok
+    opts = {"link_health_alerts": alerts}
+    if target is not None:
+        opts["wakeup_push_target"] = target
 
     class _Stop(Exception):
         pass
@@ -1546,12 +1563,15 @@ def _drive_samples(samples, alerts=True):
         return phones, summ
 
     keys = ("_load_options", "room_names", "wired_exts", "poll_once", "_append_history",
-            "_publish", "_heartbeat", "trunk_enabled", "endpoint_transitions", "warmup_done")
+            "_publish", "_heartbeat", "trunk_enabled", "endpoint_transitions", "warmup_done",
+            "OUTAGE_STATE_PATH")
     saved = {k: getattr(pm, k) for k in keys}
     real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
     try:
         sys.modules["ha_client"] = ha
-        pm._load_options = lambda: {"link_health_alerts": alerts}
+        pm.OUTAGE_STATE_PATH = state_path or os.path.join(
+            tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+        pm._load_options = lambda: dict(opts)
         pm.room_names = lambda o: {}
         pm.wired_exts = lambda o: list(_WIRED8)
         pm.poll_once = _poll
@@ -2216,6 +2236,343 @@ def test_a_trunk_drop_cannot_complete_a_phone_mass_drop() -> None:
     notes7, _ = _drive(with_cordless)
     check("mass-drop: four wired ports and the cordless are half of ten phones",
           len(notes7) == 1 and "(exts 11, 12, 13, 14, 19)" in notes7[0][0])
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.0 — the 2026-11-12 outage. The host moved to a new address at 18:28
+# MST and all nine phones were unregistered from 18:31:04. Every alert was a
+# silent drawer card; the outage card would have read "10 of 10 ... (exts 11 ...
+# 20)" although ext 20 has never registered, and both rollups read 'unknown'.
+# Summaries here come from the REAL summarize(), on the live plant's shape.
+# --------------------------------------------------------------------------- #
+_EVER9 = set(_ALL9)                    # every phone but the never-registered ext 20
+_S_UP = pm.summarize(_fleet(_ALL9), _WIRED8, ever_registered=_EVER9)
+_S_ALL_DOWN = pm.summarize(_fleet(()), _WIRED8, ever_registered=_EVER9)
+_S_GXW_DOWN = pm.summarize(_fleet(("19",)), _WIRED8, ever_registered=_EVER9)
+_TARGET = "mobile_app_test"
+
+
+def test_the_summary_splits_the_down_phones_by_path_and_leaves_out_ext_20() -> None:
+    check("split: every phone down -> the eight ports and the cordless, never ext 20",
+          _S_ALL_DOWN["down_wired_exts"] == _WIRED8 and _S_ALL_DOWN["down_other_exts"] == ["19"])
+    check("split: precondition — ext 20 is still in the raw unreachable list",
+          "20" in _S_ALL_DOWN["unreachable_exts"])
+    check("split: a gateway outage with the cordless up -> no off-gateway phone down",
+          _S_GXW_DOWN["down_wired_exts"] == _WIRED8 and _S_GXW_DOWN["down_other_exts"] == [])
+    check("split: a healthy plant -> nothing down on either path",
+          _S_UP["down_wired_exts"] == [] and _S_UP["down_other_exts"] == [])
+    check("split: the wired counts are of ports that have registered",
+          (_S_ALL_DOWN["wired_expected"], _S_ALL_DOWN["wired_reachable"]) == (8, 0)
+          and (_S_UP["wired_expected"], _S_UP["wired_reachable"]) == (8, 8))
+    check("split: no gateway list -> every down phone is off the gateway",
+          pm.summarize(_fleet(()), None, ever_registered=_EVER9)["down_wired_exts"] == [])
+
+
+def test_a_never_registered_extension_does_not_count_toward_an_outage() -> None:
+    """Counting ext 20 let four real phones down out of nine trip the
+    point-sample alert, while the between-samples detector needed five: the two
+    detectors disagreed about the same fleet."""
+    def summ(down):
+        phones = _fleet(tuple(e for e in _ALL9 if e not in down))
+        return pm.summarize(phones, _WIRED8, ever_registered=_EVER9)
+    four = summ({"11", "12", "13", "14"})
+    check("D: precondition — with ext 20 the raw count is five",
+          four["unreachable"] == 5 and four["expected"] == 9)
+    check("D: four real phones of nine are not a fleet outage", pm.is_mass_outage(four) is False)
+    check("D: five real phones of nine are", pm.is_mass_outage(summ({"11", "12", "13", "14", "15"})))
+    check("D: the healthy plant (only ext 20 unreachable) is not", pm.is_mass_outage(_S_UP) is False)
+    # The agreement test above uses hand-made dicts without ext 20; this one
+    # uses the plant's own summaries, where ext 20 is there.
+    for n in range(0, 10):
+        s = summ(set(_ALL9[:n]))
+        check(f"D: the two detectors agree on the real summary at n={n}",
+              pm.is_mass_outage(s) == pm.is_mass_drop(_ALL9[:n], s))
+    check("D: the denominator is `expected`, not the configured count",
+          pm.is_mass_drop(["11", "12", "13"], {"total": 10, "expected": 4}) is True
+          and pm.is_mass_drop(["11", "12", "13"], {"total": 10}) is False)
+    check("D: a summary without never_registered_exts counts every unreachable phone",
+          pm.is_mass_outage({"total": 10, "unreachable": 5}) is True)
+
+
+def test_the_outage_texts_count_and_name_only_phones_that_register() -> None:
+    title, msg, ptitle, pmsg = pm._outage_texts("down", _S_ALL_DOWN)
+    check("texts: 9 of 9, not 10 of 10", msg.startswith("9 of 9 phones are unreachable"))
+    check("texts: ext 20 is not named",
+          "(exts 11, 12, 13, 14, 15, 16, 17, 18, 19)" in msg and "20" not in msg)
+    check("texts: the push says the same in plain words",
+          ptitle == "Switchboard: phones down"
+          and pmsg.startswith("9 of 9 phones can't ring (exts 11, 12, 13, 14, 15, 16, 17, 18, 19)."))
+    _t, up, ptitle_up, pup = pm._outage_texts("up", _S_UP)
+    check("texts: recovery reads 9 of 9", up == "Phones recovered — 9 of 9 reachable.")
+    check("texts: the recovery push says all are back",
+          ptitle_up == "Switchboard: phones back" and pup == "All 9 phones are reachable again.")
+    partial = pm.summarize(_fleet(("11", "12", "13", "14", "15", "19")), _WIRED8,
+                           ever_registered=_EVER9)
+    check("texts: a partial recovery push gives the count",
+          pm._outage_texts("up", partial)[3] == "6 of 9 phones are reachable again.")
+
+
+def test_the_cause_names_the_host_or_network_when_the_cordless_dropped_too() -> None:
+    _t, both, _pt, pboth = pm._outage_texts("down", _S_ALL_DOWN)
+    check("C: ports and the cordless down -> the host or the network, not the gateway",
+          "Switchboard host or the network" in both and "not the gateway" in both
+          and "lost power" not in both and "power/uplink" not in both)
+    check("C: the push carries the same cause", "Switchboard host or the network" in pboth)
+    _t, gxw, _pt, _pm = pm._outage_texts("down", _S_GXW_DOWN)
+    check("C: ports down with the cordless up -> the gateway wording, as before",
+          "GXW gateway likely dropped its SIP registrations" in gxw
+          and "Switchboard host" not in gxw)
+    legacy = {"total": 10, "unreachable": 8, "reachable": 2, "unreachable_exts": ["11", "12"]}
+    check("C: a summary without the split keeps the gateway wording",
+          "GXW" in pm._outage_texts("down", legacy)[1])
+    # The between-samples card, through its gateway list.
+    base = {"nid": "n", "at": 1794103612.0, "down": [], "still": []}
+    every = {**base, "kind": "healed", "exts": _ALL9, "all": True}
+    _t, host_card = pm.mass_drop_card(every, _HEALTHY, 1794103912.0, _WIRED8)
+    check("C: a card for ports and the cordless names the host or the network",
+          "warning about the Switchboard host or the network" in host_card
+          and "gateway or its uplink" not in host_card)
+    check("C: ...and still ends 'not a current outage.' on a healthy sample",
+          host_card.endswith("not a current outage."))
+    ports = {**every, "exts": _WIRED8, "all": False}
+    _t, gw_card = pm.mass_drop_card(ports, _HEALTHY, 1794103912.0, _WIRED8)
+    check("C: a card for the ports alone names the gateway, as before",
+          "warning about the gateway or its uplink" in gw_card)
+    _t, no_list = pm.mass_drop_card(every, _HEALTHY, 1794103912.0)
+    check("C: with no gateway list the card names the gateway, as before",
+          "gateway or its uplink" in no_list)
+    # The 400-character budget, with the longer cause, over every kind.
+    t1, t2 = 1794103612.0, 1794103912.0
+    kinds = [{**base, "kind": "down", "exts": _ALL9, "down": _ALL9, "still": _ALL9},
+             {**base, "kind": "update", "exts": _ALL9, "down": _ALL9, "still": []},
+             {**base, "kind": "update", "exts": _ALL9, "down": ["15", "16", "17", "18", "19"],
+              "still": ["15", "17", "18", "19"]},
+             every]
+    longest = max(len(pm.mass_drop_card(c, s, t2, _WIRED8)[1])
+                  for c in kinds for s in (_ROUTER_REBOOT, _HEALTHY))
+    check(f"C: every host-cause card leaves room for a late note ({longest})", longest <= 400)
+    check("C: precondition — the host wording is in the longest one",
+          any("Switchboard host" in pm.mass_drop_card(c, _HEALTHY, t2, _WIRED8)[1] for c in kinds))
+    _ = t1
+
+
+def test_the_real_loop_names_the_host_when_every_phone_is_down() -> None:
+    """Through run(), with the gateway list the loop reads from the options."""
+    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])])
+    check("loop C: the outage card fires once", [t for t, _m in notes]
+          == ["Switchboard: phones unreachable"])
+    check("loop C: it counts 9 of 9 and names the host or the network",
+          notes and notes[0][1].startswith("9 of 9 ")
+          and "Switchboard host or the network" in notes[0][1])
+    drop = [{"ext": e, "state": "Unreachable"} for e in _ALL9]
+    cards = _drive_samples([(_S_UP, []), (_S_UP, drop)])
+    check("loop C: a between-samples drop of every phone names the host too",
+          len(cards) == 1 and "Switchboard host or the network" in cards[0][1])
+
+
+def test_an_outage_and_its_recovery_push_to_the_phone() -> None:
+    """A: all three 11-12 alerts were silent drawer cards. The outage alert and
+    its recovery now also go to the phone, as a NON-critical push."""
+    pushes = []
+    notes = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, [])],
+                           target=_TARGET, pushes=pushes)
+    check("push: the cards are exactly as before",
+          [t for t, _m in notes] == ["Switchboard: phones unreachable",
+                                     "Switchboard: phones recovered"])
+    check("push: one push for the outage and one for its recovery",
+          [t for t, _m, _k in pushes] == ["Switchboard: phones down", "Switchboard: phones back"])
+    check("push: to the configured target",
+          all(k.get("target") == _TARGET for _t, _m, k in pushes))
+    check("push: never critical (Do Not Disturb is for a failed alarm)",
+          len(pushes) == 2 and all(k.get("critical") is False for _t, _m, k in pushes))
+    check("push: the outage push counts 9 of 9", pushes and pushes[0][1].startswith("9 of 9 "))
+
+
+def test_no_push_without_a_target_or_with_alerts_off() -> None:
+    sequence = [(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_UP, [])]
+    for label, kw in (("no target option", {}), ("an empty target", {"target": ""}),
+                      ("a blank target", {"target": "   "})):
+        pushes = []
+        notes = _drive_samples(sequence, pushes=pushes, **kw)
+        check(f"no push: {label} -> nothing pushed", pushes == [])
+        check(f"no push: {label} -> the cards still post", len(notes) == 2)
+    pushes = []
+    notes = _drive_samples(sequence, alerts=False, target=_TARGET, pushes=pushes)
+    check("no push: link_health_alerts off silences the push too", pushes == [] and notes == [])
+
+
+def test_a_push_that_fails_is_logged_without_the_target_and_not_retried() -> None:
+    import io
+    sequence = [(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])]
+    err, real_err = io.StringIO(), sys.stderr
+    pushes = []
+    try:
+        sys.stderr = err
+        notes = _drive_samples(sequence, target=_TARGET, pushes=pushes, push_ok=False)
+        # A fake ha_client without push() at all: the loop must carry on.
+        notes2 = _drive_samples(sequence, target=_TARGET)
+    finally:
+        sys.stderr = real_err
+    log = err.getvalue()
+    check("failed push: attempted once, never retried", len(pushes) == 1)
+    check("failed push: the card is posted regardless", len(notes) == 1)
+    check("failed push: one log line per failure", log.count("phone push for the outage alert") == 2)
+    check("failed push: the log never carries the option's value", _TARGET not in log)
+    check("failed push: a client without push() does not stop the loop", len(notes2) == 1)
+
+
+def test_a_restart_during_an_outage_neither_repeats_the_down_nor_loses_the_up() -> None:
+    """The latch lived in run()'s memory. A restart during an outage lost the
+    'up' for good and raised 'down' again once warm-up was over; with a push,
+    that second 'down' would sound."""
+    path = os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+    pushes = []
+    first = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])],
+                           target=_TARGET, pushes=pushes, state_path=path)
+    check("restart: the first run alerts once", [t for t, _m in first]
+          == ["Switchboard: phones unreachable"] and len(pushes) == 1)
+    saved = json.load(open(path))
+    check("restart: the latch is on disk with its 'down' time",
+          saved["alerted"] is True and isinstance(saved["down_at"], int))
+    pushes.clear()
+    # The restart: warm-up, then settled samples with the phones still down.
+    second = _drive_samples([(_S_ALL_DOWN, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, []),
+                             (_S_UP, [])], target=_TARGET, pushes=pushes, state_path=path)
+    check("restart: no second 'down' card or push for the outage already out",
+          "Switchboard: phones unreachable" not in [t for t, _m in second]
+          and "Switchboard: phones down" not in [t for t, _m, _k in pushes])
+    check("restart: the recovery card and push still come",
+          [t for t, _m in second] == ["Switchboard: phones recovered"]
+          and [t for t, _m, _k in pushes] == ["Switchboard: phones back"])
+    check("restart: the latch is cleared on disk", json.load(open(path))["alerted"] is False)
+    # And a third run after recovery starts clean: a new outage alerts again.
+    third = _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])], state_path=path)
+    check("restart: after the recovery a new outage alerts as usual",
+          [t for t, _m in third] == ["Switchboard: phones unreachable"])
+
+
+def test_a_restored_latch_waits_for_a_settled_sample_to_recover() -> None:
+    path = os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+    pm.save_outage_state(True, time.time() - 600, path)
+    warm = _drive_samples([(_S_UP, [])], state_path=path)
+    check("restored: a warm-up sample showing the phones up posts nothing", warm == [])
+    check("restored: ...and leaves the latch on disk", json.load(open(path))["alerted"] is True)
+    settled = _drive_samples([(_S_UP, []), (_S_UP, [])], state_path=path)
+    check("restored: the first settled sample posts the recovery, once",
+          [t for t, _m in settled] == ["Switchboard: phones recovered"])
+
+
+def test_a_muted_outage_still_keeps_its_latch() -> None:
+    path = os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+    _drive_samples([(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])], alerts=False,
+                   state_path=path)
+    check("muted: the latch is written whether or not the alert is shown",
+          json.load(open(path))["alerted"] is True)
+
+
+def test_the_outage_latch_round_trips_and_degrades_safely() -> None:
+    import io
+    d = tempfile.mkdtemp(prefix="sb-outage-")
+    p = os.path.join(d, "sub", "link-outage.json")
+    now = 1794103912.0
+    check("latch: a missing file is not alerted", pm.load_outage_alerted(p, now) is False)
+    check("latch: written, nested directory created", pm.save_outage_state(True, now - 60, p))
+    check("latch: read back as alerted", pm.load_outage_alerted(p, now) is True)
+    check("latch: 'up' writes it cleared", pm.save_outage_state(False, now, p)
+          and pm.load_outage_alerted(p, now) is False)
+    err, real_err = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = err
+        pm.save_outage_state(True, now - pm.OUTAGE_STATE_MAX_AGE_S - 1, p)
+        old = pm.load_outage_alerted(p, now)
+        with open(p, "w") as fh:
+            json.dump({"alerted": True}, fh)
+        undated = pm.load_outage_alerted(p, now)
+    finally:
+        sys.stderr = real_err
+    check("latch: one older than 7 days is ignored", old is False)
+    check("latch: one with no 'down' time is ignored", undated is False)
+    check("latch: each ignored latch is logged once", err.getvalue().count("ignoring") == 2)
+    check("latch: the bound is 7 days", pm.OUTAGE_STATE_MAX_AGE_S == 7 * 86400)
+    pm.save_outage_state(True, now - 7 * 86400 + 60, p)
+    check("latch: one just inside 7 days is trusted", pm.load_outage_alerted(p, now) is True)
+    for junk in ("not json", "[1, 2]", '{"alerted": "yes", "down_at": 1}'):
+        with open(p, "w") as fh:
+            fh.write(junk)
+        check(f"latch: {junk!r} reads as not alerted", pm.load_outage_alerted(p, now) is False)
+    check("latch: an unwritable path returns False, never raises",
+          pm.save_outage_state(True, now, os.path.join(p, "under-a-file", "x.json")) is False)
+    check("latch: run() loads the latch at start",
+          "load_outage_alerted()" in __import__("inspect").getsource(pm.run))
+
+
+def _published(summ, phones=None):
+    sets = []
+
+    class _Fake:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            sets.append((eid, state, attrs or {}))
+            return True
+    real = sys.modules.get("ha_client")
+    sys.modules["ha_client"] = _Fake
+    try:
+        pm._publish(phones or [], summ)
+    finally:
+        if real is None:
+            sys.modules.pop("ha_client", None)
+        else:
+            sys.modules["ha_client"] = real
+    return {eid: (state, attrs) for eid, state, attrs in sets}
+
+
+def test_the_rollups_read_unavailable_when_nothing_is_reachable() -> None:
+    """E: on 11-12 both rollups read 'unknown' through the whole outage — the
+    same word they use for a reachable phone whose RTT is not measured yet."""
+    down = _published(_S_ALL_DOWN)
+    lh, wl = down["sensor.switchboard_link_health"], down["sensor.switchboard_wired_link_health"]
+    check("E: no phone up -> link_health is unavailable", lh[0] == "unavailable")
+    check("E: ...with the disconnected icon", lh[1]["icon"] == "mdi:lan-disconnect")
+    check("E: no gateway port up -> wired_link_health is unavailable", wl[0] == "unavailable")
+    check("E: ...with the disconnected icon", wl[1]["icon"] == "mdi:lan-disconnect")
+    gxw = _published(_S_GXW_DOWN)
+    check("E: a gateway outage with the cordless up -> the rollup keeps the cordless's RTT",
+          gxw["sensor.switchboard_link_health"][0] == 2.5)
+    check("E: ...while the wired sensor reads unavailable",
+          gxw["sensor.switchboard_wired_link_health"][0] == "unavailable")
+    # Reachable, no RTT measured yet: 'unknown' keeps that meaning alone.
+    fresh = [_ph(e, None) for e in _ALL9] + [_ph("20", None, reachable=False, registered=False)]
+    unmeasured = _published(pm.summarize(fresh, _WIRED8, ever_registered=_EVER9))
+    check("E: phones reachable with no RTT yet -> unknown, not unavailable",
+          unmeasured["sensor.switchboard_link_health"][0] == "unknown"
+          and unmeasured["sensor.switchboard_wired_link_health"][0] == "unknown")
+    check("E: ...and the connected icon on the wired sensor",
+          unmeasured["sensor.switchboard_wired_link_health"][1]["icon"] == "mdi:lan-connect")
+    up = _published(_S_UP)
+    check("E: a healthy plant still publishes the numbers",
+          up["sensor.switchboard_link_health"][0] == 2.5
+          and up["sensor.switchboard_wired_link_health"][0] == 2.5)
+    # The unit and state_class never move, whatever the state.
+    for eid, key, want in (("sensor.switchboard_link_health", "unit_of_measurement", "ms"),
+                           ("sensor.switchboard_wired_link_health", "unit_of_measurement", "ms"),
+                           ("sensor.switchboard_wired_link_health", "state_class", "measurement")):
+        check(f"E: {eid} {key} is {want} on every cycle",
+              all(p[eid][1].get(key) == want for p in (down, gxw, unmeasured, up)))
+    check("E: the rollup carries no state_class (it never had one)",
+          all("state_class" not in p["sensor.switchboard_link_health"][1]
+              for p in (down, gxw, unmeasured, up)))
+    no_ports = _published(pm.summarize(_fleet(()), [], ever_registered=_EVER9))
+    check("E: with no gateway ports configured the wired sensor is not called failed",
+          no_ports["sensor.switchboard_wired_link_health"][0] == "unknown")
+
+
+def test_the_rollup_publishes_expected_and_never_registered() -> None:
+    attrs = _published(_S_ALL_DOWN)["sensor.switchboard_link_health"][1]
+    check("D: the rollup carries expected", attrs.get("expected") == 9)
+    check("D: ...and the never-registered extensions", attrs.get("never_registered_exts") == ["20"])
+    check("D: the existing attributes are unchanged",
+          attrs["unreachable_exts"] == _S_ALL_DOWN["unreachable_exts"]
+          and "20" in attrs["unreachable_exts"] and attrs["total_phones"] == 10)
 
 
 if __name__ == "__main__":
