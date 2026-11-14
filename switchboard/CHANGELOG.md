@@ -3,6 +3,53 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.119.0
+
+**A phone-system outage reaches the phone, and its alerts name what is down.**
+
+- On 2026-11-12 the host moved to a new address at 18:28 MST (01:28 UTC on
+  11-13) and all nine phones were unregistered from 18:31. Every alert was a
+  silent notification card. The outage card counted "10 of 10", including
+  ext 20, which has never registered; the gateway alert said the GXW had
+  likely lost power; cordless health read `ok` throughout; and both
+  link-health rollups read `unknown`.
+- The fleet-outage alert and its recovery are also pushed to
+  `wakeup_push_target` ("phones down", "phones back"): ordinary pushes, not
+  critical ones, and not retried. The key is unchanged; its label is now
+  "Phone Push Target". `link_health_alerts: false` silences the push too.
+- The outage alert clears only once two fewer phones than its threshold are
+  down (3 of 9) on two consecutive samples, and the recovery names any still
+  down ("still down: ext 14"). It cleared on the first sample under the
+  threshold, so four ports dead and a fifth flapping raised and cleared it
+  every 15 minutes.
+- The outage latch is kept in `/data/state`, with whether the alert was
+  shown. A refused card counts as shown once its retry posts it. A restart
+  during an outage does not raise or push a shown alert again, and its
+  recovery still comes; one muted or lost unshown is raised after the
+  restart.
+- Extensions that have never registered no longer count toward the outage
+  threshold or appear in its text ("9 of 9"). `link_health` gains `expected`
+  and `never_registered_exts` attributes.
+- Cordless health reads the cordless's SIP registration off the link-health
+  rollup: unregistered on two consecutive rollup samples read after the 360 s
+  startup grace is `critical`, even with no IP to probe. A reboot inside one
+  sample, or a rollup that cannot say, raises no registration alert; the LAN
+  probe can still report a rebooting handset unreachable. The sensor gains
+  `sip_registered`. A cleared registration, reachability, battery or Wi-Fi
+  alert now reads as a recovery, not "alert lapsed". No cordless alert clears
+  while the newest sample shows the handset unregistered, and with nothing to
+  probe, such a cycle does not publish `ok` over the alert.
+- When every gateway port and the cordless drop together, the outage,
+  mass-drop and gateway alerts name the Switchboard host or the network
+  rather than the gateway. A port still up, a cordless already down before
+  the outage began (even one sample before), or a drop healed before the next
+  sample keeps the gateway wording.
+- `link_health` reads `unavailable` when no phone that should be up is
+  reachable, and `wired_link_health` when no gateway port is; `unknown` now
+  means only reachable but not yet measured. Units and `state_class` do not
+  change.
+- A failed push no longer names its target in the add-on log.
+
 ## 0.118.0
 
 **The "phones dropped" card says only what is true of each phone it names.**

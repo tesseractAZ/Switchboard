@@ -200,6 +200,27 @@ def test_dropped_only_after_a_refused_retry_past_its_window():
     check("window: past it, a refused retry drops it", nr.pending() == [] and len(ha.calls) == calls + 1)
 
 
+def test_status_says_whether_an_id_is_kept_dropped_or_neither():
+    """rtpmon asks after each flush whether the outage card it saw kept has
+    since been posted, so its latch can say the alert was shown."""
+    nr.clear()
+    ha = FakeHA(accept=False)
+    nid = "switchboard_link_outage"
+    check("status: nothing kept for an id never refused", nr.status(nid) == "")
+    nr.send(ha, "9 of 9 phones are unreachable", "Switchboard: phones unreachable", nid, now=T0)
+    check("status: refused -> pending", nr.status(nid) == "pending")
+    check("status: other ids are not affected", nr.status("switchboard_cordless_health") == "")
+    ha.accept = True
+    nr.flush(ha, now=T0 + 300)
+    check("status: posted by the flush -> nothing kept", nr.status(nid) == "")
+    ha.accept = False
+    nr.send(ha, "9 of 9 phones are unreachable", "Switchboard: phones unreachable", nid, now=T0)
+    nr.flush(ha, now=T0 + nr.RETRY_FOR + 1)
+    check("status: refused past its window -> dropped", nr.status(nid) == "dropped")
+    nr.clear()
+    check("status: clear() forgets both", nr.status(nid) == "")
+
+
 def test_past_its_window_but_ha_answering_it_is_posted():
     """A poller cycling once an hour (the options allow it) must still get one
     retry; and nothing is dropped in a cycle where Home Assistant answers."""
@@ -520,7 +541,7 @@ def test_devhealth_run_retries_on_a_later_cycle():
         nr.send(ha, "Cordless critical: unreachable", "Switchboard: cordless CRITICAL",
                 "switchboard_cordless_health")
         sleeps = _two_cycles(dh, ha, {"resolve_cordless_ip": lambda *a, **k: None,
-                                      "gateway_down_exts_from_rollup": lambda **k: None,
+                                      "read_rollup": lambda **k: None,
                                       "_publish_gateway_unknown": lambda *a, **k: None})
         left = nr.pending()
     posted = [c for c in ha.calls if c["id"] == "switchboard_cordless_health"]

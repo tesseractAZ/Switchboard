@@ -138,6 +138,17 @@ def test_ha_client_guards() -> None:
     check("ha: get_state rejects malformed id (no I/O)", ha_client.get_state("bad id") is None)
 
 
+def test_a_failed_push_does_not_log_its_target(monkeypatch, capsys) -> None:
+    """The push target is an option value naming a phone, and the fleet-outage
+    push (0.119.0) reaches this line on every refused push. The log says a push
+    failed and with what status, never to which device."""
+    monkeypatch.setattr(ha_client, "_request", lambda *a, **k: (500, None))
+    assert ha_client.push("phones down", target="notify.mobile_app_example_handset") is False
+    err = capsys.readouterr().err
+    assert "push" in err and "failed" in err and "status=500" in err, err
+    assert "example_handset" not in err and "mobile_app" not in err, err
+
+
 def test_announce_audio() -> None:
     import array
     import os

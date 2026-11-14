@@ -317,6 +317,20 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
     a _Clock that each sleep advances by `interval`: rollup_is_stale() reads
     'now' from datetime, run() reads its start from time, and both must move
     together. Returns (gateway publishes, notifications)."""
+    sets, notes = _drive_loop(rollup_at, cycles, interval=interval, clock=clock)
+    gw = [(st, a) for e, st, a in sets if e == "sensor.switchboard_gateway_health"]
+    return gw, notes
+
+
+def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None,
+                contact_at=None):
+    """_drive_gateway's loop, returning every publish as (entity, state, attrs)
+    plus the notifications. `env` is applied after the cordless is disabled
+    (so CORDLESS_EXT can be set with no IP to probe), and `probe`, when given,
+    replaces probe_cordless. `rollup_at` may return None for no rollup at all.
+    `contact_at(cycle, clock)`, when given, is the contact_ip rtpmon publishes
+    on the cordless's own link sensor (None: the attribute is absent, as for
+    an unregistered handset)."""
     import datetime as _dt
     import types
     clk = clock or _Clock()
@@ -328,8 +342,12 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
 
     def _get(eid):
         if eid != "sensor.switchboard_link_health":
-            return None
-        return {"state": "2.5", "attributes": rollup_at(n["c"], clk)}
+            if contact_at is None or not eid.startswith("sensor.switchboard_link_"):
+                return None
+            ip = contact_at(n["c"], clk)
+            return {"state": "9.1", "attributes": {"contact_ip": ip} if ip else {}}
+        attrs = rollup_at(n["c"], clk)
+        return None if attrs is None else {"state": "2.5", "attributes": attrs}
     ha.get_state = _get
 
     class _Stop(Exception):
@@ -353,11 +371,15 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
     fake_datetime = types.SimpleNamespace(datetime=_Now, timezone=_dt.timezone)
     real_ha = sys.modules.get("ha_client")
     real_env = dict(os.environ)
+    real_probe = dh.probe_cordless
     try:
         for k in ("CORDLESS_EXT", "GATEWAY_PORTS", "DEVICE_HEALTH_ALERTS"):
             os.environ.pop(k, None)
         os.environ.update({"CORDLESS_IP": "", "CORDLESS_PASSWORD": "",
                            "DEVICE_HEALTH_INTERVAL": str(interval)})
+        os.environ.update(env or {})
+        if probe is not None:
+            dh.probe_cordless = probe
         sys.modules["ha_client"] = ha
         dh.time, dh.datetime = fake_time, fake_datetime
         try:
@@ -366,14 +388,14 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
             pass
     finally:
         dh.time, dh.datetime = real_time, real_datetime
+        dh.probe_cordless = real_probe
         if real_ha is None:
             sys.modules.pop("ha_client", None)
         else:
             sys.modules["ha_client"] = real_ha
         os.environ.clear()
         os.environ.update(real_env)
-    gw = [(st, a) for e, st, a in sets if e == "sensor.switchboard_gateway_health"]
-    return gw, notes
+    return sets, notes
 
 
 def test_after_a_restart_the_previous_instances_rollup_reads_unknown_not_ok() -> None:
@@ -955,7 +977,7 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
 
     saved = {k: getattr(dh, k) for k in
              ("probe_cordless", "resolve_cordless_ip", "_publish_cordless",
-              "_publish_gateway", "gateway_down_exts_from_rollup", "_notify")}
+              "_publish_gateway", "read_rollup", "_notify")}
     real_sleep = dh.time.sleep
     real_env = dict(os.environ)
     try:
@@ -966,7 +988,7 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
         dh.resolve_cordless_ip = lambda ext, ip: ip
         dh._publish_cordless = lambda *a, **k: None
         dh._publish_gateway = lambda *a, **k: None
-        dh.gateway_down_exts_from_rollup = lambda not_before=None: None
+        dh.read_rollup = lambda not_before=None: None
         dh._notify = lambda device, event, reasons: events.append((device, event))
         dh.time.sleep = _sleep
         try:
@@ -1469,6 +1491,813 @@ def test_a_misdial_cannot_be_the_leg_that_judges_the_cordless() -> None:
     ju = dh.judge_rtp_records(rec(T + 12), [genuine, unscored], "19")[0]
     check("misdial: ...and it still wins on distance, as it always did",
           ju["leg"]["ts"] == float(T + 10) and dh.mos_verdict(ju) == "unmeasured")
+
+
+# ── v0.119.0: the 2026-11-12 outage ──────────────────────────────────────────
+#
+# The host moved to a new address at 18:28 MST and every phone was unregistered
+# from 18:31:04. cordless_health read 'ok' throughout: nothing in it reads SIP
+# registration, and its LAN and admin API still answered. The gateway alert
+# said the GXW "likely lost power or its uplink", with the cordless down too.
+
+_HEALTHY_SNAP = {"reachable": True, "api_ok": True, "battery_pct": 80, "charging": True,
+                 "wifi_connected": True, "wifi_signal": 4}
+_PAST_GRACE = 360          # GATEWAY_STARTUP_GRACE_S, pinned as a literal
+
+
+def test_an_unregistered_cordless_is_critical_after_the_startup_grace() -> None:
+    check("B: the grace is the gateway's, 360 s", dh.GATEWAY_STARTUP_GRACE_S == _PAST_GRACE)
+    snap = {**_HEALTHY_SNAP, "sip_registered": False}
+    lvl, why = dh.classify_cordless(snap, TH, uptime_s=_PAST_GRACE)
+    check("B: LAN and API fine but not registered -> critical", lvl == "critical")
+    check("B: ...saying it cannot ring",
+          why and "not registered with Switchboard" in why[0] and "cannot ring" in why[0])
+    lvl, why = dh.classify_cordless(snap, TH, uptime_s=_PAST_GRACE - 1)
+    check("B: inside the grace it is still re-registering -> nothing raised",
+          lvl == "ok" and why == [])
+    check("B: no uptime given keeps the strict reading",
+          dh.classify_cordless(snap, TH)[0] == "critical")
+    for reg in (True, None):
+        lvl, why = dh.classify_cordless({**_HEALTHY_SNAP, "sip_registered": reg}, TH,
+                                        uptime_s=_PAST_GRACE)
+        check(f"B: registration {reg} -> ok (unknown never raises)", lvl == "ok" and why == [])
+    lvl, why = dh.classify_cordless({**_HEALTHY_SNAP, "battery_pct": 25, "charging": False,
+                                     "sip_registered": False}, TH, uptime_s=_PAST_GRACE)
+    check("B: with a degraded reason beside it, still critical, both named",
+          lvl == "critical" and len(why) == 2 and "low" in why[1])
+    lvl, why = dh.classify_cordless({"reachable": False, "api_ok": False, "sip_registered": False},
+                                    TH, uptime_s=_PAST_GRACE)
+    check("B: unreachable AND unregistered names both, unreachable first",
+          lvl == "critical" and "offline" in why[0] and "not registered" in why[1])
+
+
+def test_a_cordless_that_was_not_probed_is_judged_on_registration_alone() -> None:
+    """With cordless_ip blank (the default) and no contact_ip (an unregistered
+    handset publishes none), there is nothing to probe. Its LAN state is then
+    unknown, not 'unreachable'."""
+    skipped = {"reachable": None, "api_ok": False}
+    lvl, why = dh.classify_cordless({**skipped, "sip_registered": True}, TH, uptime_s=_PAST_GRACE)
+    check("B: not probed, registered -> ok, no 'unreachable', no API reason",
+          lvl == "ok" and why == [])
+    lvl, why = dh.classify_cordless({**skipped, "sip_registered": False}, TH, uptime_s=_PAST_GRACE)
+    check("B: not probed, unregistered -> critical on registration alone",
+          lvl == "critical" and len(why) == 1 and "not registered" in why[0])
+    check("B: a probed handset that answers nothing is still 'unreachable'",
+          "offline" in dh.classify_cordless({"reachable": False, "api_ok": False}, TH)[1][0])
+
+
+def test_the_cordless_registration_is_read_off_the_rollup() -> None:
+    reg = dh.cordless_registration
+    base = {"unreachable_exts": ["13", "19", "20"], "offline_exts": ["19", "20"],
+            "never_registered_exts": ["20"], "other_rtt_ms": None}
+    check("B: in offline_exts -> not registered", reg(base, "19") is False)
+    check("B: unreachable but not offline -> registered (qualify failing)",
+          reg({**base, "offline_exts": ["20"]}, "19") is True)
+    check("B: reachable with an RTT -> registered",
+          reg({"unreachable_exts": [], "offline_exts": [], "other_rtt_ms": {"19": 9.1}}, "19") is True)
+    check("B: not mentioned at all -> unknown",
+          reg({"unreachable_exts": [], "offline_exts": [], "other_rtt_ms": None}, "19") is None)
+    check("B: a never-registered extension -> unknown, even though offline", reg(base, "20") is None)
+    check("B: no rollup -> unknown", reg(None, "19") is None)
+    check("B: no cordless_ext -> unknown", reg(base, "") is None)
+    down = dh.cordless_down_in
+    check("C: the cordless offline is down", down(base, "19") is True)
+    check("C: unreachable but registered is down too", down({**base, "offline_exts": []}, "19"))
+    check("C: a never-registered extension is not", down(base, "20") is False)
+    check("C: up, or nothing to judge, is not",
+          down({"unreachable_exts": [], "offline_exts": []}, "19") is False
+          and down(None, "19") is False and down(base, "") is False)
+
+
+def test_the_gateway_critical_names_the_host_when_the_cordless_dropped_too() -> None:
+    gw = list(_GW)
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=_PAST_GRACE, cordless_dropped_too=True)
+    check("C: every port and the cordless down -> critical, naming the host or network",
+          lvl == "critical" and "Switchboard host or the network" in why[0]
+          and "not the GXW gateway" in why[0] and "lost power" not in why[0])
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=_PAST_GRACE)
+    check("C: every port down, cordless up -> the gateway wording",
+          lvl == "critical" and "GXW" in why[0] and "lost power" in why[0])
+    check("C: 'ports down', not 'unregistered' (the list holds unreachable ports too)",
+          "8 gateway ports down" in why[0] and "unregistered" not in why[0])
+    lvl, why = dh.classify_gateway(["11", "12"], gw, uptime_s=_PAST_GRACE, cordless_dropped_too=True)
+    check("C: a partial outage is unchanged by the cordless",
+          lvl == "degraded" and "2 of 8" in why[0])
+    lvl, why = dh.classify_gateway(gw, gw, uptime_s=30, cordless_dropped_too=True)
+    check("C: inside the grace it is still the re-registering wording",
+          lvl == "degraded" and "re-registers" in why[0])
+
+
+def test_only_a_poor_call_can_lapse_every_other_clear_is_a_recovery() -> None:
+    fresh = dh.clear_is_fresh
+    mos = [f"{dh.MOS_REASON} (MOS 2.2, 129s ago)"]
+    check("B: a poor call that aged out, no newer call -> a lapse",
+          fresh(mos, 1000.0, 1000.0) is False)
+    check("B: a poor call followed by a newer call -> fresh", fresh(mos, 1500.0, 1000.0) is True)
+    check("B: a poor call with no call end at all -> a lapse", fresh(mos, None, None) is False)
+    for r in (dh.UNREGISTERED_REASON, "cordless unreachable (alarm/announce endpoint offline)",
+              "battery 10% and discharging (below 15% — endpoint will drop)",
+              "Wi-Fi disconnected", "Wi-Fi signal weak (1/5)"):
+        check(f"B: a clear of {r[:24]!r} is fresh, with no call at all", fresh([r], None, None))
+    check("B: a poor call beside a re-measured reason -> fresh",
+          fresh(mos + ["Wi-Fi disconnected"], 1000.0, 1000.0) is True)
+    check("B: the MOS reason the classifier gives starts with MOS_REASON",
+          dh.classify_cordless({**_HEALTHY_SNAP, "last_mos": 2.2, "last_mos_age_s": 30,
+                                "last_mos_ledger_tx": "impaired"}, TH)[1][0]
+          .startswith(dh.MOS_REASON))
+
+
+def test_the_cordless_sensor_carries_its_registration() -> None:
+    calls = []
+
+    class _FakeHA:
+        @staticmethod
+        def set_state(eid, state, attrs=None):
+            calls.append((eid, state, attrs or {}))
+            return True
+    sys.modules["ha_client"] = _FakeHA
+    try:
+        dh._publish_cordless("critical", [dh.UNREGISTERED_REASON],
+                             {"reachable": None, "api_ok": False, "sip_registered": False})
+        dh._publish_cordless("ok", [], {**_HEALTHY_SNAP, "sip_registered": True})
+        dh._publish_cordless("ok", [], dict(_HEALTHY_SNAP))
+    finally:
+        sys.modules.pop("ha_client", None)
+    (_e1, _s1, a1), (_e2, _s2, a2), (_e3, _s3, a3) = calls
+    check("B: sip_registered published as False", a1["sip_registered"] is False)
+    check("B: not probed -> reachable is null, not False", a1["reachable"] is None)
+    check("B: registered and probed", a2["sip_registered"] is True and a2["reachable"] is True)
+    check("B: unknown registration is published as null", "sip_registered" in a3
+          and a3["sip_registered"] is None)
+    check("B: one sensor, no new entity",
+          {e for e, _s, _a in calls} == {"sensor.switchboard_cordless_health"})
+
+
+def _reg_rollup(offline_19, ports_down=False, stale=False):
+    """A link-health rollup at each cycle: ext 19 offline or up, the gateway's
+    ports up or all down, measured 5 s before the read but not before this
+    process started (the first, in the start's own second), or long ago. Nine
+    phones have ever registered, as on the live plant (ext 20 never has)."""
+    def at(cycle, clk):
+        off = offline_19(cycle) if callable(offline_19) else offline_19
+        down = list(_GW) if (ports_down(cycle) if callable(ports_down) else ports_down) else []
+        is_stale = stale(cycle) if callable(stale) else stale
+        return {"measured_at": _iso(clk.time() - 5000 if is_stale
+                                    else max(clk.time() - 5, clk.start_wall)),
+                "poll_interval_s": 300,
+                "unreachable_exts": down + (["19"] if off else []) + ["20"],
+                "offline_exts": down + (["19"] if off else []) + ["20"],
+                "never_registered_exts": ["20"], "expected": 9,
+                "other_rtt_ms": None if off else {"19": 9.1}}
+    return at
+
+
+def test_the_real_loop_raises_and_clears_an_unregistered_cordless() -> None:
+    """Through run(), with nothing to probe (cordless_ip blank, no contact_ip):
+    the registration-only path publishes, alerts on the second unregistered
+    sample read after the grace (each read here is a new sample), and reports
+    the re-registration as a recovery, not a lapse."""
+    sets, notes = _drive_loop(_reg_rollup(lambda c: c < 4), cycles=6, interval=200,
+                              env={"CORDLESS_EXT": "19"})
+    cl = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
+    check("loop B: the cordless is published every cycle with nothing to probe", len(cl) == 6)
+    check("loop B: inside the grace, ok; one sample past it, still ok; two, critical; back, ok",
+          [st for st, _a in cl] == ["ok", "ok", "ok", "critical", "ok", "ok"])
+    check("loop B: sip_registered tracks the rollup",
+          [a.get("sip_registered") for _st, a in cl] == [False] * 4 + [True] * 2)
+    check("loop B: LAN reachability is unknown, not False",
+          all(a.get("reachable") is None for _st, a in cl))
+    cordless_notes = [(t, m) for t, m in notes if "cordless" in t]
+    check("loop B: one CRITICAL, then a recovery",
+          [t for t, _m in cordless_notes] == ["Switchboard: cordless CRITICAL",
+                                             "Switchboard: cordless OK"])
+    check("loop B: the alert says it cannot ring",
+          cordless_notes and "not registered with Switchboard" in cordless_notes[0][1])
+    check("loop B: the recovery is 'back to normal', not 'alert lapsed'",
+          len(cordless_notes) == 2 and "back to normal" in cordless_notes[1][1])
+
+
+def test_the_real_loop_raises_nothing_for_the_cordless_without_a_rollup() -> None:
+    sets, notes = _drive_loop(lambda c, clk: None, cycles=4, interval=200,
+                              env={"CORDLESS_EXT": "19"})
+    check("loop B: no rollup and nothing to probe -> no cordless publish",
+          not any(e == "sensor.switchboard_cordless_health" for e, _s, _a in sets))
+    stale_sets, stale_notes = _drive_loop(_reg_rollup(True, stale=True), cycles=4, interval=200,
+                                          env={"CORDLESS_EXT": "19"})
+    check("loop B: a stale rollup saying offline raises nothing",
+          stale_notes == [] and notes == []
+          and not any(e == "sensor.switchboard_cordless_health" for e, _s, _a in stale_sets))
+
+    def malformed(cycle, clk):
+        return {"measured_at": _iso(max(clk.time() - 5, clk.start_wall)),
+                "poll_interval_s": 300, "unreachable_exts": [], "offline_exts": 5}
+    bad_sets, bad_notes = _drive_loop(malformed, cycles=3, interval=200,
+                                      env={"CORDLESS_EXT": "19"})
+    gw = [st for e, st, _a in bad_sets if e == "sensor.switchboard_gateway_health"]
+    check("loop B: a malformed rollup reads as none: the loop runs on, gateway unknown",
+          gw == ["unknown"] * 3 and bad_notes == [])
+
+
+def test_unknown_registration_neither_clears_nor_raises_a_registration_alert() -> None:
+    """The LAN probe alone cannot say the cordless can ring again: while the
+    rollup is unusable an outstanding registration alert is held."""
+    def probe(ip, pw, pin, cordless_ext=""):
+        return dict(_HEALTHY_SNAP)
+
+    def drive(cycles):
+        sets, notes = _drive_loop(_reg_rollup(lambda c: c < 4, stale=lambda c: c in (4, 5)),
+                                  cycles=cycles, interval=200, probe=probe,
+                                  env={"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"})
+        cl = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
+        return cl, notes, [t for t, _m in notes if "cordless" in t]
+    # Cycles 2-3 unregistered past the grace, 4-5 no usable rollup, 6 registered.
+    cl, _notes, blind = drive(6)
+    check("hold: precondition — the probe ran every cycle", len(cl) == 6)
+    check("hold: unknown registration publishes as null", cl[4][1].get("sip_registered") is None)
+    check("hold: precondition — the LAN probe alone reads ok while blind",
+          [st for st, _a in cl][4:] == ["ok", "ok"])
+    check("hold: no recovery while registration is unknown",
+          blind == ["Switchboard: cordless CRITICAL"])
+    _cl, notes, titles = drive(7)
+    check("hold: the recovery comes once the rollup shows it registered",
+          titles == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
+    ok_note = [m for t, m in notes if t == "Switchboard: cordless OK"]
+    check("hold: the recovery is a recovery", ok_note and "back to normal" in ok_note[0])
+
+
+def test_a_blind_cycle_neither_unlocks_a_false_all_clear_nor_counts_toward_an_alert() -> None:
+    """The hold's own guard: a blind cycle whose LAN probe is unhealthy must
+    not replace the registration reason it is holding, or the next blind,
+    healthy cycle has nothing to hold and posts 'Cordless recovered — back to
+    normal' while registration is still unknown."""
+    env = {"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"}
+    calls = {"n": 0}
+
+    def probe(ip, pw, pin, cordless_ext=""):
+        c = calls["n"]
+        calls["n"] += 1
+        return {"reachable": False, "api_ok": False} if c == 4 else dict(_HEALTHY_SNAP)
+    # Cycles 2-3 unregistered past the grace (the CRITICAL); 4 blind with the
+    # handset unreachable on the LAN; 5 blind and healthy.
+    sets, notes = _drive_loop(_reg_rollup(lambda c: c < 4, stale=lambda c: c in (4, 5)),
+                              cycles=6, interval=200, probe=probe, env=env)
+    cl = [st for e, st, _a in sets if e == "sensor.switchboard_cordless_health"]
+    check("hold: precondition — the blind cycle read critical on the LAN probe",
+          cl[4] == "critical" and cl[5] == "ok")
+    check("hold: no all-clear while registration is unknown",
+          [t for t, _m in notes if "cordless" in t] == ["Switchboard: cordless CRITICAL"])
+    # Unregistered in the samples of cycles 2 and 4 (past the grace) with a
+    # blind cycle 3 between: two unregistered samples, but not consecutive ones.
+    blind = _reg_rollup(lambda c: c in (2, 4), stale=lambda c: c == 3)
+    _s, notes = _drive_loop(blind, cycles=5, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
+    check("hold: a blind cycle before the alert resets the count",
+          [t for t, _m in notes if "cordless" in t] == [])
+    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (2, 4)), cycles=5, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
+    check("hold: a registered sample between resets it too",
+          [t for t, _m in notes if "cordless" in t] == [])
+    _s, notes = _drive_loop(_reg_rollup(lambda c: c in (2, 4, 5), stale=lambda c: c == 3),
+                            cycles=6, interval=200,
+                            probe=lambda *a, **k: dict(_HEALTHY_SNAP), env=env)
+    check("hold: control — two fresh samples in a row after the blind cycle raise it",
+          [t for t, _m in notes if "cordless" in t] == ["Switchboard: cordless CRITICAL"])
+
+
+def test_the_registration_count_is_by_distinct_rollup_sample() -> None:
+    note, MIN = dh.note_registration, dh.REGISTRATION_MIN_SAMPLES
+    check("count: two samples", MIN == 2)
+    st = {}
+    check("count: the first unregistered sample counts one", note(st, False, 1000.0) == 1)
+    check("count: the same sample read again does not count again",
+          note(st, False, 1000.0) == 1 and note(st, False, 1000.0) == 1)
+    check("count: the next sample counts two", note(st, False, 1300.0) == 2)
+    check("count: a registered sample resets it", note(st, True, 1600.0) == 0)
+    check("count: ...and a later loss starts again from one", note(st, False, 1900.0) == 1)
+    check("count: unknown below the minimum resets it",
+          note(st, None, None) == 0 and note(st, False, 2200.0) == 1)
+    st = {}
+    note(st, False, 1000.0)
+    note(st, False, 1300.0)
+    check("count: unknown at the minimum keeps it (the alert is held)",
+          note(st, None, None) == 2 and note(st, False, 1300.0) == 2)
+    check("count: the sample after the blind cycle counts on", note(st, False, 1600.0) == 3)
+    st = {}
+    check("count: a rollup with no stamp never counts",
+          note(st, False, None) == 0 and note(st, False, None) == 0)
+    st = {}
+    check("count: ...nor after a stamped one",
+          note(st, False, 1000.0) == 1 and note(st, False, None) == 1)
+    snap = {**_HEALTHY_SNAP, "sip_registered": False}
+    check("count: one sample is not enough for the critical",
+          dh.classify_cordless({**snap, "sip_unregistered_samples": 1}, TH,
+                               uptime_s=_PAST_GRACE) == ("ok", []))
+    check("count: two are",
+          dh.classify_cordless({**snap, "sip_unregistered_samples": 2}, TH,
+                               uptime_s=_PAST_GRACE)[0] == "critical")
+    check("count: one sample beside an unreachable LAN names only the LAN",
+          dh.classify_cordless({"reachable": False, "api_ok": False, "sip_registered": False,
+                                "sip_unregistered_samples": 1}, TH, uptime_s=_PAST_GRACE)
+          == ("critical", ["cordless unreachable (alarm/announce endpoint offline)"]))
+
+
+def _sampled_rollup(offline_in, period=300, stale=None):
+    """rtpmon's rollup as Home Assistant holds it: sample k is measured `period`
+    seconds after sample k - 1 (sample 0 in this process's start second) and
+    stays until the next, so a 120 s poller reads most samples two or three
+    times. `offline_in(k)`: ext 19 unregistered in sample k. `stale(cycle)`: no
+    usable rollup on that read."""
+    def at(cycle, clk):
+        k = int((clk.time() - clk.start_wall) // period)
+        off = offline_in(k)
+        is_stale = stale(cycle) if stale else False
+        return {"measured_at": _iso(clk.start_wall + period * k - (5000 if is_stale else 0)),
+                "poll_interval_s": period,
+                "unreachable_exts": (["19"] if off else []) + ["20"],
+                "offline_exts": (["19"] if off else []) + ["20"],
+                "never_registered_exts": ["20"], "expected": 9,
+                "other_rtt_ms": None if off else {"19": 9.1}}
+    return at
+
+
+def _cordless_at_cadence(offline_in, cycles, stale=None, probed=False):
+    """The real loop at the default 120 s against a 300 s rollup: the
+    cordless's published states, its sip_registered attribute, and its
+    notification titles and texts. `probed`: a handset with an IP whose LAN
+    probe always reads healthy, so the cordless is published on a blind read."""
+    env = {"CORDLESS_EXT": "19"}
+    if probed:
+        env["CORDLESS_IP"] = "192.0.2.1"
+    sets, notes = _drive_loop(_sampled_rollup(offline_in, stale=stale), cycles=cycles,
+                              interval=120, env=env,
+                              probe=(lambda *a, **k: dict(_HEALTHY_SNAP)) if probed else None)
+    cl = [(st, a) for e, st, a in sets if e == "sensor.switchboard_cordless_health"]
+    return ([st for st, _a in cl], [a.get("sip_registered") for _st, a in cl],
+            [(t, m) for t, m in notes if "cordless" in t])
+
+
+def test_a_handset_rebooting_inside_one_sample_raises_nothing() -> None:
+    """A WP826 firmware auto-upgrade reboots it at 01:00 for two to four
+    minutes. One 300 s sample catches it; this poller reads that sample two or
+    three times, and two of its own cycles used to make the CRITICAL."""
+    # Reads at 0, 120, ... s; sample k covers [300k, 300k + 300). Sample 2 is
+    # read at 600, 720 and 840 s, all past the 360 s grace.
+    states, reg, notes = _cordless_at_cadence(lambda k: k == 2, cycles=10)
+    check("reboot: precondition — the unregistered sample was read three times",
+          reg.count(False) == 3)
+    check("reboot: nothing is raised", notes == [])
+    check("reboot: the sensor stays ok throughout, with the rollup's reading beside it",
+          states == ["ok"] * 10 and reg[5:8] == [False, False, False])
+
+
+def test_a_registration_lost_on_two_samples_is_critical_until_a_fresh_one_clears_it() -> None:
+    states, _reg, notes = _cordless_at_cadence(lambda k: k in (2, 3), cycles=11)
+    check("two samples: critical from the first read of the second sample (960 s), "
+          "and back with the next sample (1200 s)",
+          states == ["ok"] * 8 + ["critical", "critical", "ok"])
+    check("two samples: one CRITICAL, then a recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
+    check("two samples: the recovery is a recovery",
+          len(notes) == 2 and "back to normal" in notes[1][1])
+    _s, _r, early = _cordless_at_cadence(lambda k: k in (2, 3), cycles=9)
+    check("two samples: the CRITICAL goes out on that first read, not a cycle later",
+          [t for t, _m in early] == ["Switchboard: cordless CRITICAL"])
+    # Unregistered from the start: inside the 360 s grace nothing counts, so the
+    # two samples are the ones read after it (300 s at 360 s, 600 s at 600 s).
+    states, _reg, notes = _cordless_at_cadence(lambda k: True, cycles=7)
+    check("grace: nothing counts inside it; the second sample read after it is critical",
+          states == ["ok"] * 5 + ["critical", "critical"]
+          and [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"])
+    # A blind read while the alert is out holds it, though the LAN probe alone
+    # reads ok, and re-reading the sample that raised it does not clear it.
+    states, reg, notes = _cordless_at_cadence(lambda k: k in (2, 3), cycles=11,
+                                              stale=lambda c: c == 9, probed=True)
+    check("hold: precondition — the blind read published ok off the LAN probe",
+          reg[9] is None and states[9] == "ok")
+    check("hold: a blind read neither clears nor repeats the alert",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
+          and states[8] == "critical" and states[10] == "ok")
+    states, _reg, notes = _cordless_at_cadence(lambda k: k in (2, 3, 4), cycles=11,
+                                               stale=lambda c: c == 9, probed=True)
+    check("hold: still unregistered after the blind read -> still critical, no recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"] and states[10] == "critical")
+
+
+def test_only_a_registration_loss_skips_the_two_cycle_gate() -> None:
+    """The registration CRITICAL has its own gate (two samples); every other
+    reason still needs two consecutive cycles, as before."""
+    def flaky(bad):
+        calls = {"n": 0}
+
+        def probe(ip, pw, pin, cordless_ext=""):
+            c = calls["n"]
+            calls["n"] += 1
+            return {"reachable": False, "api_ok": False} if c in bad else dict(_HEALTHY_SNAP)
+        return probe
+    env = {"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"}
+    for bad, want in (({6}, []), ({6, 7}, ["Switchboard: cordless CRITICAL",
+                                            "Switchboard: cordless OK"])):
+        _s, notes = _drive_loop(_sampled_rollup(lambda k: False), cycles=9, interval=120,
+                                probe=flaky(bad), env=env)
+        check(f"gate: unreachable on the LAN for {len(bad)} cycle(s) -> "
+              f"{'an alert' if want else 'nothing'}",
+              [t for t, _m in notes if "cordless" in t] == want)
+
+
+def _gateway_critical(offline_19, ports_down, cycles, stale=False):
+    """The real loop at 200 s a cycle (a fresh rollup each read, rtpmon's
+    interval 300 s): the gateway CRITICAL texts, and the gateway sensor's
+    reasons on the last cycle."""
+    sets, notes = _drive_loop(_reg_rollup(offline_19, ports_down=ports_down, stale=stale),
+                              cycles=cycles, interval=200, env={"CORDLESS_EXT": "19"})
+    gw = [st_a for e, *st_a in sets if e == "sensor.switchboard_gateway_health"]
+    return ([m for t, m in notes if t == "Switchboard: gxw gateway CRITICAL"],
+            gw[-1][1].get("reasons") if gw else None)
+
+
+def test_the_real_loop_names_the_host_when_the_ports_and_the_cordless_drop() -> None:
+    gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 1, cycles=5)
+    check("loop C: one gateway CRITICAL", len(gw) == 1)
+    check("loop C: it names the host or the network, not a gateway power loss",
+          gw and "Switchboard host or the network" in gw[0] and "lost power" not in gw[0])
+    gw2, _r = _gateway_critical(False, lambda c: c >= 1, cycles=5)
+    check("loop C: the cordless up -> the gateway wording",
+          len(gw2) == 1 and "GXW gateway likely lost power" in gw2[0])
+
+
+def test_the_gateway_critical_names_the_host_only_for_a_cordless_that_dropped_with_the_ports() -> None:
+    """The cordless merely down in the same rollup was enough: one asleep (or
+    with a dead battery) half an hour before the gateway lost power made the
+    gateway CRITICAL say "not the GXW gateway"."""
+    host = lambda m: "Switchboard host or the network" in m and "not the GXW gateway" in m  # noqa: E731
+    gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 6, cycles=9)
+    check("cause 10: a cordless down 1000 s before the ports -> the gateway wording",
+          len(gw) == 1 and "GXW gateway likely lost power" in gw[0] and not host(gw[0]))
+    gw, _r = _gateway_critical(lambda c: c >= 2, lambda c: c >= 1, cycles=5)
+    check("cause: the cordless one rollup after the ports still dropped with them",
+          len(gw) == 1 and host(gw[0]))
+    gw, _r = _gateway_critical(True, True, cycles=5)
+    check("cause: both already down at the first reading -> the gateway wording",
+          len(gw) == 1 and not host(gw[0]))
+    gw, _r = _gateway_critical(lambda c: c >= 2, lambda c: c >= 2, cycles=6,
+                               stale=lambda c: c == 1)
+    check("cause: both first seen down after a blind cycle -> the gateway wording",
+          len(gw) == 1 and not host(gw[0]))
+    gw, reasons = _gateway_critical(lambda c: c >= 6, lambda c: c >= 1, cycles=9)
+    check("cause: a cordless that drops long after the ports leaves the alert as it was",
+          len(gw) == 1 and not host(gw[0]))
+    check("cause: ...and the sensor's reasons do not turn to the host later",
+          reasons and "GXW gateway likely lost power" in reasons[0])
+    # Two ports down for a while (handsets unplugged), then the rest of the
+    # ports and the cordless at once: the ports' run starts when the LAST one
+    # drops, which is when the gateway reads all-down.
+    together = _reg_rollup(lambda c: c >= 5, ports_down=lambda c: c >= 5)
+
+    def two_first(cycle, clk):
+        attrs = together(cycle, clk)
+        if 1 <= cycle < 5:
+            for key in ("unreachable_exts", "offline_exts"):
+                attrs[key] = ["11", "12"] + attrs[key]
+        return attrs
+    _sets, notes = _drive_loop(two_first, cycles=8, interval=200, env={"CORDLESS_EXT": "19"})
+    gw = [m for t, m in notes if t == "Switchboard: gxw gateway CRITICAL"]
+    check("cause: two ports down earlier, then the rest with the cordless -> the host",
+          len(gw) == 1 and host(gw[0]))
+    run, other = {}, {}
+    dh.note_down_run(run, True, 1000.0)
+    check("runs: a run in progress at the first reading has no start",
+          run.get("since") is None)
+    dh.note_down_run(run, False, 1300.0)
+    dh.note_down_run(run, True, 1600.0)
+    dh.note_down_run(run, True, 1900.0)
+    check("runs: seen up, then down -> the first down rollup's time", run["since"] == 1600.0)
+    dh.note_down_run(other, False, 1300.0)
+    dh.note_down_run(other, True, 2050.0)
+    # The ports' all-down run here is also the fleet outage's (the third run).
+    check("runs: the cordless 450 s after the ports is one rollup (300 s) with jitter",
+          dh.dropped_together(other, run, run, 300.0))
+    check("runs: ...450 s before them is not", not dh.dropped_together(run, other, other, 300.0))
+    dh.note_down_run(other, False, 2100.0)
+    dh.note_down_run(other, True, 2200.0)
+    check("runs: 600 s apart is two rollups", not dh.dropped_together(other, run, run, 300.0))
+    blind = {}
+    dh.note_down_run(blind, False, 1000.0)
+    dh.note_down_run(blind, None, 0.0)
+    dh.note_down_run(blind, True, 1600.0)
+    check("runs: a blind cycle between up and down hides the start", blind.get("since") is None)
+    check("runs: the rollup's stamp is read as an epoch",
+          dh.rollup_measured_at({"measured_at": _iso(1_760_000_000)}) == 1_760_000_000.0
+          and dh.rollup_measured_at({}) is None
+          and dh.rollup_measured_at({"measured_at": "not a time"}) is None)
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.0 review, round 2: no "recovered" off a cycle that cannot say the
+# cordless can ring, and one cause rule for devhealth and rtpmon.
+# --------------------------------------------------------------------------- #
+_POOR_CALL = {**_HEALTHY_SNAP, "last_mos": 2.2, "last_mos_age_s": 30,
+              "last_mos_ledger_tx": "impaired"}
+
+
+def _phased_cordless(phases, interval=200, period=None, cycles=None):
+    """The real loop with cordless_ip blank (the default) and ext 19's IP
+    followed from the contact_ip rtpmon publishes for it, which an unregistered
+    handset does not have. Each read is a fresh rollup sample, unless `period`
+    (rtpmon's) is given: then sample k is measured `period` seconds after
+    sample k - 1 and read by every cycle until the next, phases[k] is that
+    sample's, and `cycles` cycles run. phases[c]:
+      up       registered, LAN and API healthy;
+      unreach  registered but failing its qualify (an 'Unavail' contact), and
+               its LAN probe answers nothing;
+      badcall  registered, a corroborated poor recent call;
+      offline  unregistered: no contact_ip, so nothing to probe.
+    Returns the cordless's (state, attrs) publishes per cycle (None for a
+    cycle that published nothing) and its notifications."""
+    clk = _Clock()
+    cycles = cycles or len(phases)
+
+    def sample():
+        # The loop's clock moves only in its sleep, by `interval`.
+        since = clk.mono - clk.start_mono
+        return int(since // period) if period else int(round(since / interval))
+
+    def phase():
+        return phases[min(sample(), len(phases) - 1)]
+
+    def rollup(_cycle, _clk):
+        p = phase()
+        down = p in ("offline", "unreach")
+        return {"measured_at": _iso(clk.start_wall + period * sample() if period
+                                    else max(clk.time() - 5, clk.start_wall)),
+                "poll_interval_s": period or 300,
+                "unreachable_exts": ["19"] if down else [],
+                "offline_exts": ["19"] if p == "offline" else [],
+                "never_registered_exts": [],
+                "other_rtt_ms": {} if down else {"19": 9.1}}
+
+    def probe(ip, pw, pin, cordless_ext=""):
+        p = phase()
+        if p == "unreach":
+            return {"reachable": False, "api_ok": False}
+        return dict(_POOR_CALL if p == "badcall" else _HEALTHY_SNAP)
+
+    def contact(_cycle, _clk):
+        return None if phase() == "offline" else "192.0.2.19"
+    sets, notes = _drive_loop(rollup, cycles=cycles, interval=interval, clock=clk,
+                              probe=probe, contact_at=contact,
+                              env={"CORDLESS_EXT": "19"})
+    # The gateway is published once at the end of every cycle, after the
+    # cordless.
+    per_cycle: list = [None] * cycles
+    cycle = 0
+    for e, st, a in sets:
+        if e == "sensor.switchboard_cordless_health":
+            per_cycle[cycle] = (st, a)
+        elif e == "sensor.switchboard_gateway_health":
+            cycle += 1
+    return per_cycle, [(t, m) for t, m in notes if "cordless" in t]
+
+
+def test_an_open_cordless_alert_is_not_cleared_by_a_cycle_with_nothing_probed() -> None:
+    """cordless_ip blank, cordless_ext 19. The handset goes off the LAN (the
+    probe of its last contact_ip fails twice: CRITICAL 'unreachable'), then
+    unregisters. With no contact_ip there is nothing to probe, and one
+    unregistered sample is below the registration gate, so the cycle read
+    'ok' and posted "Cordless recovered — back to normal" between two
+    CRITICALs for one continuous outage."""
+    per, notes = _phased_cordless(["up", "up", "unreach", "unreach", "offline", "offline", "up"])
+    check("nothing probed: precondition — the 'unreachable' CRITICAL at cycle 3",
+          notes[:1] and notes[0][0] == "Switchboard: cordless CRITICAL"
+          and "unreachable" in notes[0][1])
+    check("nothing probed: one alert, then one recovery once it is registered again",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
+    check("nothing probed: the cycle that probed nothing publishes the alert, not an 'ok'",
+          _held(per[4], "critical", "unreachable"))
+    check("nothing probed: the second unregistered sample reads critical, the return ok",
+          per[5] and per[5][0] == "critical" and per[6] and per[6][0] == "ok")
+    # A poor-call 'degraded' alert open when the handset unregisters: its
+    # lapse is not reported off a cycle that measured nothing.
+    per, notes = _phased_cordless(["up", "badcall", "badcall", "badcall", "offline", "offline",
+                                   "up"])
+    check("nothing probed: an open poor-call alert does not 'lapse', it escalates",
+          [t for t, _m in notes] == ["Switchboard: cordless degraded",
+                                     "Switchboard: cordless CRITICAL",
+                                     "Switchboard: cordless OK"])
+    check("nothing probed: ...to the registration reason", "not registered" in notes[1][1])
+    check("nothing probed: the cycle between keeps the poor-call alert on the sensor",
+          _held(per[4], "degraded", dh.MOS_REASON))
+    # The registration CRITICAL, then a sample with the handset registered but
+    # failing its qualify (the count restarts, the LAN keeps the alert open),
+    # then unregistered again on one sample.
+    per, notes = _phased_cordless(["up", "up", "offline", "offline", "unreach", "offline",
+                                   "up"])
+    check("nothing probed: an 'Unavail' sample between does not unlock a false recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
+          and _held(per[5], "critical", "unreachable") and per[6] and per[6][0] == "ok")
+    # The 'unreachable' CRITICAL, then a cycle that reads only a poor call
+    # (degraded, below the alert, so nothing is sent), then one unregistered
+    # sample: the sensor keeps what it last read, not the alert's level.
+    per, notes = _phased_cordless(["up", "unreach", "unreach", "badcall", "offline", "offline",
+                                   "up"])
+    check("nothing probed: precondition — one CRITICAL and its recovery",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"]
+          and per[3] and per[3][0] == "degraded")
+    check("nothing probed: the held cycle keeps the last unhealthy cycle's level and reason",
+          _held(per[4], "degraded", dh.MOS_REASON))
+
+
+def _held(published, level, reason):
+    """A cycle that held an open alert with nothing to probe: the last judged
+    level and reason stay on the sensor, beside that cycle's own readings, the
+    handset unregistered and not probed."""
+    if not published:
+        return False
+    state, attrs = published
+    return (state == level and any(reason in r for r in attrs.get("reasons") or [])
+            and attrs.get("sip_registered") is False and attrs.get("reachable") is None)
+
+
+def test_a_held_cycle_with_nothing_probed_publishes_what_it_read() -> None:
+    """A held cycle with nothing to probe published nothing, so for up to one
+    sample the sensor kept sip_registered true, and reachable false from a
+    probe of an address the unregistered handset no longer had, while the
+    rollup had it offline. At the default cadence (120 s against a 300 s
+    rollup): the handset fails its qualify and its probe on sample 2, which
+    raises 'unreachable', and is unregistered from sample 3."""
+    per, notes = _phased_cordless(["up", "up", "unreach", "offline"], interval=120,
+                                  period=300, cycles=12)
+    check("held: precondition — one CRITICAL, 'unreachable'",
+          [t for t, _m in notes] == ["Switchboard: cordless CRITICAL"]
+          and "unreachable" in notes[0][1])
+    check("held: precondition — the CRITICAL was read registered and unreachable",
+          per[7] and per[7][0] == "critical" and per[7][1].get("sip_registered") is True
+          and per[7][1].get("reachable") is False)
+    check("held: both reads of the first unregistered sample publish it, under the alert",
+          _held(per[8], "critical", "unreachable") and _held(per[9], "critical", "unreachable"))
+    check("held: ...each with a fresh stamp", per[9][1].get("measured_at")
+          and per[9][1].get("measured_at") != per[8][1].get("measured_at"))
+    check("held: the second sample reads critical on the registration reason",
+          _held(per[10], "critical", "not registered"))
+
+
+def test_an_open_cordless_alert_is_not_cleared_while_the_rollup_has_it_unregistered() -> None:
+    """The 11-07 shape with the LAN probe: the handset's Wi-Fi rides a
+    rebooting router, two failed probes raise 'unreachable', and the rollup
+    sample in between shows it unregistered. The LAN answering again on the
+    next cycle is no evidence that it can ring: the clear waits for a sample
+    that shows it registered."""
+    calls = {"n": 0}
+
+    def probe(ip, pw, pin, cordless_ext=""):
+        c = calls["n"]
+        calls["n"] += 1
+        return {"reachable": False, "api_ok": False} if c in (10, 11) else dict(_HEALTHY_SNAP)
+
+    def drive(cycles):
+        calls["n"] = 0
+        _s, notes = _drive_loop(_sampled_rollup(lambda k: k in (4, 5)), cycles=cycles,
+                                interval=120, probe=probe,
+                                env={"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"})
+        return [t for t, _m in notes if "cordless" in t]
+    # Reads every 120 s against a 300 s rollup: sample 4 (unregistered) is read
+    # by cycles 10-12, sample 5 by 13-14, sample 6 (registered) from cycle 15.
+    check("LAN back, one unregistered sample: the CRITICAL stays out (no recovery yet)",
+          drive(15) == ["Switchboard: cordless CRITICAL"])
+    check("...and the recovery comes on the sample that shows it registered",
+          drive(16) == ["Switchboard: cordless CRITICAL", "Switchboard: cordless OK"])
+
+
+def test_devhealth_and_rtpmon_name_one_cause_for_one_outage() -> None:
+    """The cordless left the Wi-Fi a sample before the GXW lost power: devhealth
+    named the host (the cordless dropped "within one rollup" of the ports)
+    while rtpmon's outage card and push named the gateway. Both components
+    now use rtpmon's rule: the cordless was up, and a port still answered, in
+    the last sample before the fleet outage began, and the cordless and every
+    port were down by the outage's second sample."""
+    import test_rtpmon as trt
+    period = 300
+
+    def verdicts(samples, cycles=14):
+        pushes = []
+        rt_notes = trt._drive_samples([(s, []) for s in samples],
+                                      target=trt._TARGET, pushes=pushes)
+
+        def rollup_at(cycle, clk):
+            k = min(int((clk.time() - clk.start_wall) // period), len(samples) - 1)
+            attrs = dict(trt._published(samples[k])["sensor.switchboard_link_health"][1])
+            attrs["measured_at"] = _iso(clk.start_wall + period * k)
+            attrs["poll_interval_s"] = period
+            return attrs
+        _sets, dh_notes = _drive_loop(rollup_at, cycles=cycles, interval=120,
+                                      env={"CORDLESS_EXT": "19"})
+        gw = [m for t, m in dh_notes if t == "Switchboard: gxw gateway CRITICAL"]
+        out = [m for t, m in rt_notes if t == "Switchboard: phones unreachable"]
+        push = [m for t, m, _kw in pushes if t == "Switchboard: phones down"]
+        host = "Switchboard host or the network"
+        return (len(gw), len(out), len(push),
+                bool(gw) and host in gw[0], bool(out) and host in out[0],
+                bool(push) and host in push[0])
+    cordless_only = trt._sum(trt._WIRED8)
+    early = verdicts([trt._S_UP] * 3 + [cordless_only] + [trt._S_ALL_DOWN] * 4)
+    check("one cause: precondition — one alert from each", early[:3] == (1, 1, 1))
+    check("one cause: the cordless down a sample before the ports -> the gateway, in both",
+          early[3:] == (False, False, False))
+    same = verdicts([trt._S_UP] * 4 + [trt._S_ALL_DOWN] * 4)
+    check("one cause: the cordless and the ports in one sample -> the host, in both",
+          same == (1, 1, 1, True, True, True))
+    # The ports down across two samples, the cordless with the first wave:
+    # four ports and the cordless are 5 of 9, already the fleet outage, and
+    # rtpmon's sample before it has the cordless up. devhealth anchored on the
+    # last port's drop, a sample later, and named the gateway.
+    first_wave = trt._sum(trt._WIRED8[4:])
+    check("one cause: precondition — the first wave is an outage with four ports up",
+          trt.pm.is_mass_outage(first_wave) and first_wave["wired_reachable"] == 4)
+    check("one cause: the cordless with the first wave of ports -> the host, in both",
+          verdicts([trt._S_UP] * 3 + [first_wave] + [trt._S_ALL_DOWN] * 4)
+          == (1, 1, 1, True, True, True))
+    # A first wave below the threshold (two ports and the cordless, 3 of 9):
+    # the outage begins with the other ports, and the cordless was down in the
+    # sample before it.
+    small = trt._sum(trt._WIRED8[2:])
+    check("one cause: precondition — a smaller first wave is not an outage",
+          not trt.pm.is_mass_outage(small))
+    check("one cause: the cordless with a first wave below the threshold -> the gateway, in both",
+          verdicts([trt._S_UP] * 3 + [small] + [trt._S_ALL_DOWN] * 4)
+          == (1, 1, 1, False, False, False))
+    # The last port down on the outage's third sample: rtpmon's alert fires on
+    # the second, where that port still answers.
+    one_port = trt._sum(trt._WIRED8[7:])
+    check("one cause: the last port down a sample after the alert's -> the gateway, in both",
+          verdicts([trt._S_UP] * 3 + [first_wave, one_port] + [trt._S_ALL_DOWN] * 4, cycles=17)
+          == (1, 1, 1, False, False, False))
+    gw, _r = _gateway_critical(lambda c: c >= 1, lambda c: c >= 2, cycles=6)
+    check("one cause: devhealth alone, the cordless one sample early -> the gateway wording",
+          len(gw) == 1 and "GXW gateway likely lost power" in gw[0])
+    # In rollup time at rtpmon's 300 s, with the fleet outage from 1600.
+    fleet = {"since": 1600.0}
+
+    def together(c, p, m=fleet):
+        return dh.dropped_together({"since": c}, {"since": p}, m, 300.0)
+    check("runs: the cordless and every port down on the outage's first sample",
+          together(1600.0, 1600.0))
+    check("runs: ...or by its second, either of them",
+          together(1900.0, 1600.0) and together(1600.0, 1900.0) and together(1900.0, 1900.0))
+    check("runs: the cordless down a sample before the outage began is not together",
+          not together(1300.0, 1600.0) and not together(1300.0, 1900.0))
+    check("runs: nor every port down before it began (fewer ports than the threshold)",
+          not together(1600.0, 1300.0))
+    check("runs: nor the cordless or the last port down on its third sample",
+          not together(2200.0, 1600.0) and not together(1600.0, 2200.0))
+    check("runs: nor an outage whose start was not seen",
+          not together(1600.0, 1600.0, {}) and not together(1600.0, 1600.0, {"since": None}))
+    run = {}
+    dh.note_down_run(run, False, 1000.0)
+    dh.note_down_run(run, True, 1300.0)
+    check("runs: ...nor a cordless or ports run whose start was not seen",
+          not dh.dropped_together({}, run, run, 300.0)
+          and not dh.dropped_together(run, {}, run, 300.0))
+
+
+def test_devhealth_reads_a_fleet_outage_off_the_rollup_as_rtpmon_does() -> None:
+    """The gateway alert's cause rests on when the fleet outage began, which
+    rtpmon decides (is_mass_outage) and devhealth reads off the rollup rtpmon
+    publishes. Every combination of the nine phones up and down, with every
+    phone, eight, or three of them ever registered, through rtpmon's own
+    summary and publish."""
+    import itertools
+    import test_rtpmon as trt
+    differ = []
+    for ever in (trt._EVER9, trt._EVER9 - {"19"}, set(trt._WIRED8[:3])):
+        for n in range(len(trt._ALL9) + 1):
+            for up in itertools.combinations(trt._ALL9, n):
+                summ = trt._sum(up, ever=ever)
+                attrs = trt._published(summ)["sensor.switchboard_link_health"][1]
+                if dh.fleet_outage_in(attrs) is not trt.pm.is_mass_outage(summ):
+                    differ.append((sorted(ever), up))
+    check(f"fleet: devhealth and rtpmon agree on every sample ({differ[:3]})", not differ)
+    check("fleet: a rollup that does not say how many have registered -> unknown",
+          dh.fleet_outage_in({"unreachable_exts": ["11", "12", "13"], "offline_exts": []}) is None
+          and dh.fleet_outage_in(None) is None)
+    check("fleet: one that says none has registered is no outage, whatever it lists",
+          dh.fleet_outage_in({"expected": 0, "unreachable_exts": ["11", "12", "13"]}) is False)
+
+
+def test_no_served_text_says_a_reboot_inside_one_sample_raises_nothing() -> None:
+    """With an IP to probe, a WP826 reboot of three to four minutes still fails
+    two LAN probes 120 s apart and raises 'unreachable'. Only the registration
+    alert waits for two samples."""
+    root = _SRC.parents[5]
+    served = [root / "CHANGELOG.md", root.parent / "README.md",
+              root / "docs" / "reference" / "wp826-cordless.md",
+              root / "docs" / "reference" / "health-monitoring.md"]
+    for path in served:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        check(f"reboot claim: {path.name} does not say a reboot inside one sample raises nothing",
+              "inside one sample raises nothing" not in text
+              and "inside one sample, or a rollup that cannot say, raises nothing" not in text)
+    doc = " ".join((dh.classify_cordless.__doc__ or "").split())
+    check("reboot claim: nor does classify_cordless's docstring",
+          "inside one sample raises nothing" not in doc)
 
 
 if __name__ == "__main__":

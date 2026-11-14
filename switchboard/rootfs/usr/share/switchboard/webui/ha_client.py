@@ -425,7 +425,9 @@ def push(message: str, title: str = "Switchboard", target: str = "", critical: b
     status, _ = _request("POST", f"/services/notify/{tgt}", data)
     ok = status is not None and status < 300
     if not ok:
-        _log(f"push to notify.{tgt} failed (status={status})")
+        # The target is an option value that names a phone (notify.mobile_app_<device>):
+        # say which kind of call failed, never where it was going.
+        _log(f"push to the configured notify target failed (status={status})")
     return ok
 
 

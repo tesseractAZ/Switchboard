@@ -34,7 +34,7 @@ its default is fine.
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
 | `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See [*Pinning the cordless certificate*](wp826-cordless.md#pinning-the-cordless-certificate). |
-| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Blank = use `cordless_ip` only. |
+| `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Its SIP registration is checked too (v0.119.0): not registered on two link-health samples in a row, read after a 360 s grace at start-up, reads `critical`, even with no IP to probe. Blank = use `cordless_ip` only, with no registration check. |
 | `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
 | `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
 | `cordless_wifi_min_signal` | `2` | Lowest acceptable WiFi bars (0–5) before flagging a weak link. |
@@ -42,7 +42,7 @@ its default is fine.
 | `device_health_enabled` | `true` | Watch the WP826 cordless (battery/WiFi/per-call MOS) and derive gateway health. Needs `cordless_password` for the deep checks. |
 | `device_health_interval` | `120` | Seconds between device-health polls. Range 30–86400. |
 | `gateway_ports` | `11,12,13,14,15,16,17,18` | Comma-separated extensions served by the wired GXW FXS ports, used to derive gateway health. |
-| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway outage), including a mass drop between polls (its card names any phones still down at that poll and is updated at the next), and when the outside line stops or resumes registering. |
+| `link_health_alerts` | `true` | Notify when many phones lose registration at once (a shared-gateway or network outage), including a mass drop between polls (its card names any phones still down at that poll and is updated at the next), and when the outside line stops or resumes registering. With `wakeup_push_target` set, the outage and its recovery are also pushed to the phone (v0.119.0); the between-polls card is not. |
 | `link_health_enabled` | `true` | Poll every phone's registration + round-trip latency (RTT) between calls, published to sensors. |
 | `link_health_interval` | `300` | Seconds between link-health polls. Range 30–86400. |
 
@@ -76,7 +76,7 @@ its default is fine.
 | `timezone` | `""` | Blank = auto-detect the Home Assistant timezone. Set an IANA name (e.g. `America/Phoenix`) only to override. |
 | `wakeup_calendar` | `""` | Optional HA `calendar.*` entity whose next event is read out. |
 | `wakeup_enabled` / `wakeup_ext` | `true` / `42` | Wake-up calls and the dial code. Off also stops the announcement verdicts and automatic retry ([Announce onto a handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)), which run in the same scheduler, and identical repeats are then not held back. |
-| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) an undelivered wake-up escalates to, as a critical alert that sounds through Do Not Disturb. Empty falls back to a Home Assistant notification card. |
+| `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) for the phone pushes: undelivered wake-ups and phone-system outages. An undelivered wake-up escalates to it as a critical alert that sounds through Do Not Disturb. A fleet outage ("phones down") and its recovery ("phones back") are ordinary pushes beside their cards, switched by `link_health_alerts` (v0.119.0). Empty pushes nothing: the wake-up falls back to a Home Assistant notification card, and the outage keeps its card. |
 | `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. At least `wakeup_ring_seconds` + 20 (one scheduler poll); a shorter value is raised to that and a WARNING naming both values is logged at every start. With a ring above 580 s every allowed retry is raised, which is expected. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
 | `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
