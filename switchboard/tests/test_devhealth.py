@@ -3395,6 +3395,133 @@ def test_a_restored_alert_closes_at_the_first_reading_that_can_clear_it_at_every
           "clears on the first sample read after the grace, 360 s after the start" in log)
 
 
+# --------------------------------------------------------------------------- #
+# v0.119.1, the latch file hardened. /data/state is writable by the asterisk
+# user and devhealth runs as root, so whatever the file holds must never stop
+# the loop.
+# --------------------------------------------------------------------------- #
+_START = int(_Clock().start_wall)          # the start of _lives' first run
+_HUGE = "9" * 400                          # a JSON integer too large for a float
+# JSON nested too deep for json.load, which raises RecursionError (not a
+# ValueError) on it: at the recursion limit, or, from Python 3.14, once the C
+# stack runs short.
+_DEEP = "[" * 10 ** 6 + "]" * 10 ** 6
+
+
+def _planted(text):
+    """A latch file holding `text`, as anything that can write /data/state
+    could leave it."""
+    state = _state_file()
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return state
+
+
+def _gw_latch(**kw):
+    """A gateway latch that _lives' first run would restore: shown, raised 10
+    minutes before its start, on its boot."""
+    return {"alerted": "critical", "reasons": ["all 8 gateway ports down"], "at": _START - 600,
+            "announced": True, "call_end": None, "boot": _BOOT_A, **kw}
+
+
+def _with(rec_json, token):
+    """`rec_json` with its "@" placeholder replaced by a raw JSON token."""
+    return rec_json.replace('"@"', token)
+
+
+def test_no_saved_alert_file_can_stop_the_loop() -> None:
+    """A parseable latch dated 1e400 (infinity) passed the 7-day check, since
+    now minus infinity is below any bound, and was restored; run()'s start
+    then raised OverflowError saving it back as an integer. devhealth died at
+    every start and s6 restarted it into the same file, so device health was
+    gone until the file was removed. A date or a poor call's end too large for
+    a float, and a file nested too deep to parse, stopped it the same way.
+    Each is now ignored with one line and no value, and a gateway still down
+    is raised as at a start with no latch, on the second sample read after the
+    grace (600 s)."""
+    import io
+    mos = f"{dh.MOS_REASON} (MOS 2.2, 30s ago)"
+    gw_at = json.dumps({"gateway": _gw_latch(at="@")})
+    cl_end = json.dumps({"cordless": _gw_latch(alerted="degraded", reasons=[mos], call_end="@")})
+    files = {"dated by infinity": _with(gw_at, "1e400"),
+             "dated by a number too large for a float": _with(gw_at, _HUGE),
+             "a poor call ending at a number too large for a float": _with(cl_end, _HUGE),
+             "nested too deep to parse": _DEEP}
+    for why, text in files.items():
+        err, real_err = io.StringIO(), sys.stderr
+        try:
+            sys.stderr = err
+            (r1,), _s = _lives(_run(lambda k: True, cycles=6), state=_planted(text))
+        finally:
+            sys.stderr = real_err
+        log = err.getvalue()
+        states = [st for e, st, _a in r1[0] if e == "sensor.switchboard_gateway_health"]
+        check(f"{why}: the loop runs every cycle ({len(states)})", len(states) == 6)
+        check(f"{why}: nothing restored; the gateway still down is raised afresh ({_gw_of(r1)})",
+              _gw_of(r1) == [(5, _GW_CRIT)])
+        check(f"{why}: one line, naming no value ({log!r})",
+              log.count("\n") == 1 and "saved" in log and _HUGE not in log
+              and "1e400" not in log and "MOS" not in log)
+
+
+def test_a_saved_alert_dated_after_the_start_is_not_restored() -> None:
+    """An alert is dated when it is raised, so a latch dated after the start
+    of the process reading it was not left by the one before. It passed the
+    7-day bound all the same (now minus a later time is negative), and a
+    gateway still down raised no card. It is ignored now and the condition is
+    raised afresh (600 s); a latch dated before the start is still restored."""
+    for ahead, want in ((60, [(5, _GW_CRIT)]), (3600, [(5, _GW_CRIT)]),
+                        (400 * 86400, [(5, _GW_CRIT)]), (-600, [])):
+        state = _planted(json.dumps({"gateway": _gw_latch(at=_START + ahead)}))
+        (r1,), _s = _lives(_run(lambda k: True, cycles=6), state=state)
+        check(f"dated {ahead:+} s from the start: still down -> {want} ({_gw_of(r1)})",
+              _gw_of(r1) == want)
+
+
+def test_a_saved_latch_needs_finite_times() -> None:
+    """The load's own checks: a date that is not a finite number in the last
+    7 days, or a poor call's end that is not a finite number, is not trusted,
+    and the check never raises. Each record is otherwise trusted, so only the
+    time named can reject it, and the gateway beside it is still restored."""
+    import io
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(prefix="sb-devhealth-"), "devhealth-alerts.json")
+    now = 1794103912.0
+    gw = {"alerted": "critical", "reasons": ["all 8 gateway ports down"], "at": int(now) - 60,
+          "announced": True, "call_end": None, "boot": None}
+    cl = {"alerted": "degraded", "reasons": [f"{dh.MOS_REASON} (MOS 2.2, 30s ago)"],
+          "at": int(now) - 60, "announced": True, "call_end": now - 90, "boot": None}
+    check("finite: precondition — both trusted",
+          dh.save_alert_latches({"gateway": gw, "cordless": cl}, p)
+          and dh.load_alert_latches(p, now) == {"gateway": gw, "cordless": cl})
+    bad = {"dated NaN": {"at": float("nan")}, "dated infinity": {"at": float("inf")},
+           "dated minus infinity": {"at": float("-inf")},
+           "dated by an integer too large for a float": {"at": 10 ** 400},
+           "dated a second after now": {"at": int(now) + 1},
+           "dated a year after now": {"at": int(now) + 365 * 86400},
+           "a call end of NaN": {"call_end": float("nan")},
+           "a call end of infinity": {"call_end": float("inf")},
+           "a call end too large for a float": {"call_end": 10 ** 400}}
+    real_err = sys.stderr
+    for why, change in bad.items():
+        err = io.StringIO()
+        try:
+            sys.stderr = err
+            dh.save_alert_latches({"gateway": gw, "cordless": {**cl, **change}}, p)
+            got = dh.load_alert_latches(p, now)
+        except Exception as e:  # noqa: BLE001 — the point is that it never raises
+            got = e
+        finally:
+            sys.stderr = real_err
+        check(f"finite: a cordless latch {why} is not trusted, the gateway's is ({got!r})",
+              got == {"gateway": gw})
+        check(f"finite: ...logged once, naming the device ({err.getvalue()!r})",
+              err.getvalue().count("\n") == 1 and "cordless" in err.getvalue())
+    check("finite: a latch dated exactly now is trusted",
+          dh.save_alert_latches({"gateway": {**gw, "at": int(now)}}, p)
+          and "gateway" in dh.load_alert_latches(p, int(now)))
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

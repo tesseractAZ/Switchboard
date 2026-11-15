@@ -50,6 +50,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import socket
 import ssl
@@ -1530,6 +1531,16 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # alert, and a latch from another boot is not restored. Where it cannot be
 # read, now or when the alert was saved, a reboot cannot be told from an
 # add-on restart, and the latch is judged as before.
+#
+# ★ WHATEVER THE FILE HOLDS, IT CANNOT STOP THE LOOP. /data/state is writable
+# by the asterisk user, and this runs as root. A latch dated 1e400 (infinity)
+# passed the age check (now minus infinity is below any bound), was restored,
+# and run()'s start raised OverflowError saving it back as an integer: devhealth
+# died at every start, and s6 restarted it into the same file. A time too large
+# for a float and a file nested too deep to parse stopped it too. So a time is
+# trusted only as a finite number, and a date only between 7 days ago and now
+# (an alert is dated when it is raised, never later); anything else is a latch
+# ignored.
 ALERT_STATE_MAX_AGE_S = 7 * 86400
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
@@ -1542,6 +1553,15 @@ def _alert_state_path() -> str:
 
 def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _finite(v) -> bool:
+    """A number that is a finite float: not a bool, NaN or an infinity, nor
+    an integer too large for a float."""
+    try:
+        return _number(v) and math.isfinite(v)
+    except OverflowError:
+        return False
 
 
 def read_boot_id(path: str | None = None) -> str | None:
@@ -1573,9 +1593,9 @@ def latch_record(st: dict, boot: str | None = None) -> dict:
 def _latch_trusted(rec: dict, now: float) -> bool:
     reasons, at, end = rec.get("reasons"), rec.get("at"), rec.get("call_end")
     return (rec.get("alerted") in ALERT_LEVELS and rec.get("announced") is True
-            and _number(at) and now - at <= ALERT_STATE_MAX_AGE_S
+            and _finite(at) and 0 <= now - at <= ALERT_STATE_MAX_AGE_S
             and isinstance(reasons, list) and all(isinstance(r, str) for r in reasons)
-            and (end is None or _number(end))
+            and (end is None or _finite(end))
             and (rec.get("boot") is None or isinstance(rec.get("boot"), str)))
 
 
@@ -1583,17 +1603,17 @@ def load_alert_latches(path: str | None = None, now: float | None = None,
                        boot: str | None = None) -> dict:
     """{device: saved latch} for each device whose alert a previous process
     left out and that can be trusted: alerted at a level, its card shown,
-    raised no more than ALERT_STATE_MAX_AGE_S ago, and not on a host boot
-    other than `boot` (the current one; None, or none saved: not compared).
-    Never raises. A missing file, or a device with no alert out, is no latch,
-    silently; a corrupt file or an untrusted latch is none either, with one
-    stderr line and no values."""
+    raised between ALERT_STATE_MAX_AGE_S ago and `now`, and not on a host
+    boot other than `boot` (the current one; None, or none saved: not
+    compared). Never raises. A missing file, or a device with no alert out,
+    is no latch, silently; a corrupt file or an untrusted latch is none
+    either, with one stderr line and no values."""
     try:
         with open(path or _alert_state_path(), encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         data = None
     if not isinstance(data, dict):
         sys.stderr.write("[switchboard-devhealth] the saved alert state is unreadable; "
@@ -1607,7 +1627,8 @@ def load_alert_latches(path: str | None = None, now: float | None = None,
             continue
         if not (isinstance(rec, dict) and _latch_trusted(rec, now)):
             sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
-                             "not shown, undated, malformed or more than 7 days old\n")
+                             "not shown, undated, dated after now, malformed or more "
+                             "than 7 days old\n")
         elif boot is not None and rec.get("boot") not in (None, boot):
             sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
                              "raised before a host reboot, which cleared its card\n")
