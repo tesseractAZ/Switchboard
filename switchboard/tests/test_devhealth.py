@@ -3613,6 +3613,31 @@ def test_the_latch_file_defaults_to_the_add_on_state_directory() -> None:
             os.environ["SWITCHBOARD_DEVHEALTH_ALERTS"] = real
 
 
+def _across_mounts(system_tmp, save):
+    """save() as on the add-on container's mounts: its /tmp is on the overlay
+    root and /data a bind mount of its own, and rename(2) refuses to move a
+    file between two mounts (EXDEV). Modelled: the system temporary directory
+    moved to `system_tmp`, and os.replace refusing, with EXDEV, to move a file
+    between two directories. Returns save()'s result and the directories
+    os.replace was asked to move a file from. (test_rtpmon has the same.)"""
+    import errno
+    import tempfile
+    system_tmp.mkdir(parents=True, exist_ok=True)
+    real_replace, real_tempdir, moved = os.replace, tempfile.tempdir, []
+
+    def replace(src, dst, *a, **k):
+        here, there = (os.path.dirname(os.path.abspath(x)) for x in (src, dst))
+        moved.append(here)
+        if here != there:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), src, None, dst)
+        return real_replace(src, dst, *a, **k)
+    try:
+        tempfile.tempdir, os.replace = str(system_tmp), replace
+        return save(), moved
+    finally:
+        tempfile.tempdir, os.replace = real_tempdir, real_replace
+
+
 def test_a_save_never_writes_through_a_name_planted_beside_the_file(tmp_path) -> None:
     """devhealth runs as root and /data/state is writable by the asterisk
     user. The save wrote `<file>.tmp`, a fixed name, with open(): a link
@@ -3632,6 +3657,16 @@ def test_a_save_never_writes_through_a_name_planted_beside_the_file(tmp_path) ->
           p.is_file() and not p.is_symlink() and _saved(str(p)) == latches)
     check(f"planted: readable by root alone, its only reader ({oct(os.stat(p).st_mode)})",
           stat.S_IMODE(os.stat(p).st_mode) == 0o600)
+    # A temporary file made in the system temporary directory, not beside the
+    # latch file, could never be moved into /data/state in the container, and
+    # no latch would ever be saved.
+    on_data = tmp_path / "state" / "devhealth-alerts.json"
+    saved, moved = _across_mounts(tmp_path / "system-tmp",
+                                  lambda: dh.save_alert_latches(latches, str(on_data)))
+    check(f"beside: the save succeeds, the system temporary directory on another mount ({saved})",
+          saved is True and _saved(str(on_data)) == latches)
+    check(f"beside: its temporary file was made in the latch file's directory ({moved})",
+          moved == [str(on_data.parent)])
     before = sorted(os.listdir(tmp_path))
     check("failed save: a latch json cannot encode is refused",
           dh.save_alert_latches({"gateway": {**_gw_latch(), "reasons": {"x"}}}, str(p)) is False)
