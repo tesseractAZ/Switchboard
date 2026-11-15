@@ -323,14 +323,15 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
 
 
 def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None,
-                contact_at=None):
+                contact_at=None, timeline=None):
     """_drive_gateway's loop, returning every publish as (entity, state, attrs)
     plus the notifications. `env` is applied after the cordless is disabled
     (so CORDLESS_EXT can be set with no IP to probe), and `probe`, when given,
     replaces probe_cordless. `rollup_at` may return None for no rollup at all.
     `contact_at(cycle, clock)`, when given, is the contact_ip rtpmon publishes
     on the cordless's own link sensor (None: the attribute is absent, as for
-    an unregistered handset)."""
+    an unregistered handset). `timeline`, a list, also receives each
+    notification as (cycle, title, message), the cycle counted from 0."""
     import datetime as _dt
     import types
     clk = clock or _Clock()
@@ -338,7 +339,13 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     n = {"c": 0}
     ha = types.ModuleType("ha_client")
     ha.set_state = lambda eid, state, attrs=None: sets.append((eid, state, dict(attrs or {}))) or True
-    ha.notify = lambda msg, title=None, notification_id=None: notes.append((title or "", msg)) or True
+
+    def _notify(msg, title=None, notification_id=None):
+        notes.append((title or "", msg))
+        if timeline is not None:
+            timeline.append((n["c"], title or "", msg))
+        return True
+    ha.notify = _notify
 
     def _get(eid):
         if eid != "sensor.switchboard_link_health":
@@ -429,19 +436,22 @@ def test_a_fresh_rollup_still_drives_gateway_health_from_the_first_cycle() -> No
     """The normal path the restart gate must not block: rollups rtpmon publishes
     after this process started are judged from the first cycle, the first one
     stamped just before the start in the start's own second (measured_at is
-    truncated to the second), and a real partial outage still alerts after its
-    two consecutive cycles."""
+    truncated to the second), and a real partial outage still alerts on two
+    distinct samples. Since v0.119.1 no reading inside the startup grace counts
+    toward the alert, so the reads are 200 s apart and the alert comes from
+    the two read past it (400 and 600 s); at 30 s apart all three were inside
+    it."""
     def rollup(cycle, clk):
         at = clk.start_wall - 0.3 if cycle == 0 else clk.time() - 20
         return {"measured_at": _iso(at), "poll_interval_s": 300,
                 "unreachable_exts": [] if cycle == 0 else ["13", "14"], "offline_exts": []}
 
-    gw, notes = _drive_gateway(rollup, cycles=3)
+    gw, notes = _drive_gateway(rollup, cycles=4, interval=200)
     states = [st for st, _a in gw]
     check("fresh: the first cycle reads ok, not unknown",
           states[0] == "ok" and gw[0][1].get("ports_up") == 8)
-    check("fresh: a partial outage reads degraded", states[1:] == ["degraded", "degraded"])
-    check("fresh: ...and alerts once, after two consecutive cycles",
+    check("fresh: a partial outage reads degraded", states[1:] == ["degraded"] * 3)
+    check("fresh: ...and alerts once, on its second sample read after the startup grace",
           len(notes) == 1 and "degraded" in notes[0][0])
 
 
@@ -2298,6 +2308,274 @@ def test_no_served_text_says_a_reboot_inside_one_sample_raises_nothing() -> None
     doc = " ".join((dh.classify_cordless.__doc__ or "").split())
     check("reboot claim: nor does classify_cordless's docstring",
           "inside one sample raises nothing" not in doc)
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.1: the gateway alert counts rtpmon samples, not this poller's cycles.
+# The gateway is derived from the link-health rollup every 120 s and the rollup
+# is published every 300 s, so two of these cycles usually read ONE sample. A
+# GXW reboot caught by one sample (a firmware auto-install at 01:00, the weekly
+# reboot) raised "all 8 gateway ports down — the GXW gateway likely lost power
+# or its uplink", and "GXW gateway recovered" a few minutes later.
+# --------------------------------------------------------------------------- #
+_GW_CRIT = "Switchboard: gxw gateway CRITICAL"
+_GW_DEG = "Switchboard: gxw gateway degraded"
+_GW_OK = "Switchboard: gxw gateway OK"
+
+
+def _gw_sampled(ports_in, period=300, offset=0.0, stale=None, stamped=True,
+                cordless_in=None):
+    """rtpmon's rollup as Home Assistant holds it, gateway ports included:
+    sample k is measured `offset + period * k` seconds after this process
+    started and stays until the next. Before sample 0 the previous instance's
+    last rollup is still there, measured before the start (so it reads
+    unknown). `ports_in(k)`: the gateway ports down in sample k, True for all
+    eight. `cordless_in(k)`: ext 19 unregistered in sample k. `stale(cycle)`:
+    no usable rollup on that read. `stamped=False`: no `measured_at`, as an
+    older rtpmon published it."""
+    def at(cycle, clk):
+        k = int((clk.time() - clk.start_wall - offset) // period)
+        d = ports_in(k) if k >= 0 else False
+        ports = list(_GW) if d is True else list(d or [])
+        off = k >= 0 and bool(cordless_in and cordless_in(k))
+        down = ports + (["19"] if off else [])
+        attrs = {"poll_interval_s": period,
+                 "unreachable_exts": down + ["20"], "offline_exts": down + ["20"],
+                 "never_registered_exts": ["20"], "expected": 9,
+                 "other_rtt_ms": None if off else {"19": 9.1}}
+        if stamped:
+            when = clk.start_wall + offset + period * k
+            attrs["measured_at"] = _iso(when - (5000 if stale and stale(cycle) else 0))
+        return attrs
+    return at
+
+
+def _gw_at_cadence(ports_in, cycles, interval=120, **rollup):
+    """The real loop at the default 120 s against rtpmon's 300 s rollup
+    (_gw_sampled), cordless_ext 19 with nothing to probe. Returns the
+    gateway's published states and reasons, one per cycle, and its
+    notifications as (cycle, title, message); cycle c reads at 120c s."""
+    timeline: list = []
+    sets, _notes = _drive_loop(_gw_sampled(ports_in, **rollup), cycles=cycles,
+                               interval=interval, env={"CORDLESS_EXT": "19"},
+                               timeline=timeline)
+    gw = [(st, a) for e, st, a in sets if e == "sensor.switchboard_gateway_health"]
+    return ([st for st, _a in gw], [a.get("reasons") or [] for _st, a in gw],
+            [(c, t, m) for c, t, m in timeline if "gxw gateway" in t])
+
+
+def _when(notes):
+    return [(c, t) for c, t, _m in notes]
+
+
+def test_a_gateway_reboot_inside_one_sample_raises_nothing() -> None:
+    """Reads at 0, 120, 240 ... s; sample k covers [300k, 300k + 300). Sample 2
+    is read three times (600, 720, 840 s) and sample 3 twice (960, 1080 s),
+    all past the 360 s grace. Two cycles reading one sample used to make the
+    CRITICAL."""
+    for k, reads in ((2, 3), (3, 2)):
+        states, reasons, notes = _gw_at_cadence(lambda s, k=k: s == k, cycles=12)
+        check(f"gw reboot: precondition — sample {k}, every port down, was read {reads} "
+              "times and published critical each time",
+              states.count("critical") == reads and states.count("ok") == 12 - reads)
+        check("gw reboot: ...with the gateway wording",
+              all("GXW gateway likely lost power" in r[0]
+                  for st, r in zip(states, reasons) if st == "critical"))
+        check(f"gw reboot: one sample read {reads} times raises nothing", notes == [])
+
+
+def test_a_gateway_down_on_two_samples_alerts_on_the_first_read_of_the_second() -> None:
+    states, _r, notes = _gw_at_cadence(lambda k: k in (2, 3), cycles=11)
+    check("gw two samples: precondition — critical on all five reads of samples 2 and 3",
+          states == ["ok"] * 5 + ["critical"] * 5 + ["ok"])
+    check("gw two samples: one CRITICAL, on the first read of sample 3 (960 s), and the "
+          "recovery on the first read of sample 4 (1200 s)",
+          _when(notes) == [(8, _GW_CRIT), (10, _GW_OK)])
+    check("gw two samples: the CRITICAL names the gateway",
+          notes and "all 8 gateway ports down — the GXW gateway likely lost power" in notes[0][2])
+    check("gw two samples: the recovery is a recovery",
+          len(notes) == 2 and "back to normal" in notes[1][2])
+
+
+def test_a_rollup_with_no_stamp_keeps_the_per_cycle_gate() -> None:
+    """An older rtpmon published no `measured_at` (rollup_is_stale reads such
+    a rollup as fresh), so its samples cannot be told apart. The alert then
+    advances on every cycle, as it did before, rather than never."""
+    _s, _r, notes = _gw_at_cadence(lambda k: k == 2, cycles=10, stamped=False)
+    check("stampless: all down on two cycles past the grace -> CRITICAL on the second, "
+          "cleared by the next cycle that reads ok",
+          _when(notes) == [(6, _GW_CRIT), (8, _GW_OK)])
+    _s, _r, notes = _gw_at_cadence(lambda k: k == 5, cycles=8, stamped=False, period=120)
+    check("stampless: all down on one cycle -> nothing", notes == [])
+    states, _r, notes = _gw_at_cadence(lambda k: True, cycles=6, stamped=False)
+    check("stampless: nothing counts inside the grace either: CRITICAL on the second "
+          "cycle after it (480 s)",
+          states[:3] == ["degraded"] * 3 and _when(notes) == [(4, _GW_CRIT)])
+
+
+def test_a_gateway_down_from_the_start_alerts_on_two_samples_read_after_the_grace() -> None:
+    """After a restart the ports may still be re-registering, so an all-down
+    reading inside GATEWAY_STARTUP_GRACE_S is published as 'degraded' with that
+    reason. The reason was also raised as a card ("normal while the GXW
+    re-registers"), a claim about what another device was doing. As for the
+    cordless's registration, no reading inside the grace counts: the two
+    samples behind an alert are both read after it."""
+    states, reasons, notes = _gw_at_cadence(lambda k: True, cycles=8)
+    check("gw from start: the grace reads are still published, degraded, with their reason",
+          states[:3] == ["degraded"] * 3 and all("re-registers" in r[0] for r in reasons[:3]))
+    check("gw from start: past the grace the reading is critical", states[3:] == ["critical"] * 5)
+    check("gw from start: no grace card; one CRITICAL on the second sample read after the "
+          "grace (sample 1 first read at 360 s, sample 2 at 600 s)",
+          _when(notes) == [(5, _GW_CRIT)])
+    _s, _r, early = _gw_at_cadence(lambda k: True, cycles=5)
+    check("gw from start: ...and nothing before it", early == [])
+    states, reasons, notes = _gw_at_cadence(lambda k: ["11", "12"], cycles=8)
+    check("gw from start: a partial outage is published from the first read",
+          states == ["degraded"] * 8 and "2 of 8 gateway ports down" in reasons[0][0])
+    check("gw from start: ...and alerts on the same two samples read after the grace",
+          _when(notes) == [(5, _GW_DEG)])
+
+
+def test_the_gateway_alert_is_fed_once_per_rollup_sample() -> None:
+    tr, past = dh.gateway_transition, _PAST_GRACE
+    st: dict = {}
+    check("feed: the first all-down sample counts one", tr("critical", st, 1000.0, past) == "")
+    check("feed: the same sample read again adds nothing",
+          tr("critical", st, 1000.0, past + 120) == "" and tr("critical", st, 1000.0, past + 240) == "")
+    check("feed: the next sample fires", tr("critical", st, 1300.0, past + 300) == "critical")
+    check("feed: reading the sample that fired again adds nothing",
+          tr("critical", st, 1300.0, past + 420) == "")
+    check("feed: the first new sample that reads ok clears it",
+          tr("ok", st, 1600.0, past + 600) == "recovered")
+    st = {}
+    check("feed: with no stamp every cycle counts",
+          tr("critical", st, None, past) == "" and tr("critical", st, None, past) == "critical")
+    st = {}
+    check("feed: a reading inside the grace counts for nothing, and is not remembered",
+          tr("critical", st, 1000.0, past - 0.5) == "" and st == {})
+    check("feed: the same sample read once the grace is over counts",
+          tr("critical", st, 1000.0, past) == "" and st.get("cycles") == 1)
+    check("feed: ...and the next fires", tr("critical", st, 1300.0, past + 300) == "critical")
+    st = {}
+    check("feed: no uptime (direct callers) is past the grace",
+          tr("critical", st, 1000.0) == "" and tr("critical", st, 1300.0) == "critical")
+
+
+def test_a_blind_read_breaks_the_gateway_count_and_holds_an_alert_already_out() -> None:
+    _s, _r, notes = _gw_at_cadence(lambda k: k in (2, 3), cycles=11, stale=lambda c: c == 8)
+    check("gw blind: all down in samples 2 and 3 with a blind read between them -> not "
+          "consecutive, nothing raised", notes == [])
+    _s, _r, notes = _gw_at_cadence(lambda k: k in (2, 3), cycles=11, stale=lambda c: c == 6)
+    check("gw blind: sample 2 read again after the blind read counts as the first sample "
+          "after it, so sample 3 raises the alert",
+          _when(notes) == [(8, _GW_CRIT), (10, _GW_OK)])
+    states, _r, notes = _gw_at_cadence(lambda k: k in (2, 3, 4), cycles=14,
+                                       stale=lambda c: c == 9)
+    check("gw blind: precondition — the blind read publishes unknown", states[9] == "unknown")
+    check("gw blind: an alert already out is neither repeated nor cleared through it; the "
+          "next sample that reads ok clears it",
+          _when(notes) == [(8, _GW_CRIT), (13, _GW_OK)])
+    _s, _r, notes = _gw_at_cadence(lambda k: k in (2, 3), cycles=12, stale=lambda c: c == 10)
+    check("gw blind: ...also when that sample is first read after the blind read",
+          _when(notes) == [(8, _GW_CRIT), (11, _GW_OK)])
+
+
+def test_a_partial_gateway_outage_escalates_on_distinct_samples() -> None:
+    two = ["11", "12"]
+    _s, _r, notes = _gw_at_cadence(lambda k: two if k in (2, 3) else k in (4, 5), cycles=16)
+    check("gw escalation: degraded on the first read of sample 3 (960 s), CRITICAL on the "
+          "first read of sample 5 (1560 s), recovered on sample 6 (1800 s)",
+          _when(notes) == [(8, _GW_DEG), (13, _GW_CRIT), (15, _GW_OK)])
+    _s, _r, notes = _gw_at_cadence(lambda k: two if k in (2, 3, 5) else k == 4, cycles=16)
+    check("gw escalation: every port down on one sample between partial ones does not "
+          "escalate", _when(notes) == [(8, _GW_DEG), (15, _GW_OK)])
+
+
+def test_the_host_move_shape_names_the_host_at_the_real_cadence() -> None:
+    """2026-11-12: every phone dropped at once when the host moved to a new
+    address. Also the shape where the cordless, on Wi-Fi, drops one sample
+    after the ports: rtpmon's outage alert fires on the outage's second
+    sample, with the cordless down, and names the host. This alert fired on
+    the first all-down sample read twice, before the cordless dropped, and
+    named the gateway."""
+    host = "Switchboard host or the network"
+    for lag in (0, 1):
+        _s, _r, notes = _gw_at_cadence(lambda k: k >= 3, cycles=12,
+                                       cordless_in=lambda k, lag=lag: k >= 3 + lag)
+        check(f"gw host: the cordless {lag} sample(s) after the ports -> one CRITICAL, on "
+              "the first read of sample 4 (1200 s), naming the host",
+              _when(notes) == [(10, _GW_CRIT)] and host in notes[0][2]
+              and "lost power" not in notes[0][2])
+
+
+def _both_causes(samples, offset=0.0, period=300, interval=120):
+    """One outage through both real loops: rtpmon's run() over `samples`
+    (summaries from its own summarize(), sample 0 its warm-up), and this
+    poller's run() at `interval` against the rollups rtpmon's _publish() makes
+    of them, sample k measured `offset + period * k` s after this poller
+    started and read until the next. Returns (this poller's gateway CRITICAL
+    texts, rtpmon's outage card texts)."""
+    import test_rtpmon as trt
+    rt_notes = trt._drive_samples([(s, []) for s in samples], target=trt._TARGET, pushes=[])
+    attrs = [dict(trt._published(s)["sensor.switchboard_link_health"][1]) for s in samples]
+
+    def rollup_at(cycle, clk):
+        k = int((clk.time() - clk.start_wall - offset) // period)
+        a = dict(attrs[min(max(k, 0), len(samples) - 1)])
+        a["measured_at"] = _iso(clk.start_wall + offset + period * k)
+        a["poll_interval_s"] = period
+        return a
+    cycles = int((offset + period * len(samples)) // interval) + 1
+    _sets, notes = _drive_loop(rollup_at, cycles=cycles, interval=interval,
+                               env={"CORDLESS_EXT": "19"})
+    return ([m for t, m in notes if t == _GW_CRIT],
+            [m for t, m in rt_notes if t == "Switchboard: phones unreachable"])
+
+
+def _monotone_outages(n, seed=20261115):
+    """`n` monotone outages on the live plant's nine phones (each phone, once
+    down, stays down), ten rtpmon samples each: the eight gateway ports drop
+    in one to three waves at samples 2-7, the cordless on a sample 1-9 of its
+    own or never, and this poller's reads fall at a random phase against
+    rtpmon's samples. Returns (drop sample per extension, samples, phase)."""
+    import random
+    import test_rtpmon as trt
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        waves = [rng.randint(2, 7) for _ in range(rng.randint(1, 3))]
+        drop = {p: rng.choice(waves) for p in _GW}
+        drop["19"] = rng.choice([None, None] + list(range(1, 10)))
+        samples = [trt._sum([e for e in trt._ALL9 if drop[e] is None or drop[e] > k])
+                   for k in range(10)]
+        out.append((drop, samples, rng.uniform(0.0, 300.0)))
+    return out
+
+
+def test_devhealth_and_rtpmon_agree_on_the_cause_of_random_monotone_outages() -> None:
+    """Both alerts decide the cause when they fire. rtpmon's fires on the
+    fleet outage's second sample; this one fired on the first all-down
+    sample read twice, so a cordless dropping on the next sample, with the
+    outage beginning on the ports' sample, read as the host there and the
+    gateway here. It now fires on the second distinct all-down sample."""
+    import test_rtpmon as trt
+    host = "Switchboard host or the network"
+    cases = _monotone_outages(150)
+    missing, disagree, lagged = [], [], 0
+    for drop, samples, offset in cases:
+        ports = max(drop[p] for p in _GW)
+        outage = next(k for k, s in enumerate(samples) if trt.pm.is_mass_outage(s))
+        lagged += outage == ports and drop["19"] == ports + 1
+        gw, out = _both_causes(samples, offset)
+        if len(gw) != 1 or len(out) != 1:
+            missing.append((drop, round(offset), len(gw), len(out)))
+        elif (host in gw[0]) != (host in out[0]):
+            disagree.append((drop, round(offset)))
+    check(f"agree: precondition — each outage raised one alert from each ({missing[:2]})",
+          not missing)
+    check("agree: precondition — the cases include the cordless one sample after the "
+          f"ports, the outage beginning with them ({lagged})", lagged >= 5)
+    check(f"agree: both name the same cause for every outage ({disagree[:2]})", not disagree)
 
 
 if __name__ == "__main__":

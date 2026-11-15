@@ -865,8 +865,11 @@ def classify_cordless(snap: dict, th: dict,
 # restart restores the contacts and qualifies them within max_initial_qualify_time
 # (9/9 reachable 4 s after Asterisk started, measured 2026-10-17). The window
 # still opens on the first start of a new astdb, after an outage longer than a
-# registration (120 s), or whenever a restored contact fails its qualify. Anything still down afterwards alerts normally, and a PARTIAL outage
-# is never suppressed. Without this, every add-on restart fired "the GXW gateway
+# registration (120 s), or whenever a restored contact fails its qualify. Since
+# v0.119.1 no gateway reading inside the window counts toward an alert, partial
+# or whole (gateway_transition): each is still published, a PARTIAL outage as
+# itself, and anything still down afterwards alerts on two samples read after
+# it. Without this, every add-on restart fired "the GXW gateway
 # likely lost power or its uplink" (observed repeatedly on 2026-08-03) — an alarm
 # that names the wrong component and trains the reader to ignore it.
 #
@@ -898,7 +901,9 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
 
     `uptime_s` is this service's own age. Inside GATEWAY_STARTUP_GRACE_S an
     all-down reading is reported as 'degraded' (still visible, still published)
-    rather than a critical "the gateway lost power" claim.
+    rather than a critical "the gateway lost power" claim. It is not raised as
+    an alert: run() feeds no reading inside the grace to the alert
+    (gateway_transition).
 
     `cordless_dropped_too`: the cordless, which is on Wi-Fi and not on the
     gateway, went down with the ports, by rtpmon's outage rule
@@ -978,6 +983,36 @@ def health_transition(level: str, st: dict, min_cycles: int = 2,
         st["alerted"] = level
         return level
     return ""
+
+
+def gateway_transition(level: str, st: dict, measured_at: float | None,
+                       uptime_s: float | None = None) -> str:
+    """health_transition for the gateway, fed once per rtpmon sample.
+
+    The gateway is judged on rtpmon's rollup, published every
+    `poll_interval_s` (300 s by default), and this poller runs every 120 s, so
+    two of its cycles usually read ONE sample. Counting cycles let a GXW
+    reboot caught by a single sample (a firmware auto-install at 01:00, the
+    weekly reboot) raise "all 8 gateway ports down" and its recovery a few
+    minutes later. So the state advances only on a sample it has not been fed,
+    told apart by `measured_at` (kept as st["sample"]): 'degraded' and
+    'critical' need two consecutive distinct samples, and a recovery comes on
+    the first new sample that reads 'ok'. A rollup with no `measured_at` (an
+    older rtpmon) cannot be told apart, and advances the state every cycle, as
+    before. The cordless's registration is counted by sample too
+    (note_registration).
+
+    `uptime_s` is this poller's age. Inside GATEWAY_STARTUP_GRACE_S no reading
+    advances the state, and none is remembered, so the two samples behind an
+    alert are both read after it, as for the cordless's registration. The
+    grace's own 'degraded' reading is published, never raised. No uptime
+    (direct callers) is past the grace."""
+    if uptime_s is not None and uptime_s < GATEWAY_STARTUP_GRACE_S:
+        return ""
+    if measured_at is not None and measured_at == st.get("sample"):
+        return ""
+    st["sample"] = measured_at
+    return health_transition(level, st)
 
 
 def clear_is_fresh(last_reasons: list[str] | None, call_end: float | None,
@@ -1463,8 +1498,8 @@ def run() -> None:
     interval = max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
     cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
-    # This service's own start, used to hold back the gateway all-down CRITICAL
-    # while the GXW is merely re-registering after our restart (see
+    # This service's own start, used to hold back the gateway alert while the
+    # GXW may still be re-registering after our restart (see
     # GATEWAY_STARTUP_GRACE_S), and to refuse a rollup measured before it.
     # monotonic: immune to wall-clock/NTP steps.
     _started = time.monotonic()
@@ -1592,7 +1627,8 @@ def run() -> None:
                 for run in runs.values():
                     note_down_run(run, None, 0.0)
             if down is not None:
-                at = rollup_measured_at(rollup) or time.time()
+                sampled = rollup_measured_at(rollup)
+                at = sampled or time.time()
                 note_down_run(runs["cordless"], cordless_down_in(rollup, cordless_ext), at)
                 note_down_run(runs["ports"], bool(gw_exts) and set(gw_exts) <= set(down), at)
                 note_down_run(runs["fleet"], fleet_outage_in(rollup), at)
@@ -1600,19 +1636,23 @@ def run() -> None:
                     rollup_interval = float(rollup.get("poll_interval_s") or 300)
                 except (TypeError, ValueError):
                     rollup_interval = 300.0
-                # The cause is decided when the critical fires: the cordless
-                # and every port down by the fleet outage's second sample,
-                # with the cordless up before it began, points past the
-                # gateway. A cause learned later is not re-sent (the cordless
-                # dropping one rtpmon sample after the ports, read after the
-                # critical fired, say), because health_transition fires again
+                # The cause is decided when the critical fires, on the second
+                # distinct all-down sample: the cordless and every port down
+                # by the fleet outage's second sample, with the cordless up
+                # before it began, points past the gateway. A cause learned
+                # later is not re-sent (on a rollup with no stamp, judged
+                # cycle by cycle, the cordless dropping one rtpmon sample
+                # after the ports, say), because health_transition fires again
                 # only when the level rises.
+                uptime = time.monotonic() - _started
                 level, reasons = classify_gateway(
-                    down, gw_exts, time.monotonic() - _started,
+                    down, gw_exts, uptime,
                     cordless_dropped_too=dropped_together(runs["cordless"], runs["ports"],
                                                           runs["fleet"], rollup_interval))
+                # Published every cycle, the startup grace included; the alert
+                # is fed once per rtpmon sample, and nothing inside the grace.
                 _publish_gateway(level, reasons, down, gw_exts)
-                ev = health_transition(level, gst)
+                ev = gateway_transition(level, gst, sampled, uptime)
                 if ev:
                     print(f"[devhealth] gateway {ev}: {'; '.join(reasons) or ev}", flush=True)
                     _notify("gateway", ev, reasons)
@@ -1621,12 +1661,16 @@ def run() -> None:
                 # unreadable). Publish the blindness instead of leaving the last
                 # reading standing — and reset the transition state so recovery
                 # re-announces cleanly rather than comparing against a level we
-                # can no longer vouch for.
+                # can no longer vouch for. The last sample fed is forgotten
+                # too, so the samples on either side of this cycle are not
+                # taken for consecutive ones. An alert already out stays out
+                # until a fresh sample clears it.
                 _publish_gateway_unknown(
                     "link-health rollup unavailable or stale — gateway health "
                     "cannot be derived", gw_exts)
                 gst["level"] = None
                 gst["cycles"] = 0
+                gst["sample"] = None
         except Exception as e:
             print(f"[devhealth] gateway poll error: {e}", flush=True)
         time.sleep(interval)
