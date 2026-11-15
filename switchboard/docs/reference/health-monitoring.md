@@ -136,9 +136,10 @@ Since v0.119.0:
   host moved to a new address and every phone, the cordless included, was
   unregistered from 18:31:04 MST. Every alert named the gateway, and every one
   was a silent card.
-- **The alert survives a restart.** Its latch is kept in
-  `/data/state/link-outage.json`, with whether the alert was shown: the card
-  accepted by Home Assistant, or the push delivered. An add-on restart during an
+- **The alert survives an add-on restart.** Its latch is kept in
+  `/data/state/link-outage.json`, with whether the alert was shown (the card
+  accepted by Home Assistant, or the push delivered) and the host boot it was
+  raised on (the kernel's boot id, since v0.119.1). An add-on restart during an
   outage no longer raises a shown "phones unreachable" (and its push) a second
   time, and the recovery still comes. A card Home Assistant refused counts as
   shown once its retry posts it. One that was not shown (raised while
@@ -149,7 +150,15 @@ Since v0.119.0:
   the first of those comes one interval after its warm-up. A restart between
   the two clear samples therefore delays the recovery by one to two sample
   intervals plus the warm-up; it neither loses nor repeats it. One more than 7
-  days old is ignored.
+  days old is ignored. Not restored: an outage alert raised before a host
+  reboot. Home Assistant keeps notifications in memory, so the reboot cleared
+  the card. An outage still on is raised again, card and push, once the
+  restarted monitor has two settled outage samples (705 s after its start with
+  every phone down, at the default cadence: eight warm-up checks 15 s apart,
+  then two samples 300 s apart), and one already over posts no recovery. Where
+  the boot id cannot be read, at the restart or when the latch was saved (a
+  latch saved before v0.119.1 has none), a host reboot cannot be told from an
+  add-on restart, and a shown alert is restored.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable

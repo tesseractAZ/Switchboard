@@ -1180,19 +1180,47 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # rewrites the latch to say so (_outage_card_status): left unannounced, a
 # restart raised and pushed that 'down' a second time, or, with the phones
 # back, never sent the recovery that closes the card.
+#
+# ★ NOR IS ONE RAISED BEFORE A HOST REBOOT (v0.119.1). Home Assistant Core
+# keeps persistent notifications in memory and restarts with the host, so a
+# host reboot empties the drawer. Restored, the latch took a fleet still down
+# for an alert already out: no card and no push while every phone was down. A
+# fleet already back got a recovery for a card nobody held. The kernel's boot
+# id (a container shares the host kernel's) is saved with the latch, and one
+# from another boot is not trusted, so the 'down' is raised again once the
+# restarted process has two settled outage samples. Where the boot id cannot
+# be read, now or when the latch was saved (a v0.119.0 file has none), a
+# reboot cannot be told from an add-on restart, and the latch is judged as
+# before. devhealth keeps its alert latches the same way.
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
 # "already out" in any sense a reader would recognise, and holding it would
 # suppress a new 'down' indefinitely.
 OUTAGE_STATE_MAX_AGE_S = 7 * 86400
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 
-def load_outage_alerted(path: str = None, now: float | None = None) -> bool:
+def read_boot_id(path: str | None = None) -> str | None:
+    """The host's boot id (BOOT_ID_PATH; a container shares the host kernel's),
+    or None when it cannot be read. Never raises. The same read as devhealth's
+    read_boot_id: the two pollers share no module for such helpers."""
+    try:
+        with open(path or BOOT_ID_PATH, encoding="ascii") as fh:
+            return fh.read().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def load_outage_alerted(path: str = None, now: float | None = None,
+                        boot: str | None = None) -> bool:
     """True when the outage alert a previous process raised is still out: the
     file says alerted AND announced (the 'down' was shown), with a 'down' time
-    no more than OUTAGE_STATE_MAX_AGE_S ago. Never raises; a missing or corrupt
-    file reads as not alerted, and so does one whose 'down' was never shown."""
+    no more than OUTAGE_STATE_MAX_AGE_S ago, raised on host boot `boot` (the
+    current one; None, or none saved: not compared). Never raises; a
+    missing or corrupt file reads as not alerted, and so does one whose 'down'
+    was never shown. A latch ignored for its time or its boot is logged, with
+    no value."""
     try:
         with open(path or OUTAGE_STATE_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -1211,14 +1239,24 @@ def load_outage_alerted(path: str = None, now: float | None = None) -> bool:
         sys.stderr.write("switchboard-rtpmon: ignoring a saved fleet-outage alert "
                          "with no 'down' time or one more than 7 days old\n")
         return False
+    saved_boot = data.get("boot")
+    if not (saved_boot is None or isinstance(saved_boot, str)):
+        sys.stderr.write("switchboard-rtpmon: ignoring a saved fleet-outage alert "
+                         "with a malformed boot id\n")
+        return False
+    if boot is not None and saved_boot not in (None, boot):
+        sys.stderr.write("switchboard-rtpmon: ignoring a saved fleet-outage alert raised "
+                         "before a host reboot, which cleared its card\n")
+        return False
     return True
 
 
 def save_outage_state(alerted: bool, at: float, path: str = None,
-                      announced: bool = False) -> bool:
+                      announced: bool = False, boot: str | None = None) -> bool:
     """Write the latch, atomically. Returns True only if it reached the disk.
-    `announced`: the 'down' was shown (see _notify_outage); it is recorded only
-    with `alerted`."""
+    `announced`: the 'down' was shown (see _notify_outage), and `boot`: the
+    host boot it was raised on (None: unknown); both are recorded only with
+    `alerted`. v0.119.0 reads the file and ignores `boot`."""
     target = path or OUTAGE_STATE_PATH
     try:
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
@@ -1226,7 +1264,8 @@ def save_outage_state(alerted: bool, at: float, path: str = None,
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"alerted": bool(alerted),
                        "down_at": int(at) if alerted else None,
-                       "announced": bool(alerted and announced)}, fh)
+                       "announced": bool(alerted and announced),
+                       "boot": boot if alerted else None}, fh)
         os.replace(tmp, target)
         return True
     except OSError:
@@ -1783,9 +1822,16 @@ def run() -> int:
     settled = False
     polls = 0
     prev_reachable = -1
-    # The latch survives a restart (see load_outage_alerted): a 'down' already
-    # shown is not raised again, and the 'up' that closes it still fires.
-    outage_st = {"cycles": 0, "clear": 0, "alerted": load_outage_alerted()}
+    # The latch survives an add-on restart (see load_outage_alerted): a 'down'
+    # already shown is not raised again, and the 'up' that closes it still
+    # fires. Not a host reboot, which cleared the card: the host's boot id is
+    # read once and saved with the latch.
+    boot = read_boot_id()
+    if boot is None:
+        # Said once, so a host on which the reboot check cannot work shows it.
+        sys.stderr.write("switchboard-rtpmon: the host's boot id cannot be read; a saved "
+                         "outage alert is restored whether or not the host rebooted\n")
+    outage_st = {"cycles": 0, "clear": 0, "alerted": load_outage_alerted(boot=boot)}
     trunk_st = {"cycles": 0, "alerted": False}
     # The 'down' time of an outage card Home Assistant refused and notify_retry
     # kept. Once a retry posts it the alert has been shown, and the latch is
@@ -1808,7 +1854,7 @@ def run() -> int:
             if fate != "pending":
                 # Posted (""), or given up on ("dropped": never shown).
                 if fate == "" and outage_st.get("alerted"):
-                    save_outage_state(True, kept_down_at, announced=True)
+                    save_outage_state(True, kept_down_at, announced=True, boot=boot)
                 kept_down_at = None
         opts = _load_options()
         names = room_names(opts)
@@ -1851,7 +1897,8 @@ def run() -> int:
                     push_target=str(opts.get("wakeup_push_target") or "").strip(),
                     host=event == "down" and outage_cause_is_host(summ, outage_st))
             if event:
-                save_outage_state(outage_st["alerted"], sampled_at, announced=announced)
+                save_outage_state(outage_st["alerted"], sampled_at, announced=announced,
+                                  boot=boot)
                 kept_down_at = (sampled_at if event == "down" and sent and not announced
                                 and _outage_card_status() == "pending" else None)
         else:

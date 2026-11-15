@@ -27,6 +27,10 @@ Recent releases. Releases up to 0.109.0 are in the
   start). One not shown, raised over 7 days earlier, or raised before a host
   reboot, which clears Home Assistant's cards, is raised again if the
   condition persists.
+- The fleet-outage alert is not restored after a host reboot either. Its
+  latch now carries the host boot, so an outage still on is announced again,
+  card and push, on the second settled sample, and one already over posts no
+  recovery.
 
 ## 0.119.0
 
