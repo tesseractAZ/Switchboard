@@ -40,12 +40,17 @@ Env (bridged by the s6 run script from config.yaml):
   CORDLESS_WIFI_MIN        min acceptable Wi-Fi signal 0-5 (default 2)
   DEVICE_HEALTH_ALERTS     'false'/'0' -> publish sensors but never notify()
 
-Env read but not bridged (no option sets them; tests do):
+Env read but not bridged (no add-on option sets them):
   CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
+  CORDLESS_MOS_WINDOW_S    how recent, in seconds, a poor call must be to count
+                           (default 900)
+  SWITCHBOARD_CALLQOS      the call-quality ledger switchboard-callqos writes (default
+                           /data/state/callqos.jsonl; see load_callqos_legs)
+  SWITCHBOARD_CORDLESS_MOS_LOG  the low-MOS capture (default
+                           /data/state/cordless-mos.jsonl)
   SWITCHBOARD_DEVHEALTH_ALERTS  the alert-latch file (default
-                           /data/state/devhealth-alerts.json; see load_alert_latches),
-                           a path override like SWITCHBOARD_CORDLESS_MOS_LOG here and
-                           SWITCHBOARD_LINK_OUTAGE in rtpmon
+                           /data/state/devhealth-alerts.json; see load_alert_latches)
+The last three are path overrides, as SWITCHBOARD_LINK_OUTAGE is in rtpmon.
 """
 from __future__ import annotations
 

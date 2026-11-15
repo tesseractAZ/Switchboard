@@ -3589,6 +3589,38 @@ def test_the_header_lists_as_bridged_only_what_the_run_script_exports() -> None:
           "SWITCHBOARD_DEVHEALTH_ALERTS" in doc and "SWITCHBOARD_DEVHEALTH_ALERTS" not in names)
 
 
+def test_the_header_lists_every_variable_the_poller_reads() -> None:
+    """The second list, "Env read but not bridged (no option sets them; tests
+    do)", named CORDLESS_MOS_MIN, which no test sets, and left out three the
+    poller reads: CORDLESS_MOS_WINDOW_S and the SWITCHBOARD_CALLQOS and
+    SWITCHBOARD_CORDLESS_MOS_LOG paths. Each variable the poller reads is now
+    in one list or the other, as the run script exports it or not, and the
+    second heading claims only what holds for every name under it."""
+    import re
+    doc = dh.__doc__
+    bridged = "Env (bridged by the s6 run script from config.yaml):"
+    other = "Env read but not bridged (no add-on option sets them):"
+    check("header: the second heading claims only what holds for each name under it",
+          bridged in doc and other in doc and "tests do" not in doc)
+
+    def listed(head):
+        under = doc.split(head, 1)[1].split("\n\n", 1)[0] if head in doc else ""
+        return set(re.findall(r"(?m)^  ([A-Z][A-Z0-9_]+)\s", under))
+    src = _SRC.read_text(encoding="utf-8")
+    read = set(re.findall(r'(?:environ\.get\(|environ\[|getenv\(|_env_int\()\s*"([A-Z][A-Z0-9_]*)"',
+                          src))
+    run = (_SRC.parents[4] / "etc" / "s6-overlay" / "s6-rc.d" / "devhealth" / "run").read_text(
+        encoding="utf-8")
+    exported = set(re.findall(r"(?m)^\s*export ([A-Z][A-Z0-9_]*)=", run))
+    check(f"header: precondition — the poller's reads are found ({sorted(read)})",
+          len(read) >= 15 and "CORDLESS_MOS_WINDOW_S" in read)
+    check(f"header: every variable read and exported is listed as bridged "
+          f"({sorted((read & exported) - listed(bridged))})", read & exported <= listed(bridged))
+    check(f"header: the variables read and not exported are listed as not bridged, and only "
+          f"they ({sorted(read - exported)} vs {sorted(listed(other))})",
+          listed(other) == read - exported)
+
+
 def test_a_saved_device_record_that_is_not_an_object_is_no_latch() -> None:
     import io
     import tempfile
