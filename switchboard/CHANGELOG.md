@@ -20,6 +20,11 @@ Recent releases. Releases up to 0.109.0 are in the
 - The cause is decided a sample later. In 3,000 simulated outages the gateway
   and outage alerts named the same cause in all; before, they differed in
   198, each a cordless dropping one sample after the ports.
+- Gateway and cordless alerts survive an add-on restart. Each is kept in
+  `/data/state` with whether its card was shown; a shown alert is not raised
+  again, and its recovery still comes (a gateway already back clears on the
+  first sample read after the grace, 360 s after the start). One not shown,
+  or raised over 7 days earlier, is raised again if the condition persists.
 
 ## 0.119.0
 

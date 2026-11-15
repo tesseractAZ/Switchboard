@@ -3196,6 +3196,15 @@ def test_a_restored_alert_closes_at_the_first_reading_that_can_clear_it_at_every
           all(v == [120 * math.ceil(o / 120)] for o, v in cl_at.items()))
     check("phases: ...so 0 to 360 s after the start",
           (min(v[0] for v in cl_at.values()), max(v[0] for v in cl_at.values())) == (0, 360))
+    root = _SRC.parents[5]
+    flat = lambda p: " ".join(p.read_text(encoding="utf-8").split())  # noqa: E731
+    page = flat(root / "docs" / "reference" / "health-monitoring.md")
+    log = flat(root / "CHANGELOG.md")
+    check("phases: the health monitoring page states both, counted from the start",
+          "a restored gateway alert clears 360 s after the start" in page
+          and "0 to 360 s after the start, by that sample's phase" in page)
+    check("phases: the changelog states the gateway's, counted from the start",
+          "clears on the first sample read after the grace, 360 s after the start" in log)
 
 
 if __name__ == "__main__":
