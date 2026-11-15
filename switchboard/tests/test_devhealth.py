@@ -3528,7 +3528,8 @@ def test_a_saved_alert_that_is_ignored_is_cleared_from_the_file() -> None:
     cleared when nothing was restored. So a latch ignored at the start was
     never written over: it stayed in the file, and its line was logged again
     at every later start. The first cycle now rewrites the file whenever it
-    holds anything else; a file holding no latch, or the one restored, is not
+    holds anything else, as when one device's latch is restored and the
+    other's ignored; a file holding no latch, or the one restored, is not
     written (test_the_latch_file_is_written_on_each_change_and_only_then)."""
     import io
     cleared = {"cordless": dh.latch_record({}), "gateway": dh.latch_record({})}
@@ -3539,21 +3540,30 @@ def test_a_saved_alert_that_is_ignored_is_cleared_from_the_file() -> None:
              "dated by infinity": _with(json.dumps({"gateway": _gw_latch(at="@")}), "1e400"),
              "not JSON": "not json",
              "a device record that is not an object": json.dumps({"gateway": [1, 2]})}
+    # (the file, whether the gateway is down, what the file holds after a start)
+    cases = {why: (text, False, cleared) for why, text in files.items()}
+    # The gateway's latch restored, its ports still down, beside a cordless
+    # latch that is ignored (not shown): the cordless's is cleared, and the
+    # gateway's kept as it was.
+    unshown = _gw_latch(reasons=[dh.UNREGISTERED_REASON], announced=False)
+    cases["the cordless's not shown, beside the gateway's restored"] = (
+        json.dumps({"gateway": _gw_latch(), "cordless": unshown}), True,
+        {"cordless": dh.latch_record({}), "gateway": _gw_latch()})
     real_err = sys.stderr
-    for why, text in files.items():
+    for why, (text, down, want) in cases.items():
         state, logs = _planted(text), []
         for _start in range(2):
             err = io.StringIO()
             try:
                 sys.stderr = err
-                _lives(_run(lambda k: False, cycles=2), state=state)
+                _lives(_run(lambda k, down=down: down, cycles=2), state=state)
             finally:
                 sys.stderr = real_err
             logs.append(err.getvalue())
             with open(state, encoding="utf-8") as fh:
                 held = fh.read()
-            check(f"{why}: after start {_start + 1}, the file holds no latch ({held[:80]!r})",
-                  json.loads(held) == cleared)
+            check(f"{why}: after start {_start + 1}, the file holds no ignored latch "
+                  f"({held[:80]!r})", json.loads(held) == want)
         check(f"{why}: the first start says why, once ({logs[0]!r})", logs[0].count("\n") == 1)
         check(f"{why}: the next start says nothing ({logs[1]!r})", logs[1] == "")
 
