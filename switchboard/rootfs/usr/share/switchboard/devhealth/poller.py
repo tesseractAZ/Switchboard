@@ -59,6 +59,7 @@ import os
 import socket
 import ssl
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, "/usr/share/switchboard/webui")  # ha_client lives with the webui
@@ -1544,7 +1545,8 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # for a float and a file nested too deep to parse stopped it too. So a time is
 # trusted only as a finite number, and a date only between 7 days ago and now
 # (an alert is dated when it is raised, never later); anything else is a latch
-# ignored, and the first cycle writes over it.
+# ignored, and the first cycle writes over it. The save never writes through a
+# name planted in the directory (see save_alert_latches).
 ALERT_STATE_MAX_AGE_S = 7 * 86400
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
@@ -1650,16 +1652,30 @@ def load_alert_latches(path: str | None = None, now: float | None = None,
 
 def save_alert_latches(latches: dict, path: str | None = None) -> bool:
     """Write the latches atomically (a temporary file, then os.replace).
-    True only if they reached the disk; never raises."""
+    True only if they reached the disk; never raises.
+
+    /data/state is writable by the asterisk user and this runs as root, so the
+    temporary file is never a fixed name a link could be planted at: mkstemp
+    creates a new one, exclusively (rtpmon's _append_history does the same).
+    mkstemp's 0600 is kept: devhealth, running as root, is the file's only
+    reader. A save that fails leaves no temporary file behind."""
     target = path or _alert_state_path()
     try:
-        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        d = os.path.dirname(target) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".devhealth-alerts-", suffix=".tmp")
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(latches, fh)
         os.replace(tmp, target)
         return True
     except (OSError, TypeError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:                            # already gone: removed by another
+            pass
         return False
 
 

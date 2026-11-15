@@ -3173,7 +3173,8 @@ def test_a_restart_mid_recovery_neither_loses_nor_repeats_the_up() -> None:
 # keeps persistent notifications in memory and restarts with the host, so a
 # host reboot empties the drawer, and the restarted rtpmon still trusted a
 # shown latch under 7 days old. And the latch file is in /data/state, which
-# the asterisk user can write, so what it holds must never stop the loop.
+# the asterisk user can write, so what it holds must never stop the loop, nor
+# a save write through a name planted beside it.
 # --------------------------------------------------------------------------- #
 _processes = {"n": 0}
 
@@ -3436,6 +3437,48 @@ def test_no_saved_outage_file_can_stop_the_loop_or_hold_an_outage_unannounced() 
         check(f"{why}: {lines} line(s), no value ({r1[2]!r})",
               r1[2].count("\n") == lines and r1[2].count("ignoring") == lines
               and _HUGE not in r1[4] and "1e400" not in r1[4])
+
+
+def test_an_outage_save_never_writes_through_a_name_planted_beside_the_file(tmp_path) -> None:
+    """rtpmon runs as root and /data/state is writable by the asterisk user.
+    The save wrote `<file>.tmp`, a fixed name, with open(): a link planted at
+    that name sent root's write wherever it pointed, and os.replace then put
+    the link itself in the latch file's place. The temporary file is now
+    mkstemp's, as the link-health ledger's is, and none is left behind when a
+    save fails."""
+    victim = tmp_path / "victim"
+    victim.write_text("not rtpmon's", encoding="utf-8")
+    p = tmp_path / "link-outage.json"
+    os.symlink(victim, str(p) + ".tmp")
+    now = 1794103912.0
+    check("planted: the save succeeds",
+          pm.save_outage_state(True, now, str(p), announced=True, boot=_BOOT_A) is True)
+    check("planted: the file the link points at is untouched",
+          victim.read_text(encoding="utf-8") == "not rtpmon's")
+    with open(p, encoding="utf-8") as fh:
+        held = json.load(fh)
+    check(f"planted: the latch file is a regular file of its own, holding the latch ({held})",
+          p.is_file() and not p.is_symlink()
+          and held == {"alerted": True, "down_at": int(now), "announced": True, "boot": _BOOT_A})
+    check(f"planted: readable by root alone, its only reader ({oct(os.stat(p).st_mode)})",
+          (os.stat(p).st_mode & 0o777) == 0o600)
+    blocked = tmp_path / "blocked"
+    (blocked / "link-outage.json").mkdir(parents=True)
+    check("failed move: a directory at the file's name refuses the save",
+          pm.save_outage_state(True, now, str(blocked / "link-outage.json")) is False)
+    check("failed move: ...leaving no temporary file", os.listdir(blocked) == ["link-outage.json"])
+    real_unlink = os.unlink
+
+    def gone(p, *a, **k):
+        raise FileNotFoundError(p)                 # removed by another before the clean-up
+    try:
+        os.unlink = gone
+        refused = pm.save_outage_state(True, now, str(blocked / "link-outage.json"))
+    except Exception as e:  # noqa: BLE001 — run() calls it unguarded, so it must never raise
+        refused = e
+    finally:
+        os.unlink = real_unlink
+    check(f"failed clean-up: still refused, never raised ({refused!r})", refused is False)
 
 
 if __name__ == "__main__":

@@ -1197,7 +1197,8 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # writable by the asterisk user, and this runs as root. A 'down' time too large
 # for a float, or a file nested too deep to parse, raised out of the load and
 # killed rtpmon at every start; one of infinity, NaN or later than now passed
-# the age check and held an outage unannounced.
+# the age check and held an outage unannounced. The save never writes through a
+# name planted in the directory (see save_outage_state).
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
@@ -1263,12 +1264,22 @@ def save_outage_state(alerted: bool, at: float, path: str = None,
     """Write the latch, atomically. Returns True only if it reached the disk.
     `announced`: the 'down' was shown (see _notify_outage), and `boot`: the
     host boot it was raised on (None: unknown); both are recorded only with
-    `alerted`. v0.119.0 reads the file and ignores `boot`."""
+    `alerted`. v0.119.0 reads the file and ignores `boot`.
+
+    /data/state is writable by the asterisk user and this runs as root, so the
+    temporary file is never a fixed name a link could be planted at: mkstemp
+    creates a new one, exclusively, as _append_history does. mkstemp's 0600
+    is kept: rtpmon, running as root, is the file's only reader. A save that
+    fails leaves no temporary file behind."""
     target = path or OUTAGE_STATE_PATH
     try:
-        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        d = os.path.dirname(target) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".link-outage-", suffix=".tmp")
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"alerted": bool(alerted),
                        "down_at": int(at) if alerted else None,
                        "announced": bool(alerted and announced),
@@ -1276,6 +1287,10 @@ def save_outage_state(alerted: bool, at: float, path: str = None,
         os.replace(tmp, target)
         return True
     except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:                            # already gone: removed by another
+            pass
         return False
 
 

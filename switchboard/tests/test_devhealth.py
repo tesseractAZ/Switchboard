@@ -3399,7 +3399,7 @@ def test_a_restored_alert_closes_at_the_first_reading_that_can_clear_it_at_every
 # --------------------------------------------------------------------------- #
 # v0.119.1, the latch file hardened. /data/state is writable by the asterisk
 # user and devhealth runs as root, so whatever the file holds must never stop
-# the loop.
+# the loop, and a save must never write through a name planted beside it.
 # --------------------------------------------------------------------------- #
 _START = int(_Clock().start_wall)          # the start of _lives' first run
 _HUGE = "9" * 400                          # a JSON integer too large for a float
@@ -3611,6 +3611,49 @@ def test_the_latch_file_defaults_to_the_add_on_state_directory() -> None:
         os.environ.pop("SWITCHBOARD_DEVHEALTH_ALERTS", None)
         if real is not None:
             os.environ["SWITCHBOARD_DEVHEALTH_ALERTS"] = real
+
+
+def test_a_save_never_writes_through_a_name_planted_beside_the_file(tmp_path) -> None:
+    """devhealth runs as root and /data/state is writable by the asterisk
+    user. The save wrote `<file>.tmp`, a fixed name, with open(): a link
+    planted at that name sent root's write wherever it pointed, and os.replace
+    then put the link itself in the latch file's place. The temporary file is
+    now mkstemp's (a new name, created exclusively), as rtpmon's link-health
+    ledger does, and none is left behind when a save fails."""
+    victim = tmp_path / "victim"
+    victim.write_text("not devhealth's", encoding="utf-8")
+    p = tmp_path / "devhealth-alerts.json"
+    os.symlink(victim, str(p) + ".tmp")
+    latches = {"cordless": dh.latch_record({}), "gateway": _gw_latch()}
+    check("planted: the save succeeds", dh.save_alert_latches(latches, str(p)) is True)
+    check("planted: the file the link points at is untouched",
+          victim.read_text(encoding="utf-8") == "not devhealth's")
+    check("planted: the latch file is a regular file of its own, holding the latches",
+          p.is_file() and not p.is_symlink() and _saved(str(p)) == latches)
+    check(f"planted: readable by root alone, its only reader ({oct(os.stat(p).st_mode)})",
+          stat.S_IMODE(os.stat(p).st_mode) == 0o600)
+    before = sorted(os.listdir(tmp_path))
+    check("failed save: a latch json cannot encode is refused",
+          dh.save_alert_latches({"gateway": {**_gw_latch(), "reasons": {"x"}}}, str(p)) is False)
+    check("failed save: ...leaving no temporary file", sorted(os.listdir(tmp_path)) == before)
+    blocked = tmp_path / "blocked"
+    (blocked / "devhealth-alerts.json").mkdir(parents=True)
+    check("failed move: a directory at the file's name refuses the save",
+          dh.save_alert_latches(latches, str(blocked / "devhealth-alerts.json")) is False)
+    check("failed move: ...leaving no temporary file",
+          os.listdir(blocked) == ["devhealth-alerts.json"])
+    real_unlink = os.unlink
+
+    def gone(p, *a, **k):
+        raise FileNotFoundError(p)                 # removed by another before the clean-up
+    try:
+        os.unlink = gone
+        refused = dh.save_alert_latches(latches, str(blocked / "devhealth-alerts.json"))
+    except Exception as e:  # noqa: BLE001 — the point is that it never raises
+        refused = e
+    finally:
+        os.unlink = real_unlink
+    check(f"failed clean-up: still refused, never raised ({refused!r})", refused is False)
 
 
 if __name__ == "__main__":
