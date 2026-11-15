@@ -16,7 +16,7 @@ Recent releases. Releases up to 0.109.0 are in the
   reads `ok`. A rollup without `measured_at` is judged cycle by cycle.
 - No reading inside the 360 s startup grace counts. Its "re-registers"
   reading is still published but no longer raised as a card, and a gateway
-  already down at start alerts 480 to 720 s after it (was 480 s).
+  already down at start alerts 480 to 720 s after the start (was 480 s).
 - The cause is decided a sample later. In 3,000 simulated outages the gateway
   and outage alerts named the same cause in all; before, they differed in
   198, each a cordless dropping one sample after the ports.

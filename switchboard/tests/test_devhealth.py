@@ -2436,6 +2436,32 @@ def test_a_gateway_down_from_the_start_alerts_on_two_samples_read_after_the_grac
           _when(notes) == [(5, _GW_DEG)])
 
 
+def test_served_text_times_a_gateway_down_from_the_start_from_the_start() -> None:
+    """A gateway already down when this monitor starts alerts on two samples
+    read after the 360 s grace: at the default cadences 480 to 720 s after the
+    START, by the phase of rtpmon's samples. The 0.119.1 changelog entry said
+    "480 to 720 s after it" right after naming the grace, which reads as 840 to
+    1080 s after the start."""
+    import re
+    first = {}
+    for offset in range(0, 300, 20):
+        _s, _r, notes = _gw_at_cadence(lambda k: True, cycles=8, offset=float(offset))
+        crit = [c * 120 for c, t in _when(notes) if t == _GW_CRIT]
+        first[offset] = crit[0] if crit else None
+    check(f"from-start timing: precondition — every phase alerts, 480 to 720 s after the "
+          f"start ({first})",
+          None not in first.values() and (min(first.values()), max(first.values())) == (480, 720))
+    root = _SRC.parents[5]
+    flat = lambda *paths: " ".join(" ".join(p.read_text(encoding="utf-8").split()) for p in paths)
+    texts = {"changelog": flat(root / "CHANGELOG.md", root / "CHANGELOG-ARCHIVE.md"),
+             "health-monitoring.md": flat(root / "docs" / "reference" / "health-monitoring.md")}
+    for name, text in texts.items():
+        spans = re.findall(r"480 to 720 s after [^.,;]*", text)
+        check(f"from-start timing: the {name} states it ({spans})", bool(spans))
+        check(f"from-start timing: the {name} counts it from the start ({spans})",
+              all(s.startswith("480 to 720 s after the start") for s in spans))
+
+
 def test_the_gateway_alert_is_fed_once_per_rollup_sample() -> None:
     tr, past = dh.gateway_transition, _PAST_GRACE
     st: dict = {}
@@ -2459,6 +2485,37 @@ def test_the_gateway_alert_is_fed_once_per_rollup_sample() -> None:
     st = {}
     check("feed: no uptime (direct callers) is past the grace",
           tr("critical", st, 1000.0) == "" and tr("critical", st, 1300.0) == "critical")
+    st = {}
+    check("feed: a new sample stamped before the last one (the wall clock stepped back) "
+          "counts: samples are told apart by their stamp, not ordered by it",
+          tr("critical", st, 1300.0, past) == "" and tr("critical", st, 700.0, past + 300) == "critical")
+
+
+def test_a_wall_clock_stepped_back_does_not_hide_the_gateway_samples_after_it() -> None:
+    """rtpmon stamps `measured_at` from its wall clock, so after a correction
+    that steps it back 900 s, each new sample is stamped before the last one
+    fed. Ordered by stamp (newer than the last fed), samples 4, 5 and 6 were
+    skipped and the alert came three samples late, or not in this run."""
+    def rollup(cycle, clk):
+        k = int((clk.mono - clk.start_mono) // 300)
+        down = list(_GW) if k >= 4 else []
+        stamps.setdefault(k, clk.wall_at(clk.start_mono + 300 * k))
+        return {"poll_interval_s": 300, "measured_at": _iso(stamps[k]),
+                "unreachable_exts": down + ["20"], "offline_exts": down + ["20"],
+                "never_registered_exts": ["20"], "expected": 9, "other_rtt_ms": {"19": 9.1}}
+
+    stamps: dict = {}
+    timeline: list = []
+    sets, _n = _drive_loop(rollup, cycles=20, interval=120, clock=_Clock(steps=[(1150, -900)]),
+                           env={"CORDLESS_EXT": "19"}, timeline=timeline)
+    states = [st for e, st, _a in sets if e == "sensor.switchboard_gateway_health"]
+    check("clock back: precondition — samples 4 to 6, every port down, are stamped no later "
+          "than sample 3",
+          all(stamps[k] <= stamps[3] for k in (4, 5, 6)))
+    check("clock back: precondition — every read from sample 4 on is fresh and critical",
+          states[10:] == ["critical"] * 10)
+    check("clock back: one CRITICAL, on the first read of sample 5 (1560 s)",
+          [(c, t) for c, t, _m in timeline if "gxw gateway" in t] == [(13, _GW_CRIT)])
 
 
 def test_a_blind_read_breaks_the_gateway_count_and_holds_an_alert_already_out() -> None:
