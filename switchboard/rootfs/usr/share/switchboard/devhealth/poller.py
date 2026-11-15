@@ -1540,7 +1540,7 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # for a float and a file nested too deep to parse stopped it too. So a time is
 # trusted only as a finite number, and a date only between 7 days ago and now
 # (an alert is dated when it is raised, never later); anything else is a latch
-# ignored.
+# ignored, and the first cycle writes over it.
 ALERT_STATE_MAX_AGE_S = 7 * 86400
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
@@ -1599,6 +1599,19 @@ def _latch_trusted(rec: dict, now: float) -> bool:
             and (rec.get("boot") is None or isinstance(rec.get("boot"), str)))
 
 
+def read_alert_latches(path: str | None = None) -> dict | None:
+    """What the latch file holds: {} when there is no file, None when it
+    cannot be read or holds no JSON object. Never raises."""
+    try:
+        with open(path or _alert_state_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def load_alert_latches(path: str | None = None, now: float | None = None,
                        boot: str | None = None) -> dict:
     """{device: saved latch} for each device whose alert a previous process
@@ -1608,14 +1621,8 @@ def load_alert_latches(path: str | None = None, now: float | None = None,
     compared). Never raises. A missing file, or a device with no alert out,
     is no latch, silently; a corrupt file or an untrusted latch is none
     either, with one stderr line and no values."""
-    try:
-        with open(path or _alert_state_path(), encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError, RecursionError):
-        data = None
-    if not isinstance(data, dict):
+    data = read_alert_latches(path)
+    if data is None:
         sys.stderr.write("[switchboard-devhealth] the saved alert state is unreadable; "
                          "starting with no alert out\n")
         return {}
@@ -1766,9 +1773,12 @@ def run() -> None:
             print(f"[devhealth] restored the {device} {st['alerted']} alert raised before "
                   "the restart", flush=True)
     # The latches as last saved, and the devices whose refused card
-    # notify_retry holds.
-    written = {"latches": {"cordless": latch_record(cst, boot),
-                           "gateway": latch_record(gst, boot)}}
+    # notify_retry holds. A file holding anything but no latch or the state
+    # restored from it (a latch ignored above, a corrupt file) is written over
+    # on the first cycle, so what was ignored is not logged again at every
+    # later start.
+    current = {"cordless": latch_record(cst, boot), "gateway": latch_record(gst, boot)}
+    written = {"latches": current if read_alert_latches() in ({}, current) else None}
     kept: dict = {}
     while True:
         # First, whatever Home Assistant refused on an earlier cycle. An alert

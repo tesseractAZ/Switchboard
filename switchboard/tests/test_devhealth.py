@@ -3322,8 +3322,9 @@ def test_a_failed_latch_write_is_logged_once_and_the_loop_runs_on() -> None:
           [(c, t) for c, t, _m in tl] == [(8, _GW_CRIT), (10, _GW_OK)]
           and len([e for e, _s, _a in sets if e == "sensor.switchboard_gateway_health"]) == 11)
     # Two lines in all: the start could not read that path either (a file
-    # stands where its directory should be), and the saves at 960 s and
-    # 1080 s failed as one run of failures.
+    # stands where its directory should be), and the saves, tried on every
+    # cycle from the first (it writes over a file it could not read), failed
+    # as one run of failures.
     check(f"write failure: logged once for the run of failures, with no path or value ({log!r})",
           log.count("could not save") == 1 and log.count("unreadable") == 1
           and log.count("\n") == 2 and blocker not in log)
@@ -3520,6 +3521,41 @@ def test_a_saved_latch_needs_finite_times() -> None:
     check("finite: a latch dated exactly now is trusted",
           dh.save_alert_latches({"gateway": {**gw, "at": int(now)}}, p)
           and "gateway" in dh.load_alert_latches(p, int(now)))
+
+
+def test_a_saved_alert_that_is_ignored_is_cleared_from_the_file() -> None:
+    """The first cycle compared against the state run() starts with, which is
+    cleared when nothing was restored. So a latch ignored at the start was
+    never written over: it stayed in the file, and its line was logged again
+    at every later start. The first cycle now rewrites the file whenever it
+    holds anything else; a file holding no latch, or the one restored, is not
+    written (test_the_latch_file_is_written_on_each_change_and_only_then)."""
+    import io
+    cleared = {"cordless": dh.latch_record({}), "gateway": dh.latch_record({})}
+    files = {"not shown": json.dumps({"gateway": _gw_latch(announced=False)}),
+             "over 7 days old": json.dumps({"gateway": _gw_latch(at=_START - 8 * 86400)}),
+             "raised before a host reboot": json.dumps({"gateway": _gw_latch(boot=_BOOT_B)}),
+             "dated after the start": json.dumps({"gateway": _gw_latch(at=_START + 3600)}),
+             "dated by infinity": _with(json.dumps({"gateway": _gw_latch(at="@")}), "1e400"),
+             "not JSON": "not json",
+             "a device record that is not an object": json.dumps({"gateway": [1, 2]})}
+    real_err = sys.stderr
+    for why, text in files.items():
+        state, logs = _planted(text), []
+        for _start in range(2):
+            err = io.StringIO()
+            try:
+                sys.stderr = err
+                _lives(_run(lambda k: False, cycles=2), state=state)
+            finally:
+                sys.stderr = real_err
+            logs.append(err.getvalue())
+            with open(state, encoding="utf-8") as fh:
+                held = fh.read()
+            check(f"{why}: after start {_start + 1}, the file holds no latch ({held[:80]!r})",
+                  json.loads(held) == cleared)
+        check(f"{why}: the first start says why, once ({logs[0]!r})", logs[0].count("\n") == 1)
+        check(f"{why}: the next start says nothing ({logs[1]!r})", logs[1] == "")
 
 
 if __name__ == "__main__":
