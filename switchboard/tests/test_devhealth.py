@@ -3558,6 +3558,27 @@ def test_a_saved_alert_that_is_ignored_is_cleared_from_the_file() -> None:
         check(f"{why}: the next start says nothing ({logs[1]!r})", logs[1] == "")
 
 
+def test_the_header_lists_as_bridged_only_what_the_run_script_exports() -> None:
+    """The module docstring listed SWITCHBOARD_DEVHEALTH_ALERTS under "Env
+    (bridged by the s6 run script from config.yaml)". No option sets it: like
+    SWITCHBOARD_CORDLESS_MOS_LOG and rtpmon's SWITCHBOARD_LINK_OUTAGE it is a
+    path a test (or a manual run) points elsewhere. CORDLESS_MOS_MIN was listed
+    there too and is not exported either."""
+    import re
+    doc = dh.__doc__
+    head = "Env (bridged by the s6 run script from config.yaml):"
+    check("header: precondition — the bridged list is there", head in doc)
+    listed = doc.split(head, 1)[1].split("\n\n", 1)[0]
+    names = re.findall(r"(?m)^  ([A-Z][A-Z0-9_]+)\s", listed)
+    run = (_SRC.parents[4] / "etc" / "s6-overlay" / "s6-rc.d" / "devhealth" / "run").read_text(
+        encoding="utf-8")
+    exported = set(re.findall(r"(?m)^\s*export ([A-Z][A-Z0-9_]*)=", run))
+    check(f"header: every name listed as bridged is exported by the run script "
+          f"({sorted(set(names) - exported)})", len(names) >= 10 and set(names) <= exported)
+    check("header: the latch file's variable is still described, outside that list",
+          "SWITCHBOARD_DEVHEALTH_ALERTS" in doc and "SWITCHBOARD_DEVHEALTH_ALERTS" not in names)
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

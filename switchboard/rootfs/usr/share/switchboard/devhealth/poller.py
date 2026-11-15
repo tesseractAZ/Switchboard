@@ -38,10 +38,14 @@ Env (bridged by the s6 run script from config.yaml):
   CORDLESS_BATTERY_CRIT    battery %% considered critical when discharging (default 15)
   CORDLESS_BATTERY_WARN    battery %% considered low when discharging (default 30)
   CORDLESS_WIFI_MIN        min acceptable Wi-Fi signal 0-5 (default 2)
-  CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
   DEVICE_HEALTH_ALERTS     'false'/'0' -> publish sensors but never notify()
+
+Env read but not bridged (no option sets them; tests do):
+  CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
   SWITCHBOARD_DEVHEALTH_ALERTS  the alert-latch file (default
-                           /data/state/devhealth-alerts.json; see load_alert_latches)
+                           /data/state/devhealth-alerts.json; see load_alert_latches),
+                           a path override like SWITCHBOARD_CORDLESS_MOS_LOG here and
+                           SWITCHBOARD_LINK_OUTAGE in rtpmon
 """
 from __future__ import annotations
 
