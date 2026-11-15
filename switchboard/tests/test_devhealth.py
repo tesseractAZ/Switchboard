@@ -1012,10 +1012,15 @@ def test_run_loop_judges_freshness_before_clearing_the_cordless_alert() -> None:
               "_publish_gateway", "read_rollup", "_notify")}
     real_sleep = dh.time.sleep
     real_env = dict(os.environ)
+    import tempfile
     try:
         os.environ["CORDLESS_IP"] = "192.0.2.1"
         os.environ["CORDLESS_PASSWORD"] = "x"
         os.environ["DEVICE_HEALTH_INTERVAL"] = "30"
+        # Its own alert-latch file: one shared with another run() driver
+        # would restore that driver's alert here as one already out.
+        os.environ["SWITCHBOARD_DEVHEALTH_ALERTS"] = os.path.join(
+            tempfile.mkdtemp(prefix="sb-devhealth-"), "devhealth-alerts.json")
         dh.probe_cordless = _probe
         dh.resolve_cordless_ip = lambda ext, ip: ip
         dh._publish_cordless = lambda *a, **k: None
@@ -1187,9 +1192,13 @@ def _drive_cordless(tmp_path, legs, records, cycles=3, cordless_ext=None):
     try:
         for k in ("CORDLESS_EXT", "DEVICE_HEALTH_ALERTS", "CORDLESS_MOS_MIN", "CORDLESS_MOS_WINDOW_S"):
             os.environ.pop(k, None)
+        # Its own alert-latch file, as _drive_loop gives each run(): with the
+        # session's shared one, an alert one test left out was restored by
+        # the next test's run() as already out, and its own never fired.
         os.environ.update({"CORDLESS_IP": "192.0.2.1", "CORDLESS_PASSWORD": "x",
                            "DEVICE_HEALTH_INTERVAL": "30", "SWITCHBOARD_CALLQOS": str(led),
-                           "SWITCHBOARD_CORDLESS_MOS_LOG": str(cap)})
+                           "SWITCHBOARD_CORDLESS_MOS_LOG": str(cap),
+                           "SWITCHBOARD_DEVHEALTH_ALERTS": str(tmp_path / "devhealth-alerts.json")})
         if cordless_ext is not None:
             os.environ["CORDLESS_EXT"] = cordless_ext
         dh._capture_seen.update(path=None, keys=set())
@@ -2757,6 +2766,23 @@ def test_a_restored_gateway_alert_is_closed_by_its_recovery_after_the_grace() ->
     check("restored gw: the sensor is published every cycle, ok", states == ["ok"] * 6)
 
 
+def test_run_dates_a_saved_alert_by_the_wall_clock() -> None:
+    """The 7-day bound, through run(): the add-on starts 8 days after the
+    previous process's last read. The monotonic clock counts from the host's
+    boot, so dated by it every latch would read as new. Over 7 days old the
+    alert is not restored: a gateway already back posts nothing, one still
+    down is raised again on the second sample read after the grace (600 s).
+    6 days old, it is restored and its recovery closes the card (360 s)."""
+    day = 86400
+    for gap, life_2, want in ((8 * day, _run(lambda k: False, cycles=6), []),
+                              (8 * day, _run(lambda k: True, cycles=6), [(5, _GW_CRIT)]),
+                              (6 * day, _run(lambda k: False, cycles=6), [(3, _GW_OK)])):
+        (r1, r2), _s = _lives(_run(lambda k: k >= 2, cycles=9), life_2, gap=gap)
+        check(f"aged {gap // day} d: precondition — run 1 leaves one CRITICAL out",
+              _gw_of(r1) == [(8, _GW_CRIT)])
+        check(f"aged {gap // day} d: after the restart -> {want} ({_gw_of(r2)})", _gw_of(r2) == want)
+
+
 def test_a_restart_while_the_gateway_is_still_down_raises_no_second_card() -> None:
     """Still down after the restart: the two post-grace samples (360 s and
     600 s) read critical again, and the alert already out is not raised a
@@ -2803,6 +2829,9 @@ def test_a_restored_cordless_registration_alert_is_closed_when_it_re_registers()
           _cl_of(r2) == [(2, _CL_OK)])
     check("restored cordless: the recovery is a recovery",
           [m for _c, t, m in r2[1] if t == _CL_OK] == ["Cordless recovered — back to normal."])
+    # Else a restart days later restores the cleared alert, and a new outage
+    # at the same level raises no card.
+    check("restored cordless: the latch on disk is cleared", _saved(state)["cordless"]["alerted"] is None)
     # Still unregistered after the restart (samples 0-2), registered from 3:
     # no second CRITICAL from the two post-grace samples (360 s, 600 s).
     (r1, r2), _s = _lives(_run(lambda k: False, cycles=9, cordless_in=lambda k: k >= 2),
