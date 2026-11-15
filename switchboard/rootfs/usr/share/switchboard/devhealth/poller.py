@@ -1734,6 +1734,10 @@ def run() -> None:
     # is restored (see load_alert_latches): its recovery still closes the
     # card, and the same condition, or a milder one, is not raised again.
     boot = read_boot_id()
+    if boot is None:
+        # Said once, so a host on which the reboot check cannot work shows it.
+        print("[devhealth] the host's boot id cannot be read; a saved alert is restored "
+              "whether or not the host rebooted", flush=True)
     restored = load_alert_latches(now=time.time(), boot=boot)
     for device, st in (("cordless", cst), ("gateway", gst)):
         if device in restored:

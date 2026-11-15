@@ -2859,9 +2859,18 @@ def test_with_no_boot_id_to_read_a_restart_restores_the_alert_as_before() -> Non
     when the alert was saved, a host reboot cannot be told from an add-on
     restart, and a shown alert is restored as before: its recovery closes the
     card, and the same condition raises no second card."""
-    for b1, b2 in ((None, None), (None, _BOOT_B), (_BOOT_A, None)):
+    import contextlib
+    import io
+    for b1, b2 in ((None, None), (None, _BOOT_B), (_BOOT_A, None), (_BOOT_A, _BOOT_A)):
         life_1 = _run(lambda k: k >= 2, cycles=9, boot=b1)
-        (r1, r2), _s = _lives(life_1, _run(lambda k: False, cycles=6, boot=b2))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            (r1, r2), _s = _lives(life_1, _run(lambda k: False, cycles=6, boot=b2))
+        said = out.getvalue().count("boot id cannot be read")
+        check(f"boot {b1} -> {b2}: each start without one says so, once ({said})",
+              said == (b1 is None) + (b2 is None))
+        if b1 is not None and b2 is not None:
+            continue                               # the control: one boot, read both times
         saved = (r1[2] or {}).get("gateway") or {}
         check(f"boot {b1} -> {b2}: precondition — one CRITICAL out, saved with the boot read "
               f"({saved})", _gw_of(r1) == [(8, _GW_CRIT)] and saved.get("boot") == b1
