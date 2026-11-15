@@ -1193,12 +1193,15 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # reboot cannot be told from an add-on restart, and the latch is judged as
 # before. devhealth keeps its alert latches the same way.
 #
-# ★ AND WHATEVER THE FILE HOLDS, IT CANNOT STOP THE LOOP. /data/state is
+# ★ AND NO VALUE IN THE FILE CAN STOP THE LOOP. /data/state is
 # writable by the asterisk user, and this runs as root. A 'down' time too large
 # for a float, or a file nested too deep to parse, raised out of the load and
 # killed rtpmon at every start; one of infinity, NaN or later than now passed
 # the age check and held an outage unannounced. The save never writes through a
-# name planted in the directory (see save_outage_state).
+# name planted in the directory (see save_outage_state). The read is not
+# guarded the same way: it opens the name and reads the whole file, so a FIFO
+# planted there blocks the start and a file too large for memory raises, as
+# at rtpmon's other reads from /data/state (ever-registered.json).
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not

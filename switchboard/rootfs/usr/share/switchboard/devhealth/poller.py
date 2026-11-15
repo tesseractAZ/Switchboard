@@ -1542,7 +1542,7 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # read, now or when the alert was saved, a reboot cannot be told from an
 # add-on restart, and the latch is judged as before.
 #
-# ★ WHATEVER THE FILE HOLDS, IT CANNOT STOP THE LOOP. /data/state is writable
+# ★ NO VALUE IN THE FILE CAN STOP THE LOOP. /data/state is writable
 # by the asterisk user, and this runs as root. A latch dated 1e400 (infinity)
 # passed the age check (now minus infinity is below any bound), was restored,
 # and run()'s start raised OverflowError saving it back as an integer: devhealth
@@ -1551,7 +1551,10 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # trusted only as a finite number, and a date only between 7 days ago and now
 # (an alert is dated when it is raised, never later); anything else is a latch
 # ignored, and the first cycle writes over it. The save never writes through a
-# name planted in the directory (see save_alert_latches).
+# name planted in the directory (see save_alert_latches). The read is not
+# guarded the same way: it opens the name and reads the whole file, so a FIFO
+# planted there blocks the start and a file too large for memory raises, as
+# at devhealth's other reads from /data/state.
 ALERT_STATE_MAX_AGE_S = 7 * 86400
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
