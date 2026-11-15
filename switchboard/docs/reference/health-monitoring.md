@@ -330,6 +330,35 @@ Covers the two blind spots the above can't see:
   because the rollup's down list also holds ports that are still registered
   but fail their qualify.
 
+**The gateway alert counts samples** (v0.119.1), as the cordless's
+registration does. A `degraded` or `critical` reading alerts once two
+consecutive link-health samples show it, told apart by their `measured_at`,
+and the alert goes out on the first read of the second. This monitor runs
+every 120 s against a rollup published every 300 s, so two of its cycles
+usually read one sample twice: a GXW reboot caught by one sample (a firmware
+auto-install at 01:00, the weekly reboot) raised "all 8 gateway ports down" and
+its recovery a few minutes later. Such a reboot now raises no gateway alert. A
+recovery comes on the first new sample that reads `ok`. A rollup with no
+`measured_at`, from an older link-health poller, is judged cycle by cycle, as
+before. A cycle with no usable rollup restarts the count, so the samples on
+either side of it are not consecutive, and an alert already out stays out until
+a fresh sample clears it. The sensor is published every cycle either way.
+
+No reading inside the 360 s startup grace counts toward the alert. An all-down
+reading there is published as `degraded` ("normal while the GXW
+re-registers"), and is no longer raised as a card. A gateway already down,
+wholly or partly, when the monitor starts therefore alerts on two samples read
+after the grace: at the default cadences, 480 to 720 s after the start, where
+the CRITICAL came at 480 s. The fleet-outage alert above, and its push, do not
+depend on this monitor.
+
+The cause is now decided on the second all-down sample. In 3,000 simulated
+outages (every port, and the cordless or not, dropping at random samples and
+staying down, read at a random phase against the rollup), the gateway alert
+and the outage alert named the same cause in all 3,000. Before, they differed in 198: each time the outage began
+with the ports and the cordless dropped one sample later, and this alert,
+firing on the first all-down sample, named the gateway.
+
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless
 is not registered when it is in the rollup's `offline_exts`. That reads
@@ -362,9 +391,10 @@ API still answered. It is judged even with nothing to probe (`cordless_ip`
 blank and no live `contact_ip`, the case for an unregistered handset);
 `reachable` then reads `null`, not `false`.
 
-Both use a 2-cycle hysteresis so a transient blip doesn't alert, apart from the
-cordless's registration, which has its two samples instead; a worsening from
-degraded to critical alerts again. Both post a recovery notice when they return
+The cordless uses a 2-cycle hysteresis so a transient blip doesn't alert, apart
+from its registration; the gateway alert and the cordless's registration count
+two link-health samples instead. On both devices a worsening from degraded to
+critical alerts again. Both post a recovery notice when they return
 to normal, again under that device's shared `notification_id`, so the recovery
 replaces the alert rather than removing it. For the cordless, a clear is
 "recovered" unless the alert rested on a poor call alone. That is the only

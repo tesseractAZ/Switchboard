@@ -3,6 +3,24 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.119.1
+
+**The gateway alert needs two link-health samples, not two of its own cycles.**
+
+- Gateway health is read every 120 s off a rollup published every 300 s, so
+  a GXW reboot caught by one sample (a firmware auto-install at 01:00, the
+  weekly reboot) was read twice and raised "all 8 gateway ports down", then
+  its recovery. The alert now advances only on a sample with a new
+  `measured_at`, as the cordless's registration does, and goes out on the
+  first read of the second; a recovery comes on the first new sample that
+  reads `ok`. A rollup without `measured_at` is judged cycle by cycle.
+- No reading inside the 360 s startup grace counts. Its "re-registers"
+  reading is still published but no longer raised as a card, and a gateway
+  already down at start alerts 480 to 720 s after it (was 480 s).
+- The cause is decided a sample later. In 3,000 simulated outages the gateway
+  and outage alerts named the same cause in all; before, they differed in
+  198, each a cordless dropping one sample after the ports.
+
 ## 0.119.0
 
 **A phone-system outage reaches the phone, and its alerts name what is down.**
