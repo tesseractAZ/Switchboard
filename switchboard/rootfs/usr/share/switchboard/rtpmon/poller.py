@@ -1192,6 +1192,12 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # be read, now or when the latch was saved (a v0.119.0 file has none), a
 # reboot cannot be told from an add-on restart, and the latch is judged as
 # before. devhealth keeps its alert latches the same way.
+#
+# ★ AND WHATEVER THE FILE HOLDS, IT CANNOT STOP THE LOOP. /data/state is
+# writable by the asterisk user, and this runs as root. A 'down' time too large
+# for a float, or a file nested too deep to parse, raised out of the load and
+# killed rtpmon at every start; one of infinity, NaN or later than now passed
+# the age check and held an outage unannounced.
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
@@ -1216,15 +1222,15 @@ def load_outage_alerted(path: str = None, now: float | None = None,
                         boot: str | None = None) -> bool:
     """True when the outage alert a previous process raised is still out: the
     file says alerted AND announced (the 'down' was shown), with a 'down' time
-    no more than OUTAGE_STATE_MAX_AGE_S ago, raised on host boot `boot` (the
-    current one; None, or none saved: not compared). Never raises; a
+    between OUTAGE_STATE_MAX_AGE_S ago and `now`, raised on host boot `boot`
+    (the current one; None, or none saved: not compared). Never raises; a
     missing or corrupt file reads as not alerted, and so does one whose 'down'
     was never shown. A latch ignored for its time or its boot is logged, with
     no value."""
     try:
         with open(path or OUTAGE_STATE_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
     if not isinstance(data, dict) or data.get("alerted") is not True:
         return False
@@ -1232,12 +1238,13 @@ def load_outage_alerted(path: str = None, now: float | None = None,
         return False
     try:
         down_at = float(data.get("down_at"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         down_at = None
     now = time.time() if now is None else now
-    if down_at is None or now - down_at > OUTAGE_STATE_MAX_AGE_S:
+    # NaN and the infinities fail the range too.
+    if down_at is None or not 0 <= now - down_at <= OUTAGE_STATE_MAX_AGE_S:
         sys.stderr.write("switchboard-rtpmon: ignoring a saved fleet-outage alert "
-                         "with no 'down' time or one more than 7 days old\n")
+                         "with no 'down' time, one after now or one more than 7 days old\n")
         return False
     saved_boot = data.get("boot")
     if not (saved_boot is None or isinstance(saved_boot, str)):

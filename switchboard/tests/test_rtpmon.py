@@ -3172,7 +3172,8 @@ def test_a_restart_mid_recovery_neither_loses_nor_repeats_the_up() -> None:
 # v0.119.1: the fleet-outage latch and the host's boot. Home Assistant Core
 # keeps persistent notifications in memory and restarts with the host, so a
 # host reboot empties the drawer, and the restarted rtpmon still trusted a
-# shown latch under 7 days old.
+# shown latch under 7 days old. And the latch file is in /data/state, which
+# the asterisk user can write, so what it holds must never stop the loop.
 # --------------------------------------------------------------------------- #
 _processes = {"n": 0}
 
@@ -3382,6 +3383,59 @@ def test_the_outage_latch_carries_the_boot_and_is_trusted_only_on_its_own() -> N
     check("load: a boot id that is not text is malformed, on any boot", got == (False, False))
     check(f"load: ...logged each time, with no value ({err.getvalue()!r})",
           err.getvalue().count("\n") == 2 and "7" not in err.getvalue())
+    # The 'down' time's bounds: an alert is dated when it is raised, so never
+    # after now, and is trusted for 7 days.
+    err = io.StringIO()
+    try:
+        sys.stderr = err
+        for at, want in ((now, True), (now + 1, False), (now - 7 * 86400, True),
+                         (now - 7 * 86400 - 1, False)):
+            pm.save_outage_state(True, at, p, announced=True, boot=_BOOT_A)
+            check(f"load: a 'down' {at - now:+.0f} s from now -> {want}",
+                  pm.load_outage_alerted(p, now, boot=_BOOT_A) is want)
+    finally:
+        sys.stderr = real_err
+
+
+_HUGE = "9" * 400                          # a JSON integer too large for a float
+# JSON nested too deep for json.load, which raises RecursionError (not a
+# ValueError) on it: at the recursion limit, or, from Python 3.14, once the C
+# stack runs short.
+_DEEP = "[" * 10 ** 6 + "]" * 10 ** 6
+
+
+def test_no_saved_outage_file_can_stop_the_loop_or_hold_an_outage_unannounced() -> None:
+    """A 'down' time too large for a float made float() raise OverflowError,
+    and a file nested too deep to parse made json.load raise RecursionError:
+    neither was caught, so rtpmon died at every start and s6 restarted it into
+    the same file. A 'down' time of infinity, NaN or later than now passed the
+    7-day check (now minus it is never above the bound) and was restored, so
+    an outage still on raised no card for as long as the file stayed. Each is
+    now ignored and the outage is announced: a bad 'down' time with one line
+    and no value, the file that cannot be parsed silently, as any corrupt
+    file."""
+    recent = int(time.time()) - 600
+    rec = '{"alerted": true, "down_at": %s, "announced": true}'
+    files = {"a 'down' time too large for a float": (rec % _HUGE, 1),
+             "nested too deep to parse": (_DEEP, 0),
+             "a 'down' time of infinity": (rec % "1e400", 1),
+             "a 'down' time of NaN": (rec % "NaN", 1),
+             "a 'down' time an hour after now": (rec % (recent + 4200), 1),
+             "the control, a 'down' 10 minutes ago": (rec % recent, 0)}
+    for why, (text, lines) in files.items():
+        state = _outage_file()
+        with open(state, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            (r1,), _s = _lives({"samples": [(_S_ALL_DOWN, [])] * 3}, state=state)
+        except Exception as e:  # noqa: BLE001 — the defect: run() died at its start
+            r1 = ([], [], f"run() raised {type(e).__name__}", None, "")
+        control = why.startswith("the control")
+        check(f"{why}: {'restored' if control else 'ignored'} ({r1[:3]})",
+              (r1[0], r1[1]) == (([], []) if control else ([_OUT_CARD], [_OUT_PUSH])))
+        check(f"{why}: {lines} line(s), no value ({r1[2]!r})",
+              r1[2].count("\n") == lines and r1[2].count("ignoring") == lines
+              and _HUGE not in r1[4] and "1e400" not in r1[4])
 
 
 if __name__ == "__main__":
