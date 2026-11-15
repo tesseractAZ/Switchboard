@@ -3579,6 +3579,40 @@ def test_the_header_lists_as_bridged_only_what_the_run_script_exports() -> None:
           "SWITCHBOARD_DEVHEALTH_ALERTS" in doc and "SWITCHBOARD_DEVHEALTH_ALERTS" not in names)
 
 
+def test_a_saved_device_record_that_is_not_an_object_is_no_latch() -> None:
+    import io
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(prefix="sb-devhealth-"), "devhealth-alerts.json")
+    real_err = sys.stderr
+    for bad in ([1, 2], "critical", 7, True, False):
+        dh.save_alert_latches({"gateway": bad, "cordless": bad}, p)
+        err = io.StringIO()
+        try:
+            sys.stderr = err
+            got = dh.load_alert_latches(p, 1794103912.0)
+        finally:
+            sys.stderr = real_err
+        log = err.getvalue()
+        check(f"record {bad!r}: no latch, never raises ({got})", got == {})
+        check(f"record {bad!r}: one line per device, naming it and no value ({log!r})",
+              log.count("\n") == 2 and "saved gateway alert" in log and "saved cordless alert" in log
+              and "critical" not in log)
+
+
+def test_the_latch_file_defaults_to_the_add_on_state_directory() -> None:
+    real = os.environ.pop("SWITCHBOARD_DEVHEALTH_ALERTS", None)
+    try:
+        check("default: /data/state/devhealth-alerts.json",
+              dh._alert_state_path() == "/data/state/devhealth-alerts.json")
+        os.environ["SWITCHBOARD_DEVHEALTH_ALERTS"] = "/elsewhere/devhealth-alerts.json"
+        check("default: the variable, when set, points it elsewhere",
+              dh._alert_state_path() == "/elsewhere/devhealth-alerts.json")
+    finally:
+        os.environ.pop("SWITCHBOARD_DEVHEALTH_ALERTS", None)
+        if real is not None:
+            os.environ["SWITCHBOARD_DEVHEALTH_ALERTS"] = real
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))
