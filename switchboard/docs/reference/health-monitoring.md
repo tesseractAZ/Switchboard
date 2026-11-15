@@ -405,29 +405,33 @@ instead, and says the state is unknown until the next call. Every other reason
 its clearing is a recovery; before v0.119.0 those read as lapses too whenever
 no newer call had been scored.
 
-**The alerts survive a restart** (v0.119.1). Each device's alert is kept in
-`/data/state/devhealth-alerts.json`: its level and reasons, when it was raised,
-and whether its card was shown (accepted by Home Assistant, or posted later by
-its retry). It used to be kept in memory only, so a device that recovered
-while the add-on restarted got no recovery notice, and its card stayed. A
-restored alert is cleared by the first reading that would have cleared it
-before the restart, and the recovery replaces the card. The same condition, or
-a milder one, raises no second card; a worsening alerts as before. The
-cordless's holds above work from the restored reasons, and a restored
-poor-call alert whose call ages out is still titled "alert lapsed". The
-startup grace is unchanged. With the device already back at the restart, at
-the default cadences, a restored gateway alert clears 360 s after the start,
-on the first sample read after the grace, and a restored cordless
-registration alert on the first read of the first link-health sample taken
-after the start: 0 to 360 s after the start, by that sample's phase (both
-measured over 300 phases). Not restored: an alert that was not shown (raised
-while `device_health_alerts` was off, refused and lost with the restart before
-its retry, or given up on by the retry), or one raised more than 7 days
-earlier. The restarted monitor raises such a condition again if it persists.
-No count is kept, so an alert raised after a restart needs its two cycles or
-two samples afresh. After a host reboot Home Assistant has already lost the old
-card (it keeps notifications in memory); the recovery then replaces nothing,
-though what it says is still true.
+**The alerts survive an add-on restart** (v0.119.1). Each device's alert is
+kept in `/data/state/devhealth-alerts.json`: its level and reasons, when it was
+raised, the host boot it was raised on (the kernel's boot id), and whether its
+card was shown (accepted by Home Assistant, or posted later by its retry). It
+used to be kept in memory only, so a device that recovered while the add-on
+restarted got no recovery notice, and its card stayed. A restored alert is
+cleared by the first reading that would have cleared it before the restart,
+and the recovery replaces the card. The same condition, or a milder one, raises
+no second card; a worsening alerts as before. The cordless's holds above work
+from the restored reasons, and a restored poor-call alert whose call ages out
+is still titled "alert lapsed". The startup grace is unchanged. With the device
+already back at the restart, at the default cadences, a restored gateway alert
+clears 360 s after the start, on the first sample read after the grace, and a
+restored cordless registration alert on the first read of the first
+link-health sample taken after the start: 0 to 360 s after the start, by that
+sample's phase (both measured over 300 phases). Not restored: an alert raised
+before a host reboot (Home Assistant keeps notifications in memory, so the
+reboot cleared its card), one that was not shown (raised while
+`device_health_alerts` was off, refused and lost with the restart before its
+retry, or given up on by the retry), or one raised more than 7 days earlier.
+The restarted monitor raises such a condition again if it persists, as for a
+device down at the start, and posts no recovery for a card that is not there.
+Where the boot id cannot be read, a host reboot cannot be told from an add-on
+restart, and a shown alert is restored. No count is kept, so an alert raised
+after a restart needs its two cycles or two samples afresh. A Home Assistant
+restart on its own clears the cards too, and the monitor does not see it: an
+alert already out then is not raised again.
 
 **When a poor call counts.** The handset scores every call itself. Each score is
 matched to a call-quality ledger leg that hung up within 90 s of it: the

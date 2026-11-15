@@ -279,6 +279,10 @@ def test_a_rollup_measured_before_this_process_started_is_stale() -> None:
 
 
 _GW = ["11", "12", "13", "14", "15", "16", "17", "18"]
+# The host kernel's boot id as a run() reads it (BOOT_ID_PATH): one boot, and
+# the next one after a host reboot. Synthetic values.
+_BOOT_A = "11111111-1111-4111-8111-111111111111"
+_BOOT_B = "22222222-2222-4222-8222-222222222222"
 
 
 def _iso(ts):
@@ -324,7 +328,7 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
 
 def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None,
                 contact_at=None, timeline=None, mod=None, state_path=None, notify_ok=True,
-                retry=None):
+                retry=None, boot=_BOOT_A):
     """_drive_gateway's loop, returning every publish as (entity, state, attrs)
     plus the notifications. `env` is applied after the cordless is disabled
     (so CORDLESS_EXT can be set with no IP to probe), and `probe`, when given,
@@ -341,7 +345,10 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     post (every post is recorded either way). `retry`, a notify_retry module,
     is what the poller imports by that name for this run (False: no such
     module, so nothing is kept); without it the import resolves as it
-    otherwise would."""
+    otherwise would. `boot` is the host's boot id the run reads (the content
+    of its boot id file; None: no such file). The default is one boot for
+    every run, so a restart is an add-on restart unless a run says
+    otherwise."""
     import datetime as _dt
     import tempfile
     import types
@@ -392,7 +399,13 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     real_retry = sys.modules.get("notify_retry", "absent")
     real_env = dict(os.environ)
     real_probe = dh.probe_cordless
+    real_boot_path = getattr(dh, "BOOT_ID_PATH", None)
+    boot_path = os.path.join(tempfile.mkdtemp(prefix="sb-devhealth-boot-"), "boot_id")
+    if boot is not None:
+        with open(boot_path, "w", encoding="ascii") as fh:
+            fh.write(boot + "\n")                  # as the kernel gives it
     try:
+        dh.BOOT_ID_PATH = boot_path
         for k in ("CORDLESS_EXT", "GATEWAY_PORTS", "DEVICE_HEALTH_ALERTS"):
             os.environ.pop(k, None)
         os.environ.update({"CORDLESS_IP": "", "CORDLESS_PASSWORD": "",
@@ -413,6 +426,10 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     finally:
         dh.time, dh.datetime = real_time, real_datetime
         dh.probe_cordless = real_probe
+        if real_boot_path is None:
+            del dh.BOOT_ID_PATH
+        else:
+            dh.BOOT_ID_PATH = real_boot_path
         if real_ha is None:
             sys.modules.pop("ha_client", None)
         else:
@@ -2703,7 +2720,8 @@ def _lives(*runs, state=None, gap=60.0):
     """The real loop through restarts. Each run is a dict of _drive_loop
     arguments (`rollup`, `cycles`, and any others; `interval` defaults to the
     real 120 s). Each runs a fresh poller (_process) on its own clock, started
-    `gap` s after the previous run's last read, against ONE alert-latch file.
+    `gap` s after the previous run's last read, against ONE alert-latch file,
+    on one host boot unless a run gives its own `boot` (a host reboot).
     A notify_retry module a later run is given (`retry`) is emptied before it:
     the queue dies with the process. Returns ([(publishes, timeline of (cycle,
     title, message), the latch file's content after that run or None) per
@@ -2781,6 +2799,77 @@ def test_run_dates_a_saved_alert_by_the_wall_clock() -> None:
         check(f"aged {gap // day} d: precondition — run 1 leaves one CRITICAL out",
               _gw_of(r1) == [(8, _GW_CRIT)])
         check(f"aged {gap // day} d: after the restart -> {want} ({_gw_of(r2)})", _gw_of(r2) == want)
+
+
+def test_after_a_host_reboot_an_alert_still_out_is_raised_again() -> None:
+    """Home Assistant keeps notifications in memory, so a host reboot empties
+    its drawer: the card the previous process showed is gone. Each latch is
+    saved with the host's boot id, and one raised on an earlier boot is not
+    restored. A device still down after the reboot is raised again as one
+    down at the start, once: the gateway, or the cordless's registration, on
+    the second sample read after the grace (600 s). A device already back
+    posts nothing, as no card is left to close. Before, the restored latch took
+    the condition for an alert already out, and no card came for as long as
+    the device stayed down."""
+    import io
+    cases = (("gateway", _run(lambda k: k >= 2, cycles=9),
+              _run(lambda k: True, cycles=30, boot=_BOOT_B),
+              _run(lambda k: False, cycles=8, boot=_BOOT_B), _GW_CRIT, _gw_of),
+             ("cordless", _run(lambda k: False, cycles=9, cordless_in=lambda k: k >= 2),
+              _run(lambda k: False, cycles=30, cordless_in=lambda k: True, boot=_BOOT_B),
+              _run(lambda k: False, cycles=8, boot=_BOOT_B), _CL_CRIT, _cl_of))
+    for device, life_1, still_down, back, crit, of in cases:
+        err, real_err = io.StringIO(), sys.stderr
+        try:
+            sys.stderr = err
+            (r1, r2), _s = _lives(life_1, still_down)
+        finally:
+            sys.stderr = real_err
+        saved_1 = (r1[2] or {}).get(device) or {}
+        check(f"host reboot {device}: precondition — one CRITICAL out, saved as shown on the "
+              f"first boot ({saved_1})",
+              of(r1) == [(8, crit)] and saved_1.get("announced") is True
+              and saved_1.get("boot") == _BOOT_A)
+        check(f"host reboot {device}: still down -> raised again, once, on the second sample "
+              f"read after the grace ({of(r2)})", of(r2) == [(5, crit)])
+        saved_2 = (r2[2] or {}).get(device) or {}
+        check(f"host reboot {device}: the new card is saved on the new boot ({saved_2})",
+              saved_2.get("announced") is True and saved_2.get("boot") == _BOOT_B)
+        log = err.getvalue()
+        check(f"host reboot {device}: one line says why it was not restored, with no value "
+              f"({log!r})",
+              log.count("\n") == 1 and f"saved {device} alert" in log and "host reboot" in log
+              and _BOOT_A not in log and _BOOT_B not in log)
+        (r1, r2), _s = _lives(life_1, back)
+        check(f"host reboot {device}: already back -> nothing; no recovery for a card that is "
+              f"gone ({of(r2)})", of(r2) == [])
+    root = _SRC.parents[5]
+    flat = lambda p: " ".join(p.read_text(encoding="utf-8").split())  # noqa: E731
+    page = flat(root / "docs" / "reference" / "health-monitoring.md")
+    check("host reboot: the health monitoring page says such an alert is not restored, and "
+          "no longer that a reboot's recovery replaces nothing",
+          "Not restored: an alert raised before a host reboot" in page
+          and "replaces nothing" not in page)
+    check("host reboot: so does the changelog",
+          "or raised before a host reboot" in flat(root / "CHANGELOG.md"))
+
+
+def test_with_no_boot_id_to_read_a_restart_restores_the_alert_as_before() -> None:
+    """Where the boot id cannot be read (no such file here), at the restart or
+    when the alert was saved, a host reboot cannot be told from an add-on
+    restart, and a shown alert is restored as before: its recovery closes the
+    card, and the same condition raises no second card."""
+    for b1, b2 in ((None, None), (None, _BOOT_B), (_BOOT_A, None)):
+        life_1 = _run(lambda k: k >= 2, cycles=9, boot=b1)
+        (r1, r2), _s = _lives(life_1, _run(lambda k: False, cycles=6, boot=b2))
+        saved = (r1[2] or {}).get("gateway") or {}
+        check(f"boot {b1} -> {b2}: precondition — one CRITICAL out, saved with the boot read "
+              f"({saved})", _gw_of(r1) == [(8, _GW_CRIT)] and saved.get("boot") == b1
+              and "boot" in saved)
+        check(f"boot {b1} -> {b2}: restored, and closed by its recovery ({_gw_of(r2)})",
+              _gw_of(r2) == [(3, _GW_OK)])
+        (r1, r2), _s = _lives(life_1, _run(lambda k: True, cycles=8, boot=b2))
+        check(f"boot {b1} -> {b2}: still down, no second card ({_gw_of(r2)})", _gw_of(r2) == [])
 
 
 def test_a_restart_while_the_gateway_is_still_down_raises_no_second_card() -> None:
@@ -3056,7 +3145,8 @@ def test_the_alert_latches_round_trip_and_degrade_safely() -> None:
             "dated by a string": {"at": "x"}, "dated by a bool": {"at": True},
             "older than 7 days": {"at": int(now) - 7 * 86400 - 1},
             "reasons not a list": {"reasons": "x"}, "a reason not text": {"reasons": [1]},
-            "call end not a number": {"call_end": "x"}, "call end a bool": {"call_end": True}}
+            "call end not a number": {"call_end": "x"}, "call end a bool": {"call_end": True},
+            "boot not text": {"boot": 1}}
     for why, bad in junk.items():
         err = io.StringIO()
         try:
@@ -3100,7 +3190,7 @@ def test_the_alert_latches_round_trip_and_degrade_safely() -> None:
     rec = dh.latch_record(st)
     check(f"record: exactly the latch, no counters ({rec})",
           rec == {"alerted": "critical", "reasons": [dh.UNREGISTERED_REASON],
-                  "at": int(now - 5.5), "announced": True, "call_end": None})
+                  "at": int(now - 5.5), "announced": True, "call_end": None, "boot": None})
     mos = dh.latch_record({**st, "alerted": "degraded",
                            "reasons": [f"{dh.MOS_REASON} (MOS 2.2, 30s ago)"]})
     check("record: a poor call alone keeps the call it rests on", mos["call_end"] == now - 400)
@@ -3118,6 +3208,51 @@ def test_the_alert_latches_round_trip_and_degrade_safely() -> None:
           and "sample" not in restored)
     check("restore: run() loads the latches at its start",
           "load_alert_latches(" in __import__("inspect").getsource(dh.run))
+
+
+def test_the_boot_id_is_read_safely_and_a_latch_is_restored_only_on_its_own_boot(tmp_path) -> None:
+    import io
+    check("boot id: the kernel's", dh.BOOT_ID_PATH == "/proc/sys/kernel/random/boot_id")
+    f = tmp_path / "boot_id"
+    f.write_text(_BOOT_A + "\n", encoding="ascii")
+    check("boot id: the file's id, without its newline", dh.read_boot_id(str(f)) == _BOOT_A)
+    for text in ("", "\n", "  \n"):
+        f.write_text(text, encoding="ascii")
+        check(f"boot id: {text!r} is unknown", dh.read_boot_id(str(f)) is None)
+    f.write_bytes(b"\xff\xfe\n")
+    check("boot id: undecodable is unknown, never raises", dh.read_boot_id(str(f)) is None)
+    check("boot id: no such file is unknown, never raises",
+          dh.read_boot_id(str(tmp_path / "missing")) is None)
+    check("boot id: a directory is unknown, never raises", dh.read_boot_id(str(tmp_path)) is None)
+    now = 1794103912.0
+    p = str(tmp_path / "devhealth-alerts.json")
+    gw = {"alerted": "critical", "reasons": ["all 8 gateway ports down"], "at": int(now) - 60,
+          "announced": True, "call_end": None, "boot": _BOOT_A}
+    cl = {**gw, "reasons": [dh.UNREGISTERED_REASON], "boot": _BOOT_B}
+    dh.save_alert_latches({"gateway": gw, "cordless": cl}, p)
+    err, real_err = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = err
+        got = dh.load_alert_latches(p, now, boot=_BOOT_A)
+    finally:
+        sys.stderr = real_err
+    log = err.getvalue()
+    check(f"boot: raised on this boot, restored; on another, not ({got})", got == {"gateway": gw})
+    check(f"boot: ...logged once, naming the device and no boot id ({log!r})",
+          log.count("\n") == 1 and "saved cordless alert" in log and "host reboot" in log
+          and _BOOT_A not in log and _BOOT_B not in log)
+    check("boot: no boot id now -> both restored, as before",
+          dh.load_alert_latches(p, now, boot=None) == {"gateway": gw, "cordless": cl})
+    dh.save_alert_latches({"gateway": {**gw, "boot": None}}, p)
+    check("boot: one saved with no boot id is restored on any boot",
+          dh.load_alert_latches(p, now, boot=_BOOT_B) == {"gateway": {**gw, "boot": None}})
+    st = {"alerted": "critical", "level": "critical", "reasons": ["x"], "at": now,
+          "announced": True}
+    check("record: an alert is saved with the boot it was raised on",
+          dh.latch_record(st, _BOOT_A)["boot"] == _BOOT_A)
+    check("record: no alert out is the cleared latch, with no boot",
+          dh.latch_record({}, _BOOT_A)
+          == {"alerted": None, "reasons": [], "at": None, "announced": False, "call_end": None})
 
 
 def test_keeping_the_latches_saves_changes_and_logs_each_run_of_failures_once() -> None:
@@ -3200,6 +3335,21 @@ def test_the_latch_file_is_written_on_each_change_and_only_then() -> None:
           [(c, t) for c, t, _m in tl] == [(8, _GW_CRIT), (10, _GW_OK)])
     check(f"writes: two writes in twelve cycles, the alert and its clearing ({len(writes)})",
           [w["gateway"]["alerted"] for w in writes] == ["critical", None])
+    # A restart that restores the alert takes it as already saved: nothing is
+    # written while the gateway stays down, then one write for its recovery.
+    clk = _Clock()
+    _drive_loop(_gw_sampled(lambda k: k >= 2), 9, interval=120, clock=clk,
+                env={"CORDLESS_EXT": "19"}, mod=_process(), state_path=state)
+    mod, writes, tl = _process(), [], []
+    real_save = mod.save_alert_latches             # counting reads both names afresh
+    mod.save_alert_latches = counting
+    _drive_loop(_gw_sampled(lambda k: k < 3), 11, interval=120, env={"CORDLESS_EXT": "19"},
+                clock=_Clock(wall=clk.time() + 60, mono=clk.mono + 60), timeline=tl, mod=mod,
+                state_path=state)
+    check("writes: precondition — restored while still down, then one recovery",
+          [(c, t) for c, t, _m in tl] == [(8, _GW_OK)])
+    check(f"writes: after the restart, one write, the clearing ({writes})",
+          [w["gateway"]["alerted"] for w in writes] == [None])
 
 
 def test_a_restored_alert_closes_at_the_first_reading_that_can_clear_it_at_every_phase() -> None:

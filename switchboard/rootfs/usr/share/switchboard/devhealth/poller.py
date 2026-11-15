@@ -1511,21 +1511,27 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 #
 # Saved per device: the level alerted, its reasons (the cordless's hold rules
 # and clear_is_fresh read them), when it was raised, whether its card was
-# SHOWN, and, for a poor call alone, the end of the call it rests on
-# (clear_is_fresh tells a lapse from a recovery by it). A latch is restored
-# only when its card was shown: Home Assistant accepted it, or notify_retry
-# posted it later (run() asks notify_retry.status after each flush). One raised
-# with device_health_alerts off, refused and lost with the process before its
-# retry, or given up on by the retry, is not "already out": the restarted
-# process raises the condition again if it persists. No counter is saved
-# (cycles, the gateway's last sample fed, the registration count, the down
-# runs), so counting starts over.
+# SHOWN, the host boot it was raised on, and, for a poor call alone, the end
+# of the call it rests on (clear_is_fresh tells a lapse from a recovery by
+# it). A latch is restored only when its card was shown: Home Assistant
+# accepted it, or notify_retry posted it later (run() asks notify_retry.status
+# after each flush). One raised with device_health_alerts off, refused and
+# lost with the process before its retry, or given up on by the retry, is not
+# "already out": the restarted process raises the condition again if it
+# persists. No counter is saved (cycles, the gateway's last sample fed, the
+# registration count, the down runs), so counting starts over.
 #
-# After a HOST reboot Home Assistant has already lost the old card (Core keeps
-# persistent notifications in memory), so a restored latch posts a recovery
-# for a card that is gone. The recovery is still true; rtpmon's latch does the
-# same.
+# ★ NOR IS ONE RAISED BEFORE A HOST REBOOT. Home Assistant Core keeps
+# persistent notifications in memory, and it restarted with the host, so the
+# card is gone. Restored, the latch took a device still down for an alert
+# already out and no card came for as long as it stayed down; one already
+# back got a recovery for a card nobody held. The kernel's boot id
+# (BOOT_ID_PATH; a container shares the host kernel's) is saved with each
+# alert, and a latch from another boot is not restored. Where it cannot be
+# read, now or when the alert was saved, a reboot cannot be told from an
+# add-on restart, and the latch is judged as before.
 ALERT_STATE_MAX_AGE_S = 7 * 86400
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
 _LATCH_DEVICES = ("cordless", "gateway")
 
@@ -1538,9 +1544,20 @@ def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def latch_record(st: dict) -> dict:
-    """What is saved for one device's alert state `st` (see above): the
-    cleared latch when no alert is out."""
+def read_boot_id(path: str | None = None) -> str | None:
+    """The host's boot id (BOOT_ID_PATH), or None when it cannot be read.
+    Never raises."""
+    try:
+        with open(path or BOOT_ID_PATH, encoding="ascii") as fh:
+            return fh.read().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def latch_record(st: dict, boot: str | None = None) -> dict:
+    """What is saved for one device's alert state `st` (see above), raised on
+    host boot `boot` (None: unknown): the cleared latch when no alert is
+    out."""
     alerted = st.get("alerted")
     if alerted not in ALERT_LEVELS:
         return {"alerted": None, "reasons": [], "at": None, "announced": False, "call_end": None}
@@ -1550,7 +1567,7 @@ def latch_record(st: dict) -> dict:
     mos_only = all(r.startswith(MOS_REASON) for r in reasons)
     return {"alerted": alerted, "reasons": reasons, "at": int(at) if _number(at) else None,
             "announced": bool(st.get("announced")),
-            "call_end": end if mos_only and _number(end) else None}
+            "call_end": end if mos_only and _number(end) else None, "boot": boot}
 
 
 def _latch_trusted(rec: dict, now: float) -> bool:
@@ -1558,16 +1575,19 @@ def _latch_trusted(rec: dict, now: float) -> bool:
     return (rec.get("alerted") in ALERT_LEVELS and rec.get("announced") is True
             and _number(at) and now - at <= ALERT_STATE_MAX_AGE_S
             and isinstance(reasons, list) and all(isinstance(r, str) for r in reasons)
-            and (end is None or _number(end)))
+            and (end is None or _number(end))
+            and (rec.get("boot") is None or isinstance(rec.get("boot"), str)))
 
 
-def load_alert_latches(path: str | None = None, now: float | None = None) -> dict:
+def load_alert_latches(path: str | None = None, now: float | None = None,
+                       boot: str | None = None) -> dict:
     """{device: saved latch} for each device whose alert a previous process
-    left out and that can be trusted: alerted at a level, its card shown, and
-    raised no more than ALERT_STATE_MAX_AGE_S ago. Never raises. A missing
-    file, or a device with no alert out, is no latch, silently; a corrupt file
-    or an untrusted latch is none either, with one stderr line and no
-    values."""
+    left out and that can be trusted: alerted at a level, its card shown,
+    raised no more than ALERT_STATE_MAX_AGE_S ago, and not on a host boot
+    other than `boot` (the current one; None, or none saved: not compared).
+    Never raises. A missing file, or a device with no alert out, is no latch,
+    silently; a corrupt file or an untrusted latch is none either, with one
+    stderr line and no values."""
     try:
         with open(path or _alert_state_path(), encoding="utf-8") as fh:
             data = json.load(fh)
@@ -1585,11 +1605,14 @@ def load_alert_latches(path: str | None = None, now: float | None = None) -> dic
         rec = data.get(device)
         if rec is None or (isinstance(rec, dict) and rec.get("alerted") is None):
             continue
-        if isinstance(rec, dict) and _latch_trusted(rec, now):
-            out[device] = rec
-        else:
+        if not (isinstance(rec, dict) and _latch_trusted(rec, now)):
             sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
                              "not shown, undated, malformed or more than 7 days old\n")
+        elif boot is not None and rec.get("boot") not in (None, boot):
+            sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
+                             "raised before a host reboot, which cleared its card\n")
+        else:
+            out[device] = rec
     return out
 
 
@@ -1618,12 +1641,13 @@ def restore_latch(st: dict, rec: dict) -> None:
         st["mos_call_end"] = float(rec["call_end"])
 
 
-def keep_alert_latches(written: dict, cst: dict, gst: dict) -> None:
-    """Save the latches when they differ from those last saved
-    (written["latches"], updated in place). A failed save is tried again the
-    next cycle, and logged once until one succeeds; it never stops the loop."""
+def keep_alert_latches(written: dict, cst: dict, gst: dict, boot: str | None = None) -> None:
+    """Save the latches, on host boot `boot`, when they differ from those last
+    saved (written["latches"], updated in place). A failed save is tried again
+    the next cycle, and logged once until one succeeds; it never stops the
+    loop."""
     try:
-        latches = {"cordless": latch_record(cst), "gateway": latch_record(gst)}
+        latches = {"cordless": latch_record(cst, boot), "gateway": latch_record(gst, boot)}
         if latches == written.get("latches"):
             return
         ok = save_alert_latches(latches)
@@ -1706,18 +1730,20 @@ def run() -> None:
     print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
           f"api={'yes' if cordless_pw else 'no-password'} "
           f"gateway_ports={','.join(gw_exts)} every {interval}s", flush=True)
-    # An alert a previous process left out, its card shown, is restored (see
-    # load_alert_latches): its recovery still closes the card, and the same
-    # condition, or a milder one, is not raised again.
-    restored = load_alert_latches(now=time.time())
+    # An alert a previous process left out on this host boot, its card shown,
+    # is restored (see load_alert_latches): its recovery still closes the
+    # card, and the same condition, or a milder one, is not raised again.
+    boot = read_boot_id()
+    restored = load_alert_latches(now=time.time(), boot=boot)
     for device, st in (("cordless", cst), ("gateway", gst)):
         if device in restored:
             restore_latch(st, restored[device])
-            print(f"[devhealth] {device} {st['alerted']} alert raised before the restart "
-                  "is still out", flush=True)
+            print(f"[devhealth] restored the {device} {st['alerted']} alert raised before "
+                  "the restart", flush=True)
     # The latches as last saved, and the devices whose refused card
     # notify_retry holds.
-    written = {"latches": {"cordless": latch_record(cst), "gateway": latch_record(gst)}}
+    written = {"latches": {"cordless": latch_record(cst, boot),
+                           "gateway": latch_record(gst, boot)}}
     kept: dict = {}
     while True:
         # First, whatever Home Assistant refused on an earlier cycle. An alert
@@ -1871,7 +1897,7 @@ def run() -> None:
         except Exception as e:
             print(f"[devhealth] gateway poll error: {e}", flush=True)
         # Whatever this cycle changed in either latch, saved before the sleep.
-        keep_alert_latches(written, cst, gst)
+        keep_alert_latches(written, cst, gst, boot)
         time.sleep(interval)
 
 

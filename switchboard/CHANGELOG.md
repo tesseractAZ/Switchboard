@@ -21,10 +21,12 @@ Recent releases. Releases up to 0.109.0 are in the
   and outage alerts named the same cause in all; before, they differed in
   198, each a cordless dropping one sample after the ports.
 - Gateway and cordless alerts survive an add-on restart. Each is kept in
-  `/data/state` with whether its card was shown; a shown alert is not raised
-  again, and its recovery still comes (a gateway already back clears on the
-  first sample read after the grace, 360 s after the start). One not shown,
-  or raised over 7 days earlier, is raised again if the condition persists.
+  `/data/state` with whether its card was shown and the host boot; a shown
+  alert is not raised again, and its recovery still comes (a gateway already
+  back clears on the first sample read after the grace, 360 s after the
+  start). One not shown, raised over 7 days earlier, or raised before a host
+  reboot, which clears Home Assistant's cards, is raised again if the
+  condition persists.
 
 ## 0.119.0
 
