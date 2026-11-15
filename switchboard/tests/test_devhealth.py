@@ -323,7 +323,8 @@ def _drive_gateway(rollup_at, cycles, interval=30, clock=None):
 
 
 def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None,
-                contact_at=None, timeline=None):
+                contact_at=None, timeline=None, mod=None, state_path=None, notify_ok=True,
+                retry=None):
     """_drive_gateway's loop, returning every publish as (entity, state, attrs)
     plus the notifications. `env` is applied after the cordless is disabled
     (so CORDLESS_EXT can be set with no IP to probe), and `probe`, when given,
@@ -331,9 +332,20 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     `contact_at(cycle, clock)`, when given, is the contact_ip rtpmon publishes
     on the cordless's own link sensor (None: the attribute is absent, as for
     an unregistered handset). `timeline`, a list, also receives each
-    notification as (cycle, title, message), the cycle counted from 0."""
+    notification as (cycle, title, message), the cycle counted from 0.
+
+    `mod` is the poller to run (default `dh`; a restart runs a fresh copy,
+    _process). `state_path` is its alert-latch file: by default each call gets
+    a fresh one, so one test's alerts never reach the next test's run().
+    `notify_ok(cycle, title)`, or a bool, is what Home Assistant answers each
+    post (every post is recorded either way). `retry`, a notify_retry module,
+    is what the poller imports by that name for this run (False: no such
+    module, so nothing is kept); without it the import resolves as it
+    otherwise would."""
     import datetime as _dt
+    import tempfile
     import types
+    dh = mod or globals()["dh"]
     clk = clock or _Clock()
     sets, notes = [], []
     n = {"c": 0}
@@ -344,7 +356,7 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
         notes.append((title or "", msg))
         if timeline is not None:
             timeline.append((n["c"], title or "", msg))
-        return True
+        return bool(notify_ok(n["c"], title or "") if callable(notify_ok) else notify_ok)
     ha.notify = _notify
 
     def _get(eid):
@@ -377,17 +389,22 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
     fake_time.time, fake_time.monotonic, fake_time.sleep = clk.time, clk.monotonic, _sleep
     fake_datetime = types.SimpleNamespace(datetime=_Now, timezone=_dt.timezone)
     real_ha = sys.modules.get("ha_client")
+    real_retry = sys.modules.get("notify_retry", "absent")
     real_env = dict(os.environ)
     real_probe = dh.probe_cordless
     try:
         for k in ("CORDLESS_EXT", "GATEWAY_PORTS", "DEVICE_HEALTH_ALERTS"):
             os.environ.pop(k, None)
         os.environ.update({"CORDLESS_IP": "", "CORDLESS_PASSWORD": "",
-                           "DEVICE_HEALTH_INTERVAL": str(interval)})
+                           "DEVICE_HEALTH_INTERVAL": str(interval),
+                           "SWITCHBOARD_DEVHEALTH_ALERTS": state_path or os.path.join(
+                               tempfile.mkdtemp(prefix="sb-devhealth-"), "devhealth-alerts.json")})
         os.environ.update(env or {})
         if probe is not None:
             dh.probe_cordless = probe
         sys.modules["ha_client"] = ha
+        if retry is not None:
+            sys.modules["notify_retry"] = retry or None
         dh.time, dh.datetime = fake_time, fake_datetime
         try:
             dh.run()
@@ -400,6 +417,11 @@ def _drive_loop(rollup_at, cycles, interval=30, clock=None, env=None, probe=None
             sys.modules.pop("ha_client", None)
         else:
             sys.modules["ha_client"] = real_ha
+        if retry is not None:
+            if real_retry == "absent":
+                sys.modules.pop("notify_retry", None)
+            else:
+                sys.modules["notify_retry"] = real_retry
         os.environ.clear()
         os.environ.update(real_env)
     return sets, notes
@@ -2633,6 +2655,547 @@ def test_devhealth_and_rtpmon_agree_on_the_cause_of_random_monotone_outages() ->
     check("agree: precondition — the cases include the cordless one sample after the "
           f"ports, the outage beginning with them ({lagged})", lagged >= 5)
     check(f"agree: both name the same cause for every outage ({disagree[:2]})", not disagree)
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.1: the gateway and cordless alert latches survive a restart. They were
+# kept in run()'s memory only, so a card the previous process raised was never
+# closed when the device recovered before the new process raised an alert of
+# its own: its first 'ok' found nothing alerted and posted no recovery. The
+# gateway's startup grace (no reading inside it counts) widened that window.
+# --------------------------------------------------------------------------- #
+_CL_CRIT = "Switchboard: cordless CRITICAL"
+_CL_DEG = "Switchboard: cordless degraded"
+_CL_OK = "Switchboard: cordless OK"
+_CL_LAPSED = "Switchboard: cordless alert lapsed"
+_processes = {"n": 0}
+
+
+def _process():
+    """A fresh copy of the poller, module state and all: what a restarted
+    add-on runs. Loaded under its own name and not left in sys.modules, and
+    the webui path its import adds is taken back out."""
+    _processes["n"] += 1
+    name = f"devhealth_poller_process_{_processes['n']}"
+    path_before = list(sys.path)
+    try:
+        return SourceFileLoader(name, str(_SRC)).load_module()
+    finally:
+        sys.path[:] = path_before
+        sys.modules.pop(name, None)
+
+
+def _state_file():
+    import tempfile
+    return os.path.join(tempfile.mkdtemp(prefix="sb-devhealth-"), "devhealth-alerts.json")
+
+
+def _lives(*runs, state=None, gap=60.0):
+    """The real loop through restarts. Each run is a dict of _drive_loop
+    arguments (`rollup`, `cycles`, and any others; `interval` defaults to the
+    real 120 s). Each runs a fresh poller (_process) on its own clock, started
+    `gap` s after the previous run's last read, against ONE alert-latch file.
+    A notify_retry module a later run is given (`retry`) is emptied before it:
+    the queue dies with the process. Returns ([(publishes, timeline of (cycle,
+    title, message), the latch file's content after that run or None) per
+    run], the latch file)."""
+    state = state or _state_file()
+    out, clk = [], None
+    for r in runs:
+        r = dict(r)
+        r.setdefault("interval", 120)
+        if out and r.get("retry"):
+            r["retry"].clear()
+        clk = _Clock() if clk is None else _Clock(wall=clk.time() + gap, mono=clk.mono + gap)
+        tl: list = []
+        sets, _n = _drive_loop(r.pop("rollup"), r.pop("cycles"), clock=clk, timeline=tl,
+                               mod=_process(), state_path=state, **r)
+        out.append((sets, tl, _saved(state) if os.path.exists(state) else None))
+    return out, state
+
+
+def _run(ports_in, cycles, **kw):
+    """A run for _lives over rtpmon's 300 s rollup (_gw_sampled), cordless_ext
+    19 with nothing to probe unless `env`/`probe` say otherwise."""
+    rollup_kw = {k: kw.pop(k) for k in ("offset", "stale", "stamped", "cordless_in", "period")
+                 if k in kw}
+    env = {"CORDLESS_EXT": "19", **kw.pop("env", {})}
+    return dict(rollup=_gw_sampled(ports_in, **rollup_kw), cycles=cycles, env=env, **kw)
+
+
+def _gw_of(life):
+    return [(c, t) for c, t, _m in life[1] if "gxw gateway" in t]
+
+
+def _cl_of(life):
+    return [(c, t) for c, t, _m in life[1] if "cordless" in t]
+
+
+def _saved(state):
+    with open(state, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_a_restored_gateway_alert_is_closed_by_its_recovery_after_the_grace() -> None:
+    """The GXW is down from sample 2: CRITICAL on the first read of sample 3
+    (960 s). The add-on restarts with the alert out and the gateway back. No
+    reading inside the 360 s grace counts, and the first one after it (360 s,
+    a new sample) reads ok: that closes the card. Before, nothing did."""
+    (r1, r2), state = _lives(_run(lambda k: k >= 2, cycles=9), _run(lambda k: False, cycles=6))
+    check("restored gw: precondition — run 1 leaves one CRITICAL out", _gw_of(r1) == [(8, _GW_CRIT)])
+    gw = (r1[2] or {}).get("gateway") or {}
+    check(f"restored gw: on disk, critical, shown, dated, with its reasons ({gw})",
+          gw.get("alerted") == "critical" and gw.get("announced") is True
+          and isinstance(gw.get("at"), int)
+          and any("all 8 gateway ports down" in r for r in gw.get("reasons") or []))
+    check("restored gw: nothing inside the grace, then one recovery on the first read after it",
+          _gw_of(r2) == [(3, _GW_OK)])
+    check("restored gw: the recovery is a recovery",
+          [m for _c, t, m in r2[1] if t == _GW_OK] == ["GXW gateway recovered — back to normal."])
+    check("restored gw: the latch on disk is cleared", _saved(state)["gateway"]["alerted"] is None)
+    states = [st for e, st, _a in r2[0] if e == "sensor.switchboard_gateway_health"]
+    check("restored gw: the sensor is published every cycle, ok", states == ["ok"] * 6)
+
+
+def test_a_restart_while_the_gateway_is_still_down_raises_no_second_card() -> None:
+    """Still down after the restart: the two post-grace samples (360 s and
+    600 s) read critical again, and the alert already out is not raised a
+    second time. Sample 3 reads ok: one recovery (960 s). A third run after
+    that starts clean: a new outage alerts as usual."""
+    (r1, r2, r3), _s = _lives(_run(lambda k: k >= 2, cycles=9),
+                              _run(lambda k: k < 3, cycles=11),
+                              _run(lambda k: k >= 2, cycles=9))
+    check("still down: precondition — run 1 leaves one CRITICAL out", _gw_of(r1) == [(8, _GW_CRIT)])
+    check("still down: no second CRITICAL after the restart, and the recovery comes",
+          _gw_of(r2) == [(8, _GW_OK)])
+    check("still down: after the recovery a new outage alerts again", _gw_of(r3) == [(8, _GW_CRIT)])
+
+
+def test_a_restored_degraded_gateway_alert_re_alerts_only_on_a_worsening() -> None:
+    """A partial outage's 'degraded' is out at the restart. The same two ports
+    still down raise no second 'degraded'; every port down on two samples
+    (3 and 4) is a worsening and raises one CRITICAL, on the first read of
+    sample 4 (1200 s)."""
+    two = ["11", "12"]
+    (r1, r2), _s = _lives(_run(lambda k: two if k >= 2 else [], cycles=9),
+                          _run(lambda k: two if k < 3 else True, cycles=11))
+    check("worsening: precondition — run 1 leaves one 'degraded' out", _gw_of(r1) == [(8, _GW_DEG)])
+    check("worsening: no second 'degraded'; one CRITICAL for the worsening",
+          _gw_of(r2) == [(10, _GW_CRIT)])
+
+
+def test_a_restored_cordless_registration_alert_is_closed_when_it_re_registers() -> None:
+    """The cordless is unregistered from sample 2: CRITICAL on the first read
+    of sample 3 (960 s). After the restart the previous rtpmon's rollup is
+    still there for 200 s (measured before the start, so unknown, and the
+    alert is held); the first new sample shows it registered and closes the
+    card on the first read of it (240 s)."""
+    (r1, r2), state = _lives(_run(lambda k: False, cycles=9, cordless_in=lambda k: k >= 2),
+                             _run(lambda k: False, cycles=5, offset=200.0,
+                                  cordless_in=lambda k: False))
+    check("restored cordless: precondition — run 1 leaves one CRITICAL out",
+          _cl_of(r1) == [(8, _CL_CRIT)])
+    cl = (r1[2] or {}).get("cordless") or {}
+    check(f"restored cordless: on disk with the registration reason ({cl})",
+          cl.get("alerted") == "critical" and cl.get("announced") is True
+          and cl.get("reasons") == [dh.UNREGISTERED_REASON])
+    check("restored cordless: one recovery, on the first read of a sample showing it registered",
+          _cl_of(r2) == [(2, _CL_OK)])
+    check("restored cordless: the recovery is a recovery",
+          [m for _c, t, m in r2[1] if t == _CL_OK] == ["Cordless recovered — back to normal."])
+    # Still unregistered after the restart (samples 0-2), registered from 3:
+    # no second CRITICAL from the two post-grace samples (360 s, 600 s).
+    (r1, r2), _s = _lives(_run(lambda k: False, cycles=9, cordless_in=lambda k: k >= 2),
+                          _run(lambda k: False, cycles=9, cordless_in=lambda k: k < 3))
+    check("restored cordless: still unregistered -> no second CRITICAL; the recovery on sample 3",
+          _cl_of(r2) == [(8, _CL_OK)])
+    held = [(st, a) for e, st, a in r2[0] if e == "sensor.switchboard_cordless_health"]
+    check("restored cordless: with nothing to probe, each cycle below the registration gate "
+          "publishes the restored alert's level and reason, not an unmeasured 'ok'",
+          len(held) == 9 and all(_held(h, "critical", "not registered") for h in held[:8])
+          and held[8][0] == "ok")
+
+
+def test_the_cordless_hold_works_from_a_restored_alert() -> None:
+    """A handset with an IP whose LAN probe reads healthy throughout. The
+    registration CRITICAL is out at the restart. A blind read (no usable
+    rollup) cannot say it can ring, and a sample still showing it unregistered
+    holds the alert too, though inside the grace it counts for nothing and the
+    level reads ok: both rules work from the restored reasons. The recovery
+    comes on the first read of a sample that shows it registered (360 s)."""
+    lan = {"env": {"CORDLESS_IP": "192.0.2.1"}, "probe": lambda *a, **k: dict(_HEALTHY_SNAP)}
+    (r1, r2), _s = _lives(_run(lambda k: False, cycles=9, cordless_in=lambda k: k >= 2, **lan),
+                          _run(lambda k: False, cycles=5, cordless_in=lambda k: k == 0,
+                               stale=lambda c: c == 0, **lan))
+    check("hold: precondition — run 1 leaves the registration CRITICAL out",
+          _cl_of(r1) == [(8, _CL_CRIT)] and "not registered" in r1[1][-1][2])
+    regs = [a.get("sip_registered") for e, _st, a in r2[0] if e == "sensor.switchboard_cordless_health"]
+    check(f"hold: precondition — blind, then unregistered twice, then registered ({regs})",
+          regs == [None, False, False, True, True])
+    check("hold: neither the blind read nor the unregistered sample clears it; the registered "
+          "sample does", _cl_of(r2) == [(3, _CL_OK)])
+
+
+def _nr_copy(name):
+    nr = SourceFileLoader(name, str(_SRC.parents[1] / "webui" / "notify_retry.py")).load_module()
+    sys.modules.pop(name, None)
+    nr.clear()
+    return nr
+
+
+def test_a_refused_card_posted_by_its_retry_counts_as_shown_across_a_restart() -> None:
+    """Home Assistant refused the alert card; notify_retry kept it and the
+    next cycle's flush posted it, so the reader has it. The latch then says it
+    was shown, and the restarted process closes it."""
+    nr = _nr_copy("notify_retry_devhealth_latch")
+    # The gateway's recovery waits out the grace (360 s); the cordless's comes
+    # on the first read of a sample showing it registered (sample 0, at 0 s).
+    for device, life_1, life_2, crit, ok, closed in (
+            ("gateway", _run(lambda k: k >= 2, cycles=10), _run(lambda k: False, cycles=5),
+             _GW_CRIT, _GW_OK, 3),
+            ("cordless", _run(lambda k: False, cycles=10, cordless_in=lambda k: k >= 2),
+             _run(lambda k: False, cycles=5), _CL_CRIT, _CL_OK, 0)):
+        nr.clear()
+        life_1 = {**life_1, "retry": nr,
+                  "notify_ok": lambda c, t, crit=crit: not (c == 8 and t == crit)}
+        (r1, r2), _state = _lives(life_1, {**life_2, "retry": nr})
+        mine = [(c, t) for c, t, _m in r1[1] if t == crit]
+        check(f"late card {device}: precondition — refused at 960 s, posted late by the next "
+              "cycle's flush", mine == [(8, crit), (9, crit)] and "Sent late" in r1[1][-1][2])
+        check(f"late card {device}: once posted, the latch says it was shown",
+              (r1[2] or {}).get(device, {}).get("announced") is True)
+        got = [(c, t) for c, t, _m in r2[1] if t in (crit, ok)]
+        check(f"late card {device}: after the restart the recovery closes it ({got})",
+              got == [(closed, ok)])
+        # Refused again by the next cycle's retry (still kept), posted by the
+        # one after: shown from then.
+        nr.clear()
+        life_1 = {**life_1, "cycles": 11,
+                  "notify_ok": lambda c, t, crit=crit: not (c in (8, 9) and t == crit)}
+        (r1, r2), _state = _lives(life_1, {**life_2, "retry": nr})
+        check(f"late card {device}: precondition — refused at 960 and 1080 s, posted at 1200 s",
+              [(c, t) for c, t, _m in r1[1] if t == crit] == [(8, crit), (9, crit), (10, crit)])
+        check(f"late card {device}: a retry refused first, then posted, counts as shown",
+              (r1[2] or {}).get(device, {}).get("announced") is True
+              and [(c, t) for c, t, _m in r2[1] if t in (crit, ok)] == [(closed, ok)])
+        nr.clear()
+
+
+def test_a_card_the_retry_gave_up_on_is_raised_again_after_a_restart() -> None:
+    """A card notify_retry gave up on was never shown: the latch says so, a
+    restart does not take it for an alert already out, and the condition, if
+    it persists, is raised again (600 s). A gateway already back posts no
+    recovery for a card nobody saw."""
+    nr = _nr_copy("notify_retry_devhealth_dropped")
+    real_window = nr.RETRY_FOR
+    try:
+        nr.RETRY_FOR = -1                          # the first refused retry drops it
+        life_1 = _run(lambda k: k >= 2, cycles=10, retry=nr, notify_ok=False)
+        for life_2, want in ((_run(lambda k: True, cycles=6), [(5, _GW_CRIT)]),
+                             (_run(lambda k: False, cycles=6), [])):
+            nr.clear()
+            (r1, r2), _state = _lives(life_1, {**life_2, "retry": nr})
+            check("dropped: precondition — refused at 960 s, given up on at 1080 s",
+                  _gw_of(r1) == [(8, _GW_CRIT), (9, _GW_CRIT)])
+            check("dropped: the latch says it was not shown",
+                  (r1[2] or {}).get("gateway", {}).get("announced") is False)
+            check(f"dropped: after the restart -> {want}", _gw_of(r2) == want)
+    finally:
+        nr.RETRY_FOR = real_window
+        nr.clear()
+    # Refused with no notify_retry to keep it: lost at once, and still not
+    # shown on the cycles after.
+    (r1, r2), _state = _lives(_run(lambda k: k >= 2, cycles=11, retry=False, notify_ok=False),
+                              _run(lambda k: True, cycles=6, retry=False))
+    check("no retry module: precondition — refused once at 960 s, never posted again",
+          _gw_of(r1) == [(8, _GW_CRIT)])
+    check("no retry module: the latch says it was not shown, and it is raised again",
+          (r1[2] or {}).get("gateway", {}).get("announced") is False
+          and _gw_of(r2) == [(5, _GW_CRIT)])
+    # Still waiting for its retry when the process ends: not shown either.
+    (r1,), _state = _lives(_run(lambda k: k >= 2, cycles=10, retry=nr, notify_ok=False))
+    check("dropped: control — a card still kept at the end is unshown on disk",
+          nr.status("switchboard_gateway_health") == "pending"
+          and (r1[2] or {}).get("gateway", {}).get("alerted") == "critical"
+          and r1[2]["gateway"].get("announced") is False)
+    nr.clear()
+
+
+def test_an_alert_raised_with_alerts_off_is_raised_after_a_restart() -> None:
+    """device_health_alerts off: the latch is kept but not shown, also after
+    the cycles that follow (two here). Turning the option on takes a restart,
+    and then the condition is raised, not taken for an alert already out; a
+    device already back posts nothing."""
+    off = {"env": {"DEVICE_HEALTH_ALERTS": "false"}}
+    for life_2, want in ((_run(lambda k: True, cycles=6), [(5, _GW_CRIT)]),
+                         (_run(lambda k: False, cycles=6), [])):
+        (r1, r2), _state = _lives(_run(lambda k: k >= 2, cycles=11, **off), life_2)
+        check("muted: precondition — nothing shown", r1[1] == [])
+        check("muted: the latch is kept, and says it was not shown",
+              (r1[2] or {}).get("gateway", {}).get("alerted") == "critical"
+              and r1[2]["gateway"].get("announced") is False)
+        check(f"muted: after the restart with alerts on -> {want}", _gw_of(r2) == want)
+
+
+def test_a_poor_call_alert_that_lapses_after_a_restart_says_it_lapsed() -> None:
+    """Only a poor-call reason clears with nothing new measured: the call ages
+    out of the 15-minute window. The poor call ends at 150 s and raises
+    'degraded' at 360 s; the add-on restarts 100 s after the read at 960 s,
+    so the call is 910 s old at the restarted process's first read, out of
+    the window. The call the alert rests on is kept with the latch, so that
+    clear is still titled 'alert lapsed'; a newer good call that ended during
+    the restart is still a recovery."""
+    def lives(newer_at=None):
+        state, clk1 = _state_file(), _Clock()
+        stop = clk1.start_wall + 150
+
+        def probe(*a, **k):
+            now = clk.time()
+            if now < stop:
+                return dict(_HEALTHY_SNAP)
+            newer = newer_at is not None and now >= clk1.start_wall + newer_at
+            end = clk1.start_wall + newer_at if newer else stop
+            return {**_HEALTHY_SNAP, "last_mos": 4.4 if newer else 2.2,
+                    "last_mos_age_s": int(now - end), "last_mos_ledger_tx": "impaired"}
+        env = {"CORDLESS_EXT": "19", "CORDLESS_IP": "192.0.2.1"}
+        tl1, tl2 = [], []
+        clk = clk1
+        _drive_loop(_reg_rollup(False), 9, interval=120, clock=clk1, env=env, timeline=tl1,
+                    probe=probe, mod=_process(), state_path=state)
+        saved = _saved(state)["cordless"]
+        clk = _Clock(wall=clk1.time() + 100, mono=clk1.mono + 100)
+        _drive_loop(_reg_rollup(False), 2, interval=120, clock=clk, env=env, timeline=tl2,
+                    probe=probe, mod=_process(), state_path=state)
+        cl = lambda tl: [(c, t) for c, t, _m in tl if "cordless" in t]  # noqa: E731
+        return cl(tl1), saved, cl(tl2), stop
+    first, saved, second, stop = lives()
+    check("lapse: precondition — run 1 raises the poor-call 'degraded' and leaves it out",
+          first == [(3, _CL_DEG)])
+    check(f"lapse: the call it rests on is saved with it ({saved})",
+          isinstance(saved.get("call_end"), (int, float)) and abs(saved["call_end"] - stop) <= 1.5)
+    check(f"lapse: the restarted process's first read finds it aged out: 'alert lapsed', not "
+          f"'recovered' ({second})", second == [(0, _CL_LAPSED)])
+    _f, _s, second, _stop = lives(newer_at=1000)
+    check(f"lapse: control — a newer good call that ended during the restart is a recovery "
+          f"({second})", second == [(0, _CL_OK)])
+
+
+def test_the_alert_latches_round_trip_and_degrade_safely() -> None:
+    import io
+    import tempfile
+    d = tempfile.mkdtemp(prefix="sb-devhealth-")
+    p = os.path.join(d, "sub", "devhealth-alerts.json")
+    now = 1794103912.0
+    err, real_err = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = err
+        missing = dh.load_alert_latches(p, now)
+    finally:
+        sys.stderr = real_err
+    check("latch file: a missing file is no latch, silently", missing == {} and err.getvalue() == "")
+    gw = {"alerted": "critical", "reasons": ["all 8 gateway ports down — the GXW gateway likely "
+                                             "lost power or its uplink"],
+          "at": int(now) - 60, "announced": True, "call_end": None}
+    cl = {"alerted": "degraded", "reasons": [f"{dh.MOS_REASON} (MOS 2.2, 30s ago)"],
+          "at": int(now) - 60, "announced": True, "call_end": now - 90}
+    check("latch file: written, nested directory created",
+          dh.save_alert_latches({"gateway": gw, "cordless": cl}, p) is True)
+    check("latch file: no temporary file left beside it", os.listdir(os.path.dirname(p))
+          == ["devhealth-alerts.json"])
+    check("latch file: read back, both devices", dh.load_alert_latches(p, now)
+          == {"gateway": gw, "cordless": cl})
+    check("latch file: the bound is 7 days", dh.ALERT_STATE_MAX_AGE_S == 7 * 86400)
+    check("latch file: one just inside 7 days is trusted",
+          dh.save_alert_latches({"gateway": {**gw, "at": int(now) - 7 * 86400 + 60}}, p)
+          and "gateway" in dh.load_alert_latches(p, now))
+    check("latch file: one exactly 7 days old is still trusted",
+          dh.save_alert_latches({"gateway": {**gw, "at": int(now) - 7 * 86400}}, p)
+          and "gateway" in dh.load_alert_latches(p, int(now)))
+    # A save that fails part-way (json writes as it encodes, and a set cannot
+    # be encoded) leaves the previous file whole: it is written beside it and
+    # moved into place.
+    dh.save_alert_latches({"gateway": gw}, p)
+    check("latch file: a save that fails part-way returns False...",
+          dh.save_alert_latches({"gateway": {**gw, "reasons": {"not", "json"}}}, p) is False)
+    check("latch file: ...and the latch saved before it still reads back",
+          dh.load_alert_latches(p, now) == {"gateway": gw})
+    # Each junk record is otherwise trusted, so only the check it is named for
+    # can reject it, and the gateway beside it is still restored.
+    junk = {"not a level": {"alerted": "yes"}, "ok is not an alert": {"alerted": "ok"},
+            "not shown": {"announced": False}, "shown as a string": {"announced": "yes"},
+            "shown missing": {"announced": None}, "undated": {"at": None},
+            "dated by a string": {"at": "x"}, "dated by a bool": {"at": True},
+            "older than 7 days": {"at": int(now) - 7 * 86400 - 1},
+            "reasons not a list": {"reasons": "x"}, "a reason not text": {"reasons": [1]},
+            "call end not a number": {"call_end": "x"}, "call end a bool": {"call_end": True}}
+    for why, bad in junk.items():
+        err = io.StringIO()
+        try:
+            sys.stderr = err
+            dh.save_alert_latches({"gateway": gw, "cordless": {**cl, **bad}}, p)
+            got = dh.load_alert_latches(p, now)
+        finally:
+            sys.stderr = real_err
+        log = err.getvalue()
+        check(f"latch file: a cordless latch {why} is not trusted, the gateway's is",
+              got == {"gateway": gw})
+        check(f"latch file: ...logged once, naming the device and no value ({log!r})",
+              log.count("\n") == 1 and "cordless" in log and "MOS" not in log
+              and str(int(now) - 60) not in log)
+    for text in ("not json", "[1, 2]", '"a string"', ""):
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        err = io.StringIO()
+        try:
+            sys.stderr = err
+            got = dh.load_alert_latches(p, now)
+        finally:
+            sys.stderr = real_err
+        check(f"latch file: {text!r} reads as no latch, logged once",
+              got == {} and err.getvalue().count("\n") == 1)
+    err = io.StringIO()
+    try:
+        sys.stderr = err
+        dh.save_alert_latches({"gateway": dh.latch_record({}), "cordless": dh.latch_record({})}, p)
+        cleared = dh.load_alert_latches(p, now)
+    finally:
+        sys.stderr = real_err
+    check("latch file: a cleared latch is no latch, silently", cleared == {} and err.getvalue() == "")
+    check("latch file: an unwritable path returns False, never raises",
+          dh.save_alert_latches({"gateway": gw}, os.path.join(p, "under-a-file", "x.json")) is False)
+    # What is saved: the alert, its reasons, when, whether shown, and for a
+    # poor call alone the call it rests on. No counters.
+    st = {"alerted": "critical", "level": "critical", "cycles": 3, "sample": 1000.0,
+          "reasons": [dh.UNREGISTERED_REASON], "at": now - 5.5, "announced": True,
+          "mos_call_end": now - 400}
+    rec = dh.latch_record(st)
+    check(f"record: exactly the latch, no counters ({rec})",
+          rec == {"alerted": "critical", "reasons": [dh.UNREGISTERED_REASON],
+                  "at": int(now - 5.5), "announced": True, "call_end": None})
+    mos = dh.latch_record({**st, "alerted": "degraded",
+                           "reasons": [f"{dh.MOS_REASON} (MOS 2.2, 30s ago)"]})
+    check("record: a poor call alone keeps the call it rests on", mos["call_end"] == now - 400)
+    check("record: no alert out is the cleared latch",
+          dh.latch_record({"alerted": None, "level": "degraded", "reasons": ["x"], "at": now,
+                           "announced": True})
+          == {"alerted": None, "reasons": [], "at": None, "announced": False, "call_end": None})
+    restored = {}
+    dh.restore_latch(restored, cl)
+    check(f"restore: alerted, level, reasons and the call; counting starts over ({restored})",
+          restored.get("alerted") == restored.get("level") == "degraded"
+          and restored.get("cycles", 0) == 0 and restored.get("reasons") == cl["reasons"]
+          and restored.get("mos_call_end") == cl["call_end"]
+          and restored.get("announced") is True and restored.get("at") == cl["at"]
+          and "sample" not in restored)
+    check("restore: run() loads the latches at its start",
+          "load_alert_latches(" in __import__("inspect").getsource(dh.run))
+
+
+def test_keeping_the_latches_saves_changes_and_logs_each_run_of_failures_once() -> None:
+    import io
+    answers, saves = [], []
+    real_save = dh.save_alert_latches
+
+    def scripted(latches, path=None):
+        saves.append(latches["gateway"]["alerted"])
+        return answers.pop(0)
+    err, real_err = io.StringIO(), sys.stderr
+    written: dict = {"latches": {"cordless": dh.latch_record({}), "gateway": dh.latch_record({})}}
+    cst, gst = {}, {}
+    try:
+        sys.stderr, dh.save_alert_latches = err, scripted
+        dh.keep_alert_latches(written, cst, gst)
+        check("keep: nothing changed, nothing saved", saves == [])
+        gst.update(alerted="critical", reasons=["x"], at=1000.0, announced=True)
+        answers[:] = [False, False, True, False]
+        for _ in range(3):
+            dh.keep_alert_latches(written, cst, gst)
+        check("keep: a failed save is tried again each cycle until it succeeds",
+              saves == ["critical"] * 3 and written["latches"]["gateway"]["alerted"] == "critical")
+        dh.keep_alert_latches(written, cst, gst)
+        check("keep: once saved, an unchanged latch is not saved again", len(saves) == 3)
+        gst["alerted"] = None
+        dh.keep_alert_latches(written, cst, gst)
+        lines = err.getvalue().count("could not save")
+        check(f"keep: one line per run of failures: the first two, then the one after a "
+              f"success ({lines})", lines == 2 and len(saves) == 4)
+        gst.update(alerted="critical", at=float("inf"))       # int() of it raises
+        err.truncate(0), err.seek(0)
+        written["failing"] = False
+        dh.keep_alert_latches(written, cst, gst)
+        check("keep: a latch that cannot even be built is a failure, logged, never raised",
+              err.getvalue().count("could not save") == 1)
+    finally:
+        sys.stderr, dh.save_alert_latches = real_err, real_save
+
+
+def test_a_failed_latch_write_is_logged_once_and_the_loop_runs_on() -> None:
+    import io
+    import tempfile
+    blocker = os.path.join(tempfile.mkdtemp(prefix="sb-devhealth-"), "a-file")
+    with open(blocker, "w", encoding="utf-8") as fh:
+        fh.write("x")
+    err, real_err = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = err
+        tl: list = []
+        sets, _n = _drive_loop(_gw_sampled(lambda k: k in (2, 3)), 11, interval=120,
+                               env={"CORDLESS_EXT": "19"}, timeline=tl, mod=_process(),
+                               state_path=os.path.join(blocker, "devhealth-alerts.json"))
+    finally:
+        sys.stderr = real_err
+    log = err.getvalue()
+    check("write failure: the alert and its recovery still go out, every cycle runs",
+          [(c, t) for c, t, _m in tl] == [(8, _GW_CRIT), (10, _GW_OK)]
+          and len([e for e, _s, _a in sets if e == "sensor.switchboard_gateway_health"]) == 11)
+    # Two lines in all: the start could not read that path either (a file
+    # stands where its directory should be), and the saves at 960 s and
+    # 1080 s failed as one run of failures.
+    check(f"write failure: logged once for the run of failures, with no path or value ({log!r})",
+          log.count("could not save") == 1 and log.count("unreadable") == 1
+          and log.count("\n") == 2 and blocker not in log)
+
+
+def test_the_latch_file_is_written_on_each_change_and_only_then() -> None:
+    mod, state, writes = _process(), _state_file(), []
+    real_save = mod.save_alert_latches
+
+    def counting(latches, path=None):
+        writes.append(json.loads(json.dumps(latches)))
+        return real_save(latches, path)
+    mod.save_alert_latches = counting
+    tl: list = []
+    _drive_loop(_gw_sampled(lambda k: k in (2, 3)), 12, interval=120, env={"CORDLESS_EXT": "19"},
+                timeline=tl, mod=mod, state_path=state)
+    check("writes: precondition — one CRITICAL and its recovery",
+          [(c, t) for c, t, _m in tl] == [(8, _GW_CRIT), (10, _GW_OK)])
+    check(f"writes: two writes in twelve cycles, the alert and its clearing ({len(writes)})",
+          [w["gateway"]["alerted"] for w in writes] == ["critical", None])
+
+
+def test_a_restored_alert_closes_at_the_first_reading_that_can_clear_it_at_every_phase() -> None:
+    """The measurement the docs state. Both alerts are out at the restart and
+    both devices are back. rtpmon's first new sample lands at a phase of up to
+    a whole 300 s interval after the start (the previous instance's rollup
+    reads unknown until then). The gateway's card closes on the first read
+    after the 360 s grace, 360 s after the start, at every phase; the
+    cordless's on the first read of that new sample, so at most 360 s after
+    the start."""
+    import math
+    gw_at, cl_at = {}, {}
+    for offset in range(0, 300, 20):
+        (r1, r2), _s = _lives(_run(lambda k: k >= 2, cycles=9, cordless_in=lambda k: k >= 2),
+                              _run(lambda k: False, cycles=5, offset=float(offset)))
+        check(f"phase {offset}: precondition — both alerts out at the restart",
+              _gw_of(r1) == [(8, _GW_CRIT)] and _cl_of(r1) == [(8, _CL_CRIT)])
+        gw_at[offset] = [c * 120 for c, t in _gw_of(r2) if t == _GW_OK]
+        cl_at[offset] = [c * 120 for c, t in _cl_of(r2) if t == _CL_OK]
+    check(f"phases: the gateway's card closes 360 s after the start at every phase ({gw_at})",
+          all(v == [360] for v in gw_at.values()))
+    check(f"phases: the cordless's on the first read of the first new sample ({cl_at})",
+          all(v == [120 * math.ceil(o / 120)] for o, v in cl_at.items()))
+    check("phases: ...so 0 to 360 s after the start",
+          (min(v[0] for v in cl_at.values()), max(v[0] for v in cl_at.values())) == (0, 360))
 
 
 if __name__ == "__main__":

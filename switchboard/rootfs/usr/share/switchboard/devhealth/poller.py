@@ -40,6 +40,8 @@ Env (bridged by the s6 run script from config.yaml):
   CORDLESS_WIFI_MIN        min acceptable Wi-Fi signal 0-5 (default 2)
   CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
   DEVICE_HEALTH_ALERTS     'false'/'0' -> publish sensors but never notify()
+  SWITCHBOARD_DEVHEALTH_ALERTS  the alert-latch file (default
+                           /data/state/devhealth-alerts.json; see load_alert_latches)
 """
 from __future__ import annotations
 
@@ -1468,30 +1470,209 @@ def _flush_notifications() -> None:
         print(f"[devhealth] notification retry error: {e}", flush=True)
 
 
-def _notify(device: str, event: str, reasons: list[str]) -> None:
+def _notify(device: str, event: str, reasons: list[str]) -> bool:
+    """Post a device's card. True when Home Assistant accepted it on this call
+    (the latch records it as shown); False when alerts are off, or the card
+    was refused, whether or not notify_retry kept it."""
     if os.environ.get("DEVICE_HEALTH_ALERTS", "true").lower() in ("false", "0", "no"):
-        return
+        return False
     try:
         import ha_client
     except Exception:
-        return
+        return False
     nid = f"switchboard_{device}_health"
     label = "Cordless" if device == "cordless" else "GXW gateway"
     if event == "recovered":
-        _send(ha_client, f"{label} recovered — back to normal.",
-              f"Switchboard: {label.lower()} OK", nid)
-    elif event == "stale-clear":
+        return _send(ha_client, f"{label} recovered — back to normal.",
+                     f"Switchboard: {label.lower()} OK", nid)
+    if event == "stale-clear":
         # NOT "back to normal" -- nothing was re-measured. Say what actually
         # happened so the reader does not infer a fresh all-clear.
-        _send(ha_client,
-              f"The {label.lower()} alert cleared because its evidence aged out — "
-              "nothing new was measured. Treat the current state as unknown until "
-              "the next call.",
-              f"Switchboard: {label.lower()} alert lapsed", nid)
-    else:
-        why = "; ".join(reasons) or event
-        title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
-        _send(ha_client, f"{label} {event}: {why}", title, nid)
+        return _send(ha_client,
+                     f"The {label.lower()} alert cleared because its evidence aged out — "
+                     "nothing new was measured. Treat the current state as unknown until "
+                     "the next call.",
+                     f"Switchboard: {label.lower()} alert lapsed", nid)
+    why = "; ".join(reasons) or event
+    title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
+    return _send(ha_client, f"{label} {event}: {why}", title, nid)
+
+
+# --------------------------------------------------------------------------- #
+# The alert latches, kept across a restart (v0.119.1).
+# --------------------------------------------------------------------------- #
+# ★ A CARD THE PREVIOUS PROCESS RAISED WAS NEVER CLOSED. The gateway's and the
+# cordless's alert states (gst, cst) lived in run()'s memory only. After an
+# add-on restart, a device that recovered before the new process raised an
+# alert of its own got no recovery: the first 'ok' found nothing alerted, and
+# the card ("GXW gateway critical: ...") stayed in the drawer. The gateway's
+# startup grace, in which no reading counts, widened that window. rtpmon keeps
+# its fleet-outage latch the same way (link-outage.json, load_outage_alerted).
+#
+# Saved per device: the level alerted, its reasons (the cordless's hold rules
+# and clear_is_fresh read them), when it was raised, whether its card was
+# SHOWN, and, for a poor call alone, the end of the call it rests on
+# (clear_is_fresh tells a lapse from a recovery by it). A latch is restored
+# only when its card was shown: Home Assistant accepted it, or notify_retry
+# posted it later (run() asks notify_retry.status after each flush). One raised
+# with device_health_alerts off, refused and lost with the process before its
+# retry, or given up on by the retry, is not "already out": the restarted
+# process raises the condition again if it persists. No counter is saved
+# (cycles, the gateway's last sample fed, the registration count, the down
+# runs), so counting starts over.
+#
+# After a HOST reboot Home Assistant has already lost the old card (Core keeps
+# persistent notifications in memory), so a restored latch posts a recovery
+# for a card that is gone. The recovery is still true; rtpmon's latch does the
+# same.
+ALERT_STATE_MAX_AGE_S = 7 * 86400
+ALERT_LEVELS = ("degraded", "critical")
+_LATCH_DEVICES = ("cordless", "gateway")
+
+
+def _alert_state_path() -> str:
+    return os.environ.get("SWITCHBOARD_DEVHEALTH_ALERTS") or "/data/state/devhealth-alerts.json"
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def latch_record(st: dict) -> dict:
+    """What is saved for one device's alert state `st` (see above): the
+    cleared latch when no alert is out."""
+    alerted = st.get("alerted")
+    if alerted not in ALERT_LEVELS:
+        return {"alerted": None, "reasons": [], "at": None, "announced": False, "call_end": None}
+    reasons = [str(r) for r in st.get("reasons") or []]
+    at, end = st.get("at"), st.get("mos_call_end")
+    # clear_is_fresh reads the call's end only when no other reason is out.
+    mos_only = all(r.startswith(MOS_REASON) for r in reasons)
+    return {"alerted": alerted, "reasons": reasons, "at": int(at) if _number(at) else None,
+            "announced": bool(st.get("announced")),
+            "call_end": end if mos_only and _number(end) else None}
+
+
+def _latch_trusted(rec: dict, now: float) -> bool:
+    reasons, at, end = rec.get("reasons"), rec.get("at"), rec.get("call_end")
+    return (rec.get("alerted") in ALERT_LEVELS and rec.get("announced") is True
+            and _number(at) and now - at <= ALERT_STATE_MAX_AGE_S
+            and isinstance(reasons, list) and all(isinstance(r, str) for r in reasons)
+            and (end is None or _number(end)))
+
+
+def load_alert_latches(path: str | None = None, now: float | None = None) -> dict:
+    """{device: saved latch} for each device whose alert a previous process
+    left out and that can be trusted: alerted at a level, its card shown, and
+    raised no more than ALERT_STATE_MAX_AGE_S ago. Never raises. A missing
+    file, or a device with no alert out, is no latch, silently; a corrupt file
+    or an untrusted latch is none either, with one stderr line and no
+    values."""
+    try:
+        with open(path or _alert_state_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        sys.stderr.write("[switchboard-devhealth] the saved alert state is unreadable; "
+                         "starting with no alert out\n")
+        return {}
+    now = time.time() if now is None else now
+    out = {}
+    for device in _LATCH_DEVICES:
+        rec = data.get(device)
+        if rec is None or (isinstance(rec, dict) and rec.get("alerted") is None):
+            continue
+        if isinstance(rec, dict) and _latch_trusted(rec, now):
+            out[device] = rec
+        else:
+            sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
+                             "not shown, undated, malformed or more than 7 days old\n")
+    return out
+
+
+def save_alert_latches(latches: dict, path: str | None = None) -> bool:
+    """Write the latches atomically (a temporary file, then os.replace).
+    True only if they reached the disk; never raises."""
+    target = path or _alert_state_path()
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(latches, fh)
+        os.replace(tmp, target)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def restore_latch(st: dict, rec: dict) -> None:
+    """Put a trusted saved latch back on a fresh device alert state: alerted,
+    and level, at the saved level, its reasons, when it was raised, shown. No
+    count is restored, so the cycle count starts over at 0."""
+    st.update({"alerted": rec["alerted"], "level": rec["alerted"],
+               "reasons": list(rec["reasons"]), "at": rec["at"], "announced": True})
+    if rec.get("call_end") is not None:
+        st["mos_call_end"] = float(rec["call_end"])
+
+
+def keep_alert_latches(written: dict, cst: dict, gst: dict) -> None:
+    """Save the latches when they differ from those last saved
+    (written["latches"], updated in place). A failed save is tried again the
+    next cycle, and logged once until one succeeds; it never stops the loop."""
+    try:
+        latches = {"cordless": latch_record(cst), "gateway": latch_record(gst)}
+        if latches == written.get("latches"):
+            return
+        ok = save_alert_latches(latches)
+    except Exception:  # noqa: BLE001 — a latch must never cost the poll its cycle
+        ok = False
+    if ok:
+        written["latches"], written["failing"] = latches, False
+    elif not written.get("failing"):
+        written["failing"] = True
+        sys.stderr.write("[switchboard-devhealth] could not save the alert state; "
+                         "trying again each cycle\n")
+
+
+def _card_status(device: str) -> str:
+    """notify_retry's status for a device's card: "pending" while a refused
+    card waits for its retry, "dropped" once the retry gave up, "" otherwise
+    (posted, never kept, or no notify_retry to keep it)."""
+    try:
+        import notify_retry
+        return str(notify_retry.status(f"switchboard_{device}_health") or "")
+    except Exception:  # noqa: BLE001 — an older or absent module keeps nothing
+        return ""
+
+
+def _raise(device: str, ev: str, reasons: list[str], st: dict, kept: dict) -> None:
+    """Post a device's event and note on its alert state what the latch
+    saves: for an alert, its reasons, when it was raised and whether its card
+    was shown. `kept[device]` says notify_retry holds the card, refused (a
+    card accepted at once is never held). A refused recovery is held too:
+    once posted it marks `announced`, which no latch reads while no alert is
+    out, and the next event sets both afresh."""
+    shown = _notify(device, ev, reasons)
+    if ev in ALERT_LEVELS:
+        st["reasons"], st["at"], st["announced"] = list(reasons), time.time(), bool(shown)
+    kept[device] = _card_status(device) == "pending"
+
+
+def _note_posted(device: str, st: dict, kept: dict) -> None:
+    """After a flush: the alert card notify_retry kept for a device (set by
+    _raise for its latest event) has been shown once it is no longer pending
+    and the retry did not give up on it."""
+    if not kept.get(device):
+        return
+    fate = _card_status(device)
+    if fate == "pending":
+        return
+    if fate == "":
+        st["announced"] = True
+    kept[device] = False
 
 
 def run() -> None:
@@ -1525,9 +1706,25 @@ def run() -> None:
     print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
           f"api={'yes' if cordless_pw else 'no-password'} "
           f"gateway_ports={','.join(gw_exts)} every {interval}s", flush=True)
+    # An alert a previous process left out, its card shown, is restored (see
+    # load_alert_latches): its recovery still closes the card, and the same
+    # condition, or a milder one, is not raised again.
+    restored = load_alert_latches(now=time.time())
+    for device, st in (("cordless", cst), ("gateway", gst)):
+        if device in restored:
+            restore_latch(st, restored[device])
+            print(f"[devhealth] {device} {st['alerted']} alert raised before the restart "
+                  "is still out", flush=True)
+    # The latches as last saved, and the devices whose refused card
+    # notify_retry holds.
+    written = {"latches": {"cordless": latch_record(cst), "gateway": latch_record(gst)}}
+    kept: dict = {}
     while True:
-        # First, whatever Home Assistant refused on an earlier cycle.
+        # First, whatever Home Assistant refused on an earlier cycle. An alert
+        # card it posts has been shown from then, and the latch says so.
         _flush_notifications()
+        _note_posted("cordless", cst, kept)
+        _note_posted("gateway", gst, kept)
         # ONE read of rtpmon's rollup per cycle, so the cordless's registration
         # and the gateway's ports are judged on the same sample. A rollup
         # measured before this process started describes the plant before the
@@ -1617,7 +1814,7 @@ def run() -> None:
                     if ev == "stale-clear":
                         cst.pop("mos_call_end", None)
                     print(f"[devhealth] cordless {ev}: {'; '.join(reasons) or ev}", flush=True)
-                    _notify("cordless", ev, reasons)
+                    _raise("cordless", ev, reasons, cst, kept)
             except Exception as e:
                 print(f"[devhealth] cordless poll error: {e}", flush=True)
         # --- gateway (derived from rtpmon rollup) ---
@@ -1655,7 +1852,7 @@ def run() -> None:
                 ev = gateway_transition(level, gst, sampled, uptime)
                 if ev:
                     print(f"[devhealth] gateway {ev}: {'; '.join(reasons) or ev}", flush=True)
-                    _notify("gateway", ev, reasons)
+                    _raise("gateway", ev, reasons, gst, kept)
             else:
                 # No usable rollup (link-health poller down, stale, or HA
                 # unreadable). Publish the blindness instead of leaving the last
@@ -1673,6 +1870,8 @@ def run() -> None:
                 gst["sample"] = None
         except Exception as e:
             print(f"[devhealth] gateway poll error: {e}", flush=True)
+        # Whatever this cycle changed in either latch, saved before the sleep.
+        keep_alert_latches(written, cst, gst)
         time.sleep(interval)
 
 
