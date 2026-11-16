@@ -136,9 +136,10 @@ Since v0.119.0:
   host moved to a new address and every phone, the cordless included, was
   unregistered from 18:31:04 MST. Every alert named the gateway, and every one
   was a silent card.
-- **The alert survives a restart.** Its latch is kept in
-  `/data/state/link-outage.json`, with whether the alert was shown: the card
-  accepted by Home Assistant, or the push delivered. An add-on restart during an
+- **The alert survives an add-on restart.** Its latch is kept in
+  `/data/state/link-outage.json`, with whether the alert was shown (the card
+  accepted by Home Assistant, or the push delivered) and the host boot it was
+  raised on (the kernel's boot id, since v0.119.1). An add-on restart during an
   outage no longer raises a shown "phones unreachable" (and its push) a second
   time, and the recovery still comes. A card Home Assistant refused counts as
   shown once its retry posts it. One that was not shown (raised while
@@ -149,7 +150,15 @@ Since v0.119.0:
   the first of those comes one interval after its warm-up. A restart between
   the two clear samples therefore delays the recovery by one to two sample
   intervals plus the warm-up; it neither loses nor repeats it. One more than 7
-  days old is ignored.
+  days old is ignored. Not restored: an outage alert raised before a host
+  reboot. Home Assistant keeps notifications in memory, so the reboot cleared
+  the card. An outage still on is raised again, card and push, once the
+  restarted monitor has two settled outage samples (705 s after its start with
+  every phone down, at the default cadence: eight warm-up checks 15 s apart,
+  then two samples 300 s apart), and one already over posts no recovery. Where
+  the boot id cannot be read, at the restart or when the latch was saved (a
+  latch saved before v0.119.1 has none), a host reboot cannot be told from an
+  add-on restart, and a shown alert is restored.
 
 A fleet that drops **between** two samples is caught from Asterisk's own log
 (the same half-the-fleet threshold, applied to the phones that went Unreachable
@@ -330,6 +339,35 @@ Covers the two blind spots the above can't see:
   because the rollup's down list also holds ports that are still registered
   but fail their qualify.
 
+**The gateway alert counts samples** (v0.119.1), as the cordless's
+registration does. A `degraded` or `critical` reading alerts once two
+consecutive link-health samples show it, told apart by their `measured_at`,
+and the alert goes out on the first read of the second. This monitor runs
+every 120 s against a rollup published every 300 s, so two of its cycles
+usually read one sample twice: a GXW reboot caught by one sample (a firmware
+auto-install at 01:00, the weekly reboot) raised "all 8 gateway ports down" and
+its recovery a few minutes later. Such a reboot now raises no gateway alert. A
+recovery comes on the first new sample that reads `ok`. A rollup with no
+`measured_at`, from an older link-health poller, is judged cycle by cycle, as
+before. A cycle with no usable rollup restarts the count, so the samples on
+either side of it are not consecutive, and an alert already out stays out until
+a fresh sample clears it. The sensor is published every cycle either way.
+
+No reading inside the 360 s startup grace counts toward the alert. An all-down
+reading there is published as `degraded` ("normal while the GXW
+re-registers"), and is no longer raised as a card. A gateway already down,
+wholly or partly, when the monitor starts therefore alerts on two samples read
+after the grace: at the default cadences, 480 to 720 s after the start, where
+the CRITICAL came at 480 s. The fleet-outage alert above, and its push, do not
+depend on this monitor.
+
+The cause is now decided on the second all-down sample. In 3,000 simulated
+outages (every port, and the cordless or not, dropping at random samples and
+staying down, read at a random phase against the rollup), the gateway alert
+and the outage alert named the same cause in all 3,000. Before, they differed in 198: each time the outage began
+with the ports and the cordless dropped one sample later, and this alert,
+firing on the first all-down sample, named the gateway.
+
 **Registration** (v0.119.0) is read off the link-health rollup for
 `cordless_ext`, under the same freshness rules as gateway health. The cordless
 is not registered when it is in the rollup's `offline_exts`. That reads
@@ -362,9 +400,10 @@ API still answered. It is judged even with nothing to probe (`cordless_ip`
 blank and no live `contact_ip`, the case for an unregistered handset);
 `reachable` then reads `null`, not `false`.
 
-Both use a 2-cycle hysteresis so a transient blip doesn't alert, apart from the
-cordless's registration, which has its two samples instead; a worsening from
-degraded to critical alerts again. Both post a recovery notice when they return
+The cordless uses a 2-cycle hysteresis so a transient blip doesn't alert, apart
+from its registration; the gateway alert and the cordless's registration count
+two link-health samples instead. On both devices a worsening from degraded to
+critical alerts again. Both post a recovery notice when they return
 to normal, again under that device's shared `notification_id`, so the recovery
 replaces the alert rather than removing it. For the cordless, a clear is
 "recovered" unless the alert rested on a poor call alone. That is the only
@@ -374,6 +413,34 @@ instead, and says the state is unknown until the next call. Every other reason
 (registration, reachability, battery, Wi-Fi) is measured again each cycle, so
 its clearing is a recovery; before v0.119.0 those read as lapses too whenever
 no newer call had been scored.
+
+**The alerts survive an add-on restart** (v0.119.1). Each device's alert is
+kept in `/data/state/devhealth-alerts.json`: its level and reasons, when it was
+raised, the host boot it was raised on (the kernel's boot id), and whether its
+card was shown (accepted by Home Assistant, or posted later by its retry). It
+used to be kept in memory only, so a device that recovered while the add-on
+restarted got no recovery notice, and its card stayed. A restored alert is
+cleared by the first reading that would have cleared it before the restart,
+and the recovery replaces the card. The same condition, or a milder one, raises
+no second card; a worsening alerts as before. The cordless's holds above work
+from the restored reasons, and a restored poor-call alert whose call ages out
+is still titled "alert lapsed". The startup grace is unchanged. With the device
+already back at the restart, at the default cadences, a restored gateway alert
+clears 360 s after the start, on the first sample read after the grace, and a
+restored cordless registration alert on the first read of the first
+link-health sample taken after the start: 0 to 360 s after the start, by that
+sample's phase (both measured over 300 phases). Not restored: an alert raised
+before a host reboot (Home Assistant keeps notifications in memory, so the
+reboot cleared its card), one that was not shown (raised while
+`device_health_alerts` was off, refused and lost with the restart before its
+retry, or given up on by the retry), or one raised more than 7 days earlier.
+The restarted monitor raises such a condition again if it persists, as for a
+device down at the start, and posts no recovery for a card that is not there.
+Where the boot id cannot be read, a host reboot cannot be told from an add-on
+restart, and a shown alert is restored. No count is kept, so an alert raised
+after a restart needs its two cycles or two samples afresh. A Home Assistant
+restart on its own clears the cards too, and the monitor does not see it: an
+alert already out then is not raised again.
 
 **When a poor call counts.** The handset scores every call itself. Each score is
 matched to a call-quality ledger leg that hung up within 90 s of it: the

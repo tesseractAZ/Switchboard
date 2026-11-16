@@ -1531,8 +1531,14 @@ def test_each_card_says_only_what_is_true_when_it_is_sent() -> None:
     check("every card leaves room for a late note", longest <= 400)
 
 
+# The host kernel's boot id as run() reads it (BOOT_ID_PATH): one boot, and
+# the next one after a host reboot. Synthetic values, as in test_devhealth.
+_BOOT_A = "11111111-1111-4111-8111-111111111111"
+_BOOT_B = "22222222-2222-4222-8222-222222222222"
+
+
 def _drive_samples(samples, alerts=True, target=None, pushes=None, state_path=None,
-                   push_ok=True, notify_ok=True, retry=None):
+                   push_ok=True, notify_ok=True, retry=None, mod=None, boot=_BOOT_A):
     """run() over len(samples) cycles with the REAL outage_transition. Each sample
     is (summ, transitions); cycle 0 is warm-up. A summ of None is a cycle with
     no sample (AMI down). Returns (title, message) posts.
@@ -1544,8 +1550,13 @@ def _drive_samples(samples, alerts=True, target=None, pushes=None, state_path=No
     either way). `retry`, a notify_retry module, is what the poller imports by
     that name for this run; without it the import resolves as it otherwise
     would. `state_path` is the outage latch file; by default each call gets a
-    fresh one, so one test's outage never reaches the next test's run()."""
+    fresh one, so one test's outage never reaches the next test's run().
+    `mod` is the poller to run (default `pm`; a restart can run a fresh copy,
+    _process). `boot` is the host's boot id the run reads (the content of its
+    boot id file; None: no such file). The default is one boot for every run,
+    so a restart is an add-on restart unless a run says otherwise."""
     import types
+    pm = mod or globals()["pm"]
     notes = []
     ha = types.ModuleType("ha_client")
     ha.notify = lambda msg, **kw: notes.append((kw.get("title", ""), msg)) or notify_ok
@@ -1579,7 +1590,13 @@ def _drive_samples(samples, alerts=True, target=None, pushes=None, state_path=No
     saved = {k: getattr(pm, k) for k in keys}
     real_sleep, real_ha = pm.time.sleep, sys.modules.get("ha_client")
     real_retry = sys.modules.get("notify_retry", "absent")
+    real_boot_path = getattr(pm, "BOOT_ID_PATH", None)
+    boot_path = os.path.join(tempfile.mkdtemp(prefix="sb-rtpmon-boot-"), "boot_id")
+    if boot is not None:
+        with open(boot_path, "w", encoding="ascii") as fh:
+            fh.write(boot + "\n")                  # as the kernel gives it
     try:
+        pm.BOOT_ID_PATH = boot_path
         sys.modules["ha_client"] = ha
         if retry is not None:
             sys.modules["notify_retry"] = retry
@@ -1603,6 +1620,10 @@ def _drive_samples(samples, alerts=True, target=None, pushes=None, state_path=No
     finally:
         for k, v in saved.items():
             setattr(pm, k, v)
+        if real_boot_path is None:
+            del pm.BOOT_ID_PATH
+        else:
+            pm.BOOT_ID_PATH = real_boot_path
         pm.time.sleep = real_sleep
         if real_ha is None:
             sys.modules.pop("ha_client", None)
@@ -2573,7 +2594,7 @@ def test_the_outage_latch_round_trips_and_degrades_safely() -> None:
     check("latch: an unwritable path returns False, never raises",
           pm.save_outage_state(True, now, os.path.join(p, "under-a-file", "x.json")) is False)
     check("latch: run() loads the latch at start",
-          "load_outage_alerted()" in __import__("inspect").getsource(pm.run))
+          "load_outage_alerted(" in __import__("inspect").getsource(pm.run))
 
 
 def _published(summ, phones=None):
@@ -3145,6 +3166,354 @@ def test_a_restart_mid_recovery_neither_loses_nor_repeats_the_up() -> None:
                    target=_TARGET, state_path=path)
     second = _drive_samples([(_S_UP, [])] * 3, target=_TARGET, pushes=p2, state_path=path)
     check("after recovery: a restart sends nothing", second == [] and p2 == [])
+
+
+# --------------------------------------------------------------------------- #
+# v0.119.1: the fleet-outage latch and the host's boot. Home Assistant Core
+# keeps persistent notifications in memory and restarts with the host, so a
+# host reboot empties the drawer, and the restarted rtpmon still trusted a
+# shown latch under 7 days old. And the latch file is in /data/state, which
+# the asterisk user can write, so what it holds must never stop the loop, nor
+# a save write through a name planted beside it.
+# --------------------------------------------------------------------------- #
+_processes = {"n": 0}
+
+
+def _process():
+    """A fresh copy of the poller, module state and all: what a restarted
+    add-on runs. Loaded under its own name and not left in sys.modules, and
+    the webui path its import adds is taken back out."""
+    _processes["n"] += 1
+    name = f"rtpmon_poller_process_{_processes['n']}"
+    path_before = list(sys.path)
+    try:
+        return SourceFileLoader(name, str(P_PATH)).load_module()
+    finally:
+        sys.path[:] = path_before
+        sys.modules.pop(name, None)
+
+
+def _nr_copy(name):
+    nr = SourceFileLoader(name, str(P_PATH.parents[1] / "webui" / "notify_retry.py")).load_module()
+    sys.modules.pop(name, None)
+    nr.clear()
+    return nr
+
+
+def _outage_file():
+    return os.path.join(tempfile.mkdtemp(prefix="sb-outage-"), "link-outage.json")
+
+
+def _lives(*runs, state=None):
+    """run() through restarts: each run is a dict of _drive_samples arguments
+    (`samples` and any others; `target` defaults to _TARGET), run by a fresh
+    poller (_process) with a fresh notify_retry (the queue dies with the
+    process), against ONE latch file, on _BOOT_A unless it gives its own
+    `boot` (a host reboot). Returns ([(card titles, push titles, the latch's
+    stderr lines (the saved alert's, the boot id's), the latch file's content
+    or None, all of stderr) per run], the latch file)."""
+    import io
+    state = state or _outage_file()
+    out = []
+    for r in runs:
+        r, pushes, err, real_err = dict(r), [], io.StringIO(), sys.stderr
+        r.setdefault("target", _TARGET)
+        try:
+            sys.stderr = err
+            notes = _drive_samples(r.pop("samples"), pushes=pushes, state_path=state,
+                                   mod=_process(), retry=_nr_copy("notify_retry_rtpmon_life"),
+                                   **r)
+        finally:
+            sys.stderr = real_err
+        full = err.getvalue()
+        log = "".join(ln for ln in full.splitlines(True)
+                      if "saved fleet-outage alert" in ln or "boot id" in ln)
+        held = None
+        if os.path.exists(state):
+            with open(state, encoding="utf-8") as fh:
+                held = json.load(fh)
+        out.append(([t for t, _m in notes], [t for t, _m, _k in pushes], log, held, full))
+    return out, state
+
+
+_OUT_CARD, _BACK_CARD = "Switchboard: phones unreachable", "Switchboard: phones recovered"
+_OUT_PUSH, _BACK_PUSH = "Switchboard: phones down", "Switchboard: phones back"
+_OUTAGE = [(_S_UP, []), (_S_ALL_DOWN, []), (_S_ALL_DOWN, [])]       # 'down' on cycle 2
+_STILL_DOWN_THEN_BACK = [(_S_ALL_DOWN, [])] * 4 + [(_S_UP, [])] * 2
+
+
+def test_after_a_host_reboot_a_fleet_still_down_is_announced_again() -> None:
+    """The host rebooted with every phone down. Home Assistant lost the
+    'phones unreachable' card with its restart, and the restarted rtpmon took
+    the saved latch for an alert already out: no card and no push while every
+    phone was down. The latch now carries the host's boot id, and one from
+    another boot is not restored (one line, no value): the outage is raised
+    again, card and push, once, on the restarted monitor's second settled
+    outage sample, and saved on the new boot. Its recovery follows."""
+    (r1, r2), _s = _lives({"samples": _OUTAGE},
+                          {"samples": _STILL_DOWN_THEN_BACK, "boot": _BOOT_B})
+    check(f"reboot: precondition — one 'down', card and push, saved as shown on the first "
+          f"boot ({r1[3]})", r1[0] == [_OUT_CARD] and r1[1] == [_OUT_PUSH]
+          and r1[3].get("announced") is True and r1[3].get("boot") == _BOOT_A)
+    check(f"reboot: still down -> announced again, then its recovery ({r2[0]}, {r2[1]})",
+          r2[0] == [_OUT_CARD, _BACK_CARD] and r2[1] == [_OUT_PUSH, _BACK_PUSH])
+    check(f"reboot: one line says why it was not restored, with no value ({r2[2]!r})",
+          r2[2].count("\n") == 1 and "host reboot" in r2[2]
+          and _BOOT_A not in r2[4] and _BOOT_B not in r2[4])
+    (r1, r2), _s = _lives({"samples": _OUTAGE},
+                          {"samples": [(_S_ALL_DOWN, [])] * 3, "boot": _BOOT_B})
+    check(f"reboot: the 'down' comes on the second settled sample, once ({r2[0]}, {r2[1]})",
+          r2[0] == [_OUT_CARD] and r2[1] == [_OUT_PUSH])
+    check(f"reboot: ...and is saved as shown on the new boot ({r2[3]})",
+          r2[3].get("alerted") is True and r2[3].get("announced") is True
+          and r2[3].get("boot") == _BOOT_B)
+    # A 'down' card Home Assistant refused and the next cycle's retry posted:
+    # the latch rewritten to say it was shown carries the boot too.
+    (r1, r2), _s = _lives({"samples": _OUTAGE + [(_S_ALL_DOWN, [])], "notify_ok": _RefuseFirst(),
+                           "push_ok": False},
+                          {"samples": [(_S_ALL_DOWN, [])] * 3, "boot": _BOOT_B})
+    check(f"reboot: precondition — refused, then posted by its retry, saved as shown on the "
+          f"first boot ({r1[0]}, {r1[3]})", r1[0] == [_OUT_CARD] * 2
+          and r1[3].get("announced") is True and r1[3].get("boot") == _BOOT_A)
+    check(f"reboot: ...not restored either: announced again ({r2[0]}, {r2[1]})",
+          r2[0] == [_OUT_CARD] and r2[1] == [_OUT_PUSH])
+    root = P_PATH.parents[5]
+    flat = lambda p: " ".join(p.read_text(encoding="utf-8").split())  # noqa: E731
+    check("reboot: the health monitoring page says the outage alert is not restored after a "
+          "host reboot", "Not restored: an outage alert raised before a host reboot"
+          in flat(root / "docs" / "reference" / "health-monitoring.md"))
+    check("reboot: so does the changelog",
+          "The fleet-outage alert is not restored after a host reboot" in flat(root / "CHANGELOG.md"))
+
+
+def test_after_a_host_reboot_a_fleet_already_back_gets_no_recovery() -> None:
+    """The phones are back by the time the rebooted host runs rtpmon again.
+    The card went with Home Assistant's restart, so no 'phones back' is pushed
+    and no recovery card is posted for it."""
+    (r1, r2), _s = _lives({"samples": _OUTAGE}, {"samples": [(_S_UP, [])] * 4, "boot": _BOOT_B})
+    check("back at reboot: precondition — one 'down' out", r1[0] == [_OUT_CARD])
+    check(f"back at reboot: nothing posted or pushed ({r2[0]}, {r2[1]})",
+          r2[0] == [] and r2[1] == [])
+
+
+def test_an_add_on_restart_on_the_same_boot_still_restores_the_outage() -> None:
+    """The control: an add-on restart on the same host boot, its card still
+    in the drawer, raises no second 'down', and the recovery still comes."""
+    (r1, r2), _s = _lives({"samples": _OUTAGE}, {"samples": _STILL_DOWN_THEN_BACK})
+    check("same boot: precondition — one 'down' out", r1[0] == [_OUT_CARD] and r1[1] == [_OUT_PUSH])
+    check(f"same boot: no second 'down', the recovery comes, nothing logged ({r2[:3]})",
+          r2[0] == [_BACK_CARD] and r2[1] == [_BACK_PUSH] and r2[2] == "")
+
+
+def test_an_outage_latch_saved_without_a_boot_is_judged_as_before() -> None:
+    """A v0.119.0 file has no boot id, and with no boot id to read, at the
+    'down' or at the restart, a reboot cannot be told from an add-on restart:
+    a shown latch is restored as before (no second 'down'; the recovery
+    comes). A start with no boot id to read says so, once."""
+    v0119 = json.dumps({"alerted": True, "down_at": int(time.time()) - 600, "announced": True})
+    for label, first, boot_now, lines in (
+            ("a v0.119.0 file, read on a known boot", None, _BOOT_B, [0]),
+            ("no boot id at the 'down'", {"samples": _OUTAGE, "boot": None}, _BOOT_B, [1, 0]),
+            ("no boot id at the restart", {"samples": _OUTAGE}, None, [0, 1])):
+        state = _outage_file()
+        if first is None:
+            with open(state, "w", encoding="utf-8") as fh:
+                fh.write(v0119)
+        runs = (() if first is None else (first,)) + (
+            {"samples": _STILL_DOWN_THEN_BACK, "boot": boot_now},)
+        lives, _s = _lives(*runs, state=state)
+        check(f"{label}: no second 'down'; the recovery comes ({lives[-1][:2]})",
+              lives[-1][0] == [_BACK_CARD] and lives[-1][1] == [_BACK_PUSH])
+        said = [lf[2].count("boot id cannot be read") for lf in lives]
+        check(f"{label}: each start without a boot id says so, once ({said})", said == lines)
+
+
+def test_the_outage_latch_carries_the_boot_and_is_trusted_only_on_its_own() -> None:
+    import io
+    p = _outage_file()
+    now = 1794103912.0
+    check("boot id: the kernel's", pm.BOOT_ID_PATH == "/proc/sys/kernel/random/boot_id")
+    f = os.path.join(os.path.dirname(p), "boot_id")
+    with open(f, "w", encoding="ascii") as fh:
+        fh.write(_BOOT_A + "\n")
+    check("boot id: the file's id, without its newline", pm.read_boot_id(f) == _BOOT_A)
+    for text in ("", "\n"):
+        with open(f, "w", encoding="ascii") as fh:
+            fh.write(text)
+        check(f"boot id: {text!r} is unknown", pm.read_boot_id(f) is None)
+    with open(f, "wb") as fh:
+        fh.write(b"\xff\xfe\n")
+    check("boot id: undecodable is unknown, never raises", pm.read_boot_id(f) is None)
+    check("boot id: no such file is unknown", pm.read_boot_id(f + ".missing") is None)
+    check("boot id: a directory is unknown", pm.read_boot_id(os.path.dirname(p)) is None)
+    pm.save_outage_state(True, now - 60, p, announced=True, boot=_BOOT_A)
+    with open(p, encoding="utf-8") as fh:
+        saved = json.load(fh)
+    check(f"save: the alert carries the boot it was raised on ({saved})",
+          saved == {"alerted": True, "down_at": int(now - 60), "announced": True, "boot": _BOOT_A})
+    err, real_err = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = err
+        same = pm.load_outage_alerted(p, now, boot=_BOOT_A)
+        other = pm.load_outage_alerted(p, now, boot=_BOOT_B)
+    finally:
+        sys.stderr = real_err
+    check("load: restored on its own boot, not on another", same is True and other is False)
+    check(f"load: ...the other logged once, with no boot id ({err.getvalue()!r})",
+          err.getvalue().count("\n") == 1 and "host reboot" in err.getvalue()
+          and _BOOT_A not in err.getvalue() and _BOOT_B not in err.getvalue())
+    check("load: no boot id now -> restored, as before", pm.load_outage_alerted(p, now) is True)
+    pm.save_outage_state(True, now - 60, p, announced=True)
+    with open(p, encoding="utf-8") as fh:
+        check("save: with no boot id read, none is saved", json.load(fh)["boot"] is None)
+    check("load: saved with no boot id -> restored on any boot",
+          pm.load_outage_alerted(p, now, boot=_BOOT_B) is True)
+    pm.save_outage_state(False, now, p, announced=True, boot=_BOOT_A)
+    with open(p, encoding="utf-8") as fh:
+        check("save: the cleared latch carries no boot",
+              json.load(fh) == {"alerted": False, "down_at": None, "announced": False,
+                                "boot": None})
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"alerted": True, "down_at": int(now) - 60, "announced": True, "boot": 7}, fh)
+    err = io.StringIO()
+    try:
+        sys.stderr = err
+        got = (pm.load_outage_alerted(p, now, boot=_BOOT_A), pm.load_outage_alerted(p, now))
+    finally:
+        sys.stderr = real_err
+    check("load: a boot id that is not text is malformed, on any boot", got == (False, False))
+    check(f"load: ...logged each time, with no value ({err.getvalue()!r})",
+          err.getvalue().count("\n") == 2 and "7" not in err.getvalue())
+    # The 'down' time's bounds: an alert is dated when it is raised, so never
+    # after now, and is trusted for 7 days.
+    err = io.StringIO()
+    try:
+        sys.stderr = err
+        for at, want in ((now, True), (now + 1, False), (now - 7 * 86400, True),
+                         (now - 7 * 86400 - 1, False)):
+            pm.save_outage_state(True, at, p, announced=True, boot=_BOOT_A)
+            check(f"load: a 'down' {at - now:+.0f} s from now -> {want}",
+                  pm.load_outage_alerted(p, now, boot=_BOOT_A) is want)
+    finally:
+        sys.stderr = real_err
+
+
+_HUGE = "9" * 400                          # a JSON integer too large for a float
+# JSON nested too deep for json.load, which raises RecursionError (not a
+# ValueError) on it: at the recursion limit, or, from Python 3.14, once the C
+# stack runs short.
+_DEEP = "[" * 10 ** 6 + "]" * 10 ** 6
+
+
+def test_no_saved_outage_file_can_stop_the_loop_or_hold_an_outage_unannounced() -> None:
+    """A 'down' time too large for a float made float() raise OverflowError,
+    and a file nested too deep to parse made json.load raise RecursionError:
+    neither was caught, so rtpmon died at every start and s6 restarted it into
+    the same file. A 'down' time of infinity, NaN or later than now passed the
+    7-day check (now minus it is never above the bound) and was restored, so
+    an outage still on raised no card for as long as the file stayed. Each is
+    now ignored and the outage is announced: a bad 'down' time with one line
+    and no value, the file that cannot be parsed silently, as any corrupt
+    file."""
+    recent = int(time.time()) - 600
+    rec = '{"alerted": true, "down_at": %s, "announced": true}'
+    files = {"a 'down' time too large for a float": (rec % _HUGE, 1),
+             "nested too deep to parse": (_DEEP, 0),
+             "a 'down' time of infinity": (rec % "1e400", 1),
+             "a 'down' time of NaN": (rec % "NaN", 1),
+             "a 'down' time an hour after now": (rec % (recent + 4200), 1),
+             "the control, a 'down' 10 minutes ago": (rec % recent, 0)}
+    for why, (text, lines) in files.items():
+        state = _outage_file()
+        with open(state, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            (r1,), _s = _lives({"samples": [(_S_ALL_DOWN, [])] * 3}, state=state)
+        except Exception as e:  # noqa: BLE001 — the defect: run() died at its start
+            r1 = ([], [], f"run() raised {type(e).__name__}", None, "")
+        control = why.startswith("the control")
+        check(f"{why}: {'restored' if control else 'ignored'} ({r1[:3]})",
+              (r1[0], r1[1]) == (([], []) if control else ([_OUT_CARD], [_OUT_PUSH])))
+        check(f"{why}: {lines} line(s), no value ({r1[2]!r})",
+              r1[2].count("\n") == lines and r1[2].count("ignoring") == lines
+              and _HUGE not in r1[4] and "1e400" not in r1[4])
+
+
+def _across_mounts(system_tmp, save):
+    """save() as on the add-on container's mounts: its /tmp is on the overlay
+    root and /data a bind mount of its own, and rename(2) refuses to move a
+    file between two mounts (EXDEV). Modelled: the system temporary directory
+    moved to `system_tmp`, and os.replace refusing, with EXDEV, to move a file
+    between two directories. Returns save()'s result and the directories
+    os.replace was asked to move a file from. (test_devhealth has the same.)"""
+    import errno
+    system_tmp.mkdir(parents=True, exist_ok=True)
+    real_replace, real_tempdir, moved = os.replace, tempfile.tempdir, []
+
+    def replace(src, dst, *a, **k):
+        here, there = (os.path.dirname(os.path.abspath(x)) for x in (src, dst))
+        moved.append(here)
+        if here != there:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), src, None, dst)
+        return real_replace(src, dst, *a, **k)
+    try:
+        tempfile.tempdir, os.replace = str(system_tmp), replace
+        return save(), moved
+    finally:
+        tempfile.tempdir, os.replace = real_tempdir, real_replace
+
+
+def test_an_outage_save_never_writes_through_a_name_planted_beside_the_file(tmp_path) -> None:
+    """rtpmon runs as root and /data/state is writable by the asterisk user.
+    The save wrote `<file>.tmp`, a fixed name, with open(): a link planted at
+    that name sent root's write wherever it pointed, and os.replace then put
+    the link itself in the latch file's place. The temporary file is now
+    mkstemp's, as the link-health ledger's is, and none is left behind when a
+    save fails."""
+    victim = tmp_path / "victim"
+    victim.write_text("not rtpmon's", encoding="utf-8")
+    p = tmp_path / "link-outage.json"
+    os.symlink(victim, str(p) + ".tmp")
+    now = 1794103912.0
+    check("planted: the save succeeds",
+          pm.save_outage_state(True, now, str(p), announced=True, boot=_BOOT_A) is True)
+    check("planted: the file the link points at is untouched",
+          victim.read_text(encoding="utf-8") == "not rtpmon's")
+    with open(p, encoding="utf-8") as fh:
+        held = json.load(fh)
+    check(f"planted: the latch file is a regular file of its own, holding the latch ({held})",
+          p.is_file() and not p.is_symlink()
+          and held == {"alerted": True, "down_at": int(now), "announced": True, "boot": _BOOT_A})
+    check(f"planted: readable by root alone, its only reader ({oct(os.stat(p).st_mode)})",
+          (os.stat(p).st_mode & 0o777) == 0o600)
+    # A temporary file made in the system temporary directory, not beside the
+    # latch file, could never be moved into /data/state in the container, and
+    # no latch would ever be saved.
+    on_data = tmp_path / "state" / "link-outage.json"
+    saved, moved = _across_mounts(
+        tmp_path / "system-tmp",
+        lambda: pm.save_outage_state(True, now, str(on_data), announced=True, boot=_BOOT_A))
+    check(f"beside: the save succeeds, the system temporary directory on another mount ({saved})",
+          saved is True and json.loads(on_data.read_text(encoding="utf-8")) == held)
+    check(f"beside: its temporary file was made in the latch file's directory ({moved})",
+          moved == [str(on_data.parent)])
+    blocked = tmp_path / "blocked"
+    (blocked / "link-outage.json").mkdir(parents=True)
+    check("failed move: a directory at the file's name refuses the save",
+          pm.save_outage_state(True, now, str(blocked / "link-outage.json")) is False)
+    check("failed move: ...leaving no temporary file", os.listdir(blocked) == ["link-outage.json"])
+    real_unlink = os.unlink
+
+    def gone(p, *a, **k):
+        raise FileNotFoundError(p)                 # removed by another before the clean-up
+    try:
+        os.unlink = gone
+        refused = pm.save_outage_state(True, now, str(blocked / "link-outage.json"))
+    except Exception as e:  # noqa: BLE001 — run() calls it unguarded, so it must never raise
+        refused = e
+    finally:
+        os.unlink = real_unlink
+    check(f"failed clean-up: still refused, never raised ({refused!r})", refused is False)
 
 
 if __name__ == "__main__":

@@ -38,8 +38,19 @@ Env (bridged by the s6 run script from config.yaml):
   CORDLESS_BATTERY_CRIT    battery %% considered critical when discharging (default 15)
   CORDLESS_BATTERY_WARN    battery %% considered low when discharging (default 30)
   CORDLESS_WIFI_MIN        min acceptable Wi-Fi signal 0-5 (default 2)
-  CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
   DEVICE_HEALTH_ALERTS     'false'/'0' -> publish sensors but never notify()
+
+Env read but not bridged (no add-on option sets them):
+  CORDLESS_MOS_MIN         min acceptable recent-call MOS (default 3.4)
+  CORDLESS_MOS_WINDOW_S    how recent, in seconds, a poor call must be to count
+                           (default 900)
+  SWITCHBOARD_CALLQOS      the call-quality ledger switchboard-callqos writes (default
+                           /data/state/callqos.jsonl; see load_callqos_legs)
+  SWITCHBOARD_CORDLESS_MOS_LOG  the low-MOS capture (default
+                           /data/state/cordless-mos.jsonl)
+  SWITCHBOARD_DEVHEALTH_ALERTS  the alert-latch file (default
+                           /data/state/devhealth-alerts.json; see load_alert_latches)
+The last three are path overrides, as SWITCHBOARD_LINK_OUTAGE is in rtpmon.
 """
 from __future__ import annotations
 
@@ -48,10 +59,12 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import socket
 import ssl
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, "/usr/share/switchboard/webui")  # ha_client lives with the webui
@@ -865,8 +878,11 @@ def classify_cordless(snap: dict, th: dict,
 # restart restores the contacts and qualifies them within max_initial_qualify_time
 # (9/9 reachable 4 s after Asterisk started, measured 2026-10-17). The window
 # still opens on the first start of a new astdb, after an outage longer than a
-# registration (120 s), or whenever a restored contact fails its qualify. Anything still down afterwards alerts normally, and a PARTIAL outage
-# is never suppressed. Without this, every add-on restart fired "the GXW gateway
+# registration (120 s), or whenever a restored contact fails its qualify. Since
+# v0.119.1 no gateway reading inside the window counts toward an alert, partial
+# or whole (gateway_transition): each is still published, a PARTIAL outage as
+# itself, and anything still down afterwards alerts on two samples read after
+# it. Without this, every add-on restart fired "the GXW gateway
 # likely lost power or its uplink" (observed repeatedly on 2026-08-03) — an alarm
 # that names the wrong component and trains the reader to ignore it.
 #
@@ -898,7 +914,9 @@ def classify_gateway(down_exts: list[str], gw_exts: list[str],
 
     `uptime_s` is this service's own age. Inside GATEWAY_STARTUP_GRACE_S an
     all-down reading is reported as 'degraded' (still visible, still published)
-    rather than a critical "the gateway lost power" claim.
+    rather than a critical "the gateway lost power" claim. It is not raised as
+    an alert: run() feeds no reading inside the grace to the alert
+    (gateway_transition).
 
     `cordless_dropped_too`: the cordless, which is on Wi-Fi and not on the
     gateway, went down with the ports, by rtpmon's outage rule
@@ -978,6 +996,36 @@ def health_transition(level: str, st: dict, min_cycles: int = 2,
         st["alerted"] = level
         return level
     return ""
+
+
+def gateway_transition(level: str, st: dict, measured_at: float | None,
+                       uptime_s: float | None = None) -> str:
+    """health_transition for the gateway, fed once per rtpmon sample.
+
+    The gateway is judged on rtpmon's rollup, published every
+    `poll_interval_s` (300 s by default), and this poller runs every 120 s, so
+    two of its cycles usually read ONE sample. Counting cycles let a GXW
+    reboot caught by a single sample (a firmware auto-install at 01:00, the
+    weekly reboot) raise "all 8 gateway ports down" and its recovery a few
+    minutes later. So the state advances only on a sample it has not been fed,
+    told apart by `measured_at` (kept as st["sample"]): 'degraded' and
+    'critical' need two consecutive distinct samples, and a recovery comes on
+    the first new sample that reads 'ok'. A rollup with no `measured_at` (an
+    older rtpmon) cannot be told apart, and advances the state every cycle, as
+    before. The cordless's registration is counted by sample too
+    (note_registration).
+
+    `uptime_s` is this poller's age. Inside GATEWAY_STARTUP_GRACE_S no reading
+    advances the state, and none is remembered, so the two samples behind an
+    alert are both read after it, as for the cordless's registration. The
+    grace's own 'degraded' reading is published, never raised. No uptime
+    (direct callers) is past the grace."""
+    if uptime_s is not None and uptime_s < GATEWAY_STARTUP_GRACE_S:
+        return ""
+    if measured_at is not None and measured_at == st.get("sample"):
+        return ""
+    st["sample"] = measured_at
+    return health_transition(level, st)
 
 
 def clear_is_fresh(last_reasons: list[str] | None, call_end: float | None,
@@ -1433,38 +1481,286 @@ def _flush_notifications() -> None:
         print(f"[devhealth] notification retry error: {e}", flush=True)
 
 
-def _notify(device: str, event: str, reasons: list[str]) -> None:
+def _notify(device: str, event: str, reasons: list[str]) -> bool:
+    """Post a device's card. True when Home Assistant accepted it on this call
+    (the latch records it as shown); False when alerts are off, or the card
+    was refused, whether or not notify_retry kept it."""
     if os.environ.get("DEVICE_HEALTH_ALERTS", "true").lower() in ("false", "0", "no"):
-        return
+        return False
     try:
         import ha_client
     except Exception:
-        return
+        return False
     nid = f"switchboard_{device}_health"
     label = "Cordless" if device == "cordless" else "GXW gateway"
     if event == "recovered":
-        _send(ha_client, f"{label} recovered — back to normal.",
-              f"Switchboard: {label.lower()} OK", nid)
-    elif event == "stale-clear":
+        return _send(ha_client, f"{label} recovered — back to normal.",
+                     f"Switchboard: {label.lower()} OK", nid)
+    if event == "stale-clear":
         # NOT "back to normal" -- nothing was re-measured. Say what actually
         # happened so the reader does not infer a fresh all-clear.
-        _send(ha_client,
-              f"The {label.lower()} alert cleared because its evidence aged out — "
-              "nothing new was measured. Treat the current state as unknown until "
-              "the next call.",
-              f"Switchboard: {label.lower()} alert lapsed", nid)
-    else:
-        why = "; ".join(reasons) or event
-        title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
-        _send(ha_client, f"{label} {event}: {why}", title, nid)
+        return _send(ha_client,
+                     f"The {label.lower()} alert cleared because its evidence aged out — "
+                     "nothing new was measured. Treat the current state as unknown until "
+                     "the next call.",
+                     f"Switchboard: {label.lower()} alert lapsed", nid)
+    why = "; ".join(reasons) or event
+    title = f"Switchboard: {label.lower()} {'CRITICAL' if event == 'critical' else 'degraded'}"
+    return _send(ha_client, f"{label} {event}: {why}", title, nid)
+
+
+# --------------------------------------------------------------------------- #
+# The alert latches, kept across a restart (v0.119.1).
+# --------------------------------------------------------------------------- #
+# ★ A CARD THE PREVIOUS PROCESS RAISED WAS NEVER CLOSED. The gateway's and the
+# cordless's alert states (gst, cst) lived in run()'s memory only. After an
+# add-on restart, a device that recovered before the new process raised an
+# alert of its own got no recovery: the first 'ok' found nothing alerted, and
+# the card ("GXW gateway critical: ...") stayed in the drawer. The gateway's
+# startup grace, in which no reading counts, widened that window. rtpmon keeps
+# its fleet-outage latch the same way (link-outage.json, load_outage_alerted).
+#
+# Saved per device: the level alerted, its reasons (the cordless's hold rules
+# and clear_is_fresh read them), when it was raised, whether its card was
+# SHOWN, the host boot it was raised on, and, for a poor call alone, the end
+# of the call it rests on (clear_is_fresh tells a lapse from a recovery by
+# it). A latch is restored only when its card was shown: Home Assistant
+# accepted it, or notify_retry posted it later (run() asks notify_retry.status
+# after each flush). One raised with device_health_alerts off, refused and
+# lost with the process before its retry, or given up on by the retry, is not
+# "already out": the restarted process raises the condition again if it
+# persists. No counter is saved (cycles, the gateway's last sample fed, the
+# registration count, the down runs), so counting starts over.
+#
+# ★ NOR IS ONE RAISED BEFORE A HOST REBOOT. Home Assistant Core keeps
+# persistent notifications in memory, and it restarted with the host, so the
+# card is gone. Restored, the latch took a device still down for an alert
+# already out and no card came for as long as it stayed down; one already
+# back got a recovery for a card nobody held. The kernel's boot id
+# (BOOT_ID_PATH; a container shares the host kernel's) is saved with each
+# alert, and a latch from another boot is not restored. Where it cannot be
+# read, now or when the alert was saved, a reboot cannot be told from an
+# add-on restart, and the latch is judged as before.
+#
+# ★ NO VALUE IN THE FILE CAN STOP THE LOOP. /data/state is writable
+# by the asterisk user, and this runs as root. A latch dated 1e400 (infinity)
+# passed the age check (now minus infinity is below any bound), was restored,
+# and run()'s start raised OverflowError saving it back as an integer: devhealth
+# died at every start, and s6 restarted it into the same file. A time too large
+# for a float and a file nested too deep to parse stopped it too. So a time is
+# trusted only as a finite number, and a date only between 7 days ago and now
+# (an alert is dated when it is raised, never later); anything else is a latch
+# ignored, and the first cycle writes over it. The save never writes through a
+# name planted in the directory (see save_alert_latches). The read is not
+# guarded the same way: it opens the name and reads the whole file, so a FIFO
+# planted there blocks the start and a file too large for memory raises, as
+# at devhealth's other reads from /data/state.
+ALERT_STATE_MAX_AGE_S = 7 * 86400
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+ALERT_LEVELS = ("degraded", "critical")
+_LATCH_DEVICES = ("cordless", "gateway")
+
+
+def _alert_state_path() -> str:
+    return os.environ.get("SWITCHBOARD_DEVHEALTH_ALERTS") or "/data/state/devhealth-alerts.json"
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _finite(v) -> bool:
+    """A number that is a finite float: not a bool, NaN or an infinity, nor
+    an integer too large for a float."""
+    try:
+        return _number(v) and math.isfinite(v)
+    except OverflowError:
+        return False
+
+
+def read_boot_id(path: str | None = None) -> str | None:
+    """The host's boot id (BOOT_ID_PATH), or None when it cannot be read.
+    Never raises."""
+    try:
+        with open(path or BOOT_ID_PATH, encoding="ascii") as fh:
+            return fh.read().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def latch_record(st: dict, boot: str | None = None) -> dict:
+    """What is saved for one device's alert state `st` (see above), raised on
+    host boot `boot` (None: unknown): the cleared latch when no alert is
+    out."""
+    alerted = st.get("alerted")
+    if alerted not in ALERT_LEVELS:
+        return {"alerted": None, "reasons": [], "at": None, "announced": False, "call_end": None}
+    reasons = [str(r) for r in st.get("reasons") or []]
+    at, end = st.get("at"), st.get("mos_call_end")
+    # clear_is_fresh reads the call's end only when no other reason is out.
+    mos_only = all(r.startswith(MOS_REASON) for r in reasons)
+    return {"alerted": alerted, "reasons": reasons, "at": int(at) if _number(at) else None,
+            "announced": bool(st.get("announced")),
+            "call_end": end if mos_only and _number(end) else None, "boot": boot}
+
+
+def _latch_trusted(rec: dict, now: float) -> bool:
+    reasons, at, end = rec.get("reasons"), rec.get("at"), rec.get("call_end")
+    return (rec.get("alerted") in ALERT_LEVELS and rec.get("announced") is True
+            and _finite(at) and 0 <= now - at <= ALERT_STATE_MAX_AGE_S
+            and isinstance(reasons, list) and all(isinstance(r, str) for r in reasons)
+            and (end is None or _finite(end))
+            and (rec.get("boot") is None or isinstance(rec.get("boot"), str)))
+
+
+def read_alert_latches(path: str | None = None) -> dict | None:
+    """What the latch file holds: {} when there is no file, None when it
+    cannot be read or holds no JSON object. Never raises."""
+    try:
+        with open(path or _alert_state_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def load_alert_latches(path: str | None = None, now: float | None = None,
+                       boot: str | None = None) -> dict:
+    """{device: saved latch} for each device whose alert a previous process
+    left out and that can be trusted: alerted at a level, its card shown,
+    raised between ALERT_STATE_MAX_AGE_S ago and `now`, and not on a host
+    boot other than `boot` (the current one; None, or none saved: not
+    compared). Never raises. A missing file, or a device with no alert out,
+    is no latch, silently; a corrupt file or an untrusted latch is none
+    either, with one stderr line and no values."""
+    data = read_alert_latches(path)
+    if data is None:
+        sys.stderr.write("[switchboard-devhealth] the saved alert state is unreadable; "
+                         "starting with no alert out\n")
+        return {}
+    now = time.time() if now is None else now
+    out = {}
+    for device in _LATCH_DEVICES:
+        rec = data.get(device)
+        if rec is None or (isinstance(rec, dict) and rec.get("alerted") is None):
+            continue
+        if not (isinstance(rec, dict) and _latch_trusted(rec, now)):
+            sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
+                             "not shown, undated, dated after now, malformed or more "
+                             "than 7 days old\n")
+        elif boot is not None and rec.get("boot") not in (None, boot):
+            sys.stderr.write(f"[switchboard-devhealth] ignoring the saved {device} alert: "
+                             "raised before a host reboot, which cleared its card\n")
+        else:
+            out[device] = rec
+    return out
+
+
+def save_alert_latches(latches: dict, path: str | None = None) -> bool:
+    """Write the latches atomically (a temporary file, then os.replace).
+    True only if they reached the disk; never raises.
+
+    /data/state is writable by the asterisk user and this runs as root, so the
+    temporary file is never a fixed name a link could be planted at: mkstemp
+    creates a new one, exclusively (rtpmon's _append_history does the same).
+    mkstemp's 0600 is kept: devhealth, running as root, is the file's only
+    reader. A save that fails leaves no temporary file behind."""
+    target = path or _alert_state_path()
+    try:
+        d = os.path.dirname(target) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".devhealth-alerts-", suffix=".tmp")
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(latches, fh)
+        os.replace(tmp, target)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:                            # already gone: removed by another
+            pass
+        return False
+
+
+def restore_latch(st: dict, rec: dict) -> None:
+    """Put a trusted saved latch back on a fresh device alert state: alerted,
+    and level, at the saved level, its reasons, when it was raised, shown. No
+    count is restored, so the cycle count starts over at 0."""
+    st.update({"alerted": rec["alerted"], "level": rec["alerted"],
+               "reasons": list(rec["reasons"]), "at": rec["at"], "announced": True})
+    if rec.get("call_end") is not None:
+        st["mos_call_end"] = float(rec["call_end"])
+
+
+def keep_alert_latches(written: dict, cst: dict, gst: dict, boot: str | None = None) -> None:
+    """Save the latches, on host boot `boot`, when they differ from those last
+    saved (written["latches"], updated in place). A failed save is tried again
+    the next cycle, and logged once until one succeeds; it never stops the
+    loop."""
+    try:
+        latches = {"cordless": latch_record(cst, boot), "gateway": latch_record(gst, boot)}
+        if latches == written.get("latches"):
+            return
+        ok = save_alert_latches(latches)
+    except Exception:  # noqa: BLE001 — a latch must never cost the poll its cycle
+        ok = False
+    if ok:
+        written["latches"], written["failing"] = latches, False
+    elif not written.get("failing"):
+        written["failing"] = True
+        sys.stderr.write("[switchboard-devhealth] could not save the alert state; "
+                         "trying again each cycle\n")
+
+
+def _card_status(device: str) -> str:
+    """notify_retry's status for a device's card: "pending" while a refused
+    card waits for its retry, "dropped" once the retry gave up, "" otherwise
+    (posted, never kept, or no notify_retry to keep it)."""
+    try:
+        import notify_retry
+        return str(notify_retry.status(f"switchboard_{device}_health") or "")
+    except Exception:  # noqa: BLE001 — an older or absent module keeps nothing
+        return ""
+
+
+def _raise(device: str, ev: str, reasons: list[str], st: dict, kept: dict) -> None:
+    """Post a device's event and note on its alert state what the latch
+    saves: for an alert, its reasons, when it was raised and whether its card
+    was shown. `kept[device]` says notify_retry holds the card, refused (a
+    card accepted at once is never held). A refused recovery is held too:
+    once posted it marks `announced`, which no latch reads while no alert is
+    out, and the next event sets both afresh."""
+    shown = _notify(device, ev, reasons)
+    if ev in ALERT_LEVELS:
+        st["reasons"], st["at"], st["announced"] = list(reasons), time.time(), bool(shown)
+    kept[device] = _card_status(device) == "pending"
+
+
+def _note_posted(device: str, st: dict, kept: dict) -> None:
+    """After a flush: the alert card notify_retry kept for a device (set by
+    _raise for its latest event) has been shown once it is no longer pending
+    and the retry did not give up on it."""
+    if not kept.get(device):
+        return
+    fate = _card_status(device)
+    if fate == "pending":
+        return
+    if fate == "":
+        st["announced"] = True
+    kept[device] = False
 
 
 def run() -> None:
     interval = max(30, _env_int("DEVICE_HEALTH_INTERVAL", 120))
     cordless_ip = os.environ.get("CORDLESS_IP", "192.168.1.71").strip()
     cordless_ext = os.environ.get("CORDLESS_EXT", "").strip()
-    # This service's own start, used to hold back the gateway all-down CRITICAL
-    # while the GXW is merely re-registering after our restart (see
+    # This service's own start, used to hold back the gateway alert while the
+    # GXW may still be re-registering after our restart (see
     # GATEWAY_STARTUP_GRACE_S), and to refuse a rollup measured before it.
     # monotonic: immune to wall-clock/NTP steps.
     _started = time.monotonic()
@@ -1490,9 +1786,34 @@ def run() -> None:
     print(f"[devhealth] up: cordless={cordless_ip or '(disabled)'} ({follow}) "
           f"api={'yes' if cordless_pw else 'no-password'} "
           f"gateway_ports={','.join(gw_exts)} every {interval}s", flush=True)
+    # An alert a previous process left out on this host boot, its card shown,
+    # is restored (see load_alert_latches): its recovery still closes the
+    # card, and the same condition, or a milder one, is not raised again.
+    boot = read_boot_id()
+    if boot is None:
+        # Said once, so a host on which the reboot check cannot work shows it.
+        print("[devhealth] the host's boot id cannot be read; a saved alert is restored "
+              "whether or not the host rebooted", flush=True)
+    restored = load_alert_latches(now=time.time(), boot=boot)
+    for device, st in (("cordless", cst), ("gateway", gst)):
+        if device in restored:
+            restore_latch(st, restored[device])
+            print(f"[devhealth] restored the {device} {st['alerted']} alert raised before "
+                  "the restart", flush=True)
+    # The latches as last saved, and the devices whose refused card
+    # notify_retry holds. A file holding anything but no latch or the state
+    # restored from it (a latch ignored above, a corrupt file) is written over
+    # on the first cycle, so what was ignored is not logged again at every
+    # later start.
+    current = {"cordless": latch_record(cst, boot), "gateway": latch_record(gst, boot)}
+    written = {"latches": current if read_alert_latches() in ({}, current) else None}
+    kept: dict = {}
     while True:
-        # First, whatever Home Assistant refused on an earlier cycle.
+        # First, whatever Home Assistant refused on an earlier cycle. An alert
+        # card it posts has been shown from then, and the latch says so.
         _flush_notifications()
+        _note_posted("cordless", cst, kept)
+        _note_posted("gateway", gst, kept)
         # ONE read of rtpmon's rollup per cycle, so the cordless's registration
         # and the gateway's ports are judged on the same sample. A rollup
         # measured before this process started describes the plant before the
@@ -1582,7 +1903,7 @@ def run() -> None:
                     if ev == "stale-clear":
                         cst.pop("mos_call_end", None)
                     print(f"[devhealth] cordless {ev}: {'; '.join(reasons) or ev}", flush=True)
-                    _notify("cordless", ev, reasons)
+                    _raise("cordless", ev, reasons, cst, kept)
             except Exception as e:
                 print(f"[devhealth] cordless poll error: {e}", flush=True)
         # --- gateway (derived from rtpmon rollup) ---
@@ -1592,7 +1913,8 @@ def run() -> None:
                 for run in runs.values():
                     note_down_run(run, None, 0.0)
             if down is not None:
-                at = rollup_measured_at(rollup) or time.time()
+                sampled = rollup_measured_at(rollup)
+                at = sampled or time.time()
                 note_down_run(runs["cordless"], cordless_down_in(rollup, cordless_ext), at)
                 note_down_run(runs["ports"], bool(gw_exts) and set(gw_exts) <= set(down), at)
                 note_down_run(runs["fleet"], fleet_outage_in(rollup), at)
@@ -1600,35 +1922,45 @@ def run() -> None:
                     rollup_interval = float(rollup.get("poll_interval_s") or 300)
                 except (TypeError, ValueError):
                     rollup_interval = 300.0
-                # The cause is decided when the critical fires: the cordless
-                # and every port down by the fleet outage's second sample,
-                # with the cordless up before it began, points past the
-                # gateway. A cause learned later is not re-sent (the cordless
-                # dropping one rtpmon sample after the ports, read after the
-                # critical fired, say), because health_transition fires again
+                # The cause is decided when the critical fires, on the second
+                # distinct all-down sample: the cordless and every port down
+                # by the fleet outage's second sample, with the cordless up
+                # before it began, points past the gateway. A cause learned
+                # later is not re-sent (on a rollup with no stamp, judged
+                # cycle by cycle, the cordless dropping one rtpmon sample
+                # after the ports, say), because health_transition fires again
                 # only when the level rises.
+                uptime = time.monotonic() - _started
                 level, reasons = classify_gateway(
-                    down, gw_exts, time.monotonic() - _started,
+                    down, gw_exts, uptime,
                     cordless_dropped_too=dropped_together(runs["cordless"], runs["ports"],
                                                           runs["fleet"], rollup_interval))
+                # Published every cycle, the startup grace included; the alert
+                # is fed once per rtpmon sample, and nothing inside the grace.
                 _publish_gateway(level, reasons, down, gw_exts)
-                ev = health_transition(level, gst)
+                ev = gateway_transition(level, gst, sampled, uptime)
                 if ev:
                     print(f"[devhealth] gateway {ev}: {'; '.join(reasons) or ev}", flush=True)
-                    _notify("gateway", ev, reasons)
+                    _raise("gateway", ev, reasons, gst, kept)
             else:
                 # No usable rollup (link-health poller down, stale, or HA
                 # unreadable). Publish the blindness instead of leaving the last
                 # reading standing — and reset the transition state so recovery
                 # re-announces cleanly rather than comparing against a level we
-                # can no longer vouch for.
+                # can no longer vouch for. The last sample fed is forgotten
+                # too, so the samples on either side of this cycle are not
+                # taken for consecutive ones. An alert already out stays out
+                # until a fresh sample clears it.
                 _publish_gateway_unknown(
                     "link-health rollup unavailable or stale — gateway health "
                     "cannot be derived", gw_exts)
                 gst["level"] = None
                 gst["cycles"] = 0
+                gst["sample"] = None
         except Exception as e:
             print(f"[devhealth] gateway poll error: {e}", flush=True)
+        # Whatever this cycle changed in either latch, saved before the sleep.
+        keep_alert_latches(written, cst, gst, boot)
         time.sleep(interval)
 
 

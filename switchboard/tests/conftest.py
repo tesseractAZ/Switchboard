@@ -39,6 +39,11 @@ os.environ.setdefault("SWITCHBOARD_ANNOUNCE_TAG_KEY",
 # any other run() driver off /data/state.
 os.environ.setdefault("SWITCHBOARD_LINK_OUTAGE",
                       os.path.join(_STATE_DIR, "link-outage.json"))
+# The device-health poller's gateway and cordless alert latches (v0.119.1), the
+# same way: test_devhealth._drive_loop gives each run() a private file, and
+# this keeps any other run() driver off /data/state.
+os.environ.setdefault("SWITCHBOARD_DEVHEALTH_ALERTS",
+                      os.path.join(_STATE_DIR, "devhealth-alerts.json"))
 
 
 # --------------------------------------------------------------------------- #

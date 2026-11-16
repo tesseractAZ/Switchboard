@@ -3,6 +3,35 @@
 Recent releases. Releases up to 0.109.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
 
+## 0.119.1
+
+**The gateway alert needs two link-health samples, not two of its own cycles.**
+
+- Gateway health is read every 120 s off a rollup published every 300 s, so
+  a GXW reboot caught by one sample (a firmware auto-install at 01:00, the
+  weekly reboot) was read twice and raised "all 8 gateway ports down", then
+  its recovery. The alert now advances only on a sample with a new
+  `measured_at`, as the cordless's registration does, and goes out on the
+  first read of the second; a recovery comes on the first new sample that
+  reads `ok`. A rollup without `measured_at` is judged cycle by cycle.
+- No reading inside the 360 s startup grace counts. Its "re-registers"
+  reading is still published but no longer raised as a card, and a gateway
+  already down at start alerts 480 to 720 s after the start (was 480 s).
+- The cause is decided a sample later. In 3,000 simulated outages the gateway
+  and outage alerts named the same cause in all; before, they differed in
+  198, each a cordless dropping one sample after the ports.
+- Gateway and cordless alerts survive an add-on restart. Each is kept in
+  `/data/state` with whether its card was shown and the host boot; a shown
+  alert is not raised again, and its recovery still comes (a gateway already
+  back clears on the first sample read after the grace, 360 s after the
+  start). One not shown, raised over 7 days earlier, or raised before a host
+  reboot, which clears Home Assistant's cards, is raised again if the
+  condition persists.
+- The fleet-outage alert is not restored after a host reboot either. Its
+  latch now carries the host boot, so an outage still on is announced again,
+  card and push, on the second settled sample, and one already over posts no
+  recovery.
+
 ## 0.119.0
 
 **A phone-system outage reaches the phone, and its alerts name what is down.**
