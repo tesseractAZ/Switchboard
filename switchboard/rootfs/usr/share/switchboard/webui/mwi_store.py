@@ -44,7 +44,10 @@ def _open_no_follow(path: str, flags: int) -> int:
     fstat refuses a FIFO, a device or a directory; O_NONBLOCK keeps a planted
     FIFO from hanging the open.
     """
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share this file; group access is required
+    # Created owner-only. Only the lock is ever created here, and _Lock gives it
+    # the shared 0664 on its descriptor straight after; the services' umask
+    # (022) made a 0664 create mode 0644 anyway, so the group never had it before.
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"{path}: not a regular file")
