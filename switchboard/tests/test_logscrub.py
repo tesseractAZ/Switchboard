@@ -46,11 +46,12 @@ S6 = ADDON / "rootfs/etc/s6-overlay/s6-rc.d"
 ls = SourceFileLoader("logscrub_under_test", str(WEBUI / "logscrub.py")).load_module()
 
 AT = "@"
+PROVIDER = "pop0.example.org"       # a trunk host no option names: the positional rule
 VERBOSE_LINE = ("[Sep  9 19:50:47] VERBOSE[2232][C-01] pbx.c: Executing [s@rooms:1] "
                 "Dial(\"PJSIP/12-0000\", \"PJSIP/16025551234@trunk\")\n")
 ACCT_LINE = ("[Sep  7 18:39:35] WARNING[309] res_pjsip_outbound_registration.c: No "
-             "response received from 'sip:example1.voip.ms:5060' on registration "
-             "attempt to 'sip:123456_acct" + AT + "example1.voip.ms', retrying in '60'\n")
+             "response received from 'sip:" + PROVIDER + ":5060' on registration "
+             "attempt to 'sip:123456_acct" + AT + PROVIDER + "', retrying in '60'\n")
 QUALIFY_LINE = ("[Sep  7 04:06:41] ERROR[618] res_pjsip/pjsip_options.c: Unable to send "
                 "request to qualify contact sip:19" + AT + "192.168.1.71:11909 on AOR 19\n")
 PRIVATE_VARIANTS = ("[Sep 10 20:42:35] WARNING[1] x.c: 10.0.0.5 172.16.0.1 "
@@ -63,6 +64,23 @@ CLEAN = ("[Sep 10 20:42:34] NOTICE[108] cel_custom.c: No mappings found.\n"
 
 BOTH_MODES = pytest.mark.parametrize("writer_stopped", [False, True],
                                      ids=["in-place", "boot-rewrite"])
+
+
+@pytest.fixture(autouse=True)
+def _no_real_options(tmp_path_factory, monkeypatch):
+    """No test here reads the add-on options of the machine it runs on. The
+    trunk-host rule reads them; a test that wants a trunk writes its own."""
+    nowhere = tmp_path_factory.mktemp("no-options")
+    monkeypatch.setenv("SWITCHBOARD_OPTIONS", str(nowhere / "options-effective.json"))
+    monkeypatch.setattr(ls, "OPTIONS_PATH", str(nowhere / "options.json"), raising=False)
+
+
+def _trunk(tmp_path, monkeypatch, **trunk):
+    """Options naming a trunk, where the services find them (SWITCHBOARD_OPTIONS)."""
+    p = tmp_path / "options-effective.json"
+    p.write_text(json.dumps({"trunk": trunk}))
+    monkeypatch.setenv("SWITCHBOARD_OPTIONS", str(p))
+    return p
 
 
 class _OsProxy:
@@ -94,7 +112,8 @@ def test_the_boot_rewrite_removes_every_leak_class_and_nothing_else(tmp_path):
 
     assert "16025551234" not in out and "VERBOSE" not in out
     assert "123456_acct" not in out, "the trunk SIP account survived"
-    assert "sip:***" + AT + "example1.voip.ms" in out, "the account was dropped, not redacted"
+    assert "sip:***" + AT + "<trunk-host>'" in out, "the account was dropped, not redacted"
+    assert PROVIDER not in out, "the trunk host survived"
     assert "retrying in '60'" in out, "the WARNING itself must survive redaction"
 
     # The live qualify line: the address goes, the port and the AOR stay, so it
@@ -168,7 +187,8 @@ def test_while_asterisk_runs_every_mask_is_the_same_length_and_nothing_moves(tmp
     assert "16025551234" not in out and "VERBOSE" not in out
 
     assert "123456_acct" not in out
-    assert "'sip:***********" + AT + "example1.voip.ms', retrying in '60'" in out
+    assert "'sip:***********" + AT + "<host**********>', retrying in '60'" in out
+    assert "from 'sip:<host**********>:5060' on registration" in out
     assert "192.168.1.71" not in out
     assert "sip:**" + AT + "<ip********>:11909 on AOR 19" in out
     assert ("x.c: <ip****> <ip******> <ip**********> <ip*******> ended at <ip****>."
@@ -260,7 +280,8 @@ def test_a_mask_is_never_matched_again_and_the_boot_pass_makes_it_canonical(tmp_
     assert out == (CLEAN
                    + QUALIFY_LINE.replace("sip:19" + AT + "192.168.1.71",
                                           "sip:***" + AT + "<private-ip>")
-                   + ACCT_LINE.replace("sip:123456_acct" + AT, "sip:***" + AT))
+                   + ACCT_LINE.replace("sip:123456_acct" + AT, "sip:***" + AT)
+                   .replace(PROVIDER, "<trunk-host>"))
     assert ls.scrub(f, writer_stopped=True) == ls.Scrub(0, 0, len(out.encode()), "")
     assert ls.scrub(f) == ls.Scrub(0, 0, len(out.encode()), "")
 
@@ -316,7 +337,7 @@ def test_a_line_still_being_written_is_carried_through_and_judged_once_complete(
     assert r.clean_to == f.stat().st_size - len(half), "the watermark passed an unfinished line"
 
     with open(f, "ab") as fh:                       # Asterisk finishes the line
-        fh.write(("ten" + AT + "example1.voip.ms'\n").encode())
+        fh.write(("ten" + AT + PROVIDER + "'\n").encode())
     r2 = ls.scrub(f, since=r.clean_to, writer_stopped=writer_stopped)
     assert r2.redacted == 1, r2
     assert "half_written" not in f.read_text()
@@ -384,7 +405,7 @@ def test_the_rewrite_is_in_place_so_asterisk_keeps_appending_to_the_same_file(tm
     data = f.read_bytes()
     assert f.stat().st_ino == inode
     assert b"\x00" not in data, "the writer left a hole: the file was not appended to"
-    assert data.decode().endswith("example1.voip.ms', retrying in '60'\n" + after)
+    assert data.decode().endswith("', retrying in '60'\n" + after)
 
 
 @BOTH_MODES
@@ -425,6 +446,279 @@ def test_a_symlink_or_a_fifo_is_refused_and_what_it_points_at_is_untouched(tmp_p
 
 
 # --------------------------------------------------------------------------- #
+# The trunk provider's host (v0.119.3)
+# --------------------------------------------------------------------------- #
+# A provider's host is regional — a point of presence named for a city — so it
+# can place the house. The readable log held it on every registration-retry
+# WARNING, in the two shapes below, with the account already masked. Hosts here
+# are example.net names.
+
+HOST = "pop1.example.net"                   # 16 characters...
+HOST_MASK = "<host**********>"              # ...and so is its in-place mask
+HOST_TOKEN = "<trunk-host>"
+REG = "res_pjsip_outbound_registration.c: "
+NO_RESPONSE = ("[2026-11-13 02:30:35.120 -0700] WARNING[309] " + REG
+               + "No response received from 'sip:" + HOST + ":5060' on registration "
+               "attempt to 'sip:***" + AT + HOST + "', retrying in '60'\n")
+FATAL = ("[Sep  7 18:40:35] WARNING[309] " + REG + "'403' fatal response received "
+         "from 'sip:" + HOST + ":5060' on registration attempt to 'sip:***" + AT + HOST
+         + "', stopping outbound registration\n")
+# The same retry with the server URI written as a template, for other hosts.
+RETRY = ("[Sep  7 18:39:35] WARNING[309] " + REG + "No response received from "
+         "'sip:{0}' on registration attempt to 'sip:***" + AT + "{1}', retrying in '60'\n")
+# Not a registration line: the positional rule does not reach it.
+RESOLVER = "[Sep  7 18:41:00] ERROR[309] res_pjsip/pjsip_resolver.c: "
+
+
+@pytest.mark.parametrize("configured", [(HOST,), ("POP1.Example.NET",), ()],
+                         ids=["configured", "configured-other-case", "not-configured"])
+@pytest.mark.parametrize("written", [HOST, HOST.upper(), "Pop1.Example.Net"])
+@pytest.mark.parametrize("shape", [NO_RESPONSE, FATAL], ids=["no-response", "fatal"])
+def test_a_registration_retry_keeps_everything_but_the_host(shape, written, configured):
+    """Both live shapes, the host in any case, configured or not. The exact
+    expected line pins what stays: severity, source, port, the masked account,
+    the retry interval or the stop, and that it is about a registration."""
+    line = shape.replace(HOST, written)
+    assert ls.redact_line(line, configured) == shape.replace(HOST, HOST_TOKEN)
+    assert ls.mask_line(line, configured) == shape.replace(HOST, HOST_MASK)
+
+
+def test_a_server_uri_without_a_port_and_an_unmasked_account_lose_the_host_too():
+    line = RETRY.replace("'sip:***", "'sip:123456_acct").format(HOST, HOST)
+    assert ls.redact_line(line, ()) == RETRY.format(HOST_TOKEN, HOST_TOKEN)
+    assert ls.mask_line(line, ()) == RETRY.replace("'sip:***", "'sip:***********").format(
+        HOST_MASK, HOST_MASK)
+
+
+@pytest.mark.parametrize("text,canonical,same_length", [
+    ("SRV lookup of _sip._udp." + HOST + " failed",
+     "SRV lookup of _sip._udp." + HOST_TOKEN + " failed",
+     "SRV lookup of _sip._udp." + HOST_MASK + " failed"),
+    ("could not resolve '" + HOST + "'", "could not resolve '" + HOST_TOKEN + "'",
+     "could not resolve '" + HOST_MASK + "'"),
+    ("could not resolve " + HOST + ".", "could not resolve " + HOST_TOKEN + ".",
+     "could not resolve " + HOST_MASK + "."),
+    ("target " + HOST.upper() + ":5060 down", "target " + HOST_TOKEN + ":5060 down",
+     "target " + HOST_MASK + ":5060 down"),
+], ids=["srv-tail", "quoted", "ends-a-sentence", "upper-case-with-port"])
+def test_a_configured_host_goes_wherever_it_stands_as_a_whole_host(text, canonical, same_length):
+    line = RESOLVER + text + "\n"
+    assert ls.redact_line(line, (HOST,)) == RESOLVER + canonical + "\n"
+    assert ls.mask_line(line, (HOST,)) == RESOLVER + same_length + "\n"
+
+
+@pytest.mark.parametrize("longer", ["x" + HOST, "a-" + HOST, "_" + HOST, HOST + ".example",
+                                    HOST + "work", HOST + "-2", "1" + HOST])
+def test_a_configured_host_inside_a_longer_name_is_not_that_host(longer):
+    line = RESOLVER + "could not resolve '" + longer + "'\n"
+    assert ls.redact_line(line, (HOST,)) == line
+    assert ls.mask_line(line, (HOST,)) == line
+
+
+@pytest.mark.parametrize("configured", [" POP1.Example.NET ", HOST + ":5080"],
+                         ids=["case-and-blanks", "with-a-port"])
+def test_a_configured_host_is_compared_as_a_host(configured):
+    line = RESOLVER + "could not resolve '" + HOST + "'\n"
+    assert ls.redact_line(line, (configured,)) == line.replace(HOST, HOST_TOKEN)
+
+
+def test_what_is_not_a_dns_name_is_never_a_configured_host():
+    """An address is not touched by this rule: private ones are the address
+    rule's, public ones stay. A one-label name could only be matched inside
+    the masks themselves, and a mask matched again is not idempotent."""
+    public = RESOLVER + "no route to 203.0.113.5:5060\n"
+    assert ls.redact_line(public, ("203.0.113.5",)) == public
+    assert ls.mask_line(public, ("203.0.113.5",)) == public
+    for word in ("host", "ip", "trunk-host", "private-ip", ""):
+        masked = RESOLVER + "to " + HOST_MASK + " via <ip****> and " + HOST_TOKEN + "\n"
+        canonical = RESOLVER + "to " + HOST_TOKEN + " via <private-ip>\n"
+        assert ls.mask_line(masked, (word,)) == masked, word
+        assert ls.redact_line(canonical, (word,)) == canonical, word
+        assert ls.redact_line(RESOLVER + "plain text\n", (word,)) == RESOLVER + "plain text\n"
+
+
+def test_the_registration_rule_takes_dns_names_only_and_only_on_registration_lines():
+    """No host configured: the rule that removes a host the options no longer
+    name. It reads the host part of a sip: URI on a registration line, and
+    nothing else."""
+    old = "old-pop.example.org"
+    line = RETRY.format(old + ":5060", old)
+    assert ls.redact_line(line, ()) == RETRY.format(HOST_TOKEN + ":5060", HOST_TOKEN)
+    # An address in that position belongs to the address rule, or stays.
+    assert (ls.redact_line(RETRY.format("10.0.0.9:5060", "10.0.0.9"), ())
+            == RETRY.format("<private-ip>:5060", "<private-ip>"))
+    for kept in (RETRY.format("203.0.113.5:5060", "203.0.113.5"),
+                 RETRY.format("[2001:db8::5]:5060", "[2001:db8::5]")):
+        assert ls.redact_line(kept, ()) == kept and ls.mask_line(kept, ()) == kept
+    # Another source's sip: URI is not the trunk's.
+    other = ("[Sep  7 18:39:35] WARNING[1] res_pjsip_session.c: transfer to "
+             "'sip:" + old + ":5060' refused\n")
+    assert ls.redact_line(other, ()) == other and ls.mask_line(other, ()) == other
+
+
+def test_a_host_shorter_than_the_mask_frame_becomes_all_stars():
+    assert (ls.mask_line(RETRY.format("ab.io:5060", "ab.io"), ())
+            == RETRY.format("*****:5060", "*****"))
+    assert (ls.mask_line(RETRY.format("abc.io:5060", "abc.io"), ())
+            == RETRY.format("<host>:5060", "<host>"))
+    for masked in (RETRY.format("*****:5060", "*****"), RETRY.format("<host>:5060", "<host>")):
+        assert ls.mask_line(masked, ()) == masked
+        assert ls.redact_line(masked, ()) == masked
+
+
+def test_the_boot_pass_makes_the_bare_frame_canonical_and_keeps_the_all_star_form(tmp_path):
+    """A six-character host leaves `<host>`, the frame with no `*`; the boot
+    pass must still recognise it. Five or fewer leave only `*`, which cannot be
+    told from other asterisks and so stays."""
+    f = tmp_path / "asterisk.log"
+    f.write_text(RETRY.format("abc.io:5060", "abc.io") + RETRY.format("ab.io:5060", "ab.io"))
+    ls.scrub(f)
+    stars = RETRY.format("*****:5060", "*****")
+    assert f.read_text() == RETRY.format("<host>:5060", "<host>") + stars
+
+    boot = ls.scrub(f, writer_stopped=True)
+
+    assert (boot.redacted, boot.deferred) == (1, ""), boot
+    assert f.read_text() == RETRY.format(HOST_TOKEN + ":5060", HOST_TOKEN) + stars
+
+
+def test_every_host_mask_keeps_the_line_byte_for_byte_and_folds_no_unicode():
+    """Offsets are bytes. A case-insensitive match that folded a non-ASCII
+    letter onto an ASCII one (the Kelvin sign onto `k`, the long s onto `s`,
+    the dotless i onto `i`) would replace more bytes than it writes."""
+    trap = "kiosk.example.net"
+    lines = [NO_RESPONSE, FATAL,
+             RESOLVER + "café \udcff to " + trap + ":5060\n",
+             RETRY.replace("No response", "café \udcff No response").format(
+                 HOST + ":5060", HOST)]
+    for fake in ("Kiosk.example.net", "kıosk.example.net", "kioſk.example.net"):
+        lines.append(RESOLVER + "could not resolve '" + fake + "'\n")
+        assert ls.mask_line(lines[-1], (trap,)) == lines[-1], fake
+        assert ls.redact_line(lines[-1], (trap,)) == lines[-1], fake
+    for line in lines:
+        masked = ls.mask_line(line, (HOST, trap))
+        assert (len(masked.encode("utf-8", "surrogateescape"))
+                == len(line.encode("utf-8", "surrogateescape"))), line
+        assert ls.mask_line(masked, (HOST, trap)) == masked, "a second pass changed a mask"
+
+
+@BOTH_MODES
+@pytest.mark.parametrize("options", [
+    None, "dir", b"{not json", b"\xff\xfe", b"[]", b'{"trunk": "pop1.example.net"}',
+    b'{"trunk": {}}', b'{"trunk": {"provider_host": 5060, "from_domain": null}}',
+    b'{"trunk": {"provider_host": "", "from_domain": "  "}}',
+    b'{"trunk": {"provider_host": ["pop1.example.net"]}}',
+], ids=["missing", "a-directory", "malformed", "not-utf8", "not-an-object", "trunk-not-an-object",
+        "no-trunk-host", "not-strings", "blank", "a-list"])
+def test_without_a_usable_trunk_host_nothing_raises_and_the_registration_rule_still_runs(
+        tmp_path, monkeypatch, options, writer_stopped):
+    p = tmp_path / "options-effective.json"
+    if options == "dir":
+        p.mkdir()
+    elif options is not None:
+        p.write_bytes(options)
+    monkeypatch.setenv("SWITCHBOARD_OPTIONS", str(p))
+    f = tmp_path / "asterisk.log"
+    elsewhere = RESOLVER + "could not resolve '" + HOST + "'\n"
+    f.write_text(CLEAN + NO_RESPONSE + elsewhere)
+
+    r = ls.scrub(f, writer_stopped=writer_stopped)
+
+    token = HOST_TOKEN if writer_stopped else HOST_MASK
+    assert (r.redacted, r.deferred) == (1, ""), r
+    assert f.read_text() == CLEAN + NO_RESPONSE.replace(HOST, token) + elsewhere
+
+
+@BOTH_MODES
+def test_the_hosts_come_from_both_option_files(tmp_path, monkeypatch, writer_stopped):
+    """SWITCHBOARD_OPTIONS (the services' post-overlay snapshot) and
+    /data/options.json are both read, so a host an overlay replaced is
+    still taken out of the lines it wrote before."""
+    _trunk(tmp_path, monkeypatch, provider_host="pop2.example.net")
+    data = tmp_path / "options.json"
+    data.write_text(json.dumps({"trunk": {"provider_host": HOST,
+                                          "from_domain": "Voice.Example.Net"}}))
+    monkeypatch.setattr(ls, "OPTIONS_PATH", str(data))
+    f = tmp_path / "asterisk.log"
+    f.write_text("".join(RESOLVER + "could not resolve '" + h + "'\n"
+                         for h in (HOST, "pop2.example.net", "voice.example.net")))
+
+    r = ls.scrub(f, writer_stopped=writer_stopped)
+
+    out = f.read_text()
+    assert r.redacted == 3, (r, out)
+    assert "example.net" not in out, out
+
+
+def test_without_the_variable_the_options_file_alone_is_read(tmp_path, monkeypatch):
+    """The boot oneshot runs without SWITCHBOARD_OPTIONS."""
+    monkeypatch.delenv("SWITCHBOARD_OPTIONS")
+    data = tmp_path / "options.json"
+    data.write_text(json.dumps({"trunk": {"provider_host": HOST}}))
+    monkeypatch.setattr(ls, "OPTIONS_PATH", str(data))
+    f = tmp_path / "asterisk.log"
+    f.write_text(RESOLVER + "could not resolve '" + HOST + "'\n")
+    assert ls.scrub(f, writer_stopped=True).redacted == 1
+    assert f.read_text() == RESOLVER + "could not resolve '" + HOST_TOKEN + "'\n"
+
+
+def test_a_host_mask_is_never_matched_again_and_the_boot_pass_makes_it_canonical(
+        tmp_path, monkeypatch):
+    _trunk(tmp_path, monkeypatch, provider_host=HOST, from_domain=HOST)
+    f = tmp_path / "asterisk.log"
+    original = CLEAN + NO_RESPONSE + FATAL
+    f.write_text(original)
+
+    first = ls.scrub(f)
+    masked = f.read_text()
+    assert (first.redacted, first.deferred) == (2, ""), first
+    assert masked == CLEAN + NO_RESPONSE.replace(HOST, HOST_MASK) + FATAL.replace(HOST, HOST_MASK)
+    assert ls.scrub(f, since=0) == ls.Scrub(0, 0, len(masked), "")
+    assert f.read_text() == masked
+
+    boot = ls.scrub(f, writer_stopped=True)
+    out = f.read_text()
+    assert (boot.dropped, boot.redacted, boot.deferred) == (0, 2, ""), boot
+    assert out == CLEAN + NO_RESPONSE.replace(HOST, HOST_TOKEN) + FATAL.replace(HOST, HOST_TOKEN)
+    assert ls.scrub(f, writer_stopped=True) == ls.Scrub(0, 0, len(out.encode()), "")
+    assert ls.scrub(f) == ls.Scrub(0, 0, len(out.encode()), "")
+
+
+def test_a_registration_retry_appended_mid_pass_survives_whole_and_is_masked_next(
+        tmp_path, monkeypatch):
+    """The concurrent-append guarantee, with the host rule in the pass."""
+    _trunk(tmp_path, monkeypatch, provider_host=HOST)
+    f = tmp_path / "asterisk.log"
+    before = CLEAN + FATAL + NO_RESPONSE
+    f.write_text(before)
+    asterisk = open(f, "ab")
+    fired = []
+
+    def pwrite(fd, data, offset):
+        if not fired:
+            fired.append(offset)
+            asterisk.write(NO_RESPONSE.encode())
+            asterisk.flush()
+        return os.pwrite(fd, data, offset)
+
+    monkeypatch.setattr(ls, "os", _OsProxy(pwrite=pwrite))
+    try:
+        r = ls.scrub(f)
+    finally:
+        asterisk.close()
+    monkeypatch.setattr(ls, "os", os)
+
+    data = f.read_text()
+    assert fired, "the pass wrote nothing, so nothing was raced"
+    assert data == (CLEAN + FATAL.replace(HOST, HOST_MASK) + NO_RESPONSE.replace(HOST, HOST_MASK)
+                    + NO_RESPONSE), "the line appended during the pass was cut or overwritten"
+    assert r.clean_to == len(before)
+    r2 = ls.scrub(f, since=r.clean_to)
+    assert (r2.redacted, r2.deferred) == (1, ""), r2
+    assert HOST not in f.read_text()
+
+
+# --------------------------------------------------------------------------- #
 # Caller 1: switchboard-config, once at boot
 # --------------------------------------------------------------------------- #
 
@@ -452,7 +746,40 @@ def test_boot_scrubs_the_share_log_with_the_shared_module(tmp_path, monkeypatch)
     # ★ The boot pass is the REWRITE, and only these assertions tell it from the
     # in-place pass, which would also leave no account, address or "VERBOSE".
     assert out == CLEAN + ACCT_LINE.replace("sip:123456_acct" + AT, "sip:***" + AT) \
-        + QUALIFY_LINE.replace("sip:19" + AT + "192.168.1.71", "sip:***" + AT + "<private-ip>")
+        .replace(PROVIDER, "<trunk-host>") + QUALIFY_LINE.replace("sip:19" + AT + "192.168.1.71", "sip:***" + AT + "<private-ip>")
+
+
+def test_the_boot_pass_takes_the_trunk_host_out_with_the_options_it_can_read(
+        tmp_path, monkeypatch):
+    """The init oneshot has no SWITCHBOARD_OPTIONS: it reads /data/options.json.
+    The module is loaded afresh by file path, so its default is pointed here."""
+    sbc = SourceFileLoader("sbc_logscrub_host", str(CONFIG)).load_module()
+    monkeypatch.delenv("SWITCHBOARD_OPTIONS")
+    data = tmp_path / "options.json"
+    data.write_text(json.dumps({"trunk": {"provider_host": HOST, "from_domain": HOST}}))
+    real_load = sbc.load_logscrub
+
+    def load():
+        mod = real_load()
+        mod.OPTIONS_PATH = str(data)
+        return mod
+    monkeypatch.setattr(sbc, "load_logscrub", load)
+    share = tmp_path / "share"
+    share.mkdir()
+    elsewhere = RESOLVER + "could not resolve '" + HOST + "'\n"
+    old = RETRY.format("old-pop.example.org:5060", "old-pop.example.org")
+    (share / "asterisk.log").write_text(CLEAN + FATAL + elsewhere + old)
+    logged = []
+    monkeypatch.setattr(sbc, "SHARE_DIR", share)
+    monkeypatch.setattr(sbc, "SHARE_LOG", share / "asterisk.log")
+    monkeypatch.setattr(sbc, "log", logged.append)
+
+    sbc.ensure_share_log_dir()
+
+    assert (share / "asterisk.log").read_text() == (
+        CLEAN + FATAL.replace(HOST, HOST_TOKEN) + elsewhere.replace(HOST, HOST_TOKEN)
+        + RETRY.format(HOST_TOKEN + ":5060", HOST_TOKEN))
+    assert any("dropped 0 verbose line(s), redacted 3 line(s)" in m for m in logged), logged
 
 
 def test_a_boot_scrub_that_could_not_run_says_so(tmp_path, monkeypatch):
@@ -728,6 +1055,26 @@ def test_a_persistent_problem_is_logged_once_and_a_recovery_rearms_it(monkeypatc
     assert "boom" in err and "(grew)" in err, err
     assert [s for _, s in calls] == [0, 50, 50, 90, 90], "an exception moved the watermark"
     assert st == {"to": 90, "problem": "grew"}
+
+
+def test_the_poll_pass_takes_the_trunk_host_out_in_place(tmp_path, monkeypatch, capsys):
+    """Through the poller's own _scrub_share_log and the real module, with the
+    options where the rtpmon run script points SWITCHBOARD_OPTIONS."""
+    _trunk(tmp_path, monkeypatch, provider_host=HOST)
+    monkeypatch.setitem(sys.modules, "logscrub", ls)
+    f = tmp_path / "asterisk.log"
+    elsewhere = RESOLVER + "could not resolve '" + HOST + "'\n"
+    original = CLEAN + NO_RESPONSE + elsewhere
+    f.write_text(original)
+    monkeypatch.setattr(pm, "SHARE_LOG_PATH", str(f))
+    st = {"to": 0, "problem": ""}
+
+    pm._scrub_share_log(st)
+
+    out = f.read_text()
+    assert out == CLEAN + NO_RESPONSE.replace(HOST, HOST_MASK) + elsewhere.replace(HOST, HOST_MASK)
+    assert st == {"to": len(original), "problem": ""}
+    assert "masked 2 line(s)" in capsys.readouterr().err
 
 
 def test_scrub_only_mode_keeps_scrubbing_on_its_own_cadence(monkeypatch):
