@@ -32,6 +32,7 @@ import json
 import os
 import stat
 import threading
+import types
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -43,6 +44,8 @@ pm = SourceFileLoader("state_links_rtpmon", str(ROOT / "rtpmon/poller.py")).load
 dh = SourceFileLoader("state_links_devhealth", str(ROOT / "devhealth/poller.py")).load_module()
 ws = SourceFileLoader("state_links_wakeup_store", str(ROOT / "wakeup/store.py")).load_module()
 mw = SourceFileLoader("state_links_mwi_store", str(ROOT / "webui/mwi_store.py")).load_module()
+bp = SourceFileLoader("state_links_backup_pre",
+                      str(ROOT.parents[1] / "bin/switchboard-backup-pre")).load_module()
 
 SECRET = b'{"exts": ["99"], "secret": "root-only"}\n'
 
@@ -225,6 +228,32 @@ def test_capture_never_trims_through_a_link(tmp_path, fresh_capture, monkeypatch
     assert _untouched(v, 0o644)
 
 
+def test_capture_is_not_fed_into_a_fifo_with_a_reader(tmp_path, fresh_capture):
+    """With a reader on the other end, a write-only open of a FIFO succeeds
+    even with O_NONBLOCK, so the regular-file check is all that keeps root's
+    private rows from whoever holds the read end."""
+    p = _state(tmp_path) / "cordless-mos.jsonl"
+    os.mkfifo(p)
+    reader = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        # In a thread: the old code's read of the dedupe keys by name blocked
+        # on this FIFO, waiting for a writer, and would hang the suite.
+        written = _returns_quickly(
+            lambda: dh.capture_low_mos(_judged(), 3.4, now=5100, path=str(p)))
+        try:
+            got = os.read(reader, 65536)
+        except BlockingIOError:
+            got = b""
+    finally:
+        try:                              # a regressed open waits for a writer: be one
+            os.close(os.open(p, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+        os.close(reader)
+    assert got == b"", f"a capture row went down the FIFO: {got[:80]!r}"
+    assert written == 0, "a refused write is reported as not written"
+
+
 def test_capture_does_not_read_its_dedupe_keys_through_a_link(tmp_path):
     v = tmp_path / "outside.jsonl"
     v.write_text(json.dumps({"dedupe": "from-the-target"}) + "\n")
@@ -371,11 +400,15 @@ def test_store_refuses_a_directory_at_the_lock(tmp_path, monkeypatch, mod, write
     assert (lock / "kept").exists(), "a directory is never removed"
 
 
+@pytest.mark.parametrize("replant", ["link", "file"])
 @pytest.mark.parametrize("mod,write,name", STORES)
 def test_store_lock_name_planted_again_in_the_gap_is_refused(tmp_path, monkeypatch,
-                                                             mod, write, name):
+                                                             mod, write, name, replant):
     """Between the unlink and the create the asterisk user can plant the name
-    again. The create is exclusive, so that fails the call; nothing follows."""
+    again. The create is exclusive, so whatever is there fails the call with
+    EEXIST and nothing follows. A link would be refused by O_NOFOLLOW alone
+    (ELOOP); a regular file only by the exclusive create. That file may be a
+    hard link to one the asterisk user owns, which _Lock would then chmod."""
     v = _victim(tmp_path)
     d = _state(tmp_path)
     lock = d / (name + ".lock")
@@ -386,10 +419,13 @@ def test_store_lock_name_planted_again_in_the_gap_is_refused(tmp_path, monkeypat
     def unlink_then_replant(p, *a, **k):
         real(p, *a, **k)
         if os.path.basename(str(p)) == lock.name:
-            os.symlink(v, p)
+            if replant == "link":
+                os.symlink(v, p)
+            else:
+                Path(p).write_text("")
 
     monkeypatch.setattr(os, "unlink", unlink_then_replant)
-    with pytest.raises(OSError):
+    with pytest.raises(FileExistsError):
         write(mod)
     assert _untouched(v)
 
@@ -428,9 +464,12 @@ def test_capture_takes_back_a_file_the_asterisk_user_was_given(tmp_path, fresh_c
     """The live capture is `0600 asterisk:asterisk`: from v0.102.0 until v0.109.0
     the boot pass chowned every file in /data/state to the asterisk user, so the
     file the docs call root-only was theirs to read. Running as root, the append
-    hands it back to root, through the fd. (Simulated: the suite is not root.)"""
+    hands it back to root, through the fd. (Simulated: geteuid is faked, and the
+    file is not root's whoever runs the suite.)"""
     p = _state(tmp_path) / "cordless-mos.jsonl"
     p.write_text("")
+    if os.geteuid() == 0:                 # a root suite: give the file away first
+        os.chown(p, 1, -1)
     calls = []
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
@@ -447,8 +486,8 @@ def test_capture_takes_back_a_file_the_asterisk_user_was_given(tmp_path, fresh_c
 # --------------------------------------------------------------------------- #
 # Root READS from /data/state: no link followed, no FIFO blocks the poller, no
 # file of any size read whole. The two v0.119.1 latch reads, the ever-registered
-# set, the call ledger devhealth reads every cycle, and the durable Asterisk log
-# rtpmon reads for transitions.
+# set, the call ledger devhealth reads every cycle, the durable Asterisk log
+# rtpmon reads for transitions, and the backup hook's flush of every file.
 # --------------------------------------------------------------------------- #
 def _returns_quickly(fn):
     got = []
@@ -508,7 +547,9 @@ def test_alert_latch_read_refuses_a_link_a_fifo_and_an_oversized_file(tmp_path):
 
 def test_ever_registered_read_survives_a_fifo_and_deep_nesting(tmp_path):
     """A file nested too deep raised RecursionError out of the load, at
-    rtpmon's start, which the old except did not catch."""
+    rtpmon's start, which the old except did not catch. The 30000-deep file
+    raises on Python 3.12 (CI and the image); 3.14 parses it, so the test after
+    this one raises the error itself, to pin the catch on any interpreter."""
     d = _state(tmp_path)
     fifo = d / "fifo.json"
     os.mkfifo(fifo)
@@ -516,6 +557,92 @@ def test_ever_registered_read_survives_a_fifo_and_deep_nesting(tmp_path):
     deep = d / "deep.json"
     deep.write_text("[" * 30000 + "]" * 30000)
     assert pm.load_ever_registered(str(deep)) == set()
+
+
+def test_ever_registered_read_survives_a_recursion_error_on_any_python(tmp_path,
+                                                                      monkeypatch):
+    p = _state(tmp_path) / "ever-registered.json"
+    p.write_text('{"exts": ["11"]}')
+
+    def too_deep(*a, **k):
+        raise RecursionError("maximum recursion depth exceeded while decoding")
+
+    monkeypatch.setattr(pm, "json", types.SimpleNamespace(loads=too_deep))
+    assert pm.load_ever_registered(str(p)) == set()
+
+
+@pytest.mark.parametrize("exts", [5, None, True, 1.5, "12", {"11": 1}],
+                         ids=["int", "null", "bool", "float", "string", "object"])
+def test_ever_registered_read_survives_an_exts_that_is_not_a_list(tmp_path, exts):
+    """Well-formed JSON with a non-list `exts` raised TypeError out of the load
+    (a number, null or true), or read as a wrong set (a string's characters, an
+    object's keys). At rtpmon's start a raise stopped it, and s6 restarted it
+    into the same file: the only rewrite is in the loop it never reached."""
+    p = _state(tmp_path) / "ever-registered.json"
+    p.write_text(json.dumps({"exts": exts}))
+    assert pm.load_ever_registered(str(p)) == set()
+
+
+class _ReadCounter:
+    """os.fdopen's file, counting what is read from it."""
+
+    def __init__(self, fh, log):
+        self._fh, self._log = fh, log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+
+    def read(self, *a):
+        got = self._fh.read(*a)
+        self._log.append(len(got))
+        return got
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+
+def _count_reads(monkeypatch) -> list:
+    log, real = [], os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: _ReadCounter(real(*a, **k), log))
+    return log
+
+
+def _sparse(p: Path, size: int = 8 << 20) -> Path:
+    with open(p, "wb") as fh:
+        fh.truncate(size)
+    return p
+
+
+def test_state_json_reads_stop_one_byte_past_the_bound(tmp_path, monkeypatch):
+    """The oversized-file cases above check only the result, which the length
+    check alone produces. This checks how much is READ: a large or sparse file
+    read whole raised MemoryError."""
+    d = _state(tmp_path)
+    big = _sparse(d / "big.json")
+    log = _count_reads(monkeypatch)
+    assert pm.load_ever_registered(str(big)) == set()
+    assert 0 < sum(log) <= pm.STATE_JSON_MAX_BYTES + 1, f"rtpmon read {sum(log)} bytes"
+    log.clear()
+    assert dh.read_alert_latches(str(big)) is None
+    assert 0 < sum(log) <= dh.ALERT_STATE_MAX_BYTES + 1, f"devhealth read {sum(log)} bytes"
+
+
+def test_transitions_read_is_bounded_when_the_log_grows_after_its_size_check(
+        tmp_path, monkeypatch):
+    """The size is taken by name before the open. A file grown or swapped in
+    between was read to its end."""
+    log_path = _sparse(_state(tmp_path) / "asterisk.log")
+    real_getsize = os.path.getsize
+    monkeypatch.setattr(os.path, "getsize",
+                        lambda p: 10 if str(p) == str(log_path) else real_getsize(p))
+    monkeypatch.setattr(pm, "ENDPOINT_LOG_PATH", str(log_path))
+    monkeypatch.setattr(pm, "_transition_offset", 5)
+    reads = _count_reads(monkeypatch)
+    assert pm.endpoint_transitions() == []
+    assert 0 < sum(reads) <= pm._TRANSITION_MAX_READ, f"read {sum(reads)} characters"
 
 
 def test_call_ledger_read_does_not_block_on_a_fifo(tmp_path):
@@ -538,3 +665,70 @@ def test_transitions_are_not_read_through_a_link(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "_transition_offset", 0)
     assert pm.endpoint_transitions() == [{"ext": "11", "state": "Unreachable"}], \
         "positive control: a regular log is read"
+
+
+# --------------------------------------------------------------------------- #
+# The backup hook: root, run by the Supervisor while the add-on is live, opens
+# every file in /data/state and /share/switchboard to flush it.
+# --------------------------------------------------------------------------- #
+def _backup_dirs(tmp_path, monkeypatch):
+    d = _state(tmp_path)
+    share = tmp_path / "share"
+    share.mkdir()
+    monkeypatch.setattr(bp, "STATE_DIR", str(d))
+    monkeypatch.setattr(bp, "SHARE_DIR", str(share))
+    monkeypatch.setattr(bp, "STAMP_PATH", str(tmp_path / "backup-window.jsonl"))
+    return d, share
+
+
+def test_backup_flush_opens_no_link(tmp_path, monkeypatch):
+    """isfile() and open() both went by name: a link in either directory had
+    root open (and fsync) its target."""
+    v = _victim(tmp_path)
+    d, share = _backup_dirs(tmp_path, monkeypatch)
+    (d / "callqos.jsonl").write_text("{}\n")
+    (d / "planted.json").symlink_to(v)
+    (share / "planted.log").symlink_to(v)
+    flushed, real_fsync = [], os.fsync
+
+    def fsync(fd):
+        flushed.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    assert bp.main() == 0
+    assert os.stat(v).st_ino not in flushed, "a link's target was opened"
+    assert os.stat(d / "callqos.jsonl").st_ino in flushed, "positive control"
+
+
+def test_backup_flush_does_not_hang_on_a_fifo(tmp_path, monkeypatch):
+    """v0.119.1 checked isfile() by name and then opened by name, with no
+    O_NONBLOCK: a FIFO the asterisk user renamed over a file between the two
+    hung the open, and the backup the hook brackets with it. The swap is made
+    at that check here (the hook no longer makes one), and a FIFO sits at
+    another name in each directory from the start."""
+    d, share = _backup_dirs(tmp_path, monkeypatch)
+    (d / "callqos.jsonl").write_text("{}\n")
+    (share / "heartbeat.jsonl").write_text("{}\n")
+    os.mkfifo(d / "static.fifo")
+    os.mkfifo(share / "static.fifo")
+    swapped, real_isfile = [], os.path.isfile
+
+    def isfile_then_swap(p):
+        ok = real_isfile(p)
+        if ok and str(p).endswith(".jsonl") and os.path.dirname(str(p)) in (str(d), str(share)):
+            fifo = os.path.join(os.path.dirname(str(p)), ".swap")
+            os.mkfifo(fifo)
+            os.replace(fifo, p)
+            swapped.append(str(p))
+        return ok
+
+    monkeypatch.setattr(os.path, "isfile", isfile_then_swap)
+    try:
+        assert _returns_quickly(bp.main) == 0
+    finally:
+        for p in swapped:                 # a regressed open is blocked here: free it
+            try:
+                os.close(os.open(p, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass

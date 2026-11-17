@@ -640,11 +640,12 @@ def _open_no_follow(path: str, flags: int) -> int:
     """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
 
     rtpmon/poller.py's helper, with one difference: a file this creates is 0600,
-    not 0664, because the only file devhealth opens this way is its own private
-    capture. /data/state is owned by `asterisk`, group-writable and not sticky,
-    and this poller runs as root, so any name in it may be a link planted in
-    place of the ledger. By name, the append, the trim and the chmod followed
-    such a link onto its target. O_NOFOLLOW makes a link fail to open; the
+    not 0664, because the only file devhealth creates this way is its own
+    private capture (the call ledger and the alert latches are only read
+    through it). /data/state is owned by `asterisk`, group-writable and not
+    sticky, and this poller runs as root, so any name in it may be a link
+    planted in place of the ledger. By name, the append, the trim and the chmod
+    followed such a link onto its target. O_NOFOLLOW makes a link fail to open; the
     fstat refuses a FIFO, a device or a directory; O_NONBLOCK keeps a planted
     FIFO from hanging the open. Everything after goes through the fd.
     """

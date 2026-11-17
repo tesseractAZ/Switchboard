@@ -5,32 +5,38 @@ Recent releases. Releases up to 0.109.1 are in the
 
 ## 0.119.2
 
-**No root write into `/data/state` follows a link.**
+**No root read or write in `/data/state` follows a link.**
 
 - `/data/state` belongs to the `asterisk` user, its group can write it, and it
-  is not sticky, so that user can put any name in it. Five writers there run as
-  root, and each went through a name somewhere: the ever-registered set wrote a
-  fixed `<file>.tmp`; the low-MOS capture appended, trimmed and changed its mode
-  by name; the link-health ledger read the old file by name, which copied a
-  link's target into a ledger the `asterisk` group reads, and set its mode by
-  name after the replace; the wake-up and MWI stores opened and changed the mode
-  of their `.lock` files by name, and read the store by name before rewriting
-  it. Each now reads and appends through a no-follow descriptor on a regular
-  file, writes a new temporary file of its own, and sets the mode on it before
-  the replace.
+  is not sticky, so that user can put any name in it. Five root writers there
+  still went through a name: the ever-registered set wrote a fixed
+  `<file>.tmp`; the low-MOS capture appended, trimmed and changed its mode by
+  name; the link-health ledger read the old file by name, which copied a link's
+  target into a ledger the `asterisk` group reads, and set its mode by name
+  after the replace; the wake-up and MWI stores opened and changed the mode of
+  their `.lock` files by name, and read the store by name before rewriting it.
+  Each now reads and appends through a no-follow descriptor on a regular file.
+  A writer that replaces its file writes a new temporary file of its own, with
+  its mode settled before the replace.
 - A link or a FIFO at a store's lock name is removed and the lock created
   again, so wake-ups keep ringing; a directory there refuses the call. A FIFO at
   a store's name reads as an empty store instead of hanging the reader.
 - Root reads from `/data/state` follow no link either, and none blocks on a
   FIFO: the two alert latches, the ever-registered set, the call ledger
-  devhealth reads every cycle and the durable Asterisk log rtpmon reads for
-  transitions. A FIFO at any of those names stopped its poller, at start or on
-  its next cycle. The latches and the set are read up to 64 KiB, so a file of
-  any size no longer reaches the parser, and a set nested too deep to parse no
-  longer stops rtpmon at start.
-- `ever-registered.json` is `0600`: rtpmon is its only reader. The low-MOS
-  capture goes back to root on its next write; on installs that ran v0.102.0 to
-  v0.108.x it was owned by `asterisk`.
+  devhealth reads every cycle, the durable Asterisk log rtpmon reads for
+  transitions, and the backup hook, which opens every file there and in
+  `/share/switchboard` to flush it. A FIFO at a latch, the set or the call
+  ledger stopped its poller, at start or on its next cycle. One swapped in after
+  a check by name stopped rtpmon at the log, and hung the backup hook and the
+  backup it runs in.
+- The latches and the set are read up to 64 KiB and the log up to 512 KiB a
+  cycle, so none of them is read whole, whatever its size. A set nested too
+  deep to parse, or one whose `exts` is not a list, no longer stops rtpmon at
+  start.
+- rtpmon now saves `ever-registered.json` as `0600`: it is the file's only
+  reader. A set saved before keeps its mode until an extension registers for the
+  first time. The low-MOS capture goes back to root on its next write; on
+  installs that ran v0.102.0 to v0.108.x it was owned by `asterisk`.
 
 ## 0.119.1
 

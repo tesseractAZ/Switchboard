@@ -1176,12 +1176,16 @@ def load_ever_registered(path: str = None) -> set:
 
     Read by _read_state_json: a link, a FIFO, a directory or an oversized file
     at the name reads as no set, and the next save puts a regular file back. A
-    file nested too deep to parse raised RecursionError out of this, at start."""
+    file nested too deep to parse raised RecursionError out of this, and an
+    `exts` that is not a list (a number, null, true) raised TypeError, both at
+    rtpmon's start, where nothing catches them: s6 restarted it into the same
+    file, and the only rewrite is in the loop it never reached."""
     try:
         data = _read_state_json(path or EVER_REGISTERED_PATH)
-        return {str(e) for e in data.get("exts", [])} if isinstance(data, dict) else set()
     except (OSError, ValueError, RecursionError):
         return set()
+    exts = data.get("exts") if isinstance(data, dict) else None
+    return {str(e) for e in exts} if isinstance(exts, list) else set()
 
 
 def save_ever_registered(exts: set, path: str = None) -> bool:
@@ -1404,12 +1408,15 @@ def endpoint_transitions() -> list:
     start = max(_transition_offset, size - _TRANSITION_MAX_READ)
     try:
         # No-follow on a regular file (see _open_no_follow): the log is in
-        # /data/state, and a FIFO planted in its place blocked this open, and
-        # with it the whole poll loop.
+        # /data/state, and a FIFO swapped in after the size check above
+        # blocked this open, and with it the whole poll loop. The read is
+        # bounded too: the size above was taken by name, before the open, and a
+        # file grown or swapped since was read to its end (a large or sparse
+        # one raised MemoryError, which nothing here or in run() catches).
         with os.fdopen(_open_no_follow(ENDPOINT_LOG_PATH, os.O_RDONLY), "r",
                        encoding="utf-8", errors="replace") as fh:
             fh.seek(start)
-            chunk = fh.read()
+            chunk = fh.read(_TRANSITION_MAX_READ)
     except OSError:
         return []
     _transition_offset = size
