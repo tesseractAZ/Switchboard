@@ -1413,10 +1413,12 @@ def endpoint_transitions() -> list:
         # bounded too: the size above was taken by name, before the open, and a
         # file grown or swapped since was read to its end (a large or sparse
         # one raised MemoryError, which nothing here or in run() catches).
-        with os.fdopen(_open_no_follow(ENDPOINT_LOG_PATH, os.O_RDONLY), "r",
-                       encoding="utf-8", errors="replace") as fh:
+        # Read as bytes and decoded after: in text mode read(n) counts
+        # characters, so the cap let up to four times as many bytes through,
+        # and `start` above already counts this constant in bytes.
+        with os.fdopen(_open_no_follow(ENDPOINT_LOG_PATH, os.O_RDONLY), "rb") as fh:
             fh.seek(start)
-            chunk = fh.read(_TRANSITION_MAX_READ)
+            chunk = fh.read(_TRANSITION_MAX_READ).decode("utf-8", errors="replace")
     except OSError:
         return []
     _transition_offset = size

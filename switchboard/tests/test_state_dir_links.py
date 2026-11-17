@@ -584,7 +584,9 @@ def test_ever_registered_read_survives_an_exts_that_is_not_a_list(tmp_path, exts
 
 
 class _ReadCounter:
-    """os.fdopen's file, counting what is read from it."""
+    """os.fdopen's file, counting the bytes read from it. Text is counted as
+    its UTF-8 encoding, so a cap counted in characters cannot pass for one
+    counted in bytes."""
 
     def __init__(self, fh, log):
         self._fh, self._log = fh, log
@@ -597,7 +599,7 @@ class _ReadCounter:
 
     def read(self, *a):
         got = self._fh.read(*a)
-        self._log.append(len(got))
+        self._log.append(len(got.encode("utf-8")) if isinstance(got, str) else len(got))
         return got
 
     def __getattr__(self, name):
@@ -633,8 +635,10 @@ def test_state_json_reads_stop_one_byte_past_the_bound(tmp_path, monkeypatch):
 def test_transitions_read_is_bounded_when_the_log_grows_after_its_size_check(
         tmp_path, monkeypatch):
     """The size is taken by name before the open. A file grown or swapped in
-    between was read to its end."""
-    log_path = _sparse(_state(tmp_path) / "asterisk.log")
+    between was read to its end. Four-byte characters, so a cap that counted
+    characters (a text-mode read) would let four times the bytes through."""
+    log_path = _state(tmp_path) / "asterisk.log"
+    log_path.write_text("\U0001F600" * (2 << 20), encoding="utf-8")   # 8 MiB
     real_getsize = os.path.getsize
     monkeypatch.setattr(os.path, "getsize",
                         lambda p: 10 if str(p) == str(log_path) else real_getsize(p))
@@ -642,7 +646,7 @@ def test_transitions_read_is_bounded_when_the_log_grows_after_its_size_check(
     monkeypatch.setattr(pm, "_transition_offset", 5)
     reads = _count_reads(monkeypatch)
     assert pm.endpoint_transitions() == []
-    assert 0 < sum(reads) <= pm._TRANSITION_MAX_READ, f"read {sum(reads)} characters"
+    assert 0 < sum(reads) <= pm._TRANSITION_MAX_READ, f"read {sum(reads)} bytes"
 
 
 def test_call_ledger_read_does_not_block_on_a_fifo(tmp_path):
