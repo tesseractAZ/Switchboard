@@ -1058,12 +1058,24 @@ def _append_history(phones: list) -> None:
     # half-written file, and a read error midway silently dropped every record
     # it had not reached yet. os.replace() is atomic on the same filesystem, so
     # a reader sees either the old file or the new one, never a partial one.
+    #
+    # ★ /data/state IS WRITABLE BY THE ASTERISK USER, and this runs as root.
+    # The directory is theirs and not sticky, so any name in it can be swapped
+    # for a symlink at any moment. Two steps here went through the name:
+    #   * the read. A link planted in place of the ledger had root copy its
+    #     target's lines (/data/options.json, say) into the new ledger, which
+    #     the asterisk group reads. It is now read through a no-follow fd on a
+    #     regular file, so a link reads as no history, and the replace below
+    #     puts a regular file back in its place.
+    #   * the chmod, which ran by name AFTER the replace: a link swapped into
+    #     the ledger's place in between took the chmod onto its target. The
+    #     mode is now set on the temporary file's fd, before anyone can see it.
     try:
         d = os.path.dirname(STATE_PATH) or "."
         os.makedirs(d, exist_ok=True)
         lines = []
         try:
-            with open(STATE_PATH) as f:
+            with os.fdopen(_open_no_follow(STATE_PATH, os.O_RDONLY)) as f:
                 lines = [ln for ln in f.read().splitlines() if ln.strip()]
         except OSError:
             lines = []
@@ -1072,25 +1084,25 @@ def _append_history(phones: list) -> None:
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".linkhealth-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
+                try:
+                    # mkstemp creates 0600 owned by THIS process (root), and
+                    # os.replace keeps the TEMP file's mode/owner — not the
+                    # destination's. v0.52.0 copied callqos's atomic idiom but
+                    # dropped this chmod, silently turning an asterisk-readable
+                    # ledger into 0600 root-only. /data/state is the asterisk-owned
+                    # directory (setgid) precisely so non-root components can read.
+                    # 0640, NOT the 0664 the sibling ledger uses — the requirements
+                    # genuinely differ. callqos.jsonl is WRITTEN by asterisk-user
+                    # AGIs, so it needs group write; THIS ledger has exactly one
+                    # writer (rtpmon, as root) and only ever needs to be READ by
+                    # group asterisk. So root writes, group reads, world gets
+                    # nothing. CodeQL flagged both the world bit and the group-write
+                    # bit (py/overly-permissive-file, sev 7.8) and was right twice.
+                    os.fchmod(f.fileno(), 0o640)
+                except OSError:
+                    pass
                 f.write("\n".join(lines) + "\n")
             os.replace(tmp, STATE_PATH)
-            try:
-                # mkstemp creates 0600 owned by THIS process (root), and
-                # os.replace keeps the TEMP file's mode/owner — not the
-                # destination's. v0.52.0 copied callqos's atomic idiom but
-                # dropped this chmod, silently turning an asterisk-readable
-                # ledger into 0600 root-only. /data/state is the asterisk-owned
-                # directory (setgid) precisely so non-root components can read.
-                # 0640, NOT the 0664 the sibling ledger uses — the requirements
-                # genuinely differ. callqos.jsonl is WRITTEN by asterisk-user
-                # AGIs, so it needs group write; THIS ledger has exactly one
-                # writer (rtpmon, as root) and only ever needs to be READ by
-                # group asterisk. So root writes, group reads, world gets
-                # nothing. CodeQL flagged both the world bit and the group-write
-                # bit (py/overly-permissive-file, sev 7.8) and was right twice.
-                os.chmod(STATE_PATH, 0o640)
-            except OSError:
-                pass
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
@@ -1136,29 +1148,70 @@ EVER_REGISTERED_PATH = os.environ.get("SWITCHBOARD_EVER_REGISTERED",
                                       "/data/state/ever-registered.json")
 
 
+# The JSON state files here are a few hundred bytes. Anything past this is not
+# one of them, and is not read at all.
+STATE_JSON_MAX_BYTES = 64 * 1024
+
+
+def _read_state_json(path: str):
+    """The JSON value in the small state file at `path`. Raises OSError (absent;
+    a link, a FIFO or a directory; past STATE_JSON_MAX_BYTES), ValueError (not
+    UTF-8 JSON) or RecursionError (nested too deep to parse).
+
+    /data/state is writable by the asterisk user, and this runs as root. By
+    name, open() followed a link, blocked on a FIFO (the poller stopped at its
+    start) and read a file of any size whole (a large or sparse one raised
+    MemoryError). The fd is no-follow on a regular file (see _open_no_follow),
+    and at most one byte past the bound is read."""
+    with os.fdopen(_open_no_follow(path, os.O_RDONLY), "rb") as fh:
+        raw = fh.read(STATE_JSON_MAX_BYTES + 1)
+    if len(raw) > STATE_JSON_MAX_BYTES:
+        raise OSError(f"{path}: larger than {STATE_JSON_MAX_BYTES} bytes")
+    return json.loads(raw.decode("utf-8"))
+
+
 def load_ever_registered(path: str = None) -> set:
     """The durable set, or an empty one. Never raises: a missing or corrupt file
-    must degrade to the old per-process reading, not stop the poller."""
+    must degrade to the old per-process reading, not stop the poller.
+
+    Read by _read_state_json: a link, a FIFO, a directory or an oversized file
+    at the name reads as no set, and the next save puts a regular file back. A
+    file nested too deep to parse raised RecursionError out of this, at start."""
     try:
-        with open(path or EVER_REGISTERED_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
+        data = _read_state_json(path or EVER_REGISTERED_PATH)
         return {str(e) for e in data.get("exts", [])} if isinstance(data, dict) else set()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return set()
 
 
 def save_ever_registered(exts: set, path: str = None) -> bool:
     """Write the set. Returns True only if it reached the disk — a silent
-    failure here would quietly restore the defect this file exists to fix."""
+    failure here would quietly restore the defect this file exists to fix.
+
+    /data/state is writable by the asterisk user and this runs as root. The
+    temporary file was the fixed name `<file>.tmp`, opened with open(): a link
+    planted at that name sent root's write (a truncation, then this JSON) to
+    wherever it pointed, and os.replace then put the link in the set's place.
+    mkstemp now creates a new name, exclusively, as save_outage_state does.
+    mkstemp's 0600 is kept: rtpmon, running as root, is the file's only reader.
+    A save that fails leaves no temporary file behind."""
     target = path or EVER_REGISTERED_PATH
     try:
-        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        d = os.path.dirname(target) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".ever-registered-", suffix=".tmp")
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"exts": sorted(exts)}, fh)
         os.replace(tmp, target)
         return True
     except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:                            # already gone: removed by another
+            pass
         return False
 
 
@@ -1198,10 +1251,10 @@ def save_ever_registered(exts: set, path: str = None) -> bool:
 # for a float, or a file nested too deep to parse, raised out of the load and
 # killed rtpmon at every start; one of infinity, NaN or later than now passed
 # the age check and held an outage unannounced. The save never writes through a
-# name planted in the directory (see save_outage_state). The read is not
-# guarded the same way: it opens the name and reads the whole file, so a FIFO
-# planted there blocks the start and a file too large for memory raises, as
-# at rtpmon's other reads from /data/state (ever-registered.json).
+# name planted in the directory (see save_outage_state), and the read never
+# reads through one: a link, a FIFO or a file past STATE_JSON_MAX_BYTES reads
+# as no latch (see _read_state_json), as at rtpmon's other reads from
+# /data/state.
 OUTAGE_STATE_PATH = os.environ.get("SWITCHBOARD_LINK_OUTAGE",
                                    "/data/state/link-outage.json")
 # A latch older than this is not trusted: an alert raised a week ago is not
@@ -1232,8 +1285,7 @@ def load_outage_alerted(path: str = None, now: float | None = None,
     was never shown. A latch ignored for its time or its boot is logged, with
     no value."""
     try:
-        with open(path or OUTAGE_STATE_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
+        data = _read_state_json(path or OUTAGE_STATE_PATH)
     except (OSError, ValueError, RecursionError):
         return False
     if not isinstance(data, dict) or data.get("alerted") is not True:
@@ -1351,7 +1403,11 @@ def endpoint_transitions() -> list:
         return []
     start = max(_transition_offset, size - _TRANSITION_MAX_READ)
     try:
-        with open(ENDPOINT_LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+        # No-follow on a regular file (see _open_no_follow): the log is in
+        # /data/state, and a FIFO planted in its place blocked this open, and
+        # with it the whole poll loop.
+        with os.fdopen(_open_no_follow(ENDPOINT_LOG_PATH, os.O_RDONLY), "r",
+                       encoding="utf-8", errors="replace") as fh:
             fh.seek(start)
             chunk = fh.read()
     except OSError:
@@ -1376,7 +1432,9 @@ def _open_no_follow(path: str, flags: int) -> int:
     ★ A LEDGER IN A DIRECTORY OTHERS CAN WRITE (2026-09-14). /share/switchboard
     is owned by `asterisk` and group-writable, and whatever can write the shared
     folder from the host can add entries to it as well. This poller runs as
-    root, and appends and trims heartbeat.jsonl there every cycle.
+    root, and appends and trims heartbeat.jsonl there every cycle. /data/state
+    is the same: owned by `asterisk`, group-writable and not sticky, so the
+    link-health ledger and the ever-registered set are read through this too.
 
     By name, an append, a trim or a chmod follows a symlink planted in place of
     the ledger and lands on its target. O_NOFOLLOW makes a link fail to open;

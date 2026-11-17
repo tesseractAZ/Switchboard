@@ -126,6 +126,25 @@ def test_rotation_is_stable_under_repetition(tmp_path, impl):
 
 
 @pytest.mark.parametrize("impl", sorted(ROTATORS))
+def test_no_copy_trims_through_a_symlink(tmp_path, impl):
+    """Every ledger lives in a directory the asterisk user can write, and most
+    of the trims run as root, so a link planted in place of a ledger must not
+    turn the trim into a rewrite of whatever it points at. devhealth's copy
+    still trimmed by name until v0.119.2, because /data/state was taken to be
+    private; the drift test above compares output bytes, which a by-name copy
+    matches exactly, so only a test like this one can see the difference."""
+    target = _ledger(tmp_path, 400)
+    os.chmod(target, 0o600)
+    before = target.read_bytes()
+    link = tmp_path / "planted.jsonl"
+    link.symlink_to(target)
+    ROTATORS[impl](str(link), CAP)
+    assert target.read_bytes() == before, f"{impl} trimmed through the link"
+    assert (target.stat().st_mode & 0o777) == 0o600
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("impl", sorted(ROTATORS))
 def test_a_missing_ledger_does_not_raise(tmp_path, impl):
     """Trimming is best-effort: it must never fail the write it precedes."""
     ROTATORS[impl](str(tmp_path / "nope.jsonl"), CAP)
