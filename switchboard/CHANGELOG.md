@@ -1,7 +1,21 @@
 # Changelog
 
-Recent releases. Releases up to 0.110.0 are in the
+Recent releases. Releases up to 0.110.1 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.119.4
+
+**The dashboard no longer shows the trunk provider's server.**
+
+- The header and the Trunk position typed the host set in
+  `trunk.provider_host`, and `/api/status` sent it to the browser, where the
+  developer tools could read it whatever the page drew. A provider's host is
+  usually a regional point of presence, so it can say roughly where the house
+  is. The status now carries only whether the trunk is on and its
+  registration; the header reads `trunk: on` and the Trunk position `on`,
+  beside the registration as before.
+- The operator console showed only the registration and is unchanged. The
+  add-on's Log tab still names the host on a trunk registration retry.
 
 ## 0.119.3
 
@@ -431,16 +445,3 @@ that stay honest across a restart, and two web-UI hardenings.**
     recordings (about 16 kB, 1.02 s), the low-MOS ledger (no comparison set is
     kept), the call-quality jitter fields and leg identity, and the durable log's
     growth.
-
-## 0.110.1
-
-**Changelog opens quickly in Home Assistant.** No change to how the add-on runs.
-
-- Home Assistant renders the add-on's `CHANGELOG.md` whole each time Changelog is
-  opened, and it had grown to 207 releases (319 KB). It now holds the ten most
-  recent releases; everything older is in `CHANGELOG-ARCHIVE.md`, linked from the
-  top of the changelog, which Home Assistant never loads.
-- `scripts/rotate-changelog.py` moves the oldest releases to the archive, and
-  `tests/test_changelog.py` fails when the changelog grows past 15 releases or
-  48 KB, or when a release is missing, duplicated or out of order across the
-  two files.

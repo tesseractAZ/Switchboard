@@ -3,6 +3,18 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.110.1
+
+**Changelog opens quickly in Home Assistant.** No change to how the add-on runs.
+
+- Home Assistant renders the add-on's `CHANGELOG.md` whole each time Changelog is
+  opened, and it had grown to 207 releases (319 KB). It now holds the ten most
+  recent releases; everything older is in `CHANGELOG-ARCHIVE.md`, linked from the
+  top of the changelog, which Home Assistant never loads.
+- `scripts/rotate-changelog.py` moves the oldest releases to the archive, and
+  `tests/test_changelog.py` fails when the changelog grows past 15 releases or
+  48 KB, or when a release is missing, duplicated or out of order across the
+  two files.
 ## 0.110.0
 
 **The asterisk user no longer holds the Home Assistant token, and an input-validation
