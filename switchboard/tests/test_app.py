@@ -2468,6 +2468,154 @@ def test_a_completed_wake_up_time_survives_the_rebuild() -> None:
           and "delete wakeDrafts[ext]; done('Cancelled ✓')" in html)
 
 
+# --------------------------------------------------------------------------- #
+# The trunk provider's host stays inside the add-on (v0.119.4)
+#
+# A provider's host is usually a regional point of presence, often named for a
+# city, so it can say roughly where the house is. v0.119.3 took it out of the
+# readable log; the dashboard still typed it in its header and on the Trunk
+# position, and /api/status carried it to every browser that opened the panel,
+# readable in the developer tools whatever the page drew. The names below are
+# example.* hosts: this repository is public.
+# --------------------------------------------------------------------------- #
+_TRUNK_HOST = "pop7.example.net"
+_TRUNK_FROM_DOMAIN = "edge7.example.org"
+_TRUNK_URI = f"sip:{_TRUNK_HOST}:5060"
+
+
+def _served_status() -> dict:
+    """/api/status as the handler builds it, for a trunk whose host appears in
+    every place the handler can read one: the options (host and From domain),
+    the trunk's static contact, and the registration's server URI."""
+    saved = {k: getattr(app, k) for k in
+             ("load_options", "cached_status_bundle", "cached_registrations",
+              "cached_stt_status", "wakeups_list", "mwi_store", "JSONResponse")}
+    try:
+        app.JSONResponse = _JSON
+        app.load_options = lambda: {
+            "rooms": [{"ext": "11", "name": "Kitchen"}],
+            "trunk": {"enabled": True, "provider_host": _TRUNK_HOST, "port": 5060,
+                      "from_domain": _TRUNK_FROM_DOMAIN, "username": "u77"}}
+        app.cached_status_bundle = lambda: (
+            [{"name": "11", "state": "Not in use"}, {"name": "trunk", "state": "Not in use"}],
+            {"11": {"status": "Reachable", "uri": "", "rtt": "2000"},
+             "trunk": {"status": "Unknown", "uri": _TRUNK_URI, "rtt": ""}},
+            [])
+        app.cached_registrations = lambda: {
+            "trunk-reg": {"status": "Registered", "server_uri": _TRUNK_URI, "next_reg": "0"}}
+        app.cached_stt_status = lambda opts: "up"
+        app.wakeups_list = lambda rooms_by_ext: []
+        app.mwi_store = None
+        resp = app.api_status()
+    finally:
+        for k, v in saved.items():
+            setattr(app, k, v)
+    return resp.payload
+
+
+def test_the_status_api_carries_no_trunk_host() -> None:
+    """The fix is at the source: what /api/status never sends, no page, tab or
+    developer tool can show. The trunk object is an allowlist, so a field added
+    to it later is a decision, not a passthrough."""
+    import json as _json
+    payload = _served_status()
+    check("trunk api: the status answered and the room is there",
+          payload["ami_ok"] is True and [r["ext"] for r in payload["rooms"]] == ["11"])
+    check("trunk api: the trunk says only whether it is on and its registration",
+          payload["trunk"] == {"enabled": True, "registration": "Registered"})
+    text = _json.dumps(payload)
+    for needle in (_TRUNK_HOST, _TRUNK_FROM_DOMAIN, "server_uri", "sip:"):
+        check(f"trunk api: {needle!r} is nowhere in the response", needle not in text)
+
+
+def _render_dashboard(status: dict) -> dict:
+    """Run the served page's script under node against a stub DOM and this
+    status, and return what refresh() wrote into the header and the field.
+    None when node is not on PATH."""
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+    node = shutil.which("node")
+    if not node:
+        return None
+    html = app.INDEX_HTML
+    start = html.index("<script>") + len("<script>")
+    page_js = html[start:html.index("</script>", start)]
+    harness = (
+        "const STATUS = " + _json.dumps(status) + ";\n"
+        "const els = {};\n"
+        "function el(id) {\n"
+        "  if (!els[id]) els[id] = {innerHTML: '', textContent: '',\n"
+        "                           addEventListener() {}, contains() { return false; }};\n"
+        "  return els[id];\n"
+        "}\n"
+        "globalThis.document = {getElementById: el, activeElement: null};\n"
+        "globalThis.fetch = async (u) => ({json: async () =>\n"
+        "  (String(u).indexOf('api/status') !== -1 ? STATUS : {lights_ok: false})});\n"
+        "globalThis.setInterval = () => 0;\n"
+        + page_js +
+        "\nsetTimeout(() => process.stdout.write(JSON.stringify(\n"
+        "  {sub: el('sub').innerHTML, subText: el('sub').textContent,\n"
+        "   rooms: el('rooms').innerHTML})), 50);\n")
+    with tempfile.TemporaryDirectory() as td:
+        path = f"{td}/dashboard.js"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(harness)
+        proc = subprocess.run([node, path], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return _json.loads(proc.stdout)
+
+
+def test_the_dashboard_types_no_trunk_host() -> None:
+    """The header and the Trunk position read `on` for an enabled trunk, the
+    word they already used when no host was set. Fed the payload a build before
+    this one served, with the host in it, the page still types none: the page
+    reads no host field at all, so a host can return to the panel only by a
+    change to both the API and the page."""
+    base = {"ami_ok": True, "rooms": [{"ext": "11", "label": "Kitchen", "registered": True,
+                                       "device_state": "Not in use"}],
+            "calls": [], "wakeups": [], "stt": "up"}
+    for label, trunk in (
+            ("the payload this build serves", {"enabled": True, "registration": "Registered"}),
+            ("a payload that still carries a host",
+             {"enabled": True, "provider": _TRUNK_HOST, "registration": "Registered"})):
+        out = _render_dashboard({**base, "trunk": trunk})
+        if out is None:
+            print("SKIP trunk page: the rendered dashboard (node not on PATH)")
+            break
+        check(f"trunk page ({label}): refresh() rendered the header",
+              "1 of 1 phones registered" in out["sub"] and out["subText"] == "")
+        check(f"trunk page ({label}): the header says the trunk is on",
+              " · trunk: on <span" in out["sub"])
+        check(f"trunk page ({label}): the Trunk position is drawn",
+              'aria-label="Trunk">' in out["rooms"])
+        # The Trunk position runs to the first room's position.
+        position = out["rooms"].split('aria-label="Trunk">', 1)[1].split('<div class="pos" ', 1)[0]
+        check(f"trunk page ({label}): the Trunk position reads on, Registered",
+              '<div class="ext">Trunk</div><div class="name">on</div>'
+              '<div class="state">Registered</div>' in position)
+        check(f"trunk page ({label}): the host is nowhere on the page",
+              _TRUNK_HOST not in out["sub"] + out["rooms"])
+    # Without node, this is what is left: the script reads no such field.
+    check("trunk page: the script reads no provider field",
+          ".provider" not in app.INDEX_HTML)
+
+
+def test_the_screenshot_fixture_pictures_the_trunk_the_api_serves() -> None:
+    """scripts/build-screenshots.py stubs /api/status for the published
+    screenshots. Its trunk is the API's shape, so the fixture cannot keep a
+    field the add-on no longer serves. Read with ast: the script pins TZ when it
+    is imported."""
+    import ast
+    tree = ast.parse((_ROOT.parent / "scripts" / "build-screenshots.py").read_text())
+    trunk = next(ast.literal_eval(n.value) for n in tree.body
+                 if isinstance(n, ast.Assign)
+                 and [t.id for t in n.targets if isinstance(t, ast.Name)] == ["TRUNK"])
+    check("trunk fixture: the screenshot's trunk has exactly the fields the API serves",
+          set(trunk) == set(_served_status()["trunk"]))
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

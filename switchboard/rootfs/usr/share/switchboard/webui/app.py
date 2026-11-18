@@ -1434,9 +1434,14 @@ def api_status() -> JSONResponse:
             "rooms": rooms,
             "calls": summary["calls"],
             "wakeups": wakeups_list(rooms_by_ext),
+            # ★ No host (v0.119.4). This carried trunk.provider_host to every
+            # browser that opened the panel, readable in its developer tools
+            # whatever the page drew. A provider's host is usually a regional
+            # point of presence, so it can say roughly where the house is. Name
+            # each field: the registration record's server URI holds the host
+            # too (tests/test_app.py, test_the_status_api_carries_no_trunk_host).
             "trunk": {
                 "enabled": bool(trunk.get("enabled")),
-                "provider": trunk.get("provider_host", ""),
                 "registration": trunk_reg,
             },
             "stt": cached_stt_status(opts),
@@ -2018,7 +2023,7 @@ INDEX_HTML = """<!doctype html>
   .trunk .strip .ext { letter-spacing: .18em; text-transform: uppercase; }
   .trunk .strip .name { font-size: .95rem; text-transform: none; }
   /* Wide enough, the trunk's strip types on one line; on a phone it stacks like
-     the others, so the provider is not cut to a few letters. */
+     the others. */
   @media (min-width: 560px) {
     .trunk .strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
                     align-items: baseline; column-gap: 1rem; }
@@ -2254,7 +2259,7 @@ async function refresh() {
     const reg = data.rooms.filter(r => r.registered).length;
     let subHtml = reg + ' of ' + data.rooms.length + ' phones registered';
     if (data.trunk.enabled) {
-      subHtml += ' · trunk: ' + esc(data.trunk.provider || 'on');
+      subHtml += ' · trunk: on';
       const tr = data.trunk.registration || '';
       if (tr) {  // white lamp Registered, unlit Unknown, red anything else (Rejected/Unregistered)
         const st = (tr === 'Registered') ? 'st-ok' : (tr === 'Unknown' ? 'st-unk' : 'st-bad');
@@ -2307,7 +2312,7 @@ async function refresh() {
     const tkLamp = !tk.enabled ? '' :
                    (tkReg === 'Registered' ? 'lit-ok' : (tkReg === 'Unknown' ? '' : 'lit-fault'));
     const trunkHtml = '<div class="pos trunk" role="group" aria-label="Trunk">' +
-      positionHead(tkLamp, 0, 'Trunk', tk.enabled ? esc(tk.provider || 'on') : '—',
+      positionHead(tkLamp, 0, 'Trunk', tk.enabled ? 'on' : '—',
                    tk.enabled ? esc(tkReg) : 'No trunk') + '</div>';
 
     const gridHtml = trunkHtml + data.rooms.map((r, i) => {
