@@ -17,9 +17,9 @@ sensors keep publishing either way.
 > off.
 >
 > One thing it does **not** stop: the same service keeps the readable log copy,
-> `/share/switchboard/asterisk.log`, free of SIP accounts and LAN addresses (see
-> SECURITY.md). With link health off it runs that scrub alone, every 300 s,
-> rather than idling.
+> `/share/switchboard/asterisk.log`, free of SIP accounts, the trunk provider's
+> host and LAN addresses (see SECURITY.md). With link health off it runs that
+> scrub alone, every 300 s, rather than idling.
 
 ## When Home Assistant is not answering
 

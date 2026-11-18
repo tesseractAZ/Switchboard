@@ -260,7 +260,8 @@ doesn't stop when it has queued a call; it records what actually happened.
 - **Secret handling.** Generated files that hold secrets are created `0640`, or
   `0600` where only root reads them, with no umask window. Room and trunk credentials are validated and fail closed on
   characters Asterisk would silently truncate. Secrets never reach a log, and the
-  readable log copy is scrubbed of SIP accounts and LAN addresses.
+  readable log copy is scrubbed of SIP accounts, the trunk provider's host and
+  LAN addresses.
 - **Consoles.**
   - **SSH console (`2300`):** password-only, checked against `console_users`. It
     refuses every login until a user is configured, and also refuses exec, SFTP
