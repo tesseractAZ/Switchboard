@@ -3,7 +3,7 @@
 <head>
 <script>
 (function(){
-  const STATUS = {"ami_ok": true, "rooms": [{"ext": "101", "label": "Kitchen", "registered": true, "device_state": "Not in use", "rtt": "2100", "contact_status": "Reachable"}, {"ext": "102", "label": "Living Room", "registered": true, "device_state": "Not in use", "rtt": "2400", "contact_status": "Reachable", "mwi": true}, {"ext": "103", "label": "Study", "registered": true, "device_state": "In use", "call_state": "Talking", "peer": "Kitchen", "call_peer": "Kitchen", "codec": "ulaw", "call_codec": "ulaw", "channel": "PJSIP/103-1", "peer_channel": "PJSIP/101-1", "rtt": "1900", "contact_status": "Reachable"}, {"ext": "104", "label": "Garage", "registered": true, "device_state": "Ringing", "call_state": "Ringing", "rtt": "3100", "contact_status": "Reachable"}, {"ext": "105", "label": "Bedroom", "registered": true, "device_state": "Not in use", "rtt": "2600", "contact_status": "Reachable"}, {"ext": "106", "label": "Cordless", "registered": true, "device_state": "Not in use", "rtt": "14800", "contact_status": "Reachable"}, {"ext": "107", "label": "Guest Room", "registered": false, "device_state": "Unavailable"}], "calls": [{"kind": "internal", "detail": "Study \u2194 Kitchen", "state": "Talking", "duration": "02:14", "codec": "ulaw"}, {"kind": "outside", "detail": "Garage \u2194 Outside", "state": "Ringing", "duration": "00:03", "codec": "ulaw"}], "wakeups": [{"ext": "105", "label": "Bedroom", "hhmm": "06:30", "target_epoch": 9999999999}], "trunk": {"enabled": true, "provider": "my-provider.example.com", "registration": "Registered"}, "stt": "up"};
+  const STATUS = {"ami_ok": true, "rooms": [{"ext": "101", "label": "Kitchen", "registered": true, "device_state": "Not in use", "rtt": "2100", "contact_status": "Reachable"}, {"ext": "102", "label": "Living Room", "registered": true, "device_state": "Not in use", "rtt": "2400", "contact_status": "Reachable", "mwi": true}, {"ext": "103", "label": "Study", "registered": true, "device_state": "In use", "call_state": "Talking", "peer": "Kitchen", "call_peer": "Kitchen", "codec": "ulaw", "call_codec": "ulaw", "channel": "PJSIP/103-1", "peer_channel": "PJSIP/101-1", "rtt": "1900", "contact_status": "Reachable"}, {"ext": "104", "label": "Garage", "registered": true, "device_state": "Ringing", "call_state": "Ringing", "rtt": "3100", "contact_status": "Reachable"}, {"ext": "105", "label": "Bedroom", "registered": true, "device_state": "Not in use", "rtt": "2600", "contact_status": "Reachable"}, {"ext": "106", "label": "Cordless", "registered": true, "device_state": "Not in use", "rtt": "14800", "contact_status": "Reachable"}, {"ext": "107", "label": "Guest Room", "registered": false, "device_state": "Unavailable"}], "calls": [{"kind": "internal", "detail": "Study \u2194 Kitchen", "state": "Talking", "duration": "02:14", "codec": "ulaw"}, {"kind": "outside", "detail": "Garage \u2194 Outside", "state": "Ringing", "duration": "00:03", "codec": "ulaw"}], "wakeups": [{"ext": "105", "label": "Bedroom", "hhmm": "06:30", "target_epoch": 9999999999}], "trunk": {"enabled": true, "registration": "Registered"}, "stt": "up"};
   window.fetch = function(u){
     const url = (typeof u === 'string') ? u : (u && u.url) || '';
     if (url.indexOf('api/status') !== -1)
@@ -175,7 +175,7 @@
   .trunk .strip .ext { letter-spacing: .18em; text-transform: uppercase; }
   .trunk .strip .name { font-size: .95rem; text-transform: none; }
   /* Wide enough, the trunk's strip types on one line; on a phone it stacks like
-     the others, so the provider is not cut to a few letters. */
+     the others. */
   @media (min-width: 560px) {
     .trunk .strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
                     align-items: baseline; column-gap: 1rem; }
@@ -411,7 +411,7 @@ async function refresh() {
     const reg = data.rooms.filter(r => r.registered).length;
     let subHtml = reg + ' of ' + data.rooms.length + ' phones registered';
     if (data.trunk.enabled) {
-      subHtml += ' · trunk: ' + esc(data.trunk.provider || 'on');
+      subHtml += ' · trunk: on';
       const tr = data.trunk.registration || '';
       if (tr) {  // white lamp Registered, unlit Unknown, red anything else (Rejected/Unregistered)
         const st = (tr === 'Registered') ? 'st-ok' : (tr === 'Unknown' ? 'st-unk' : 'st-bad');
@@ -464,7 +464,7 @@ async function refresh() {
     const tkLamp = !tk.enabled ? '' :
                    (tkReg === 'Registered' ? 'lit-ok' : (tkReg === 'Unknown' ? '' : 'lit-fault'));
     const trunkHtml = '<div class="pos trunk" role="group" aria-label="Trunk">' +
-      positionHead(tkLamp, 0, 'Trunk', tk.enabled ? esc(tk.provider || 'on') : '—',
+      positionHead(tkLamp, 0, 'Trunk', tk.enabled ? 'on' : '—',
                    tk.enabled ? esc(tkReg) : 'No trunk') + '</div>';
 
     const gridHtml = trunkHtml + data.rooms.map((r, i) => {

@@ -80,7 +80,9 @@ CALLS = [
 # out of the dashboard, which would silently drop the feature from the screenshot
 # whenever this script is re-run later.
 WAKEUPS = [{"ext": "105", "label": "Bedroom", "hhmm": "06:30", "target_epoch": 9999999999}]
-TRUNK = {"enabled": True, "provider": "my-provider.example.com", "registration": "Registered"}
+# The shape /api/status serves: no provider host since v0.119.4
+# (tests/test_app.py, test_the_screenshot_fixture_pictures_the_trunk_the_api_serves).
+TRUNK = {"enabled": True, "registration": "Registered"}
 NOW = 1784596400  # fixed clock so re-runs are byte-stable
 
 CHROME_CANDIDATES = [
