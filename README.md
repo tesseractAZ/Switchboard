@@ -261,7 +261,7 @@ doesn't stop when it has queued a call; it records what actually happened.
   `0600` where only root reads them, with no umask window. Room and trunk credentials are validated and fail closed on
   characters Asterisk would silently truncate. Secrets never reach a log, and the
   readable log copy is scrubbed of SIP accounts, the trunk provider's host and
-  LAN addresses.
+  LAN addresses. The dashboard shows the trunk's registration, not its host.
 - **Consoles.**
   - **SSH console (`2300`):** password-only, checked against `console_users`. It
     refuses every login until a user is configured, and also refuses exec, SFTP
