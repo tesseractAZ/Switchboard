@@ -338,14 +338,16 @@ control.
     reasoning that it made the retry line diagnostic and identified nobody. A
     provider's host is usually a regional point of presence, often named for a
     city, so it can say roughly where the house is. Two rules take it out:
-    every occurrence, on any line, of `trunk.provider_host` and
-    `trunk.from_domain` (read from the add-on options, compared without regard
-    to case, matched only as a whole host name), and, on a trunk registration
-    line, the host name in every `sip:` URI, so a host the options no longer
-    name goes too. The port, the masked account, the retry interval, the
-    severity and the source stay, so the line still says the trunk's
-    registration failed and how. An address in that position is left to the
-    rule below.
+    every occurrence, on any line, of the host name set in
+    `trunk.provider_host` and `trunk.from_domain` (read from the add-on
+    options and the options overlay, with any `sip:` scheme, port or trailing
+    dot taken off, compared without regard to case, matched only as a whole
+    host name), and, on a trunk registration line, the host name in every
+    `sip:` URI, so a host the options no longer name goes too. The port, the
+    masked account, the retry interval, the severity and the source stay, so
+    the line still says the trunk's registration failed and how. An address,
+    whether set in those options or in that position, is left to the rule
+    below.
   - **Private (RFC 1918) IPv4 addresses** — `10.0.0.0/8`, `172.16.0.0/12`,
     `192.168.0.0/16`. A failed qualify is logged at **ERROR** with the phone's
     contact URI, and that URI carries the phone's LAN address. The port and the

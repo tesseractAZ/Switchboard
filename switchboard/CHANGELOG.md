@@ -10,9 +10,12 @@ Recent releases. Releases up to 0.110.0 are in the
 - `/share/switchboard/asterisk.log` kept the provider's host on every trunk
   registration retry, on the reasoning that it identified nobody. A provider's
   host is usually a regional point of presence, so it can say roughly where the
-  house is. Both scrub passes now take out every whole-host occurrence of
-  `trunk.provider_host` and `trunk.from_domain`, on any line, and the host name
-  in each `sip:` URI on a registration line, configured or not. The boot pass
+  house is. Both scrub passes now take out every whole-host occurrence, on any
+  line, of the host name set in `trunk.provider_host` or `trunk.from_domain`
+  (in the options or the options overlay, with or without a `sip:` scheme, a
+  port or a trailing dot), and the host name in each `sip:` URI on a
+  registration line, configured or not. An address set there is not a host
+  name: a private one is masked as before, a public one stays. The boot pass
   writes `<trunk-host>`, the per-poll pass a mask of the same length; the port,
   the masked account and the retry interval stay.
 - The boot pass scans the whole file at every start, so the lines already there

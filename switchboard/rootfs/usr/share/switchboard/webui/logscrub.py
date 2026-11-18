@@ -24,11 +24,12 @@ this was found on, the readable copy named it 260 times, on 130 retry lines from
 early September to mid-November, the account on each already masked. Two rules
 take it out:
 
-- every occurrence, on any line, of a host the options name —
-  `trunk.provider_host` and `trunk.from_domain`, read from SWITCHBOARD_OPTIONS
-  and /data/options.json, compared without regard to case, and matched only as a
-  whole host (not inside `x<host>` or `<host>.example`; yes at the end of
-  `_sip._udp.<host>`);
+- every occurrence, on any line, of a host name the options give —
+  `trunk.provider_host` and `trunk.from_domain`, read from SWITCHBOARD_OPTIONS,
+  the post-overlay snapshot and /data/options.json, taken as Asterisk reads
+  them (without a `sip:` scheme, a port or a trailing dot), compared without
+  regard to case, and matched only as a whole host (not inside `x<host>` or
+  `<host>.example`; yes at the end of `_sip._udp.<host>`);
 - on a res_pjsip_outbound_registration line, the host part of every sip: URI
   that is a DNS name, configured or not, so a host the options no longer name
   (trunk off, provider changed) goes too.
@@ -107,11 +108,15 @@ from typing import NamedTuple
 _SIP_ACCT_RE = re.compile(r"sip:[A-Za-z0-9_.+-]+@")
 _SEVERITY_RE = re.compile(r"^\[[^\]]+\] ([A-Z]+)\[")
 
-# The add-on options, for the trunk's configured hosts. SWITCHBOARD_OPTIONS is
-# the post-overlay snapshot the s6 services are pointed at; the init oneshot has
-# no such variable. Both files are read and their hosts joined, so a host an
-# overlay replaced still goes from the lines written while it was in use.
+# The add-on options, for the trunk's configured hosts. SWITCHBOARD_OPTIONS
+# points the s6 services at the post-overlay snapshot; the init oneshot has no
+# such variable, and rtpmon's scrub-only mode starts before it exports one. So
+# the snapshot is also read by its own path: switchboard-config writes it before
+# the boot scrub, and a host only the overlay sets is in no other file. Every
+# file is read and their hosts joined, so a host an overlay replaced still goes
+# from the lines written while it was in use.
 OPTIONS_PATH = "/data/options.json"
+EFFECTIVE_PATH = "/run/switchboard/options-effective.json"
 HOST_TOKEN = "<trunk-host>"
 
 # A configured host is used only if it is a DNS name: dotted labels, at least
@@ -121,9 +126,12 @@ _DNS_NAME_RE = re.compile(r"(?=[a-z0-9_.-]*[a-z])[a-z0-9_-]+(?:\.[a-z0-9_-]+)+")
 
 # The trunk's registration lines, and the host part of a sip: URI on one —
 # after an optional `user@`, the account already masked or not. A host here is
-# taken whether or not it is still configured.
+# taken whether or not it is still configured. The user part stops at a `:`, so
+# each `sip:` scans no further than the next URI: without that, a long run of
+# `sip:` with no `@` cost one scan to the end of the run per occurrence, which
+# is quadratic in the line. Asterisk does not log a `user:password@` URI.
 _REG_LINE = "res_pjsip_outbound_registration"
-_URI_HOST_RE = re.compile(r"(sip:(?:[^\s@'\"<>]*@)?)([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)")
+_URI_HOST_RE = re.compile(r"(sip:(?:[^\s@'\"<>:]*@)?)([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)")
 _LETTER_RE = re.compile(r"[A-Za-z]")
 
 # A dotted quad that is not part of a longer run: not preceded by a digit or by
@@ -179,7 +187,8 @@ def configured_hosts() -> tuple:
     can be read, as written. Never raises: an unreadable or malformed file, or
     one with no trunk, adds nothing."""
     found = []
-    for path in (os.environ.get("SWITCHBOARD_OPTIONS", OPTIONS_PATH), OPTIONS_PATH):
+    for path in (os.environ.get("SWITCHBOARD_OPTIONS", OPTIONS_PATH), EFFECTIVE_PATH,
+                 OPTIONS_PATH):
         try:
             with open(path, encoding="utf-8") as fh:
                 trunk = json.load(fh).get("trunk")
@@ -195,11 +204,16 @@ def _hosts_re(hosts: tuple):
     name, matched only as a whole host: not inside a longer label or name, but
     yes as the tail of one (`_sip._udp.<host>`). None if there is none.
 
+    A configured value is taken as Asterisk reads it: switchboard-config accepts
+    a `sip:` or `sips:` scheme, a port and a fully qualified name's trailing dot,
+    and the trunk still works with each, so each is taken off before the
+    DNS-name check rather than turning this rule off.
+
     re.ASCII matters: Unicode case-folding would let the Kelvin sign match `k`,
     and a mask written over it would be shorter in bytes than what it hid."""
     names = set()
     for h in hosts:
-        h = h.strip().lower().split(":", 1)[0]
+        h = re.sub(r"^sips?:", "", h.strip().lower()).split(":", 1)[0].rstrip(".")
         if _DNS_NAME_RE.fullmatch(h):
             names.add(h)
     if not names:
@@ -235,8 +249,11 @@ def mask_line(line: str, hosts=()) -> str:
     """redact_line(), with every mask exactly as long as what it replaces.
 
     Same patterns, same order, so the two cannot disagree about WHAT is private
-    — only about how the hole is drawn. Every pattern matches ASCII only, and
-    each mask is ASCII, so the encoded line keeps its byte length too."""
+    — only about how the hole is drawn. Every pattern replaces only ASCII text,
+    each mask is ASCII, and what a pattern matches but does not replace (a URI's
+    user part before the host, a run of digits that is not a private address)
+    is written back as it was read, so the encoded line keeps its byte length
+    too."""
     line = _drop_hosts(_SIP_ACCT_RE.sub(_mask_acct_same_length, line), hosts,
                        _host_same_length)
     return _IPV4_RE.sub(_mask_ip_same_length, line)
@@ -244,7 +261,7 @@ def mask_line(line: str, hosts=()) -> str:
 
 class Scrub(NamedTuple):
     dropped: int = 0        # VERBOSE lines removed at boot, or blanked in place
-    redacted: int = 0       # lines with an account or a private address masked
+    redacted: int = 0       # lines with an account, trunk host or private address masked
     clean_to: int = 0       # byte offset the file is known clean through; a line boundary
     deferred: str = ""      # "" once finished; otherwise why nothing was written
 
