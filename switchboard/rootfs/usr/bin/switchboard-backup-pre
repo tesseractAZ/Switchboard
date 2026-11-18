@@ -56,10 +56,12 @@ def _open_no_follow(path: str, flags: int) -> int:
     """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
 
     A copy of switchboard-callqos's helper. The Supervisor runs this hook as
-    root, and /share/switchboard can be written by `asterisk` and from the host,
-    so a name may be a link planted in place of the stamp file. O_NOFOLLOW makes
-    a link fail to open, the fstat refuses a FIFO, a device or a directory, and
-    O_NONBLOCK keeps a planted FIFO from hanging the backup at the open.
+    root, and /data/state and /share/switchboard can both be written by
+    `asterisk` (the share from the host too), so any name in them may be a link
+    planted in place of the stamp file or of a file the flush opens. O_NOFOLLOW
+    makes a link fail to open, the fstat refuses a FIFO, a device or a
+    directory, and O_NONBLOCK keeps a planted FIFO from hanging the backup at
+    the open.
     """
     fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)  # intentional: root services AND the asterisk-user AGIs share these ledgers; group write, never world
     try:
@@ -161,13 +163,10 @@ def _fsync_dir(path: str) -> int:
               "flush", flush=True)
         return 0
     for name in names:
-        fp = os.path.join(path, name)
-        if not os.path.isfile(fp):
-            continue
         try:
-            fd = os.open(fp, os.O_RDONLY)
+            fd = _open_no_follow(os.path.join(path, name), os.O_RDONLY)
         except OSError:
-            continue
+            continue                      # gone, a link, or not a regular file
         try:
             os.fsync(fd)
             synced += 1
@@ -196,13 +195,16 @@ def main() -> int:
               "flush", flush=True)
         return 0
     for name in names:
-        path = os.path.join(STATE_DIR, name)
-        if not os.path.isfile(path):
-            continue
+        # ★ By fd, never through a link (2026-11-16). The asterisk user owns
+        # /data/state and the backup runs hot, so it can swap any name while
+        # this loop runs. An isfile() check by name and then open() by name
+        # followed a link, and a FIFO swapped in between the two hung the open,
+        # and with it the backup this hook brackets. A link, a FIFO or a
+        # directory is now refused at the open and skipped.
         try:
-            fd = os.open(path, os.O_RDONLY)
+            fd = _open_no_follow(os.path.join(STATE_DIR, name), os.O_RDONLY)
         except OSError:
-            continue
+            continue                      # gone, a link, or not a regular file
         try:
             os.fsync(fd)
             synced += 1

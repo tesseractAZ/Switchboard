@@ -63,6 +63,7 @@ import math
 import os
 import socket
 import ssl
+import stat
 import sys
 import tempfile
 import time
@@ -308,7 +309,10 @@ def load_callqos_legs(path: str | None = None, max_bytes: int = 65536) -> list[d
     NEAREST leg, and skips the record when that leg is playback."""
     p = path or os.environ.get("SWITCHBOARD_CALLQOS") or "/data/state/callqos.jsonl"
     try:
-        with open(p, "rb") as f:
+        # No-follow on a regular file (see _open_no_follow): the asterisk user
+        # writes this ledger, and a FIFO in its place blocked this open, and with
+        # it every cycle after.
+        with os.fdopen(_open_no_follow(p, os.O_RDONLY), "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             f.seek(max(0, size - max_bytes))
@@ -608,7 +612,8 @@ def mos_verdict(judged: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Low-MOS capture. PRIVATE: /data/state is add-on-only (container shell blocked,
 # backups encrypted, add-on API 403). The handset's record can name the far end
-# and carry LAN ports, so this is never mirrored to /share.
+# and carry LAN ports, so this is never mirrored to /share. Inside the container
+# the directory is the asterisk user's, so every open here is by no-follow fd.
 # --------------------------------------------------------------------------- #
 CAPTURE_MAX_BYTES = 512 * 1024
 _CAPTURE_TAIL_BYTES = 65536
@@ -631,9 +636,32 @@ def _capture_key(j: dict) -> str:
                                      j.get("mos"), mos_verdict(j)))
 
 
+def _open_no_follow(path: str, flags: int) -> int:
+    """An fd for the REGULAR file at `path`, never through a symlink. Raises OSError.
+
+    rtpmon/poller.py's helper, with one difference: a file this creates is 0600,
+    not 0664, because the only file devhealth creates this way is its own
+    private capture (the call ledger and the alert latches are only read
+    through it). /data/state is owned by `asterisk`, group-writable and not
+    sticky, and this poller runs as root, so any name in it may be a link
+    planted in place of the ledger. By name, the append, the trim and the chmod
+    followed such a link onto its target. O_NOFOLLOW makes a link fail to open; the
+    fstat refuses a FIFO, a device or a directory; O_NONBLOCK keeps a planted
+    FIFO from hanging the open. Everything after goes through the fd.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _load_capture_keys(path: str) -> set:
     try:
-        with open(path, "rb") as f:
+        with os.fdopen(_open_no_follow(path, os.O_RDONLY), "rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - _CAPTURE_TAIL_BYTES))
             data = f.read()
@@ -718,13 +746,23 @@ def capture_low_mos(judged: list[dict], mos_min: float, now: float | None = None
     try:
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         _rotate_tail(p, CAPTURE_MAX_BYTES)
-        with open(p, "a", encoding="utf-8") as fh:
+        # By fd, never through a symlink (see _open_no_follow): this append and
+        # the chmod after it went by name, so a link planted in place of the
+        # ledger took root's rows, and then mode 0600, onto its target.
+        with os.fdopen(_open_no_follow(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT),
+                       "a", encoding="utf-8") as fh:
+            # Root writes, nobody else reads. Tighter than linkhealth.jsonl's 0640:
+            # nothing running as `asterisk` needs this file, and a handset record
+            # can carry the far end's name or number.
+            os.fchmod(fh.fileno(), 0o600)
+            # And root owns it. From v0.102.0 until v0.109.0 the boot pass handed
+            # every file in /data/state to the asterisk user, this one included,
+            # and nothing took it back, so on an install from that time the
+            # 0600 file was the asterisk user's to read.
+            if os.geteuid() == 0 and os.fstat(fh.fileno()).st_uid != 0:
+                os.fchown(fh.fileno(), 0, -1)
             for _key, row in rows:
                 fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-        # Root writes, nobody else reads. Tighter than linkhealth.jsonl's 0640:
-        # nothing running as `asterisk` needs this file, and a handset record
-        # can carry the far end's name or number.
-        os.chmod(p, 0o600)
     except (OSError, TypeError, ValueError) as e:
         print(f"[devhealth] low-MOS capture not written ({e}); retrying next cycle", flush=True)
         return 0
@@ -739,22 +777,33 @@ def _rotate_tail(path: str, max_bytes: int, keep_frac: float = 0.5) -> None:
     """Trim an append-only ledger to its newest records. Best-effort.
 
     A copy of rtpmon/poller.py's helper (see its docstring for the v0.77.0
-    zero-byte truncation it replaced); tests/test_ledger_rotation.py runs every
-    copy over one input and requires identical bytes, so the copies cannot drift.
+    zero-byte truncation it replaced), by fd and never through a symlink;
+    tests/test_ledger_rotation.py runs every copy over one input and requires
+    identical bytes, so the copies cannot drift. This copy opened the path twice
+    by name, so a link planted in place of the ledger turned the trim into a
+    rewrite of whatever it pointed at; rtpmon's copy stopped doing that in
+    2026-09, for /share, and this one had been missed because /data/state was
+    taken to be private.
     """
     try:
-        if os.path.getsize(path) <= max_bytes:
-            return
-        keep = max(1, int(max_bytes * keep_frac))
-        with open(path, "rb") as fh:
+        fd = _open_no_follow(path, os.O_RDWR)
+    except OSError:
+        return                            # absent, a link, or not a file: nothing to trim
+    try:
+        with os.fdopen(fd, "r+b") as fh:
+            if os.fstat(fh.fileno()).st_size <= max_bytes:
+                return
+            keep = max(1, int(max_bytes * keep_frac))
             fh.seek(-keep, os.SEEK_END)
             tail = fh.read()
-        # Everything before the first newline is half a record. Drop it: a
-        # reader must never have to guess whether the first line is complete.
-        nl = tail.find(b"\n")
-        tail = tail[nl + 1:] if nl != -1 else b""
-        with open(path, "wb") as fh:
+            # Everything before the first newline is half a record. Drop it: a
+            # reader must never have to guess whether the first line is complete.
+            nl = tail.find(b"\n")
+            tail = tail[nl + 1:] if nl != -1 else b""
+            # Written first and cut after, so the file is never empty.
+            fh.seek(0)
             fh.write(tail)
+            fh.truncate()
     except OSError:
         pass                              # a trim must never break the write
 
@@ -1551,10 +1600,10 @@ def _notify(device: str, event: str, reasons: list[str]) -> bool:
 # trusted only as a finite number, and a date only between 7 days ago and now
 # (an alert is dated when it is raised, never later); anything else is a latch
 # ignored, and the first cycle writes over it. The save never writes through a
-# name planted in the directory (see save_alert_latches). The read is not
-# guarded the same way: it opens the name and reads the whole file, so a FIFO
-# planted there blocks the start and a file too large for memory raises, as
-# at devhealth's other reads from /data/state.
+# name planted in the directory (see save_alert_latches), and the read never
+# reads through one: a link, a FIFO or a file past ALERT_STATE_MAX_BYTES is a
+# file that cannot be read (see read_alert_latches), as at devhealth's other
+# reads from /data/state.
 ALERT_STATE_MAX_AGE_S = 7 * 86400
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 ALERT_LEVELS = ("degraded", "critical")
@@ -1613,14 +1662,32 @@ def _latch_trusted(rec: dict, now: float) -> bool:
             and (rec.get("boot") is None or isinstance(rec.get("boot"), str)))
 
 
+# The latch file is a few hundred bytes. Anything past this is not one, and is
+# not read at all.
+ALERT_STATE_MAX_BYTES = 64 * 1024
+
+
 def read_alert_latches(path: str | None = None) -> dict | None:
     """What the latch file holds: {} when there is no file, None when it
-    cannot be read or holds no JSON object. Never raises."""
+    cannot be read or holds no JSON object. Never raises.
+
+    By name, open() followed a link, blocked on a FIFO (devhealth stopped at its
+    start) and read a file of any size whole (a large or sparse one raised
+    MemoryError). The fd is no-follow on a regular file (see _open_no_follow),
+    and at most one byte past ALERT_STATE_MAX_BYTES is read: a link, a FIFO,
+    a directory or a larger file is a file that cannot be read."""
     try:
-        with open(path or _alert_state_path(), encoding="utf-8") as fh:
-            data = json.load(fh)
+        fd = _open_no_follow(path or _alert_state_path(), os.O_RDONLY)
     except FileNotFoundError:
         return {}
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(ALERT_STATE_MAX_BYTES + 1)
+        if len(raw) > ALERT_STATE_MAX_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
