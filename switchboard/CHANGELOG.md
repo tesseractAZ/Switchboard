@@ -1,7 +1,25 @@
 # Changelog
 
-Recent releases. Releases up to 0.109.1 are in the
+Recent releases. Releases up to 0.110.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.119.3
+
+**The readable Asterisk log no longer names the trunk provider's server.**
+
+- `/share/switchboard/asterisk.log` kept the provider's host on every trunk
+  registration retry, on the reasoning that it identified nobody. A provider's
+  host is usually a regional point of presence, so it can say roughly where the
+  house is. Both scrub passes now take out every whole-host occurrence of
+  `trunk.provider_host` and `trunk.from_domain`, on any line, and the host name
+  in each `sip:` URI on a registration line, configured or not. The boot pass
+  writes `<trunk-host>`, the per-poll pass a mask of the same length; the port,
+  the masked account and the retry interval stay.
+- The boot pass scans the whole file at every start, so the lines already there
+  go at the first start of this version: on a copy shaped like an affected log,
+  130 retry lines naming the host 260 times, it left none and changed no other
+  line. Backups taken before that start, the private `/data/state/asterisk.log`
+  and the add-on's Log tab still carry the host.
 
 ## 0.119.2
 
@@ -423,80 +441,3 @@ that stay honest across a restart, and two web-UI hardenings.**
   `tests/test_changelog.py` fails when the changelog grows past 15 releases or
   48 KB, or when a release is missing, duplicated or out of order across the
   two files.
-
-## 0.110.0
-
-**The asterisk user no longer holds the Home Assistant token, and an input-validation
-review of the dial plan closed seven gaps.**
-
-- **The Supervisor token stays with the root services.**
-  - The token grants the whole Home Assistant Core API.
-  - Asterisk, its AGIs, the speech recognizer and every program the dial plan runs
-    (the `asterisk` user) now start with `SUPERVISOR_TOKEN` and `HASSIO_TOKEN`
-    removed from their environment.
-  - s6-overlay keeps a copy of every container variable in
-    `/run/s6/container_environment`, which shipped world-readable. It is made
-    readable by root only at boot. Before this, any of those programs could read
-    the token from it.
-  - What they need from Home Assistant they ask a new root service for, the
-    Home Assistant broker. It listens on a Unix socket (`/run/switchboard/ha.sock`,
-    `0660 root:asterisk`) and forwards only the requests those programs make, each
-    with its arguments checked: entity reads, the lights template, the home
-    location, calendar reads, `light.turn_on`/`turn_off`, `scene.turn_on`,
-    `media_player.play_media` of this add-on's own clip URL, the built-in local
-    conversation agent, `sensor.switchboard_last_call` and a persistent
-    notification. Everything else is refused and logged as `[ha-broker] refused`.
-    Reads are trimmed to what the callers use, so no camera access token, picture
-    URL or tracker coordinate is handed back, and a clip must be this add-on's own,
-    on this host's web UI port.
-  - The callers did not change: `ha_client` uses the broker by itself when it has
-    no token. A broker that is down costs those features, never calls, and is
-    logged as `[ha_client] Home Assistant unreachable through the broker`.
-- **Dial-plan input validation:**
-  - **The operator identifies a room by its PJSIP endpoint, never by caller ID.**
-    The message-waiting clear used to put the caller's caller ID into the expression
-    that gated it and into a shell command line. An outside caller transferred to
-    the operator sets their own caller ID. `switchboard-mwi` also refuses anything
-    but an extension.
-  - **An outside caller transferred to the operator gets no house features.**
-    Lights, the status readout, announcements, paging and the assistant are for
-    room phones; connecting to a room, the directory, the clock and wake-ups stay
-    open. The operator asks which room is calling again after its speech step (an
-    attended transfer can change the caller meanwhile), and each feature asks
-    again when it starts. A room's `*2` consult to `0` is not a room phone for
-    this, and no longer clears that room's message-waiting indicator: dial `0`
-    directly.
-  - **Only digits, `*` and `#` reach the trunk `Dial`, and only digits reach a room
-    `Dial`.** The outbound and room patterns match any character, and `Dial` reads
-    `&`, `/`, `@` and `,` in its argument. A number the filter changes is refused.
-    `+` is not allowed, which also closes a path around the `011` international
-    block.
-  - **The call-quality hook filters the channel name** before the shell sees it,
-    as it already filtered the caller ID, stage and clip name.
-  - **Spoken text can never be read as an option:** every place that starts
-    `espeak-ng` passes `--` before the text and closes its stdin.
-  - **Operator synonyms are scrubbed** of control characters, like room names, and
-    must name a 2-6 digit extension.
-  - **The weather forecast URL must be `https://api.weather.gov`,** checked where it
-    is fetched, cached and read back from the cache.
-- **The manual's typefaces are restored.** The 0.109.1 PDF, the first built on
-  Ubuntu 26.04, came out with plain serif headings and proportional inline code:
-  pandoc 3.7's template asks for Aptos (absent on Linux) and no longer bolds
-  headings. The build now pins the template to Calibri and Cambria with bold
-  headings, installs their metric-compatible clones (Carlito, Caladea) for the
-  PDF, and maps code to DejaVu Sans Mono. The docs workflow checks each role
-  before the build and the embedded faces after it, so a fallback fails the
-  check instead of shipping.
-- **CodeQL runs on Ubuntu 26.04**, like every other job; 24.04 is retired. Its
-  published system requirements still list only 22.04 and 24.04, so the CI gate
-  now refuses a Python analysis that reproduces none of the baseline's known,
-  accepted findings (`check-sarif.mjs --min-accepted`): an analysis that extracted
-  nothing can no longer pass as a clean one.
-- **Tests:**
-  - Every test file's standalone runner is one shared, discovering runner
-    (`tests/_runner.py`). Hand-maintained lists and runner blocks defined above
-    later tests had left 182 tests unrun by those entry points (counted by tracing
-    each runner); CI's pytest run always ran them. `tests/test_standalone_runners.py` keeps it that way.
-  - New: `test_ha_broker.py` (the broker accepts exactly what the programs send,
-    generated by calling the real client functions), `test_tts_argv.py`, and tests
-    for each dial-plan fix.
