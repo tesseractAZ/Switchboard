@@ -263,7 +263,7 @@ control.
 
   | Destination | Carries | Kept | Readable from outside the add-on |
   | --- | --- | --- | --- |
-  | Add-on journal: Asterisk's console, plus the stdout and stderr of every service and the stderr of every voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's LAN IPv4 address and its IPv6 address, which res_pjsip logs at every Asterisk start (`Local IPv4/IPv6 address determined to be`). At every level, the web UI's refused-request lines: the address, method and path (speaker-clip names masked) of the first refused HTTP request per address and reason in each 10 minutes, then a count | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | Add-on journal: Asterisk's console, plus the stdout and stderr of every service and the stderr of every voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account and the provider's host; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's LAN IPv4 address and its IPv6 address, which res_pjsip logs at every Asterisk start (`Local IPv4/IPv6 address determined to be`). At every level, the web UI's refused-request lines: the address, method and path (speaker-clip names masked) of the first refused HTTP request per address and reason in each 10 minutes, then a count | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
   | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
@@ -324,7 +324,7 @@ control.
   kept working and the dialplan trace stopped being published.
 
   **The readable copy is scrubbed at boot, and then every poll** (v0.100.4,
-  v0.100.6). Three things are taken out of it, and nothing else removed either:
+  v0.100.6). Four things are taken out of it, and nothing else removed either:
 
   - **Any `VERBOSE` line.** v0.94.7 stopped writing them here, and removed
     nothing already written. On the deployment this was found on, the readable
@@ -333,9 +333,21 @@ control.
   - **The SIP account in a registration URI.** This one is not historical: a
     trunk registration retry writes the full URI at **WARNING**, a class this
     channel still carries, so it returns on the next hiccup. Masked rather than
-    dropped — that line is how you learn your trunk is flapping — and the
-    provider host is deliberately kept, because it is what makes the line
-    diagnostic and it identifies nobody.
+    dropped — that line is how you learn your trunk is flapping.
+  - **The trunk provider's host** (v0.119.3). Until then it was kept, on the
+    reasoning that it made the retry line diagnostic and identified nobody. A
+    provider's host is usually a regional point of presence, often named for a
+    city, so it can say roughly where the house is. Two rules take it out:
+    every occurrence, on any line, of the host name set in
+    `trunk.provider_host` and `trunk.from_domain` (read from the add-on
+    options and the options overlay, with any `sip:` scheme, port or trailing
+    dot taken off, compared without regard to case, matched only as a whole
+    host name), and, on a trunk registration line, the host name in every
+    `sip:` URI, so a host the options no longer name goes too. The port, the
+    masked account, the retry interval, the severity and the source stay, so
+    the line still says the trunk's registration failed and how. An address,
+    whether set in those options or in that position, is left to the rule
+    below.
   - **Private (RFC 1918) IPv4 addresses** — `10.0.0.0/8`, `172.16.0.0/12`,
     `192.168.0.0/16`. A failed qualify is logged at **ERROR** with the phone's
     contact URI, and that URI carries the phone's LAN address. The port and the
@@ -359,16 +371,20 @@ control.
   They differ in whether anything may move:
 
   - **At boot**, before Asterisk starts, lines move. `VERBOSE` lines are removed,
-    the account becomes `sip:***@<provider>` and an address `<private-ip>`.
+    the account becomes `sip:***@`, the trunk host `<trunk-host>` and an address
+    `<private-ip>`.
   - **Every poll**, while Asterisk is appending, nothing moves. Each mask is
     exactly as long as what it covers and is written over those bytes alone; the
     file is never truncated and never written past what the pass read, so a line
     Asterisk appends at the same moment cannot be cut or overwritten. An account
-    becomes `sip:`, one `*` per character, then `@`. An address becomes `<ip`,
-    `*` up to the address's length, then `>`, so `192.168.1.71` reads
-    `<ip********>`. A `VERBOSE` line keeps its timestamp and is `*` to the end.
-    A same-length mask keeps the length of what it hides, and nothing else; the
-    next boot pass turns all three into the forms above.
+    becomes `sip:`, one `*` per character, then `@`. The trunk host becomes
+    `<host`, `*` up to the host's length, then `>`; a host of five characters
+    or fewer becomes one `*` per character. An address becomes `<ip`, `*` up to
+    the address's length, then `>`, so `192.168.1.71` reads `<ip********>`. A
+    `VERBOSE` line keeps its timestamp and is `*` to the end. A same-length
+    mask keeps the length of what it hides, and nothing else; the next boot
+    pass turns each into the forms above, except the all-`*` form of a short
+    host, which keeps its length.
 
   In 0.100.6 the per-poll pass used the boot pass's rewrite, guarded by one
   re-check of the file size. That check covered only the moment it ran: a line
@@ -414,7 +430,7 @@ control.
   points at.
 
   The scrub rewrites the live `/share` file only. The private copy in
-  `/data/state/asterisk.log` keeps all three in full — that is the whole reason
+  `/data/state/asterisk.log` keeps all four in full — that is the whole reason
   the two copies differ — and so does the add-on journal, which carries the
   VERBOSE lines at `log_level` `info`, `debug` or `trace`. The scrub touches
   neither of those, nor any backup taken before a line was scrubbed.
