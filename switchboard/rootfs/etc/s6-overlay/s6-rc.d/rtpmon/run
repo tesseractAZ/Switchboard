@@ -6,7 +6,7 @@
 # not permanently idle this enabled-by-default poller (s6 never restarts an idle).
 if [ "$(bashio::config 'link_health_enabled')" = "false" ]; then
     # Not idle: this service also keeps the readable Asterisk log in /share free
-    # of SIP accounts and LAN addresses, every cycle. Switching off a health graph
+    # of SIP accounts, the trunk host and LAN addresses, every cycle. Switching off a health graph
     # must not turn that back into a once-per-boot scrub.
     bashio::log.info "Idle link-health poller disabled (link_health_enabled: false); scrubbing the readable log only."
     exec python3 /usr/share/switchboard/rtpmon/poller.py --scrub-only

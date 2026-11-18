@@ -2529,8 +2529,8 @@ def ensure_share_log_dir() -> None:
                     f"{SHARE_LOG_MAX_BYTES // (1024*1024)} MB)")
         except OSError as exc:
             log(f"WARN could not trim {SHARE_LOG}: {exc}")
-        # ...and take the call detail, the trunk account and the LAN addressing
-        # out of it. Runs after the trim so it works on the smaller file. This
+        # ...and take the call detail, the trunk account, the trunk host and the
+        # LAN addressing out of it. Runs after the trim so it works on the smaller file. This
         # pass is for what an earlier build or an earlier run left behind; the
         # link-health poller repeats it every cycle for what Asterisk writes next.
         # `writer_stopped=True` is true HERE AND NOWHERE ELSE: this is the init
