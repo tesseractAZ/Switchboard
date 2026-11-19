@@ -212,6 +212,26 @@ def test_a_wav_alone_installs_with_a_derived_g711_ulaw():
               [p.name for p in b.dest.parent.iterdir()] == ["prompts"])
 
 
+def test_the_install_directory_holds_prompt_files_and_nothing_else():
+    """Asterisk tries <dir>/<language>/<name> before <dir>/<name> for an
+    absolute name, so a subdirectory there could shadow an installed prompt:
+    the install is regular files named <prompt>.wav|ulaw only."""
+    with _box() as b:
+        (b.src / "sw-greeting.wav").write_bytes(_wav())
+        (b.src / "sw-busy.ulaw").write_bytes(_ulaw())
+        (b.src / "sw-goodbye.wav").write_bytes(_wav())
+        (b.src / "sw-goodbye.ulaw").write_bytes(_ulaw())
+        (b.src / "en").mkdir()
+        (b.src / "en" / "sw-greeting.ulaw").write_bytes(_ulaw())
+        sbc.install_custom_prompts()
+        entries = sorted(os.listdir(b.dest))
+        check(f"install dir: exactly the prompt files ({entries})",
+              entries == ["sw-busy.ulaw", "sw-goodbye.ulaw", "sw-goodbye.wav",
+                          "sw-greeting.ulaw", "sw-greeting.wav"])
+        check("install dir: each a regular file, none a link or directory",
+              all(stat.S_ISREG(os.lstat(b.dest / e).st_mode) for e in entries))
+
+
 def test_a_ulaw_alone_installs_as_given():
     with _box() as b:
         body = _ulaw(1234, 0x2A)

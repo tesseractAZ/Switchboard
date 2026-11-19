@@ -17,10 +17,14 @@ the second it announced.
 ★ A WHOLE NAME RESOLVES TO ONE DIRECTORY. Asterisk picks the cheapest format it
 finds for a sound name, and for the phones' µ-law channel a ``.ulaw`` beats a
 ``.wav``. A custom ``.wav`` placed next to the built-in ``.ulaw`` would therefore
-never play. Returning an absolute path (Asterisk uses a name starting with "/"
-as-is) makes the custom directory the only candidate for that name, and every
-installed name has a ``.ulaw`` there (switchboard-config derives one from a
-``.wav`` given alone), which is also the file the clock measures.
+never play. Returning an absolute path makes the custom directory the only
+place Asterisk looks for that name: it never resolves an absolute name under
+sounds/, and tries ``<dir>/<language>/<name>`` (the channel's language, then
+"en") and ``<dir>/<name>`` (main/file.c, fileexists_test's "old layout").
+switchboard-config installs regular files only, no subdirectory, so only
+``<dir>/<name>`` can match. Every installed name has a ``.ulaw`` there
+(switchboard-config derives one from a ``.wav`` given alone), which is also
+the file the clock measures.
 
 stdlib only; runs as root (switchboard-config, the web UI) and as the asterisk
 user (the AGIs). Never raises.
