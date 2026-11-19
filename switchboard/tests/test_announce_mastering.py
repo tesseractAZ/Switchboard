@@ -397,21 +397,22 @@ _FAILURES = [("missing", _failing("missing")), ("unstartable", _failing("unstart
 
 def test_a_failed_master_renders_the_old_output_exactly() -> None:
     speech = _speechlike(0.7)
+    ref = _load()
+    today = _today_bytes(ref, ref._resample_to_8k(speech, 22050, 8000))
     for branch in ("text", "wav"):
-        mod = _load()
-        today = _today_bytes(mod, mod._resample_to_8k(speech, 22050, 8000))
         for name, master in _FAILURES:
+            mod = _load()  # a fresh one each: a timeout pauses the mastering
             fake = _Fake(speech=speech, master=master)
             data, _ = _run(mod, branch, fake, speech)
             check(f"{branch} / {name}: the pre-0.121 bytes exactly", data == today)
 
 
 def test_a_failed_master_on_a_non_wav_clip_takes_the_old_decode() -> None:
-    mod = _load()
     decoded = array.array("h", [int(3000 * math.sin(i / 3)) for i in range(4000)])
     for name, master in _FAILURES:
         if name.startswith("garbage") and name.endswith(("short", "long")):
             continue  # an encoded input has no known length to check against
+        mod = _load()  # a fresh one each: a timeout pauses the mastering
         fake = _Fake(master=master, decode=_wav_bytes(decoded, 8000))
         data, _ = _run(mod, "mp3", fake, None)
         check(f"mp3 / {name}: then the plain decode, once", len(fake.decodes()) == 1)
@@ -422,6 +423,7 @@ def test_a_failed_master_on_a_non_wav_clip_takes_the_old_decode() -> None:
     check("mp3: the fallback is logged like the others",
           "mastering failed (ffmpeg exited 1)" in log and "example.com" not in log)
     # ffmpeg absent altogether: a non-WAV clip cannot be decoded, as before.
+    mod = _load()
     fake = _Fake(master=_failing("missing"), decode=None)
     with _stubbed(mod, fake, b"ID3\x04 encoded clip") as log:
         with tempfile.TemporaryDirectory() as d:
@@ -449,6 +451,54 @@ def test_the_fallback_is_logged_once_per_process() -> None:
     _, log2 = _run(mod2, "text", _Fake(speech=speech, master=_failing("timeout")), speech)
     check("log: a new process logs again, with its own cause",
           "(ffmpeg timed out)" in log2 and log2.count("\n") == 1)
+
+
+def test_a_stalled_ffmpeg_pauses_the_mastering() -> None:
+    """A master that runs past MASTER_TIMEOUT_S costs its announcement that wait.
+    Mastering is then skipped for MASTER_PAUSE_S, so a wedged ffmpeg does not
+    hold back every alarm after it by 10 s; after the pause it is tried again.
+    A failure that costs no time pauses nothing."""
+    speech = _speechlike(0.5)
+    mod = _load()
+    check("pause: 10 minutes", mod.MASTER_PAUSE_S == 600)
+    now = [1000.0]
+    mod.time = types.SimpleNamespace(monotonic=lambda: now[0])
+    today = _today_bytes(mod, mod._resample_to_8k(speech, 22050, 8000))
+    stalls = []
+
+    def stall(cmd, kw):
+        stalls.append(cmd)
+        raise _sp.TimeoutExpired(cmd, kw.get("timeout"))
+    lines = []
+    for branch in ("text", "wav", "text"):
+        data, log = _run(mod, branch, _Fake(speech=speech, master=stall), speech)
+        lines += [x for x in log.splitlines() if x]
+        check(f"pause / {branch}: the pre-0.121 bytes", data == today)
+    check(f"pause: one stalled run, not three ({len(stalls)})", len(stalls) == 1)
+    check("pause: logged once, as the timeout",
+          len(lines) == 1 and "(ffmpeg timed out)" in lines[0])
+    decoded = array.array("h", [int(3000 * math.sin(i / 3)) for i in range(4000)])
+    fake = _Fake(master=stall, decode=_wav_bytes(decoded, 8000))
+    data, _ = _run(mod, "mp3", fake, None)
+    check("pause / mp3: straight to the old decode",
+          len(stalls) == 1 and len(fake.decodes()) == 1 and data == _today_bytes(mod, decoded))
+    now[0] += mod.MASTER_PAUSE_S - 1
+    _run(mod, "text", _Fake(speech=speech, master=stall), speech)
+    check("pause: still skipped a second before it ends", len(stalls) == 1)
+    now[0] += 1
+    fake = _Fake(speech=speech)
+    data, log = _run(mod, "text", fake, speech)
+    check("pause: over after MASTER_PAUSE_S, and the clip is mastered again",
+          len(fake.masters()) == 1 and data != today and log == "")
+    mod2 = _load()
+    mod2.time = types.SimpleNamespace(monotonic=lambda: now[0])
+    for name, master in _FAILURES:
+        if name == "timeout":
+            continue
+        fake = _Fake(speech=speech, master=master)
+        _run(mod2, "text", fake, speech)
+        _run(mod2, "text", fake, speech)
+        check(f"pause: {name} pauses nothing", len(fake.masters()) == 2)
 
 
 def test_a_mastering_error_never_raises() -> None:
@@ -789,10 +839,12 @@ def test_the_output_check_on_ffmpeg() -> None:
               "ffmpeg could not run"),
              ("stalled", raising(_sp.TimeoutExpired(["ffmpeg"], 10)), "ffmpeg timed out")]
     for name, run, why in cases:
+        mod._master_paused_until = 0.0  # the stalled case pauses the mastering
         with _stubbed(mod, run):
             y, got = mod._ffmpeg_master(payload, 22050, 2205)
         check(f"output check: {name} -> {why or 'accepted'}",
               got == why and (y is not None) is (why == ""))
+    mod._master_paused_until = 0.0
     # An encoded clip has no known length: any well-formed stream is taken.
     with _stubbed(mod, answer(_f32(_tone_f32(123)))):
         y, got = mod._ffmpeg_master(b"ID3", None, None)

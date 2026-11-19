@@ -92,8 +92,10 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   If ffmpeg is missing, exits with an error, runs past 10 seconds, or returns
   something that is not audio of the expected length, the clip is rendered as
   before 0.121.0: the speech resampled in Python without the shaping, and for a
-  non-WAV `{url}` the plain ffmpeg decode. The Log tab gets one line per start
-  of the web UI naming the cause, never the message or the URL, for example
+  non-WAV `{url}` the plain ffmpeg decode. After a run past 10 seconds the
+  shaping is skipped for 10 minutes, so a stalled ffmpeg holds back one
+  announcement rather than every one after it. The Log tab gets one line per
+  start of the web UI naming the cause, never the message or the URL, for example
   `announce: phone-band mastering failed (ffmpeg not found), so the clip was
   rendered unmastered; later fallbacks are not logged`.
 - **Busy-guard:** when the target phone is already on (or being offered) a call —

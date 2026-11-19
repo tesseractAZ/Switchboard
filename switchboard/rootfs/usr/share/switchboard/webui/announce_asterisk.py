@@ -38,6 +38,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import wave
@@ -78,6 +79,11 @@ MASTER_FILTERS = ",".join((
 # of its length, so this only bounds a stalled ffmpeg: the clip then takes the
 # pre-0.121 path, at most this much later than it would have.
 MASTER_TIMEOUT_S = 10
+# After a master that runs into that ceiling, mastering is skipped for this
+# long, so a wedged ffmpeg costs one announcement the wait, not every alarm
+# after it; then it is tried again. Failures that cost no time pause nothing.
+MASTER_PAUSE_S = 600
+_PAUSED = "mastering paused after an ffmpeg timeout"
 # Speech longer than this is not mastered: the announce endpoint refuses any clip
 # over 90 seconds, so the work would be thrown away, and the limiter's cost grows
 # with the clip. Such a clip takes the pre-0.121 path, without a log line.
@@ -317,6 +323,9 @@ def _master_argv(rate: "int | None") -> list:
                    "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]
 
 
+_master_paused_until = 0.0  # time.monotonic(); see MASTER_PAUSE_S
+
+
 def _ffmpeg_master(payload: bytes, rate: "int | None" = None,
                    n_in: "int | None" = None) -> tuple["array.array | None", str]:
     """Run MASTER_FILTERS over `payload` (see _master_argv). `n_in` is the number
@@ -326,11 +335,16 @@ def _ffmpeg_master(payload: bytes, rate: "int | None" = None,
     reason is a fixed phrase that names nothing about the clip. Output is refused
     unless ffmpeg exited 0 and wrote whole float samples, of the length the input
     implies, finite, not all zero, and within a range real audio can reach. Output
-    that reaches the MASTER_MAX_SECONDS cut is (None, _TOO_LONG)."""
+    that reaches the MASTER_MAX_SECONDS cut is (None, _TOO_LONG). For
+    MASTER_PAUSE_S after a timeout, ffmpeg is not run: (None, _PAUSED)."""
+    global _master_paused_until
+    if time.monotonic() < _master_paused_until:
+        return None, _PAUSED
     try:
         proc = subprocess.run(_master_argv(rate), input=payload,
                               capture_output=True, timeout=MASTER_TIMEOUT_S)
     except subprocess.TimeoutExpired:
+        _master_paused_until = time.monotonic() + MASTER_PAUSE_S
         return None, "ffmpeg timed out"
     except FileNotFoundError:
         return None, "ffmpeg not found"
