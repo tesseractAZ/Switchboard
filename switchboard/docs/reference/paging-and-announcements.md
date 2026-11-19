@@ -66,8 +66,34 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   as Home Assistant's own TTS is allowed. It does not follow redirects and caps
   the body at 5 MB. A WAV is decoded directly and other formats (such as the MP3
   Home Assistant's TTS proxy serves) with ffmpeg, which the image installs on a
-  best-effort basis. The result is transcoded to 8 kHz for the phone line and
+  best-effort basis. The result is shaped for the phone line (below) and
   bracketed by the same chime as a `{text}` clip.
+- **Shaped for the phone band** (since v0.121.0). Every phone here runs G.711
+  µ-law, so the clip reaches the earpiece as 8 kHz narrowband audio, about
+  300–3400 Hz, whatever rate it was rendered at. The speech of every branch
+  (`{text}`, a WAV `{url}`, any other `{url}`) goes through one ffmpeg process,
+  stdin to stdout: a 4th-order high-pass at 250 Hz, -2 dB at 500 Hz, +5 dB at
+  2.8 kHz (the consonants), a 4th-order low-pass at 3.5 kHz, 3:1 compression
+  above -24 dBFS, and ffmpeg's resampler to 8 kHz, so energy above 4 kHz no
+  longer folds back into the band as hiss. For a non-WAV `{url}` the same
+  process also decodes the clip. The clip's speech level (the RMS over its
+  20 ms frames above -30 dBFS, measured after the gain, as the built-in
+  prompts' -15 dBFS is) is then set to -15 dBFS, raised by at most 20 dB; a
+  clip with nothing above -30 dBFS is left as it is. A look-ahead peak limiter
+  (2 ms attack, 40 ms release) keeps every sample at or under -1 dBFS.
+  The chime is generated at 8 kHz and not processed: measured the same way it
+  reads -12 dBFS, about 3 dB above the speech, with its peaks at -3 dBFS. The
+  same input renders the same bytes, so duplicate suppression still recognises
+  a repeat. Speech of 120 seconds or more is not shaped, since a clip over 90
+  seconds is refused anyway.
+
+  If ffmpeg is missing, exits with an error, runs past 10 seconds, or returns
+  something that is not audio of the expected length, the clip is rendered as
+  before 0.121.0: the speech resampled in Python without the shaping, and for a
+  non-WAV `{url}` the plain ffmpeg decode. The Log tab gets one line per start
+  of the web UI naming the cause, never the message or the URL, for example
+  `announce: phone-band mastering failed (ffmpeg not found), so the clip was
+  rendered unmastered; later fallbacks are not logged`.
 - **Busy-guard:** when the target phone is already on (or being offered) a call —
   its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
   call is **not** placed. A second INVITE cannot auto-answer mid-call and would
