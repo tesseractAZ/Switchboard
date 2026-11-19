@@ -19,6 +19,7 @@ What is pinned here:
     source scan keeps every future reference on that path.
 """
 import contextlib
+import io
 import os
 import re
 import shutil
@@ -162,11 +163,22 @@ def test_the_resolver_answers_custom_only_for_an_installed_name():
         (d / "sw-goodbye.ulaw").mkdir()
         check("resolver: a directory is not an installed prompt",
               pr.prompt("sw-goodbye") == "switchboard/sw-goodbye")
-        # Nothing that could leave the directory is ever made absolute.
+        # Nothing that could leave the directory is ever made absolute: with
+        # the directories each odd name walks through really there, a prefix
+        # match or a pattern that admits "/" or "." would reach x.ulaw.
         (d / "x.ulaw").write_bytes(_ulaw())
-        for odd in ("sw-../x", "../sw-greeting", "sw-greeting/../x", "SW-GREETING", "x", ""):
+        for sub in ("sw-greeting", "sw-..", "sw-sub", "sw-a.b"):
+            (d / sub).mkdir()
+        (d / "sw-a.b" / "c.ulaw").write_bytes(_ulaw())
+        for odd in ("sw-../x", "../sw-greeting", "sw-greeting/../x", "sw-sub/../x", "sw-a.b/c",
+                    "SW-GREETING", "x", ""):
             check(f"resolver: {odd!r} is never resolved into the directory",
-                  not pr.prompt(odd).startswith("/"))
+                  not pr.prompt(odd).startswith("/") and pr.NAME_RE.fullmatch(odd) is None)
+        # Never raises, whatever it is handed.
+        for bad in (None, 3, b"sw-greeting", "sw-a\x00b", "sw-greeting\n"):
+            got = pr.prompt(bad)
+            check(f"resolver: {bad!r} gets a built-in reference, no exception ({got!r})",
+                  isinstance(got, str) and got.startswith("switchboard/"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -187,16 +199,25 @@ def test_the_install_directory_is_the_one_the_resolver_reads():
 # --------------------------------------------------------------------------- #
 def test_a_wav_alone_installs_with_a_derived_g711_ulaw():
     with _box() as b:
-        # A metadata chunk before the audio, as recorders write.
-        (b.src / "sw-greeting.wav").write_bytes(_wav(extra=b"LIST" + struct.pack("<I", 4) + b"INFO"))
-        sbc.install_custom_prompts()
+        # A metadata chunk before the audio, as recorders write: odd-sized, so
+        # its pad byte must be skipped to find the audio.
+        (b.src / "sw-greeting.wav").write_bytes(
+            _wav(extra=b"LIST" + struct.pack("<I", 5) + b"INFOx" + b"\0"))
+        old_umask = os.umask(0o077)            # the modes below must not depend on it
+        try:
+            sbc.install_custom_prompts()
+        finally:
+            os.umask(old_umask)
         ulaw = (b.dest / "sw-greeting.ulaw").read_bytes()
         check("wav-only: a .ulaw is derived", len(ulaw) == len(SAMPLES))
         check("wav-only: the derived .ulaw is G.711 µ-law",
               ulaw == bytes(G711[s] for s in SAMPLES))
         wav = (b.dest / "sw-greeting.wav").read_bytes()
+        n = len(_pcm())
         check("wav-only: the .wav is installed with the same audio under a plain header",
-              wav[:4] == b"RIFF" and wav[8:16] == b"WAVEfmt " and wav[36:40] == b"data"
+              wav[:44] == (b"RIFF" + struct.pack("<I", 36 + n) + b"WAVEfmt "
+                           + struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
+                           + b"data" + struct.pack("<I", n))
               and wav[44:] == _pcm() and sbc.wav_pcm(wav) == (_pcm(), ""))
         check("wav-only: the dialplan's resolver now answers the custom path",
               sbc.prompt("sw-greeting") == str(b.dest / "sw-greeting"))
@@ -331,6 +352,9 @@ def test_every_bad_file_is_skipped_with_one_line_and_its_name_stays_built_in():
             lines = [line for line in b.logs if line.startswith(f"prompts: skipped {fname}: ")]
             check(f"skip: {fname} is named in exactly one line", len(lines) == 1)
             check(f"skip: {fname} says why ({why})", why in lines[0])
+            if not name:
+                check(f"skip: {fname} names no prompt it does not replace",
+                      "keeps its built-in prompt" not in lines[0])
             if name:
                 check(f"skip: {fname} -> {name} keeps its built-in prompt",
                       lines[0].endswith(f"; {name} keeps its built-in prompt")
@@ -347,6 +371,83 @@ def test_every_bad_file_is_skipped_with_one_line_and_its_name_stays_built_in():
                                   f"{len(NAMES) - 1} built-in; {len(bad)} file(s) skipped")
         check("skip: one line per skipped file plus the summary, nothing else",
               len(b.logs) == len(bad) + 1)
+
+
+def test_the_size_and_length_limits_sit_where_the_docs_say():
+    """1 MiB and 0.1 s (800 samples or bytes), as literal numbers: a test sized
+    from the constants would move with them."""
+    with _box() as b:
+        audible = _pcm((SAMPLES * 2)[:800])
+        files = {
+            "sw-greeting.ulaw": (_ulaw(1048576), ""),
+            "sw-busy.ulaw": (_ulaw(1048577), "larger than 1 MiB"),
+            "sw-goodbye.ulaw": (_ulaw(800), ""),
+            "sw-connecting.ulaw": (_ulaw(799), "too short (under 0.1 s of audio)"),
+            "sw-tone.wav": (_wav(audible), ""),
+            "sw-beep.wav": (_wav(audible[:-2]), "too short (under 0.1 s of audio)"),
+            # An odd-length audio chunk with no pad byte: its last byte is half
+            # a sample, dropped.
+            "sw-wakeup-ask.wav": (_wav(_pcm() + b"\x01"), ""),
+        }
+        for fname, (body, _why) in files.items():
+            (b.src / fname).write_bytes(body)
+        sbc.install_custom_prompts()
+        for fname, (_body, why) in files.items():
+            name = fname.rsplit(".", 1)[0]
+            if why:
+                check(f"limits: {fname} is refused ({why})",
+                      f"prompts: skipped {fname}: {why}; {name} keeps its built-in prompt" in b.logs
+                      and sbc.prompt(name) == f"switchboard/{name}")
+            else:
+                check(f"limits: {fname} is installed", sbc.prompt(name) == str(b.dest / name))
+        check("limits: exactly 1 MiB is installed whole",
+              (b.dest / "sw-greeting.ulaw").stat().st_size == 1048576)
+        wav = (b.dest / "sw-wakeup-ask.wav").read_bytes()
+        check("limits: an odd audio chunk installs as whole samples",
+              struct.unpack_from("<I", wav, 40)[0] == len(_pcm()) == len(wav) - 44
+              and wav[44:] == _pcm()
+              and sbc.wav_pcm(_wav(_pcm() + b"\x01")) == (_pcm(), ""))
+
+
+def test_a_skip_line_is_one_line_whatever_the_file_is_called():
+    """A file name is the owner's, but it goes into the boot log: control
+    characters are dropped, so it cannot forge a line, and it is cut to 80."""
+    with _box() as b:
+        forged = "x\nERROR: forged line.txt"
+        escape = "y\x1b[2Jz.wav"
+        long_ = "a" * 200 + ".txt"
+        for name in (forged, escape, long_):
+            (b.src / name).write_bytes(b"x")
+        sbc.install_custom_prompts()
+        check("names: no log line holds a control character",
+              not any(re.search(r"[\x00-\x1f\x7f]", line) for line in b.logs))
+        check("names: a newline cannot start a line of its own",
+              "prompts: skipped xERROR: forged line.txt: not a .wav or .ulaw file" in b.logs
+              and not any(line.startswith("ERROR: forged") for line in b.logs))
+        check("names: an escape sequence is dropped",
+              "prompts: skipped y[2Jz.wav: not the name of a built-in prompt" in b.logs)
+        check("names: a long name is cut to 80 characters",
+              f"prompts: skipped {long_[:80]}: not a .wav or .ulaw file" in b.logs)
+
+
+def test_an_image_with_no_built_in_prompts_is_an_error_not_an_empty_allow_list():
+    """An empty allow-list would refuse every file as an unknown name and
+    report "0 built-in" as if that were normal: it is a broken image."""
+    with _box() as b:
+        empty = b.root / "no-prompts"
+        empty.mkdir()
+        (b.src / "sw-greeting.ulaw").write_bytes(_ulaw())
+        saved = sbc.BUNDLED_PROMPTS
+        sbc.BUNDLED_PROMPTS = empty
+        try:
+            sbc.install_custom_prompts()
+        finally:
+            sbc.BUNDLED_PROMPTS = saved
+        check("no built-ins: one ERROR line naming the cause",
+              len(b.logs) == 1 and b.logs[0].startswith("ERROR: custom prompts unusable")
+              and "no built-in prompts found" in b.logs[0])
+        check("no built-ins: nothing installed", not b.dest.exists()
+              and sbc.prompt("sw-greeting") == "switchboard/sw-greeting")
 
 
 def test_a_skip_line_never_echoes_what_the_file_holds():
@@ -578,6 +679,40 @@ def test_a_resolver_that_cannot_load_leaves_config_generation_working():
         sbc.PROMPT_REF = saved
 
 
+def test_switchboard_config_imports_when_its_resolver_cannot_load():
+    """The resolver is loaded at import: a missing, broken or raising
+    prompt_ref.py must still leave a switchboard-config that generates the
+    whole configuration, every prompt built-in."""
+    cases = (("missing", None), ("a syntax error", "def prompt(:\n"),
+             ("raising", "raise RuntimeError('synthetic')\n"))
+    for i, (label, body) in enumerate(cases):
+        root = Path(tempfile.mkdtemp(prefix="sw-noresolver-"))
+        try:
+            (root / "usr" / "bin").mkdir(parents=True)
+            shutil.copy(SBC_PATH, root / "usr" / "bin" / "switchboard-config")
+            ref = root / "usr" / "share" / "switchboard" / "prompts" / "prompt_ref.py"
+            ref.parent.mkdir(parents=True)
+            if body is not None:
+                ref.write_text(body)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                mod = SourceFileLoader(f"sbc_noresolver_{i}",
+                                       str(root / "usr" / "bin" / "switchboard-config")).load_module()
+                mod.install_custom_prompts()
+            check(f"no resolver ({label}): switchboard-config imports, without it",
+                  mod.PROMPT_REF is None and mod.PROMPT_REF_PY == ref.resolve())
+            check(f"no resolver ({label}): says so once",
+                  out.getvalue().count("ERROR: prompt resolver") == 1
+                  and "every prompt is the built-in one" in out.getvalue())
+            rooms = mod.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+            ext = mod.render_extensions({"rooms": rooms, "operator": {"enabled": True}, "trunk": {}})
+            check(f"no resolver ({label}): the dialplan plays every built-in prompt",
+                  ext.count("Playback(switchboard/sw-no-emergency)") == 2
+                  and not re.search(r"Playback\(/", ext))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def _drive_main(b, explode=False):
     """Run switchboard-config's main() with every path it writes inside `b`."""
     names = ("OPTIONS_PATH", "OVERLAY_PATH", "EFFECTIVE_PATH", "ASTERISK_ETC", "RUN_DIR",
@@ -695,6 +830,24 @@ def test_the_clock_measures_the_custom_file_it_plays():
               == (3.0, 2.25, 0.5))
         check("clock: an unknown prompt is still assumed long",
               mod.duration_of(str(d / "sw-missing")) == mod.UNKNOWN_PROMPT_S)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_clock_measures_a_built_in_prompt_under_the_sounds_dir():
+    """With nothing installed, the default: the clock resolves the built-in
+    prompts relative to the sounds directory, as Asterisk does."""
+    d = Path(tempfile.mkdtemp())
+    try:
+        mod, cs = _clock(_resolver(d))
+        sounds = ROOTFS / "var" / "lib" / "asterisk" / "sounds"
+        mod.SOUND_DIRS = (str(sounds / "en"), str(sounds))
+        check("clock: nothing installed, the tone is the built-in one", mod.TONE == "switchboard/sw-tone")
+        for name in ("sw-tone", "sw-hours-and", "sw-seconds", "sw-at-sound-tone"):
+            want = (BUNDLED / f"{name}.ulaw").stat().st_size / 8000
+            got = mod.duration_of(f"switchboard/{name}")
+            check(f"clock: built-in {name} is measured as shipped ({got} vs {want})",
+                  got == want != mod.UNKNOWN_PROMPT_S)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
