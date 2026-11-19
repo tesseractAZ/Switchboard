@@ -196,6 +196,12 @@ Full details: [Page all](https://github.com/tesseractAZ/Switchboard/blob/main/sw
   the LAN this needs a non-empty `announce_token`; while it is blank, only the
   Supervisor can call it. The WP826 cordless answers hands-free; an analog phone
   rings like a call.
+- The speech of a handset announcement is shaped for the phone line, which
+  carries only about 300–3400 Hz: filtered to that band with the consonants
+  lifted, raised toward the level of the built-in prompts (by at most
+  20 dB), and kept under a peak limit. The chime is left as it is. This uses ffmpeg, which the image
+  installs; if ffmpeg is missing or fails, the announcement is sent unshaped,
+  as before 0.121.0, and the Log tab says so once per start.
 - A clip whose audio never played is sent again, up to `announce_retry_attempts`
   times (2), once the phone reports itself registered and idle.
   An announcement nobody answers is retried too, so set

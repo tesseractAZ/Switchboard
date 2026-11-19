@@ -64,10 +64,46 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
 - The `{url}` branch fetches `http`/`https` only. It rejects loopback,
   link-local, multicast, reserved and unspecified hosts; a private-LAN URL such
   as Home Assistant's own TTS is allowed. It does not follow redirects and caps
-  the body at 5 MB. A WAV is decoded directly and other formats (such as the MP3
-  Home Assistant's TTS proxy serves) with ffmpeg, which the image installs on a
-  best-effort basis. The result is transcoded to 8 kHz for the phone line and
-  bracketed by the same chime as a `{text}` clip.
+  the body at 5 MB. A WAV is decoded directly (one cut off mid-sample plays up
+  to the cut) and other formats (such as the MP3 Home Assistant's TTS proxy
+  serves) with ffmpeg, which the image installs on a best-effort basis. A WAV
+  whose chunks or frame rate the WAV reader cannot use is handed to ffmpeg too;
+  ffmpeg usually cannot decode it either, and the request then fails with
+  HTTP 502 (`render failed`). The result is shaped for the phone line (below)
+  and bracketed by the same chime as a `{text}` clip.
+- **Shaped for the phone band** (since v0.121.0). Every phone here runs G.711
+  µ-law, so the clip reaches the earpiece as 8 kHz narrowband audio, about
+  300–3400 Hz, whatever rate it was rendered at. The speech of every branch
+  (`{text}`, a WAV `{url}`, any other `{url}`) goes through one ffmpeg process,
+  stdin to stdout: a 4th-order high-pass at 250 Hz, -2 dB at 500 Hz, +5 dB at
+  2.8 kHz (the consonants), a 4th-order low-pass at 3.5 kHz, 3:1 compression
+  above -24 dBFS, and ffmpeg's resampler to 8 kHz, so energy above 4 kHz no
+  longer folds back into the band as hiss. For a non-WAV `{url}` the same
+  process also decodes the clip. The clip's speech level (the RMS over its
+  20 ms frames above -30 dBFS, measured after the gain, as the built-in
+  prompts' -15 dBFS is) is then raised toward -15 dBFS by at most 20 dB.
+  Typical TTS speech uses about 8 to 12 dB of that after the shaping, so a
+  clip up to about 15 dB quieter than typical TTS output still reaches
+  -15 dBFS; a quieter one gets the full 20 dB and stays that much short of
+  it.
+  A look-ahead peak limiter (2 ms attack, 40 ms release) keeps every sample at
+  or under -1 dBFS.
+  The chime is generated at 8 kHz and not processed: measured the same way it
+  reads -12 dBFS, about 3 dB above the speech, with its peaks at -3 dBFS. The
+  same input renders the same bytes, so duplicate suppression still recognises
+  a repeat. Speech of 120 seconds or more is not shaped, since a clip over 90
+  seconds is refused anyway, and neither is silence or a clip shorter than
+  20 ms; none of these is logged.
+
+  If ffmpeg is missing, exits with an error, runs past 10 seconds, or returns
+  something that is not audio of the expected length, the clip is rendered as
+  before 0.121.0: the speech resampled in Python without the shaping, and for a
+  non-WAV `{url}` the plain ffmpeg decode. After a run past 10 seconds the
+  shaping is skipped for 10 minutes, so a stalled ffmpeg holds back one
+  announcement rather than every one after it. The Log tab gets one line per
+  start of the web UI naming the cause, never the message or the URL, for example
+  `announce: phone-band mastering failed (ffmpeg not found), so the clip was
+  rendered unmastered; later fallbacks are not logged`.
 - **Busy-guard:** when the target phone is already on (or being offered) a call —
   its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
   call is **not** placed. A second INVITE cannot auto-answer mid-call and would
