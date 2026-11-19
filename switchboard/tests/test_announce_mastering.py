@@ -492,19 +492,20 @@ def test_speech_past_the_mastering_cap_takes_the_old_path_quietly() -> None:
     check("cap: 120 s, and ffmpeg is told to stop there",
           mod.MASTER_MAX_SECONDS == 120
           and mod._master_argv(None)[mod._master_argv(None).index("-t") + 1] == "120")
-    long_pcm = array.array("h", [1000, -1000, 500, 0] * (120 * 22050 // 4))
+    # At 8000 Hz, so the old path is a plain copy and the test stays quick.
+    long_pcm = array.array("h", [1000, -1000, 500, 0] * (120 * 8000 // 4))
     fake = _Fake(speech=long_pcm)
     with _stubbed(mod, fake) as log:
-        got = mod._speech_to_8k(long_pcm, 22050)
+        got = mod._speech_to_8k(long_pcm, 8000)
     check("cap: 120 s of decoded speech is not sent to ffmpeg", not fake.masters())
     check("cap: rendered as before, no log line",
-          got == mod._resample_to_8k(long_pcm, 22050, 8000) and log.getvalue() == "")
-    edge = long_pcm[:120 * 22050 - 100]  # just under: sent, and ffmpeg's output reaches the cut
+          got == mod._resample_to_8k(long_pcm, 8000, 8000) and log.getvalue() == "")
+    edge = long_pcm[:120 * 8000 - 40]  # just under: sent, and ffmpeg's output reaches the cut
     fake = _Fake(speech=edge)
     with _stubbed(mod, fake) as log:
-        got = mod._speech_to_8k(edge, 22050)
+        got = mod._speech_to_8k(edge, 8000)
     check("cap: speech that reaches the cut in ffmpeg also renders as before, unlogged",
-          len(fake.masters()) == 1 and got == mod._resample_to_8k(edge, 22050, 8000)
+          len(fake.masters()) == 1 and got == mod._resample_to_8k(edge, 8000, 8000)
           and log.getvalue() == "")
     decoded = array.array("h", [int(3000 * math.sin(i / 3)) for i in range(4000)])
 
