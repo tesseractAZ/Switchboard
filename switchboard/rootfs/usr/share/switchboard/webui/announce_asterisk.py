@@ -395,13 +395,20 @@ def _note_unmastered(reason: str) -> None:
         pass
 
 
+def _nothing_to_master(samples, rate: int) -> bool:
+    """True for speech with nothing to master: shorter than one SPEECH_FRAME_MS
+    frame (a click, not speech, and ffmpeg's resampler can return nothing at all
+    for a few ms), or silent. Pure."""
+    return len(samples) * 1000 < SPEECH_FRAME_MS * rate or not any(samples)
+
+
 def _speech_to_8k(samples: "array.array", in_rate: int) -> "array.array":
     """Decoded mono int16 speech -> 8 kHz int16 for the handset: mastered, or, when
     mastering fails, the unmastered pure-Python resample exactly as before
-    v0.121.0. Empty or all-zero speech has nothing to master, and speech of
-    MASTER_MAX_SECONDS or more is not mastered; both take that path without a
-    log line."""
-    if (not samples or not any(samples)
+    v0.121.0. Speech with nothing to master (see _nothing_to_master), and speech
+    of MASTER_MAX_SECONDS or more, take that path without a log line, so the
+    one line is kept for a real failure."""
+    if (_nothing_to_master(samples, in_rate)
             or len(samples) >= MASTER_MAX_SECONDS * in_rate):
         return _resample_to_8k(samples, in_rate, TARGET_RATE)
     pcm = array.array("h", samples)
@@ -422,7 +429,9 @@ def _fetched_speech_to_8k(raw: bytes) -> "array.array | None":
     A plain 16-bit WAV is decoded here and goes through _speech_to_8k. Anything
     else is decoded AND mastered by one ffmpeg process; if that fails, the clip
     takes the pre-0.121 path unchanged (_decode_audio_to_mono16: a WAV, else the
-    plain ffmpeg decode to 8 kHz)."""
+    plain ffmpeg decode to 8 kHz). Only that decode shows whether the clip had
+    anything to master; a silent or tiny one fails the mastering's output check
+    and is not logged."""
     samples, rate = _read_plain_wav(raw)
     if samples is not None:
         return _speech_to_8k(samples, rate)
@@ -433,7 +442,7 @@ def _fetched_speech_to_8k(raw: bytes) -> "array.array | None":
     if samples is None:
         return None
     speech8k = _resample_to_8k(samples, rate, TARGET_RATE)
-    if reason != _TOO_LONG:
+    if reason != _TOO_LONG and not _nothing_to_master(samples, rate):
         _note_unmastered(reason)
     return speech8k
 

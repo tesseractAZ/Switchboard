@@ -530,6 +530,64 @@ def test_speech_past_the_mastering_cap_takes_the_old_path_quietly() -> None:
               mod._ffmpeg_master(flac) == (None, mod._TOO_LONG))
 
 
+def _clicks(n):
+    return array.array("h", [((i * 7919) % 20000) - 10000 for i in range(n)])
+
+
+def test_a_silent_or_tiny_clip_keeps_the_log_line_for_a_real_failure() -> None:
+    """Speech shorter than one 20 ms frame, or silent, has nothing to master on
+    any branch. It renders as before without a log line, so the one line a
+    process logs is still there for a real failure. (In 0.121.0 as first built,
+    a silent MP3 or a WAV of a few ms logged "unusable audio", and the real
+    failure after it went unlogged.)"""
+    mod = _load()
+    for n in (1, 3, 10, 50, 440):  # 440 samples at 22050 Hz: just under 20 ms
+        speech = _clicks(n)
+        for branch in ("text", "wav"):
+            fake = _Fake(speech=speech, master=_failing("exit"))
+            data, log = _run(mod, branch, fake, speech)
+            check(f"{branch} / {n} samples: not sent to ffmpeg", not fake.masters())
+            check(f"{branch} / {n} samples: the pre-0.121 bytes, no log line",
+                  data == _today_bytes(mod, mod._resample_to_8k(speech, 22050, 8000))
+                  and log == "")
+    fake = _Fake(speech=_clicks(441))
+    _run(mod, "text", fake, fake.speech)
+    check("one whole 20 ms frame is mastered", len(fake.masters()) == 1)
+
+    def zeros(cmd, kw):  # what ffmpeg makes of a silent MP3
+        return _sp.CompletedProcess(cmd, 0, _f32([0.0] * 8000), b"")
+
+    def nothing(cmd, kw):  # ... and of one a few ms long
+        return _sp.CompletedProcess(cmd, 0, b"", b"")
+    for name, master, decoded in (("silent", zeros, array.array("h", [0] * 8000)),
+                                  ("tiny", nothing, _clicks(150))):
+        fake = _Fake(master=master, decode=_wav_bytes(decoded, 8000))
+        data, log = _run(mod, "mp3", fake, None)
+        check(f"mp3 / {name}: the old decode, no log line",
+              len(fake.decodes()) == 1 and data == _today_bytes(mod, decoded) and log == "")
+    decoded = array.array("h", [int(3000 * math.sin(i / 3)) for i in range(4000)])
+    fake = _Fake(master=_failing("exit"), decode=_wav_bytes(decoded, 8000))
+    _, log = _run(mod, "mp3", fake, None)
+    check("then a real failure in the same process is logged",
+          "mastering failed (ffmpeg exited 1)" in log)
+
+
+def test_real_ffmpeg_a_silent_or_tiny_clip_is_not_logged() -> None:
+    if _skip_without_ffmpeg("silent and tiny clips, real ffmpeg"):
+        return
+    mod = _load()
+    silent = _sp.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le",
+                      "-ar", "22050", "-ac", "1", "-i", "pipe:0", "-f", "flac", "pipe:1"],
+                     input=bytes(2 * 22050), capture_output=True, timeout=20).stdout
+    fake = _Fake(speech=_clicks(50), master="real", decode="real")
+    _run(mod, "mp3", fake, None, silent)
+    _run(mod, "wav", fake, fake.speech)
+    with _stubbed(mod, fake) as log:
+        mod._note_unmastered("ffmpeg not found")
+    check("a silent encoded clip and a 50-sample WAV leave the log line unused",
+          "mastering failed (ffmpeg not found)" in log.getvalue())
+
+
 def test_silent_or_empty_speech_is_not_sent_to_ffmpeg() -> None:
     mod = _load()
     for name, speech in (("all zero", array.array("h", [0] * 5000)),

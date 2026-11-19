@@ -86,7 +86,8 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   reads -12 dBFS, about 3 dB above the speech, with its peaks at -3 dBFS. The
   same input renders the same bytes, so duplicate suppression still recognises
   a repeat. Speech of 120 seconds or more is not shaped, since a clip over 90
-  seconds is refused anyway.
+  seconds is refused anyway, and neither is silence or a clip shorter than
+  20 ms; none of these is logged.
 
   If ffmpeg is missing, exits with an error, runs past 10 seconds, or returns
   something that is not audio of the expected length, the clip is rendered as
