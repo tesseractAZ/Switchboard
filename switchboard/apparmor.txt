@@ -208,8 +208,11 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
   # AGI scripts (run by Asterisk as uid 100) and shipped audio, including the
   # 911 notice prompt. Recordings use absolute paths under
   # /run/switchboard/asr; Asterisk would resolve a relative recording name
-  # into sounds/, which this refuses. /var/lib/asterisk itself (astdb.sqlite3
-  # and its journal) and keys/ stay writable.
+  # into sounds/, which this refuses. Custom prompts (v0.120.0) cannot replace
+  # the shipped ones here either: switchboard-config installs them under
+  # /run/switchboard/prompts and they are played by absolute path.
+  # /var/lib/asterisk itself (astdb.sqlite3 and its journal) and keys/ stay
+  # writable.
   audit deny /var/lib/asterisk/{agi-bin,sounds,moh}/{,**} wl,
 
   # Asterisk configuration and the zone link. switchboard-config rewrites them
@@ -316,7 +319,9 @@ profile switchboard flags=(attach_disconnected,mediate_deleted) {
     /etc/timezone w,
     #  - the runtime handoff to the services: options snapshot, zone,
     #    verbosity, operator and features maps, AMI credentials, ASR and
-    #    announce dirs;
+    #    announce dirs, and the custom prompts read from /config/prompts
+    #    (built in a .prompts-* dir beside /run/switchboard/prompts, then
+    #    renamed into place);
     /run/switchboard/{,**} w,
     #  - the shared stores, the durable-log trim and the one-time move of
     #    the two stores out of /data;
