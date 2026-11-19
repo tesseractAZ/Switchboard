@@ -19,11 +19,17 @@ Recent releases. Releases up to 0.112.0 are in the
   the speech.
 - If ffmpeg is missing, fails, runs past 10 seconds or returns unusable audio,
   the clip is rendered exactly as in 0.120.0, and the Log tab says so once per
-  start. The same input renders the same bytes, so duplicate suppression is
-  unaffected. `{text}` and WAV clips render faster than before, as the Python
-  resampler is off their path; a 10-second MP3 clip takes 15 to 35 ms longer
-  (measured on a desktop computer). Announcements to the Home Assistant
-  speakers (`46`) are unchanged.
+  start. After a run past 10 seconds the shaping is skipped for 10 minutes, so
+  a stalled ffmpeg holds back one announcement, not every one after it. Silence
+  and clips under 20 ms are not shaped and not logged. The same input renders
+  the same bytes, so duplicate suppression is unaffected. `{text}` and WAV
+  clips render faster than before, as the Python resampler is off their path;
+  a 10-second MP3 clip takes 15 to 35 ms longer (measured on a desktop
+  computer). Announcements to the Home Assistant speakers (`46`) are
+  unchanged.
+- A WAV `{url}` clip cut off mid-sample now plays up to the cut, and one whose
+  chunks the WAV reader cannot follow, or with no frame rate, goes to ffmpeg
+  like any other format. Each of these failed with HTTP 502 before.
 
 ## 0.120.0
 

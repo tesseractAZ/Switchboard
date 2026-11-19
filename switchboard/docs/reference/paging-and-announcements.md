@@ -64,10 +64,12 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
 - The `{url}` branch fetches `http`/`https` only. It rejects loopback,
   link-local, multicast, reserved and unspecified hosts; a private-LAN URL such
   as Home Assistant's own TTS is allowed. It does not follow redirects and caps
-  the body at 5 MB. A WAV is decoded directly and other formats (such as the MP3
-  Home Assistant's TTS proxy serves) with ffmpeg, which the image installs on a
-  best-effort basis. The result is shaped for the phone line (below) and
-  bracketed by the same chime as a `{text}` clip.
+  the body at 5 MB. A WAV is decoded directly (one cut off mid-sample plays up
+  to the cut) and other formats (such as the MP3 Home Assistant's TTS proxy
+  serves) with ffmpeg, which the image installs on a best-effort basis, as is a
+  WAV whose chunks or frame rate the WAV reader cannot use. The result is
+  shaped for the phone line (below) and bracketed by the same chime as a
+  `{text}` clip.
 - **Shaped for the phone band** (since v0.121.0). Every phone here runs G.711
   µ-law, so the clip reaches the earpiece as 8 kHz narrowband audio, about
   300–3400 Hz, whatever rate it was rendered at. The speech of every branch
