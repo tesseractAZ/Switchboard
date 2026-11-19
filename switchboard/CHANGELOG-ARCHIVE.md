@@ -3,6 +3,23 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.112.0
+
+**Phones may register only from the LAN, and registrations survive a restart.**
+
+- **LAN-only room phones.** Every room endpoint now refuses a request from, or a
+  contact at, an address outside the private ranges (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`). A room secret, including the
+  never-registered test extension's, is useless from outside even where the SIP
+  port is reachable. The trunk has its own endpoint and is not affected.
+- **Registrations are kept across updates and restarts.** Asterisk's internal
+  database, which holds each phone's registered contact, moved from the container
+  layer the Supervisor discards to `/data/state/astdb.sqlite3`. Restored contacts
+  are qualified within 4 s of start-up (`max_initial_qualify_time`), so a phone
+  still registered when the add-on stopped is reachable again within seconds
+  instead of after its own next REGISTER (about a minute). The first start on
+  this version begins with an empty database. The move is made in the image
+  build: the boot pass's AppArmor profile may not write `asterisk.conf`.
 ## 0.111.0
 
 **Fixes from a log review: log lines that say what actually happened, health sensors
