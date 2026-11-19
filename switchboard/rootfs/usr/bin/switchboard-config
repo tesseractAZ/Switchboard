@@ -724,7 +724,7 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,Set(DS=${DEVICE_STATE(PJSIP/${OP_TARGET})})",
         " same = n,GotoIf($[\"${DS}\" = \"UNAVAILABLE\" | \"${DS}\" = \"INVALID\"]?unavail)",
         " same = n,GotoIf($[\"${DS}\" != \"NOT_INUSE\"]?busy)",
-        " same = n(connect),Playback(switchboard/sw-connecting)",
+        f" same = n(connect),Playback({prompt('sw-connecting')})",
         " same = n,Dial(PJSIP/${OP_TARGET},30,rtT)",
         # Dial fell through (didn't answer): tell the caller WHY rather than a
         # bland goodbye. ${DIALSTATUS} = BUSY | NOANSWER | CHANUNAVAIL | CONGESTION.
@@ -737,16 +737,16 @@ def render_operator_context(joined: str, automation_on: bool = False,
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"CHANUNAVAIL\"]?unavail)",
         " same = n,GotoIf($[\"${DIALSTATUS}\" = \"CONGESTION\"]?unavail)",
         " same = n,Goto(bye)",
-        " same = n(busy),Playback(switchboard/sw-busy)",
+        f" same = n(busy),Playback({prompt('sw-busy')})",
         " same = n,Goto(endtone)",
-        " same = n(noanswer),Playback(switchboard/sw-noanswer)",
+        f" same = n(noanswer),Playback({prompt('sw-noanswer')})",
         " same = n,Goto(endtone)",
-        " same = n(unavail),Playback(switchboard/sw-unavailable)",
+        f" same = n(unavail),Playback({prompt('sw-unavailable')})",
         " same = n,Goto(endtone)",
         # Also reached after a connected call ends (Dial returns): the end-of-call
         # tone tells the caller on an antique handset that the line is down.
-        " same = n(bye),Playback(switchboard/sw-goodbye)",
-        " same = n(endtone),Playback(switchboard/sw-endtone)",
+        f" same = n(bye),Playback({prompt('sw-goodbye')})",
+        f" same = n(endtone),Playback({prompt('sw-endtone')})",
         " same = n,Hangup()",
         "",
     ]
@@ -777,14 +777,14 @@ def render_wakeup_context() -> list[str]:
         " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"set\"]?setdone)",
         " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"cancelled\"]?cancelled)",
         " same = n,Goto(none)",
-        " same = n(setdone),Playback(switchboard/sw-wakeup-set)",
+        f" same = n(setdone),Playback({prompt('sw-wakeup-set')})",
         " same = n,SayUnixTime(${WAKEUP_EPOCH},,IMp)",
         " same = n,Goto(bye)",
-        " same = n(cancelled),Playback(switchboard/sw-wakeup-cancelled)",
+        f" same = n(cancelled),Playback({prompt('sw-wakeup-cancelled')})",
         " same = n,Goto(bye)",
-        " same = n(none),Playback(switchboard/sw-wakeup-none)",
-        " same = n(bye),Playback(switchboard/sw-goodbye)",
-        " same = n,Playback(switchboard/sw-endtone)",
+        f" same = n(none),Playback({prompt('sw-wakeup-none')})",
+        f" same = n(bye),Playback({prompt('sw-goodbye')})",
+        f" same = n,Playback({prompt('sw-endtone')})",
         " same = n,Hangup()",
     ] + rtpqos_h("wakeup") + [
         "",
@@ -827,7 +827,7 @@ def render_wakeup_context() -> list[str]:
         " same = n,AGI(switchboard-wakeup-deliver.agi,scene,detach)",
         " same = n,Wait(0.5)",
         " same = n,Set(SW_STAGE=greeting)",
-        " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        f" same = n,Playback({prompt('sw-wakeup-greeting')})",
         # ★ THE DELIVERY MILESTONE, and it belongs exactly here. Asterisk
         # abandons the extension the moment the channel drops, so reaching this
         # line proves the greeting played to a live channel — the earliest point
@@ -849,7 +849,7 @@ def render_wakeup_context() -> list[str]:
         " same = n,AGI(switchboard-wakeup-deliver.agi,speak)",
         " same = n,Wait(1)",
         " same = n,Set(SW_STAGE=repeat)",
-        " same = n,Playback(switchboard/sw-wakeup-greeting)",
+        f" same = n,Playback({prompt('sw-wakeup-greeting')})",
         " same = n,SayUnixTime(,,IMp)",
         " same = n,Set(SW_STAGE=complete)",
         " same = n,Hangup()",
@@ -944,8 +944,8 @@ def render_directory_context(joined: str, trunk_on: bool = False) -> list[str]:
         # The AGI already spoke "Connecting you now"; go straight to the Dial.
         " same = n,Dial(PJSIP/${DIR_TARGET},30,rtT)",
         " same = n,Hangup()",
-        " same = n(bye),Playback(switchboard/sw-goodbye)",
-        " same = n,Playback(switchboard/sw-endtone)",
+        f" same = n(bye),Playback({prompt('sw-goodbye')})",
+        f" same = n,Playback({prompt('sw-endtone')})",
         " same = n,Hangup()",
         "",
     ]
@@ -1126,7 +1126,7 @@ def render_emergency_notices() -> list:
             # the most important call kind on this system, and filing it beside
             # a 1-900 attempt makes it unfindable.
             " same = n,Set(SW_TAG=emergency)",
-            " same = n,Playback(switchboard/sw-no-emergency)",
+            f" same = n,Playback({prompt('sw-no-emergency')})",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
         ]
@@ -1209,13 +1209,13 @@ def render_outbound_rules(prefix: str, caller_id: str) -> list:
         f"exten = {prefix}911,1,NoOp(EMERGENCY {prefix}911 attempted — not carried)",
         " same = n,Answer()",
         " same = n,Set(SW_TAG=emergency)",
-        " same = n,Playback(switchboard/sw-no-emergency)",
+        f" same = n,Playback({prompt('sw-no-emergency')})",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
         f"exten = {prefix}933,1,NoOp(EMERGENCY {prefix}933 test — not carried)",
         " same = n,Answer()",
         " same = n,Set(SW_TAG=emergency)",
-        " same = n,Playback(switchboard/sw-no-emergency)",
+        f" same = n,Playback({prompt('sw-no-emergency')})",
         " same = n,Congestion(5)",
         " same = n,Hangup()",
         "",
@@ -1572,14 +1572,14 @@ def render_extensions(opts: dict) -> str:
                 " same = n,Answer()",
                 " same = n,Set(CHANNEL(language)=en)",
                 " same = n,Wait(1)",
-                " same = n(loop),Playback(switchboard/sw-at-sound-tone)",
+                f" same = n(loop),Playback({prompt('sw-at-sound-tone')})",
                 # The AGI sounds the tone itself, ON the second it announced
                 # (v0.106.2) and sets SW_CLOCK_TONE when it has. The Playback
                 # below is only the fallback for an AGI that could not run, so
                 # the caller still hears a tone rather than silence.
                 " same = n,Set(SW_CLOCK_TONE=)",
                 " same = n,AGI(switchboard-clock.agi)",
-                " same = n,ExecIf($[\"${SW_CLOCK_TONE}\" != \"1\"]?Playback(switchboard/sw-tone))",
+                f" same = n,ExecIf($[\"${{SW_CLOCK_TONE}}\" != \"1\"]?Playback({prompt('sw-tone')}))",
                 " same = n,Wait(2)",
                 " same = n,Goto(loop)",
                 " same = n,Hangup()",
@@ -1774,7 +1774,7 @@ def render_extensions(opts: dict) -> str:
             " same = n,Hangup()",
             " same = n(longnum),Answer()",
             " same = n,Set(SW_TAG=misdial)",
-            " same = n,Playback(switchboard/sw-dial-one-first)",
+            f" same = n,Playback({prompt('sw-dial-one-first')})",
             " same = n,Congestion(5)",
             " same = n,Hangup()",
             "",
@@ -2832,6 +2832,339 @@ def ensure_voice_dirs() -> None:
         log(f"WARNING: could not prepare asterisk voice dirs: {exc}")
 
 
+# --------------------------------------------------------------------------- #
+# Custom prompts (v0.120.0) — recordings in the add-on's config folder replace
+# the built-in ones of the same name.
+#
+# The shipped prompts cannot be overwritten: the AppArmor profile write-locks
+# /var/lib/asterisk/sounds, deliberately. So the accepted files are installed
+# into a directory of their own under /run, and everything that plays or
+# measures a prompt asks prompt_ref.prompt() which of the two to use. That
+# module is the ONE answer; this script only decides what gets installed.
+# --------------------------------------------------------------------------- #
+PROMPTS_SRC = Path("/config/prompts")
+# The built-in set, from the shipped directory itself: the names a custom file
+# may replace. Resolved relative to this script so it is the same tree in the
+# image (/usr/bin -> /var/lib/...) and in a checkout (rootfs/usr/bin -> ...).
+BUNDLED_PROMPTS = Path(__file__).resolve().parents[2] / "var/lib/asterisk/sounds/en/switchboard"
+PROMPT_EXTS = ("wav", "ulaw")
+# 1 MiB is over a minute of 8 kHz 16-bit audio; the longest built-in prompt is
+# under eight seconds.
+PROMPT_MAX_BYTES = 1024 * 1024
+# 0.1 s of audio; the shortest built-in prompt (the beep) is 0.25 s.
+PROMPT_MIN_SAMPLES = 800
+# Asterisk and the AGIs (uid 100) read the installed prompts, and nothing in
+# them is private: they are what any caller hears. Root writes, everyone reads.
+_PROMPT_DIR_MODE = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+_PROMPT_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+
+# The resolver, loaded by file path relative to this script like logscrub
+# above, so the image and a checkout run the same code without sys.path.
+PROMPT_REF_PY = Path(__file__).resolve().parents[1] / "share/switchboard/prompts/prompt_ref.py"
+
+
+def _load_prompt_ref():
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("prompt_ref", PROMPT_REF_PY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001 — the phones must work without it
+        log(f"ERROR: prompt resolver {PROMPT_REF_PY} unusable ({exc!r}); "
+            f"every prompt is the built-in one")
+        return None
+
+
+PROMPT_REF = _load_prompt_ref()
+
+
+def prompt(name: str) -> str:
+    """The sound reference the dialplan plays for `name`: see prompt_ref.prompt."""
+    if PROMPT_REF is None:
+        return "switchboard/" + name
+    return PROMPT_REF.prompt(name)
+
+
+def addon_config_folder(mountinfo: str = "/proc/self/mountinfo") -> str:
+    """The add-on's config folder as Home Assistant shows it, for log lines.
+
+    The Supervisor bind-mounts /addon_configs/<slug> at /config, and the mount
+    table names the source directory, whose last component is the slug (the
+    repository's hash and the add-on's name, or local_<name>). Only that
+    component is used. "<slug>" when the table cannot be read."""
+    try:
+        with open(mountinfo, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                fields = line.split()
+                if len(fields) > 4 and fields[4] == "/config":
+                    name = fields[3].rstrip("/").rsplit("/", 1)[-1]
+                    if re.fullmatch(r"[a-z0-9_]+", name):
+                        return f"/addon_configs/{name}"
+    except OSError:
+        pass
+    return "/addon_configs/<slug>"
+
+
+def bundled_prompt_names() -> set:
+    """The built-in prompt names (sw-…), from the files the image ships."""
+    return {p.stem for p in BUNDLED_PROMPTS.iterdir()
+            if p.suffix[1:] in PROMPT_EXTS and PROMPT_REF.NAME_RE.fullmatch(p.stem)}
+
+
+def _read_prompt_file(dir_fd: int, name: str):
+    """(bytes, "") for the regular file `name` in the open directory, else
+    (None, why). Never follows a link and never blocks on a FIFO: the same
+    discipline as the root reads in /data/state (v0.119.2)."""
+    import errno
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "a link, not a file"
+        return None, f"unreadable ({exc.strerror or exc})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "not a regular file"
+        chunks, total = [], 0
+        while total <= PROMPT_MAX_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks), ""
+            chunks.append(chunk)
+            total += len(chunk)
+        return None, f"larger than {PROMPT_MAX_BYTES // (1024 * 1024)} MiB"
+    except OSError as exc:
+        return None, f"unreadable ({exc.strerror or exc})"
+    finally:
+        os.close(fd)
+
+
+def wav_pcm(data: bytes):
+    """(PCM samples, "") for an 8 kHz mono 16-bit PCM WAV, else (None, why).
+
+    Parsed here rather than with the wave module, whose rules change between
+    Python versions: Asterisk's wav reader takes format 1 (plain PCM) only, so
+    WAVE_FORMAT_EXTENSIBLE, which the wave module accepts, is refused too."""
+    import struct
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return None, "not a WAV file (no RIFF/WAVE header)"
+    pos, fmt = 12, None
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        body = data[pos + 8:pos + 8 + size]
+        if len(body) < size:
+            return None, f"truncated (its {cid.decode('latin-1')!r} chunk is cut short)"
+        if cid == b"fmt ":
+            if size < 16:
+                return None, "truncated (its format header is too short)"
+            fmt = struct.unpack_from("<HHIIHH", body)
+        elif cid == b"data":
+            if fmt is None:
+                return None, "no format header before the audio"
+            tag, channels, rate, _byte_rate, _align, bits = fmt
+            if tag != 1:
+                return None, f"not 16-bit PCM (WAV format {tag})"
+            if channels != 1:
+                return None, f"{channels} channels (must be mono)"
+            if bits != 16:
+                return None, f"{bits}-bit (must be 16-bit)"
+            if rate != 8000:
+                return None, f"{rate} Hz (must be 8000 Hz)"
+            if size // 2 < PROMPT_MIN_SAMPLES:
+                return None, "too short (under 0.1 s of audio)"
+            return body[:size // 2 * 2], ""
+        pos += 8 + size + (size & 1)      # RIFF chunks are word-aligned
+    return None, "truncated (no audio data)"
+
+
+def ulaw_check(data: bytes) -> str:
+    """"" for raw µ-law audio Asterisk can play as-is, else why not."""
+    if data[:4] == b"RIFF":
+        return "a WAV file named .ulaw (raw µ-law has no header)"
+    if len(data) < PROMPT_MIN_SAMPLES:
+        return "too short (under 0.1 s of audio)"
+    return ""
+
+
+_SEG_UEND = (0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF)
+_ULAW_TABLE = b""
+
+
+def _ulaw_byte(sample: int) -> int:
+    """G.711 µ-law of one 16-bit sample, exactly as audioop.lin2ulaw codes it."""
+    pcm = sample >> 2
+    if pcm < 0:
+        pcm, mask = -pcm, 0x7F
+    else:
+        mask = 0xFF
+    pcm = min(pcm, 8159) + (0x84 >> 2)
+    for seg, end in enumerate(_SEG_UEND):
+        if pcm <= end:
+            return ((seg << 4) | ((pcm >> (seg + 1)) & 0xF)) ^ mask
+    return 0x7F ^ mask
+
+
+def lin2ulaw(pcm: bytes, use_audioop: bool = True) -> bytes:
+    """Little-endian 16-bit PCM -> G.711 µ-law, the phones' codec.
+
+    audioop where the interpreter has it (the image's 3.12 does); the pure
+    version, identical byte for byte, where it does not (3.13 removed it)."""
+    global _ULAW_TABLE
+    import array
+    import sys
+    samples = array.array("h")
+    samples.frombytes(pcm[:len(pcm) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    if use_audioop:
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                import audioop
+            return audioop.lin2ulaw(samples.tobytes(), 2)
+        except ImportError:
+            pass
+    if not _ULAW_TABLE:
+        _ULAW_TABLE = bytes(_ulaw_byte(v - 65536 if v >= 32768 else v) for v in range(65536))
+    return bytes(_ULAW_TABLE[v & 0xFFFF] for v in samples)
+
+
+def _wav_file(pcm: bytes) -> bytes:
+    """A plain 44-byte-header WAV around 8 kHz mono 16-bit PCM: the one layout
+    Asterisk's wav reader is sure to take, whatever chunks the original had."""
+    import struct
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def _remove_prompt_tree(path: Path) -> None:
+    import shutil
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _skip_reason(entry: str, names: set, dir_fd: int):
+    """(stem, ext, data, why) for one entry of the folder; why is "" when the
+    file passed every check and data is then what to install for it."""
+    stem, dot, ext = entry.rpartition(".")
+    if not dot or ext not in PROMPT_EXTS:
+        if dot and ext.lower() in PROMPT_EXTS:
+            return stem, ext, None, "the extension must be lower-case .wav or .ulaw"
+        return stem, ext, None, "not a .wav or .ulaw file"
+    if stem not in names:
+        return stem, ext, None, "not the name of a built-in prompt"
+    data, why = _read_prompt_file(dir_fd, entry)
+    if not why:
+        if ext == "wav":
+            data, why = wav_pcm(data)
+        else:
+            why = ulaw_check(data)
+    return stem, ext, data, why
+
+
+def _install_custom_prompts(dest: Path) -> tuple:
+    """Build the accepted custom prompts into a fresh `dest`. Returns
+    (custom names, built-in count, skipped count). Raises only on the
+    unexpected; install_custom_prompts turns that into "all built-in"."""
+    import errno
+    import tempfile
+    names = bundled_prompt_names()
+    if not names:
+        raise RuntimeError(f"no built-in prompts found in {BUNDLED_PROMPTS}")
+    folder = addon_config_folder() + "/prompts"
+    accepted: dict = {}
+    refused: set = set()
+    skipped, absent = 0, False
+    try:
+        dir_fd = os.open(str(PROMPTS_SRC),
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        dir_fd, absent = None, True
+    except OSError as exc:
+        why = ("a link or not a folder" if exc.errno in (errno.ELOOP, errno.ENOTDIR)
+               else f"unreadable ({exc.strerror or exc})")
+        log(f"prompts: skipped {folder}: {why}; every prompt is the built-in one")
+        dir_fd = None
+    if dir_fd is not None:
+        try:
+            for entry in sorted(os.listdir(dir_fd)):
+                stem, ext, data, why = _skip_reason(entry, names, dir_fd)
+                if why:
+                    skipped += 1
+                    # A file in the right place for a prompt that failed a check
+                    # leaves that name built-in even if its sibling passed: a
+                    # bad .ulaw is never quietly replaced by one made from the
+                    # .wav, so what the log names is exactly what changed.
+                    candidate = stem in names and ext in PROMPT_EXTS
+                    if candidate:
+                        refused.add(stem)
+                    log(f"prompts: skipped {_scrub(entry)[:80]}: {why}"
+                        + (f"; {stem} keeps its built-in prompt" if candidate else ""))
+                    continue
+                accepted.setdefault(stem, {})[ext] = data
+        finally:
+            os.close(dir_fd)
+    custom = sorted(set(accepted) - refused)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".prompts-", dir=str(dest.parent)))
+    try:
+        for stem in custom:
+            files = accepted[stem]
+            if "ulaw" not in files:
+                files["ulaw"] = lin2ulaw(files["wav"])
+            for ext, body in files.items():
+                if ext == "wav":
+                    body = _wav_file(body)
+                fd = os.open(str(tmp / f"{stem}.{ext}"),
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             _PROMPT_FILE_MODE)
+                with os.fdopen(fd, "wb") as fh:
+                    os.fchmod(fh.fileno(), _PROMPT_FILE_MODE)   # whatever the umask
+                    fh.write(body)
+        os.chmod(tmp, _PROMPT_DIR_MODE)
+        # Replace, never merge: what an earlier start in this container installed
+        # and the folder no longer holds must not survive.
+        _remove_prompt_tree(dest)
+        if custom:
+            os.rename(tmp, dest)
+    finally:
+        if tmp.exists():
+            _remove_prompt_tree(tmp)
+    log(f"prompts: {len(custom)} custom from {folder}"
+        + (" (no such folder)" if absent else "")
+        + f", {len(names) - len(custom)} built-in"
+        + (f"; {skipped} file(s) skipped" if skipped else ""))
+    return custom, len(names) - len(custom), skipped
+
+
+def install_custom_prompts() -> None:
+    """Install the valid custom prompts from /config/prompts. Never raises.
+
+    Runs before the dialplan is rendered, which embeds prompt()'s answer. A file
+    that fails a check is skipped with one log line and its name keeps the
+    built-in prompt, so no prompt, the 911 notice least of all, can be made
+    silent or unplayable by a bad file. Anything unexpected leaves every prompt
+    built-in, and config generation, and with it Asterisk, carries on."""
+    if PROMPT_REF is None:
+        return
+    dest = Path(PROMPT_REF.PROMPTS_DIR)
+    try:
+        _install_custom_prompts(dest)
+    except Exception as exc:  # noqa: BLE001 — never fail the boot over a prompt
+        log(f"ERROR: custom prompts unusable ({exc!r}); every prompt is the built-in one")
+        try:
+            _remove_prompt_tree(dest)
+        except OSError as rm_exc:
+            log(f"ERROR: could not remove {dest} ({rm_exc})")
+
+
 _EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
@@ -2994,6 +3327,9 @@ def main() -> None:
     # it in exactly one place (asterisk_console_verbosity), next to logger.conf.
     (RUN_DIR / "asterisk-verbosity").write_text(f"{asterisk_console_verbosity(opts)}\n")
     ensure_voice_dirs()          # ASR + announce dirs (needed even if operator off)
+    # Custom prompts from /config/prompts, BEFORE the dialplan is rendered: it
+    # embeds prompt()'s answer for every Playback. Never raises.
+    install_custom_prompts()
     write_operator_runtime(opts)
     write_features_runtime(opts)
 
