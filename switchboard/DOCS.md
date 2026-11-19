@@ -198,8 +198,8 @@ Full details: [Page all](https://github.com/tesseractAZ/Switchboard/blob/main/sw
   rings like a call.
 - The speech of a handset announcement is shaped for the phone line, which
   carries only about 300–3400 Hz: filtered to that band with the consonants
-  lifted, set to the level of the built-in prompts, and kept under a peak
-  limit. The chime is left as it is. This uses ffmpeg, which the image
+  lifted, raised toward the level of the built-in prompts (by at most
+  20 dB), and kept under a peak limit. The chime is left as it is. This uses ffmpeg, which the image
   installs; if ffmpeg is missing or fails, the announcement is sent unshaped,
   as before 0.121.0, and the Log tab says so once per start.
 - A clip whose audio never played is sent again, up to `announce_retry_attempts`

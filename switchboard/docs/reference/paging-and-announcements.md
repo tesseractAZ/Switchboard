@@ -66,10 +66,11 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   as Home Assistant's own TTS is allowed. It does not follow redirects and caps
   the body at 5 MB. A WAV is decoded directly (one cut off mid-sample plays up
   to the cut) and other formats (such as the MP3 Home Assistant's TTS proxy
-  serves) with ffmpeg, which the image installs on a best-effort basis, as is a
-  WAV whose chunks or frame rate the WAV reader cannot use. The result is
-  shaped for the phone line (below) and bracketed by the same chime as a
-  `{text}` clip.
+  serves) with ffmpeg, which the image installs on a best-effort basis. A WAV
+  whose chunks or frame rate the WAV reader cannot use is handed to ffmpeg too;
+  ffmpeg usually cannot decode it either, and the request then fails with
+  HTTP 502 (`render failed`). The result is shaped for the phone line (below)
+  and bracketed by the same chime as a `{text}` clip.
 - **Shaped for the phone band** (since v0.121.0). Every phone here runs G.711
   µ-law, so the clip reaches the earpiece as 8 kHz narrowband audio, about
   300–3400 Hz, whatever rate it was rendered at. The speech of every branch
@@ -80,8 +81,11 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   longer folds back into the band as hiss. For a non-WAV `{url}` the same
   process also decodes the clip. The clip's speech level (the RMS over its
   20 ms frames above -30 dBFS, measured after the gain, as the built-in
-  prompts' -15 dBFS is) is then set to -15 dBFS, raised by at most 20 dB, so
-  a quiet clip plays at that level and only a near-silent one stays quieter.
+  prompts' -15 dBFS is) is then raised toward -15 dBFS by at most 20 dB.
+  Typical TTS speech uses about 8 to 12 dB of that after the shaping, so a
+  clip up to about 15 dB quieter than typical TTS output still reaches
+  -15 dBFS; a quieter one gets the full 20 dB and stays that much short of
+  it.
   A look-ahead peak limiter (2 ms attack, 40 ms release) keeps every sample at
   or under -1 dBFS.
   The chime is generated at 8 kHz and not processed: measured the same way it

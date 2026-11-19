@@ -13,23 +13,26 @@ Recent releases. Releases up to 0.112.0 are in the
   +5 dB at 2.8 kHz for the consonants, a 3.5 kHz low-pass, 3:1 compression,
   and ffmpeg's resampler to 8 kHz, which keeps energy above 4 kHz from folding
   back into the band as hiss (the old resampler left a 6 kHz tone only about
-  15 dB down at 2 kHz). Each clip's speech is then set to the built-in
-  prompts' level, -15 dBFS, raised by at most 20 dB, under a look-ahead peak
-  limiter at -1 dBFS. The chime is not processed and sits about 3 dB above
+  15 dB down at 2 kHz). Each clip's speech is then raised toward the
+  built-in prompts' level, -15 dBFS, by at most 20 dB, under a look-ahead
+  peak limiter at -1 dBFS. Speech up to about 15 dB quieter than typical TTS
+  output reaches that level; a quieter clip gets the full 20 dB and stays
+  below it. The chime is not processed and sits about 3 dB above
   the speech.
 - If ffmpeg is missing, fails, runs past 10 seconds or returns unusable audio,
   the clip is rendered exactly as in 0.120.0, and the Log tab says so once per
   start. After a run past 10 seconds the shaping is skipped for 10 minutes, so
   a stalled ffmpeg holds back one announcement, not every one after it. Silence
   and clips under 20 ms are not shaped and not logged. The same input renders
-  the same bytes, so duplicate suppression is unaffected. `{text}` and WAV
-  clips render faster than before, as the Python resampler is off their path;
-  a 10-second MP3 clip takes 15 to 35 ms longer (measured on a desktop
-  computer). Announcements to the Home Assistant speakers (`46`) are
-  unchanged.
-- A WAV `{url}` clip cut off mid-sample now plays up to the cut, and one whose
-  chunks the WAV reader cannot follow, or with no frame rate, goes to ffmpeg
-  like any other format. Each of these failed with HTTP 502 before.
+  the same bytes, so duplicate suppression is unaffected. On a Home
+  Assistant host, a 10-second `{text}` or WAV clip renders in about 0.2 s
+  instead of 0.4 s, as the Python resampler is off its path, and a 10-second
+  MP3 clip takes about 90 ms longer. Announcements to the Home Assistant
+  speakers (`46`) are unchanged.
+- A WAV `{url}` clip cut off mid-sample now plays up to the cut instead of
+  failing with HTTP 502. A WAV whose chunks the reader cannot follow, or with
+  no frame rate, no longer raises an error; it is handed to ffmpeg, which
+  usually cannot decode it either, so it still fails with HTTP 502.
 
 ## 0.120.0
 
