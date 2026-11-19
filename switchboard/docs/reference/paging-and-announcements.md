@@ -78,9 +78,10 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   longer folds back into the band as hiss. For a non-WAV `{url}` the same
   process also decodes the clip. The clip's speech level (the RMS over its
   20 ms frames above -30 dBFS, measured after the gain, as the built-in
-  prompts' -15 dBFS is) is then set to -15 dBFS, raised by at most 20 dB; a
-  clip with nothing above -30 dBFS is left as it is. A look-ahead peak limiter
-  (2 ms attack, 40 ms release) keeps every sample at or under -1 dBFS.
+  prompts' -15 dBFS is) is then set to -15 dBFS, raised by at most 20 dB, so
+  a quiet clip plays at that level and only a near-silent one stays quieter.
+  A look-ahead peak limiter (2 ms attack, 40 ms release) keeps every sample at
+  or under -1 dBFS.
   The chime is generated at 8 kHz and not processed: measured the same way it
   reads -12 dBFS, about 3 dB above the speech, with its peaks at -3 dBFS. The
   same input renders the same bytes, so duplicate suppression still recognises

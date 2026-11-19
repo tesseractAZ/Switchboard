@@ -584,10 +584,15 @@ def test_the_gain_sets_the_level_measured_after_it() -> None:
     g = mod._clip_gain_db(mod._frame_powers(loud))
     check(f"gain: a loud clip is brought DOWN to -15 ({g:+.2f} dB)",
           g < 0 and abs(mod._speech_level_dbfs(_gained(loud, g)) + 15.0) < 0.01)
-    check("gain: silence is left as it is",
+    check("gain: a clip with no sound at all is left as it is",
           mod._clip_gain_db(mod._frame_powers([0.0] * 8000)) == 0.0
-          and mod._clip_gain_db(mod._frame_powers(_sine(0.03, 8000))) == 0.0
           and mod._clip_gain_db([]) == 0.0)
+    quiet = _sine(0.03, 8000)  # -33.5 dBFS: under the gate as it stands, still speech
+    g = mod._clip_gain_db(mod._frame_powers(quiet))
+    check(f"gain: a clip under the gate as it stands is raised to -15 too ({g:+.2f} dB)",
+          abs(mod._speech_level_dbfs(_gained(quiet, g)) + 15.0) < 0.01)
+    check("gain: a near-silent clip gets the cap, no more",
+          mod._clip_gain_db(mod._frame_powers(_sine(0.0005, 8000))) == 20.0)
     # One frame just over the gate and a long quiet passage: the fixed point
     # would be about +25 dB, and the cap holds it at +20.
     faint = _sine(0.05, 160) + _sine(0.012, 16000)
@@ -595,6 +600,69 @@ def test_the_gain_sets_the_level_measured_after_it() -> None:
     check(f"gain: capped at +20 dB ({g:+.2f})", g == 20.0)
     check("gain: deterministic", mod._clip_gain_db(mod._frame_powers(clip))
           == mod._clip_gain_db(mod._frame_powers(clip)))
+
+
+def test_the_gain_reaches_the_fixed_point_on_continuous_levels() -> None:
+    """Frame powers spread evenly over 30 dB, as running speech has, rather than
+    a few discrete levels: the gain must land on the level exactly, not a few
+    tenths of a dB short of it."""
+    mod = _load()
+    powers = [10 ** ((-18 - 30 * k / 199) / 10) for k in range(200)]
+    g = mod._clip_gain_db(powers)
+    level = mod._gated_level_dbfs(powers, g)
+    check(f"fixed point: the level after the gain is -15 ({level:.6f} dBFS, {g:+.4f} dB)",
+          abs(level + 15.0) < 1e-6)
+    shuffled = powers[1::2] + powers[::2]
+    check("fixed point: the order of the frames does not matter",
+          mod._clip_gain_db(shuffled) == g)
+
+
+def test_a_quieter_clip_gets_more_gain_until_the_cap() -> None:
+    """The same clip made quieter step by step gets exactly that much more gain,
+    so it plays at -15 dBFS until the +20 dB cap, and only then gets quieter,
+    smoothly. In 0.121.0 as first built, a clip with no frame over -30 dBFS as
+    it stands got no gain at all: half a dB quieter played about 20 dB quieter."""
+    mod = _load()
+    clip = _sine(0.08, 4000) + _sine(0.02, 4000) + _sine(0.04, 4000) + [0.0] * 4000
+    base = mod._frame_powers(clip)
+    g0 = mod._clip_gain_db(base)
+    for step in range(81):  # 0 to -40 dB in half-dB steps
+        atten = -0.5 * step
+        powers = [p * 10 ** (atten / 10) for p in base]
+        g = mod._clip_gain_db(powers)
+        want = min(20.0, g0 - atten)
+        if abs(g - want) > 1e-6:
+            check(f"sweep: {atten:.1f} dB quieter gets {want:+.2f} dB (got {g:+.2f})", False)
+        if want < 20.0 and abs(mod._gated_level_dbfs(powers, g) + 15.0) > 1e-6:
+            check(f"sweep: {atten:.1f} dB quieter still plays at -15 dBFS", False)
+    check("sweep: the gain rises with the attenuation, 1:1, then holds at the cap", True)
+
+
+def test_real_ffmpeg_quiet_speech_has_no_level_cliff() -> None:
+    """With the real chain: speech fed in quieter and quieter plays at -15 dBFS
+    until the cap, then gets quieter no faster than the input does."""
+    if _skip_without_ffmpeg("quiet speech, real ffmpeg"):
+        return
+    mod = _load()
+    speech = _speechlike(1.5)
+    prev = None
+    for atten in range(0, 31, 2):
+        k = 10 ** (-atten / 20)
+        quiet = array.array("h", [round(v * k) for v in speech])
+        with _stubbed(mod, _Fake(master="real")) as log:
+            out = mod._speech_to_8k(quiet, 22050)
+        s = [v / 32768 for v in out]
+        rms = 10 * math.log10(math.sumprod(s, s) / len(s))
+        y, _ = mod._ffmpeg_master(quiet.tobytes(), 22050, len(quiet))
+        if mod._clip_gain_db(mod._frame_powers(y)) < 20.0:
+            level = mod._speech_level_dbfs(s)
+            check(f"real sweep: {atten} dB quieter plays at -15 dBFS ({level})",
+                  level is not None and abs(level + 15.0) < 0.5)
+        if prev is not None:
+            check(f"real sweep: {atten} dB quieter drops at most 2.5 dB ({prev - rms:+.2f})",
+                  prev - rms <= 2.5)
+        check(f"real sweep: {atten} dB quieter was mastered", log.getvalue() == "")
+        prev = rms
 
 
 def test_the_limiter() -> None:

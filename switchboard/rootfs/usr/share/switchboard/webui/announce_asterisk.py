@@ -224,20 +224,26 @@ def _clip_gain_db(powers: list) -> float:
     SPEECH_TARGET_DBFS, never more than MAX_GAIN_DB. Pure.
 
     Raising a clip lifts quiet frames over the gate, which lowers the level the
-    gate measures, so the gain is found by iterating to that fixed point; each
-    step moves the same way as the first, and it settles in a few steps. A clip
-    with no frame over the gate as it stands is silence and is left as it is."""
-    gain = 0.0
-    for _ in range(16):
-        level = _gated_level_dbfs(powers, gain)
-        if level is None:
-            break
-        step = min(MAX_GAIN_DB, gain + SPEECH_TARGET_DBFS - level)
-        if abs(step - gain) < 0.001:
-            gain = step
-            break
-        gain = step
-    return gain
+    gate measures, so the gain is a fixed point: the level of the loudest j
+    frames asks for a gain at which exactly those j frames are over the gate.
+    Taking the frames loudest first, the first j for which that holds gives the
+    smallest such gain, exactly, with no iteration to stop short. Each further
+    frame only asks for more gain, so the cap is reached as soon as any j asks
+    for it. The gain depends on the frames only relative to each other: a
+    copy of a clip N dB quieter gets N dB more, up to the cap, so the level
+    never falls off a step as a clip gets quieter. Only a clip with no sound at
+    all (or shorter than one frame) gets 0 dB."""
+    gate = 10.0 ** (SPEECH_GATE_DBFS / 10.0)
+    loud = sorted((p for p in powers if p > 0.0), reverse=True)
+    total = 0.0
+    for j, p in enumerate(loud, 1):
+        total += p
+        gain = SPEECH_TARGET_DBFS - 10.0 * math.log10(total / j)
+        if gain >= MAX_GAIN_DB:
+            return MAX_GAIN_DB
+        if j == len(loud) or loud[j] * 10.0 ** (gain / 10.0) <= gate:
+            return gain
+    return 0.0
 
 
 def _limit_to_int16(samples, gain: float, rate: int = TARGET_RATE,
