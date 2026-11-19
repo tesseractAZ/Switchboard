@@ -64,6 +64,10 @@ over SSH on port 2300, with a password:
   makes any phone, the WiFi cordless included, an announce target.
 - **A local voice assistant (`47`, off by default)** that answers through Home
   Assistant's built-in conversation agent.
+- **Your own recordings for the prompts.** A WAV or µ-law file named after a
+  prompt, in the add-on's config folder, replaces the built-in recording at the
+  next start; a file that fails a check is skipped and the built-in one plays
+  ([custom prompts](switchboard/DOCS.md#custom-prompts)).
 - **An outside line.** Enable a SIP trunk for inbound and outbound calls. Dial
   the prefix (`9` by default) first, or turn on **direct dial** and dial `1` and
   the 10-digit number like a cell phone. Requiring the leading `1` keeps the

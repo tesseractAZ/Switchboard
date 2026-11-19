@@ -281,6 +281,74 @@ push; a push is never retried.
 
 Full details: [Health monitoring & sensors](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/health-monitoring.md).
 
+### Custom prompts
+
+Any recorded prompt can be replaced with a recording of your own, in another
+voice for example. Put the file in a `prompts` folder inside the add-on's config
+folder, `/addon_configs/<slug>/prompts` (the Samba, SSH and File editor add-ons
+show it under `addon_configs`, as the folder ending in `_switchboard`; the
+add-on itself sees `/config/prompts`), name it after the prompt in the table
+below, and restart the add-on. Delete the file and restart to get the built-in
+prompt back. The built-in recordings are never changed.
+
+Give each prompt one or both of:
+
+- **`<prompt>.wav`**: 8 kHz, mono, 16-bit PCM. A µ-law copy for the phones is
+  made from it at start.
+- **`<prompt>.ulaw`**: the same audio as raw G.711 µ-law (no header), played
+  as given.
+
+A text-to-speech engine or a recorder usually writes another rate or format.
+Convert with either tool:
+
+```sh
+ffmpeg -i input.wav -ar 8000 -ac 1 -c:a pcm_s16le sw-greeting.wav
+ffmpeg -i input.wav -ar 8000 -ac 1 -f mulaw sw-greeting.ulaw
+sox input.wav -r 8000 -c 1 -b 16 -e signed-integer sw-greeting.wav
+sox input.wav -r 8000 -c 1 -t ul sw-greeting.ulaw
+```
+
+Each file is checked at start: a prompt name from the table, in lower case; a
+`.wav` or `.ulaw` extension; a regular file, not a link; between 0.1 s of audio
+and 1 MiB; and for a `.wav`, 8 kHz mono 16-bit PCM. A file that fails is
+skipped with one line in the add-on's **Log** tab saying why, and that prompt
+keeps its built-in recording, so a bad file can never silence a prompt, the
+`911` notice included. One line sums up the start, for example `prompts: 3
+custom from /addon_configs/<slug>/prompts, 25 built-in`. The talking clock
+measures the recordings it plays, so its tone still lands on the second it
+names.
+
+| Prompt | Played by | What it says |
+|--------|-----------|--------------|
+| `sw-at-sound-tone` | Talking clock | "At the sound of the tone, the time will be" |
+| `sw-at-the-tone` | Not played by anything | (shipped, unused) |
+| `sw-beep` | Every voice feature, before you speak | Tone: the "speak now" beep |
+| `sw-busy` | Operator | "That line is busy. Please try again in a moment." |
+| `sw-connecting` | Operator | "Connecting you now." |
+| `sw-dial-one-first` | A long number that cannot be dialled, such as 10 digits without the `1` | "That number needs a one in front. For a long-distance call, dial one, the area code, and the number." |
+| `sw-didnt-catch` | Operator | "Sorry, I didn't catch that. Who would you like to reach?" |
+| `sw-endtone` | The end of an operator, directory or wake-up call | Tone: the end-of-call tone |
+| `sw-goodbye` | Operator, directory, wake-up and the voice features | "Goodbye." |
+| `sw-greeting` | Operator | "Operator. Say a room name, or ask for the time, weather, directory, or lights." |
+| `sw-hours-and` | Talking clock | "hours, and" |
+| `sw-no-emergency` | `911` and `933` | "This telephone line cannot reach emergency services. Please hang up and dial 9-1-1 from a mobile phone." |
+| `sw-no-such-room` | Operator | "Sorry, I couldn't reach that room." |
+| `sw-noanswer` | Operator | "There's no answer. Please try again later." |
+| `sw-onemoment` | Every voice feature, while it listens | "One moment." |
+| `sw-seconds` | Talking clock | "seconds" |
+| `sw-test` | The dashboard's and the console's test ring | "Switchboard test ring. This line is working." |
+| `sw-time-is` | Not played by anything | (shipped, unused) |
+| `sw-tone` | Talking clock | Tone: the time signal |
+| `sw-unavailable` | Operator | "That room isn't available right now." |
+| `sw-wakeup-ask` | Wake-up (`42`) | "What time would you like your wake-up call?" |
+| `sw-wakeup-cancelled` | Wake-up | "Your wake-up call has been cancelled." |
+| `sw-wakeup-change` | Wake-up, when one is already set | "To set a new time, say it now. To cancel, say cancel." |
+| `sw-wakeup-didnt-catch` | Wake-up | "Sorry, I didn't catch that. What time would you like your wake-up call?" |
+| `sw-wakeup-exists` | Wake-up, when one is already set | "You already have a wake-up call set for" |
+| `sw-wakeup-greeting` | The wake-up call itself | "Good morning. This is your wake-up call. The time is" |
+| `sw-wakeup-none` | Wake-up | "Sorry, I didn't catch a time. No wake-up call was set." |
+| `sw-wakeup-set` | Wake-up | "Your wake-up call is set for" |
+
 ---
 
 ## 4. Options you are most likely to change
