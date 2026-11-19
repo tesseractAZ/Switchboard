@@ -10,7 +10,8 @@ Recent releases. Releases up to 0.111.0 are in the
 - A file in `/addon_configs/<slug>/prompts` named after a prompt (`sw-greeting.wav`,
   `sw-no-emergency.ulaw`, ...) replaces the built-in recording at the next
   start: an 8 kHz mono 16-bit PCM `.wav`, raw µ-law `.ulaw`, or both. A `.wav`
-  given alone gets a µ-law copy, the phones' codec. Removing the file and
+  given alone gets a µ-law copy, the phones' codec; given both, the phones play
+  the `.ulaw`, and the summary line counts those names. Removing the file and
   restarting returns the built-in prompt. DOCS.md lists every prompt and what it
   says, with conversion commands.
 - Each file is checked first: a built-in prompt's name, a regular file and not

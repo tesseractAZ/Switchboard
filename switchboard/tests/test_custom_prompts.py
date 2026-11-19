@@ -231,7 +231,19 @@ def test_both_install_and_the_owners_ulaw_is_kept():
         check("both: the owner's .ulaw is installed, not one derived from the .wav",
               (b.dest / "sw-busy.ulaw").read_bytes() == own)
         check("both: the .wav is installed too", sbc.wav_pcm((b.dest / "sw-busy.wav").read_bytes())[0] == _pcm())
-        check("both: one name counted once", _summary(b.logs).startswith("prompts: 1 custom"))
+        check("both: one name counted once, and the summary says the .ulaw plays",
+              _summary(b.logs) == f"prompts: 1 custom from {FOLDER}/prompts, {len(NAMES) - 1} "
+                                  "built-in; 1 given as both .wav and .ulaw, the .ulaw plays")
+        # A re-recording: a new .wav beside an earlier .ulaw. The .ulaw still
+        # plays (it is what the phones take), and the summary says so.
+        (b.src / "sw-greeting.wav").write_bytes(_wav())
+        (b.src / "sw-greeting.ulaw").write_bytes(_ulaw(3000, 0x11))
+        b.logs.clear()
+        sbc.install_custom_prompts()
+        check("both: two names given as both are counted",
+              _summary(b.logs).endswith("built-in; 2 given as both .wav and .ulaw, the .ulaw plays"))
+        check("both: the earlier .ulaw is what plays",
+              (b.dest / "sw-greeting.ulaw").read_bytes() == _ulaw(3000, 0x11))
 
 
 def test_every_bad_file_is_skipped_with_one_line_and_its_name_stays_built_in():
@@ -999,6 +1011,8 @@ def test_the_guide_documents_every_prompt():
         check(f"docs: {tone} is marked as a tone", "tone" in rows[tone].lower())
     for name in UNUSED:
         check(f"docs: {name} is marked as not played", "not played" in rows[name].lower())
+    check("docs: says which file plays when both are given",
+          "When both are given, the phones play the `.ulaw`" in section)
     for words in ("/addon_configs/", "8 kHz", "mono", "16-bit", "µ-law", "ffmpeg", "sox", "restart"):
         check(f"docs: the section says {words!r}", words in section)
 

@@ -3157,6 +3157,10 @@ def _install_custom_prompts(dest: Path) -> tuple:
         finally:
             os.close(dir_fd)
     custom = sorted(set(accepted) - refused)
+    # The phones take µ-law, so where both files are given the .ulaw is what
+    # plays: a .wav re-recorded beside an earlier .ulaw changes nothing, and
+    # the summary says how many names that is.
+    both = sum(len(accepted[stem]) == 2 for stem in custom)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=".prompts-", dir=str(dest.parent)))
     try:
@@ -3185,6 +3189,7 @@ def _install_custom_prompts(dest: Path) -> tuple:
     log(f"prompts: {len(custom)} custom from {folder}"
         + (" (no such folder)" if absent else "")
         + f", {len(names) - len(custom)} built-in"
+        + (f"; {both} given as both .wav and .ulaw, the .ulaw plays" if both else "")
         + (f"; {skipped} file(s) skipped" if skipped else ""))
     return custom, len(names) - len(custom), skipped
 

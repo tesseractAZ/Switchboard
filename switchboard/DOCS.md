@@ -293,10 +293,13 @@ prompt back. The built-in recordings are never changed.
 
 Give each prompt one or both of:
 
-- **`<prompt>.wav`**: 8 kHz, mono, 16-bit PCM. A µ-law copy for the phones is
-  made from it at start.
+- **`<prompt>.wav`**: 8 kHz, mono, 16-bit PCM. Given alone, a µ-law copy for
+  the phones is made from it at start.
 - **`<prompt>.ulaw`**: the same audio as raw G.711 µ-law (no header), played
   as given.
+
+When both are given, the phones play the `.ulaw`, so replace both when you
+re-record a prompt (or remove the `.ulaw`).
 
 A text-to-speech engine or a recorder usually writes another rate or format.
 Convert with either tool:
