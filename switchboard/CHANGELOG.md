@@ -16,10 +16,12 @@ Recent releases. Releases up to 0.111.0 are in the
   restarting returns the built-in prompt. DOCS.md lists every prompt and what it
   says, with conversion commands.
 - Each file is checked first: a built-in prompt's name, a regular file and not
-  a link, 0.1 s to 1 MiB, not silent, for a `.wav` the format above, and for a
-  `.ulaw` not another audio format renamed. A file that fails is skipped with
-  one log line, and that prompt keeps its built-in recording, the `911` notice
-  included. Anything unexpected in this step leaves every prompt built-in and
+  a link, 0.1 s to 1 MiB, some sound above about -50 dBFS, for a `.wav` the
+  format above, and for a `.ulaw` not a WAV, MP3, FLAC, Ogg, AIFF, CAF or MP4
+  file renamed. A file that fails is skipped with one log line, and that prompt
+  keeps its built-in recording, the `911` notice included. Raw 16-bit PCM or
+  A-law named `.ulaw` cannot be told from µ-law and plays as noise; DOCS.md says
+  how to make the file and to dial `933` to hear the notice. Anything unexpected in this step leaves every prompt built-in and
   the start carries on. One line sums up the start.
 - The shipped recordings stay write-locked. The accepted files are installed
   under `/run/switchboard/prompts` and played from there by absolute path, so

@@ -8,8 +8,9 @@ What is pinned here:
 
   * switchboard-config installs only files that pass every check, each refusal
     is one log line, and a refused name keeps its built-in prompt (the 911
-    notice included): no file in the wrong format, no silent one and no other
-    container named .ulaw can replace a prompt;
+    notice included): a WAV in the wrong format, a file with no sound above
+    about -50 dBFS and a WAV/MP3/FLAC/Ogg/AIFF/CAF/MP4 named .ulaw are refused
+    (raw PCM or A-law named .ulaw has no header and cannot be told apart);
   * a .wav given alone gets a G.711 µ-law sibling, so it plays in the phones'
     codec and the talking clock can measure it;
   * anything unexpected leaves every prompt built-in and config generation

@@ -3209,8 +3209,11 @@ def install_custom_prompts() -> None:
 
     Runs before the dialplan is rendered, which embeds prompt()'s answer. A file
     that fails a check is skipped with one log line and its name keeps the
-    built-in prompt: the 911 notice included, no prompt can be replaced by a
-    file in the wrong format, a silent one, or another container named .ulaw.
+    built-in prompt, the 911 notice included. Refused: a WAV that is not 8 kHz
+    mono 16-bit PCM, a file with no sound above about -50 dBFS, and a WAV, MP3,
+    FLAC, Ogg, AIFF, CAF or MP4 file named .ulaw. Raw 16-bit PCM or A-law named
+    .ulaw has no header to tell it from µ-law, so it is installed and plays as
+    noise (DOCS.md says so and how to check: dial 933).
     Anything unexpected leaves every prompt built-in, and config generation,
     and with it Asterisk, carries on."""
     if PROMPT_REF is None:
