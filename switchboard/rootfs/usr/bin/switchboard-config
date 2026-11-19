@@ -2970,7 +2970,11 @@ def wav_pcm(data: bytes):
         size = int.from_bytes(data[pos + 4:pos + 8], "little")
         body = data[pos + 8:pos + 8 + size]
         if len(body) < size:
-            return None, f"truncated (its {cid.decode('latin-1')!r} chunk is cut short)"
+            # Only the two ids this reader looks for are named: any other id is
+            # four bytes of the file, so it is named by where it is instead.
+            where = (f"its {cid.decode('ascii')!r} chunk" if cid in (b"fmt ", b"data")
+                     else f"the chunk at byte {pos}")
+            return None, f"truncated ({where} is cut short)"
         if cid == b"fmt ":
             if size < 16:
                 return None, "truncated (its format header is too short)"

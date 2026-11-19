@@ -317,6 +317,30 @@ def test_every_bad_file_is_skipped_with_one_line_and_its_name_stays_built_in():
               len(b.logs) == len(bad) + 1)
 
 
+def test_a_skip_line_never_echoes_what_the_file_holds():
+    """The reason names a cut-short chunk by where it is, unless it is one of
+    the two the reader looks for: a chunk id is four bytes of the file."""
+    with _box() as b:
+        good = _wav()
+        planted = (b"RIFF" + struct.pack("<I", 9999) + b"WAVE" + b"pw=h" + struct.pack("<I", 999999)
+                   + b"unter2-secret-token")
+        (b.src / "sw-greeting.wav").write_bytes(planted)
+        (b.src / "sw-busy.wav").write_bytes(good[:36] + b"data" + struct.pack("<I", 99999) + _pcm())
+        (b.src / "sw-tone.wav").write_bytes(good[:12] + b"fmt " + struct.pack("<I", 16) + b"\x01\x00")
+        sbc.install_custom_prompts()
+        text = "\n".join(b.logs)
+        for secret in ("pw=h", "unter2", "secret", "token"):
+            check(f"no echo: {secret!r} from the file is not in the log", secret not in text)
+        check("no echo: an unknown chunk is named by its place in the file",
+              "prompts: skipped sw-greeting.wav: truncated (the chunk at byte 12 is cut short); "
+              "sw-greeting keeps its built-in prompt" in b.logs)
+        check("no echo: the audio and format chunks are still named",
+              "prompts: skipped sw-busy.wav: truncated (its 'data' chunk is cut short); "
+              "sw-busy keeps its built-in prompt" in b.logs
+              and "prompts: skipped sw-tone.wav: truncated (its 'fmt ' chunk is cut short); "
+              "sw-tone keeps its built-in prompt" in b.logs)
+
+
 def test_a_silent_or_renamed_recording_is_refused():
     """Well-formed but silent audio, and other containers named .ulaw, would
     play as silence or noise: refused like any other bad file."""
