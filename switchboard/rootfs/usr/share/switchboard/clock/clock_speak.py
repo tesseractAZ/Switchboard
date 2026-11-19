@@ -28,12 +28,21 @@ never blend into the H:M groups. Pure data transform (no AGI I/O, no clock read)
 from __future__ import annotations
 
 import math
+import sys
 import time
+
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
 
 OH = "digits/oh"
 HUNDRED = "digits/hundred"
-HOURS_AND = "switchboard/sw-hours-and"   # espeak: "hours, and"
-SECONDS = "switchboard/sw-seconds"       # espeak: "seconds"
+HOURS_AND = prompt("sw-hours-and")   # "hours, and"
+SECONDS = prompt("sw-seconds")       # "seconds"
 
 
 def two_digit_group(value: int) -> list:

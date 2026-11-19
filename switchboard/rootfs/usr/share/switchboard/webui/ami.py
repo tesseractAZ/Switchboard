@@ -18,6 +18,15 @@ import logging
 import os
 import re
 import socket
+import sys
+
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
 
 AMI_HOST = "127.0.0.1"
 AMI_PORT = 5038
@@ -653,7 +662,7 @@ def _ami_actions(actions: list[list[str]], timeout: float = 2.5) -> list[dict]:
     return blocks
 
 
-def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: int = 8) -> bool:
+def ring_extension(ext: str, sound: str | None = None, ring_seconds: int = 8) -> bool:
     """Place a short "test ring" to a room phone via AMI Originate.
 
     The caller MUST have validated ``ext`` against the configured rooms — this
@@ -665,6 +674,8 @@ def ring_extension(ext: str, sound: str = "switchboard/sw-test", ring_seconds: i
     """
     if not _EXT_RE.fullmatch(ext or ""):
         return False
+    if sound is None:
+        sound = prompt("sw-test")   # at use time: what this start installed
     action_id = _next_action_id()
     blocks = _ami_command(
         [

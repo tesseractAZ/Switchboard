@@ -23,6 +23,14 @@ import subprocess
 import sys
 import wave
 
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
+
 # A single whisper pass now handles both jobs: switchboard-stt --mode rooms
 # resolves a room extension OR prints the literal token 'automation' when the
 # caller asks for "lights"/"automation" (the gate lives in the STT wrapper), so
@@ -188,7 +196,7 @@ def recognize(attempt: int) -> tuple[str, str]:
     transcribes the recording only once. main() maps a feature token to
     OP_RESULT and the dialplan routes it; 'connect' Dials the room ext."""
     rec = f"{ASR_DIR}/utt-{os.getpid()}-{attempt}"
-    stream("switchboard/sw-beep")  # "speak now" cue — Alpine asterisk-sounds has no built-in beep
+    stream(prompt("sw-beep"))  # "speak now" cue — Alpine asterisk-sounds has no built-in beep
     # RECORD FILE <name> <fmt> <escape> <timeout_ms> s=<silence>.
     # No offset arg and no BEEP keyword: the offset position makes res_agi try to
     # play the (absent) 'beep' sound and abort the recording before it writes the
@@ -212,7 +220,7 @@ def recognize(attempt: int) -> tuple[str, str]:
     # the inference (the STT child never touches this AGI channel), hiding the
     # recognition latency instead of adding it as dead air after the prompt.
     proc = _stt_start(["--mode", "rooms"], wav)
-    stream("switchboard/sw-onemoment")  # cover STT latency — now OVERLAPS it
+    stream(prompt("sw-onemoment"))  # cover STT latency — now OVERLAPS it
     try:
         result = _stt_finish(proc)
         if result in _FEATURE_TOKENS:
@@ -229,7 +237,7 @@ def recognize(attempt: int) -> tuple[str, str]:
 def main() -> None:
     read_env()
     for attempt in range(MAX_ATTEMPTS):
-        stream("switchboard/sw-greeting" if attempt == 0 else "switchboard/sw-didnt-catch")
+        stream(prompt("sw-greeting") if attempt == 0 else prompt("sw-didnt-catch"))
         kind, ext = recognize(attempt)
         if kind in _FEATURE_TOKENS:
             # The dialplan routes OP_RESULT=<feature> to that feature's flow.
@@ -239,7 +247,7 @@ def main() -> None:
             set_var("OP_TARGET", ext)
             set_var("OP_RESULT", "connect")
             return
-    stream("switchboard/sw-no-such-room")
+    stream(prompt("sw-no-such-room"))
     set_var("OP_RESULT", "bye")
 
 

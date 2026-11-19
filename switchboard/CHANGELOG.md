@@ -1,7 +1,34 @@
 # Changelog
 
-Recent releases. Releases up to 0.110.1 are in the
+Recent releases. Releases up to 0.111.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.120.0
+
+**Recorded prompts can be replaced with your own recordings.**
+
+- A file in `/app_configs/<slug>/prompts` (`addon_configs` on older Home
+  Assistant releases) named after a prompt (`sw-greeting.wav`,
+  `sw-no-emergency.ulaw`, ...) replaces the built-in recording at the next
+  start: an 8 kHz mono 16-bit PCM `.wav`, raw µ-law `.ulaw`, or both. A `.wav`
+  given alone gets a µ-law copy, the phones' codec; given both, the phones play
+  the `.ulaw`, and the summary line counts those names. Removing the file and
+  restarting returns the built-in prompt. DOCS.md lists every prompt and what it
+  says, with conversion commands.
+- Each file is checked first: a built-in prompt's name, a regular file and not
+  a link, 0.1 s to 1 MiB, some sound above about -50 dBFS, for a `.wav` the
+  format above, and for a `.ulaw` not a WAV, MP3, FLAC, Ogg, AIFF, CAF or MP4
+  file renamed. A file that fails is skipped with one log line, and that prompt
+  keeps its built-in recording, the `911` notice included. Raw 16-bit PCM or
+  A-law named `.ulaw` cannot be told from µ-law and plays as noise; DOCS.md says
+  how to make the file and to dial `933` to hear the notice. Anything unexpected in this step leaves every prompt built-in and
+  the start carries on. One line sums up the start.
+- The shipped recordings stay write-locked. The accepted files are installed
+  under `/run/switchboard/prompts` and played from there by absolute path, so
+  a custom `.wav` can never lose to the built-in `.ulaw` beside it. The
+  dialplan, every voice flow, the test ring and the talking clock ask one
+  resolver which recording a prompt plays; the clock measures that same file,
+  so its tone stays on the second it names.
 
 ## 0.119.4
 
@@ -363,85 +390,3 @@ operator's position of a 1940s cord switchboard.** Nothing behaves differently.
   instead of after its own next REGISTER (about a minute). The first start on
   this version begins with an empty database. The move is made in the image
   build: the boot pass's AppArmor profile may not write `asterisk.conf`.
-
-## 0.111.0
-
-**Fixes from a log review: log lines that say what actually happened, health sensors
-that stay honest across a restart, and two web-UI hardenings.**
-
-- **Web UI**
-  - Refused requests on the web UI port are now logged with the client address, the
-    method, the path and a reason (not from ingress, missing token, bad token, or
-    LAN announce off), never the token, the headers or the query string. Only the
-    first refusal per address and reason in each 10 minutes is logged in full; the
-    rest are counted into one summary line (also written when the web UI stops), so
-    these lines cannot use up the journal rate limit every container shares. The
-    web server's own line for each refused WebSocket handshake or malformed request
-    is unchanged and still written once per attempt.
-  - The announce token is compared in constant time.
-  - Speaker announcement clips are named from 64 random bits instead of the speaker
-    script's process id and the clock, and are deleted five to six minutes after
-    they are written. A once-a-minute sweep removes them even when no further
-    announcement follows; handset clips are swept on the same schedule.
-  - A test ring and an MWI change from the dashboard each leave a `web:` line in the
-    log, including when the change was a no-op or Asterisk refused it.
-- **Wake-ups and announcements**
-  - `scene <id> fired for ext N` is logged only when Home Assistant accepted the
-    call; otherwise the line says the scene was NOT fired. Before, `fired` was
-    logged whatever the outcome.
-  - `wakeup_retry_seconds` is raised to at least `wakeup_ring_seconds` plus one 20 s
-    poll, with a WARNING naming both values at every start, and the start-up line
-    shows the effective retry. With a ring within 20 s of the retry option's
-    600 s maximum the clamp is expected, and the WARNING says so instead of asking
-    for a value the form refuses.
-  - While the handset is busy, the announcement-retry line says the replay is
-    deferred because the handset is busy, instead of "is waiting for the handset".
-  - The retry's `ActiveChannels` check stays. Asterisk 20.11.1 always reports that
-    field blank; the upstream fix (first in 20.15.0) makes it a channel count, and
-    the check already treats blank and `0` as idle.
-- **Health monitors**
-  - On a cycle where Asterisk's manager interface did not answer, `heartbeat.jsonl`
-    wrote `wired_down: []`, which on every other row means no gateway port is down.
-    It is now `null`, like `reachable`, and `down` is present and `null` too.
-  - Gateway health no longer reports the previous run's reading after a restart. A
-    link-health rollup measured before the device-health monitor started reads
-    `unknown`, which never alerts, until a new one arrives, instead of `ok` with
-    every port up while the ports were still re-registering. A real gateway alert
-    straight after a restart can come one cycle later.
-- **Logs and ledgers**
-  - Each call-quality record now says what became of the
-    `sensor.switchboard_last_call` update, as `sensor_status` (`posted`, `failed`
-    or `skipped`) next to `notify_status`. The recorder runs detached with its
-    output discarded, so a failed update used to leave no trace. Schema version 6.
-  - The Home Assistant broker writes one traffic line an hour when there was
-    traffic, counting requests by kind and outcome (`ok`, `http<code>`,
-    `unreachable`, `refused`), and the partial interval when it stops. A broker or
-    Home Assistant failure seen by the call-quality recorder never reached the log,
-    contrary to a 0.110.0 note; the hourly line and `sensor_status` now cover it.
-  - `switchboard-mwi` says when nothing changed (`MWI for 13 already clear ...`)
-    instead of `cleared MWI for 13 (store + Asterisk)`.
-  - The `rec` lines of the operator and of the status, directory and speaker-announce
-    menus give the recording's length and
-    how it ended (`bytes=... secs=... end=<reason>`), and end in `no-speech` when
-    the phone sent nothing above the silence threshold, so "said nothing" can be
-    told from "spoke briefly".
-  - whisper-server's standard output is discarded. It was block-buffered, so its
-    per-request lines reached the log hours late under one timestamp, were spliced
-    into other lines, or were lost at stop. Its standard error and
-    `switchboard-stt`'s own line per request are unchanged.
-  - `backup-window.jsonl`, the one `/share/switchboard` ledger with no cap, is
-    trimmed to its newest half once it passes 256 KiB.
-- **Documentation and comments**
-  - `backup-window.jsonl` brackets the Supervisor's copy of this add-on's own image
-    and `/data`. When a backup includes `/share`, the Supervisor archives it after
-    every add-on in that backup, with its writers still appending.
-  - The telnet console and the web terminal listen on the host's loopback, which
-    every host-network add-on and process shares.
-  - With `log_level` `info` or more verbose, the add-on journal also records the
-    host's LAN IPv4 address and its IPv6 address at every Asterisk start, and at
-    every level the web UI's refused-request lines (the requester's address,
-    method and path).
-  - Heartbeat `transitions` are per poller process. Corrected comments on silent
-    recordings (about 16 kB, 1.02 s), the low-MOS ledger (no comparison set is
-    kept), the call-quality jitter fields and leg identity, and the durable log's
-    growth.

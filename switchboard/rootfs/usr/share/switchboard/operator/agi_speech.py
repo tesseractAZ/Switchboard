@@ -15,6 +15,14 @@ import subprocess
 import sys
 import wave
 
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
+
 STT = "/usr/bin/switchboard-stt"
 TTS = "/usr/bin/switchboard-tts"
 ASR_DIR = "/run/switchboard/asr"
@@ -26,9 +34,9 @@ FEATURES = "/run/switchboard/features.json"
 # the last 1.02 s (16364 bytes) WHATEVER N is; any speech adds its own length.
 SILENT_REMAINDER_S = (0.95, 1.1)
 
-PROMPT_BEEP = "switchboard/sw-beep"
-PROMPT_ONEMOMENT = "switchboard/sw-onemoment"
-PROMPT_GOODBYE = "switchboard/sw-goodbye"
+PROMPT_BEEP = prompt("sw-beep")
+PROMPT_ONEMOMENT = prompt("sw-onemoment")
+PROMPT_GOODBYE = prompt("sw-goodbye")
 
 _seq = 0
 

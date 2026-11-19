@@ -1,6 +1,6 @@
 ---
 name: Switchboard
-version: "0.119.4"
+version: "0.120.0"
 slug: switchboard
 description: >-
   Instrumented Asterisk 20 PBX for analog house phones on a Grandstream GXW4216
@@ -54,7 +54,8 @@ panel_icon: mdi:phone-classic
 panel_title: Switchboard
 map:
   # 'app_config' is the current name for the add-on's own config dir (host:
-  # /addon_configs/<slug>/) — the Supervisor warns on the legacy 'addon_config'
+  # /app_configs/<slug>/, /addon_configs/<slug>/ before Supervisor 2026.07) —
+  # the Supervisor warns on the legacy 'addon_config'
   # spelling ("uses legacy map type 'addon_config'; use 'app_config' instead").
   - type: app_config
     read_only: false
