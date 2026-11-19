@@ -285,11 +285,13 @@ Full details: [Health monitoring & sensors](https://github.com/tesseractAZ/Switc
 
 Any recorded prompt can be replaced with a recording of your own, in another
 voice for example. Put the file in a `prompts` folder inside the add-on's config
-folder, `/addon_configs/<slug>/prompts` (the Samba, SSH and File editor add-ons
-show it under `addon_configs`, as the folder ending in `_switchboard`; the
-add-on itself sees `/config/prompts`), name it after the prompt in the table
-below, and restart the add-on. Delete the file and restart to get the built-in
-prompt back. The built-in recordings are never changed.
+folder, name it after the prompt in the table below, and restart the add-on.
+The config folder is the one ending in `_switchboard` under `app_configs`
+(`addon_configs` on older Home Assistant releases; the Samba add-on shares it
+under both names), so the folder to make is `/app_configs/<slug>/prompts`. The
+add-on itself sees it as `/config/prompts`, and its log names the folder at
+every start. Delete the file and restart to get the built-in prompt back. The
+built-in recordings are never changed.
 
 Give each prompt one or both of:
 
@@ -321,7 +323,7 @@ notice included. Raw audio in another encoding (16-bit PCM or A-law, which have
 no header either) cannot be told from µ-law and plays as noise, so make a
 `.ulaw` with one of the commands above and listen to each prompt you replace:
 dial `933` to hear the emergency notice. One line sums up the start, for example `prompts: 3
-custom from /addon_configs/<slug>/prompts, 25 built-in`. The talking clock
+custom from /app_configs/<slug>/prompts, 25 built-in`. The talking clock
 measures the recordings it plays, so its tone still lands on the second it
 names.
 

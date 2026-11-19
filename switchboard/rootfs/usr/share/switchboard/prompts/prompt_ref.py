@@ -1,7 +1,7 @@
 """Which recording a Switchboard prompt plays: the built-in one or a custom one.
 
 v0.120.0. A prompt file dropped into the add-on's config folder
-(``/addon_configs/<slug>/prompts``, ``/config/prompts`` inside the container)
+(``/app_configs/<slug>/prompts``, ``/config/prompts`` inside the container)
 replaces the built-in recording of the same name. switchboard-config validates
 those files at every start and installs the ones it accepts into PROMPTS_DIR
 below; the shipped recordings under ``/var/lib/asterisk/sounds/en/switchboard``

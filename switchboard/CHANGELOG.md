@@ -7,7 +7,8 @@ Recent releases. Releases up to 0.111.0 are in the
 
 **Recorded prompts can be replaced with your own recordings.**
 
-- A file in `/addon_configs/<slug>/prompts` named after a prompt (`sw-greeting.wav`,
+- A file in `/app_configs/<slug>/prompts` (`addon_configs` on older Home
+  Assistant releases) named after a prompt (`sw-greeting.wav`,
   `sw-no-emergency.ulaw`, ...) replaces the built-in recording at the next
   start: an 8 kHz mono 16-bit PCM `.wav`, raw µ-law `.ulaw`, or both. A `.wav`
   given alone gets a µ-law copy, the phones' codec; given both, the phones play

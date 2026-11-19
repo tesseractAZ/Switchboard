@@ -44,7 +44,7 @@ BUNDLED = ROOTFS / "var" / "lib" / "asterisk" / "sounds" / "en" / "switchboard"
 sbc = SourceFileLoader("switchboard_config_prompts", str(SBC_PATH)).load_module()
 
 NAMES = sorted({p.stem for p in BUNDLED.iterdir() if p.suffix in (".wav", ".ulaw")})
-FOLDER = "/addon_configs/0123abcd_switchboard"
+FOLDER = "/app_configs/0123abcd_switchboard"
 
 _failures = 0
 
@@ -954,15 +954,22 @@ def test_the_config_folder_is_named_as_home_assistant_shows_it():
             "601 590 0:52 / / rw,relatime master:1 - overlay overlay rw\n"
             "639 601 8:8 /supervisor/share /share rw - ext4 /dev/sda8 rw\n"
             "640 601 8:8 /supervisor/addons/data/0123abcd_switchboard /data rw - ext4 /dev/sda8 rw\n"
-            "641 601 8:8 /supervisor/addon_configs/0123abcd_switchboard /config rw - ext4 /dev/sda8 rw\n")
+            "641 601 8:8 /supervisor/app_configs/0123abcd_switchboard /config rw - ext4 /dev/sda8 rw\n")
         check("folder: from the /config mount's source",
+              sbc.addon_config_folder(str(mi)) == "/app_configs/0123abcd_switchboard")
+        # The Supervisor's name for that folder before it renamed it.
+        mi.write_text("641 601 8:8 /supervisor/addon_configs/0123abcd_switchboard /config rw - ext4 /dev/sda8 rw\n")
+        check("folder: an older Supervisor's name for it",
               sbc.addon_config_folder(str(mi)) == "/addon_configs/0123abcd_switchboard")
-        mi.write_text("641 601 8:8 /x/addon_configs/local_switchboard/ /config rw - ext4 /dev/sda8 rw\n")
-        check("folder: a local install", sbc.addon_config_folder(str(mi)) == "/addon_configs/local_switchboard")
+        mi.write_text("641 601 8:8 /x/app_configs/local_switchboard/ /config rw - ext4 /dev/sda8 rw\n")
+        check("folder: a local install", sbc.addon_config_folder(str(mi)) == "/app_configs/local_switchboard")
+        mi.write_text("641 601 8:8 /x/elsewhere/local_switchboard /config rw - ext4 /dev/sda8 rw\n")
+        check("folder: an unknown parent is not echoed; the current name is used",
+              sbc.addon_config_folder(str(mi)) == "/app_configs/local_switchboard")
         mi.write_text("641 601 8:8 /x/Bad\\040Name /config rw - ext4 /dev/sda8 rw\n")
         check("folder: anything unexpected is not echoed",
-              sbc.addon_config_folder(str(mi)) == "/addon_configs/<slug>")
-        check("folder: no mount table", sbc.addon_config_folder(str(d / "absent")) == "/addon_configs/<slug>")
+              sbc.addon_config_folder(str(mi)) == "/app_configs/<slug>")
+        check("folder: no mount table", sbc.addon_config_folder(str(d / "absent")) == "/app_configs/<slug>")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1045,7 +1052,10 @@ def test_the_guide_documents_every_prompt():
         check(f"docs: {name} is marked as not played", "not played" in rows[name].lower())
     check("docs: says which file plays when both are given",
           "When both are given, the phones play the `.ulaw`" in section)
-    for words in ("/addon_configs/", "8 kHz", "mono", "16-bit", "µ-law", "ffmpeg", "sox", "restart"):
+    check("docs: no File editor (it cannot browse app_configs unless enforce_basepath is off)",
+          "File editor" not in section)
+    for words in ("/app_configs/<slug>/prompts", "`addon_configs`", "8 kHz", "mono", "16-bit", "µ-law",
+                  "ffmpeg", "sox", "restart"):
         check(f"docs: the section says {words!r}", words in section)
 
 

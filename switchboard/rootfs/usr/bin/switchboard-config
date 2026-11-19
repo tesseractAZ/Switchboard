@@ -2900,24 +2900,34 @@ def prompt(name: str) -> str:
     return PROMPT_REF.prompt(name)
 
 
+# The Supervisor's folder of add-on config folders: app_configs, which it
+# called addon_configs until it renamed it (its docker/const.py marks the old
+# name "Legacy, deprecated as of 2026.07"; Samba shares it under both).
+_CONFIG_PARENTS = ("app_configs", "addon_configs")
+
+
 def addon_config_folder(mountinfo: str = "/proc/self/mountinfo") -> str:
     """The add-on's config folder as Home Assistant shows it, for log lines.
 
-    The Supervisor bind-mounts /addon_configs/<slug> at /config, and the mount
-    table names the source directory, whose last component is the slug (the
-    repository's hash and the add-on's name, or local_<name>). Only that
-    component is used. "<slug>" when the table cannot be read."""
+    The Supervisor bind-mounts <its data>/app_configs/<slug> at /config, and
+    the mount table names that source directory: its last component is the
+    slug (the repository's hash and the add-on's name, or local_<name>), and
+    its parent the name this Supervisor gives the folder. Only those are
+    used, each only when it looks as expected; "app_configs" and "<slug>"
+    stand in for what the table does not give."""
     try:
         with open(mountinfo, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 fields = line.split()
                 if len(fields) > 4 and fields[4] == "/config":
-                    name = fields[3].rstrip("/").rsplit("/", 1)[-1]
-                    if re.fullmatch(r"[a-z0-9_]+", name):
-                        return f"/addon_configs/{name}"
+                    parts = fields[3].rstrip("/").rsplit("/", 2)
+                    parent = parts[-2] if len(parts) > 1 and parts[-2] in _CONFIG_PARENTS \
+                        else _CONFIG_PARENTS[0]
+                    if re.fullmatch(r"[a-z0-9_]+", parts[-1]):
+                        return f"/{parent}/{parts[-1]}"
     except OSError:
         pass
-    return "/addon_configs/<slug>"
+    return f"/{_CONFIG_PARENTS[0]}/<slug>"
 
 
 def bundled_prompt_names() -> set:
