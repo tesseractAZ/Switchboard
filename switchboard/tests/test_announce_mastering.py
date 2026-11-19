@@ -692,6 +692,36 @@ def test_a_damaged_wav_still_plays() -> None:
           ok is True and exc is None and len(fake.decodes()) == 1)
 
 
+@functools.lru_cache(maxsize=None)
+def _long_tone(n: int) -> array.array:
+    return array.array("f", _f32(_tone_f32(n)))
+
+
+def test_long_speech_under_the_cut_is_mastered() -> None:
+    """Speech of 85 s, or a tenth of a second under the 120 s cut, is mastered
+    on every branch: only output that reaches the cut stands for a longer clip."""
+    mod = _load()
+    for secs in (85.0, 119.9):
+        n = round(secs * 8000)
+        y = _long_tone(n)
+        want = mod._limit_to_int16(y, 10 ** (mod._clip_gain_db(mod._frame_powers(y)) / 20))
+        pcm = array.array("h", [1000, -1000, 500, 0]) * (n // 4)  # at 8000 Hz
+        fake = _Fake()  # answers a tone as long as its input
+        with _stubbed(mod, fake) as log:
+            got = mod._speech_to_8k(pcm, 8000)
+        check(f"{secs} s of decoded speech: mastered, not the old path",
+              len(fake.masters()) == 1 and got == want and log.getvalue() == "")
+
+        def answer(cmd, kw, y=y):
+            return _sp.CompletedProcess(cmd, 0, _f32(y), b"")
+        fake = _Fake(master=answer, decode=_wav_bytes(pcm, 8000))
+        with _stubbed(mod, fake) as log:
+            got = mod._fetched_speech_to_8k(b"ID3\x04 encoded clip")
+        check(f"{secs} s of an encoded clip: mastered, not the old decode",
+              len(fake.masters()) == 1 and not fake.decodes() and got == want
+              and log.getvalue() == "")
+
+
 def test_silent_or_empty_speech_is_not_sent_to_ffmpeg() -> None:
     mod = _load()
     for name, speech in (("all zero", array.array("h", [0] * 5000)),
@@ -861,6 +891,22 @@ def test_the_limiter() -> None:
     check("limiter: +12 dB into a dense loud signal never passes the ceiling",
           max(abs(v) for v in lim) <= ceiling)
     check("limiter: deterministic", mod._limit_to_int16(dense, 3.0) == mod._limit_to_int16(dense, 3.0))
+    # A peak between the ceiling and full scale is limited too, not only one
+    # that would clip.
+    for name, sig, gain in (("a 0.95 peak", _sine(0.95, 800), 1.0),
+                            ("a 0.5 peak raised to 0.95", _sine(0.5, 800), 1.9)):
+        out = mod._limit_to_int16(sig, gain)
+        check(f"limiter: {name} lands on the ceiling ({max(abs(v) for v in out)})",
+              max(abs(v) for v in out) == ceiling)
+    # A smaller peak inside the release of a bigger one does not pull the gain
+    # back up: the release carries on from the bigger one.
+    y = [0.1] * n
+    y[p], y[p + 40] = 2.0, 1.0
+    out = mod._limit_to_int16(y, 1.0)
+    for k in (41, 60, 200):
+        want = 0.1 * (1 - d * math.exp(-k / 320)) * 32768
+        check(f"limiter: {k} samples after the bigger peak, still its release "
+              f"({out[p + k]} vs {want:.0f})", abs(out[p + k] - want) <= 1)
 
 
 def test_the_output_check_on_ffmpeg() -> None:
