@@ -43,11 +43,19 @@ RECORD_MS = 7000
 SILENCE_S = 3
 MAX_ATTEMPTS = 2
 
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
+
 # Canned prompts shipped with the add-on (used for greeting + apology so the
 # flow still has *some* voice even if TTS is broken).
-PROMPT_BEEP = "switchboard/sw-beep"
-PROMPT_ONEMOMENT = "switchboard/sw-onemoment"
-PROMPT_GOODBYE = "switchboard/sw-goodbye"          # best-effort; may be absent
+PROMPT_BEEP = prompt("sw-beep")
+PROMPT_ONEMOMENT = prompt("sw-onemoment")
+PROMPT_GOODBYE = prompt("sw-goodbye")          # best-effort; may be absent
 
 _tts_seq = 0  # monotonically increasing so each utterance gets a unique file
 

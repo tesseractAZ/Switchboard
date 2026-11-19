@@ -18,6 +18,14 @@ import os
 import sys
 import time
 
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
+
 sys.path.insert(0, "/usr/share/switchboard/clock")
 try:
     import clock_speak
@@ -50,14 +58,18 @@ FORMATS = ((".ulaw", 8000), (".alaw", 8000), (".sln", 16000), (".gsm", 1650))
 # A prompt that cannot be found is assumed LONG: overestimating only lengthens the
 # pause before the tone, underestimating would make the tone late again.
 UNKNOWN_PROMPT_S = 1.5
-TONE = "switchboard/sw-tone"
+TONE = prompt("sw-tone")
 
 
 def duration_of(stem: str) -> float:
-    for base in SOUND_DIRS:
+    # A custom prompt is an absolute reference (prompt_ref), and Asterisk plays
+    # it from exactly there, so that is the file measured: measuring the
+    # built-in one instead would put the tone off the second it announced.
+    bases = ("",) if stem.startswith("/") else tuple(f"{d}/" for d in SOUND_DIRS)
+    for base in bases:
         for ext, bytes_per_s in FORMATS:
             try:
-                return os.path.getsize(f"{base}/{stem}{ext}") / bytes_per_s
+                return os.path.getsize(f"{base}{stem}{ext}") / bytes_per_s
             except OSError:
                 continue
     return UNKNOWN_PROMPT_S

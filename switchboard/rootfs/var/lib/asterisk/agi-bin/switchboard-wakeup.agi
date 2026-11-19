@@ -33,6 +33,14 @@ try:
 except Exception:  # noqa: BLE001  (a missing ledger must never stop a wake-up being set)
     delivery = None
 
+# Which recording each prompt plays, built-in or custom (v0.120.0).
+sys.path.insert(0, "/usr/share/switchboard/prompts")
+try:
+    from prompt_ref import prompt  # noqa: E402  (one answer for every prompt played)
+except Exception:  # noqa: BLE001  (the built-in prompts, if the resolver cannot load)
+    def prompt(name: str) -> str:
+        return "switchboard/" + name
+
 STT = "/usr/bin/switchboard-stt"
 ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
@@ -95,7 +103,7 @@ def channel_ext(channel: str) -> str:
 def recognize(attempt: int) -> str:
     """Record one utterance; return an 'HH:MM', 'CANCEL', or '' (nothing)."""
     rec = f"{ASR_DIR}/wake-{os.getpid()}-{attempt}"
-    stream("switchboard/sw-beep")
+    stream(prompt("sw-beep"))
     agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     wav = rec + ".wav"
     out = ""
@@ -108,7 +116,7 @@ def recognize(attempt: int) -> str:
     except OSError as exc:
         sys.stderr.write(f"[wakeup] stt spawn error: {exc}\n")
         proc = None
-    stream("switchboard/sw-onemoment")
+    stream(prompt("sw-onemoment"))
     try:
         if proc is not None:
             so, se = proc.communicate(timeout=25)
@@ -191,15 +199,15 @@ def main() -> None:
             # Read back what's set (guarding a corrupt/empty epoch), then keep
             # offering change/cancel — including across the retry.
             if attempt == 0:
-                stream("switchboard/sw-wakeup-exists")  # "You have a wake-up set for…"
+                stream(prompt("sw-wakeup-exists"))  # "You have a wake-up set for…"
                 tgt = existing.get("target_epoch")
                 if isinstance(tgt, int) and tgt > 0:
                     agi(f"EXEC SayUnixTime {tgt},,IMp")
             else:
-                stream("switchboard/sw-wakeup-didnt-catch")
-            stream("switchboard/sw-wakeup-change")  # "…say a new time, or say cancel."
+                stream(prompt("sw-wakeup-didnt-catch"))
+            stream(prompt("sw-wakeup-change"))  # "…say a new time, or say cancel."
         else:
-            stream("switchboard/sw-wakeup-ask" if attempt == 0 else "switchboard/sw-wakeup-didnt-catch")
+            stream(prompt("sw-wakeup-ask") if attempt == 0 else prompt("sw-wakeup-didnt-catch"))
 
         result = recognize(attempt)
         if result == "CANCEL":
