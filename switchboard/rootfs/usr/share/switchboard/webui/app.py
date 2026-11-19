@@ -1058,7 +1058,8 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
     Body: {"text": "<message>"} OR {"url": "<http(s) audio>"}. text is rendered offline
     with espeak-ng; url fetches a WAV (decoded in pure Python) or a non-WAV clip (e.g.
     an MP3 from tts.piper via HA's tts_proxy, decoded with ffmpeg if it is present).
-    Either way we produce an 8 kHz mono 16-bit PCM WAV (what Asterisk
+    Either way the speech is shaped for the phone band (announce_asterisk; unmastered
+    if ffmpeg cannot do it) and we produce an 8 kHz mono 16-bit PCM WAV (what Asterisk
     Playback reads) under ANNOUNCE_DIR, then Originate a Playback to the ext via
     ami.announce_to_ext — paired with the phone auto-answering calls from CID 8000.
     The ext is validated against the configured rooms (which include the cordless)
@@ -1083,8 +1084,9 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "text too long"}, status_code=400)
 
     # This is an async handler on a single-worker uvicorn loop, so every blocking
-    # step — espeak (up to 20s), the URL fetch (up to 15s), the pure-Python resample,
-    # the AMI originate, and the dir cleanup — is offloaded with asyncio.to_thread;
+    # step — espeak (up to 20s), the URL fetch (up to 15s), the mastering (one ffmpeg
+    # process, up to 10s) or the pure-Python resample, the AMI originate, and the dir
+    # cleanup — is offloaded with asyncio.to_thread;
     # otherwise a single render would freeze the whole webui (the 4s /api/status
     # poll, hangup, transfer) for its full duration.
     await asyncio.to_thread(_cleanup_announce_dir)
