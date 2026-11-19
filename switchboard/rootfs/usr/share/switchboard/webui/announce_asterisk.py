@@ -463,13 +463,17 @@ def _fetched_speech_to_8k(raw: bytes) -> "array.array | None":
 
 def _read_plain_wav(raw: bytes) -> tuple["array.array | None", int]:
     """(mono int16 samples, rate) when `raw` is a WAV the stdlib reader decodes as
-    16-bit mono/stereo PCM, else (None, TARGET_RATE)."""
+    16-bit mono/stereo PCM, else (None, TARGET_RATE). Never raises on a damaged
+    body: the stdlib reader raises wave.Error, EOFError, or RuntimeError for a
+    chunk that claims more bytes than its parent holds, and ValueError is caught
+    with them. A body it declines, or one with no frame rate, goes to ffmpeg
+    like any format this reader does not take."""
     try:
         with wave.open(io.BytesIO(raw), "rb") as w:
             samples, rate = _read_wav_mono16(w)
-        if samples is not None:
+        if samples is not None and rate > 0:
             return samples, rate
-    except (wave.Error, EOFError, OSError):
+    except (wave.Error, EOFError, OSError, ValueError, RuntimeError):
         pass
     return None, TARGET_RATE
 
@@ -484,11 +488,7 @@ def _decode_audio_to_mono16(raw: bytes) -> tuple["array.array | None", int]:
     wav = _ffmpeg_to_8k_wav(raw)
     if wav is None:
         return None, TARGET_RATE
-    try:
-        with wave.open(io.BytesIO(wav), "rb") as w:
-            return _read_wav_mono16(w)
-    except (wave.Error, EOFError, OSError):
-        return None, TARGET_RATE
+    return _read_plain_wav(wav)
 
 
 def _read_wav_mono16(reader) -> tuple["array.array | None", int]:
@@ -496,13 +496,15 @@ def _read_wav_mono16(reader) -> tuple["array.array | None", int]:
 
     Returns (samples, rate) or (None, rate) if the WAV isn't 16-bit. Stereo is
     downmixed to mono defensively (espeak is mono, but a fetched TTS clip may be
-    stereo). Pure given the reader."""
+    stereo). A file cut off mid-frame keeps its whole frames. Pure given the
+    reader."""
     rate = reader.getframerate()
     if reader.getsampwidth() != 2:
         return None, rate
-    frames = reader.readframes(reader.getnframes())
-    samples = array.array("h", frames)
     ch = reader.getnchannels()
+    frames = reader.readframes(reader.getnframes())
+    frames = frames[:len(frames) - len(frames) % (2 * ch)]
+    samples = array.array("h", frames)
     if ch == 2:
         samples = array.array(
             "h",

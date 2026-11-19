@@ -638,6 +638,60 @@ def test_real_ffmpeg_a_silent_or_tiny_clip_is_not_logged() -> None:
           "mastering failed (ffmpeg not found)" in log.getvalue())
 
 
+def _render_body(mod, fake, body):
+    """render_url_to_8k over `body`: (rendered, what it raised or None)."""
+    try:
+        with _stubbed(mod, fake, body):
+            with tempfile.TemporaryDirectory() as d:
+                return mod.render_url_to_8k(URL_WAV, os.path.join(d, "a.wav")), None
+    except Exception as exc:  # noqa: BLE001 — the endpoint would answer 502
+        return False, exc
+
+
+def test_a_damaged_wav_still_plays() -> None:
+    """A fetched WAV cut off mid-sample raised ValueError out of the decode, in
+    0.120.0 as well, and the endpoint answered 502: the announcement was lost.
+    It now plays up to the cut, decoded here like any WAV. A WAV whose chunk
+    sizes the stdlib reader cannot follow (it raises RuntimeError) is handed to
+    ffmpeg, like any format that reader does not take."""
+    mod = _load()
+    speech = _speechlike(0.8)
+    stereo = array.array("h")
+    for v in speech:
+        stereo.extend((v, v))
+    for name, body, kept in (
+            ("mono, one byte short", _wav_bytes(speech, 22050)[:-1], len(speech) - 1),
+            ("stereo, three bytes short", _wav_bytes(stereo, 22050, 2)[:-3], len(speech) - 1)):
+        fake = _Fake()
+        ok, exc = _render_body(mod, fake, body)
+        check(f"{name}: rendered, nothing raised ({exc!r})", ok is True and exc is None)
+        sent = [kw["input"] for c, kw in fake.calls if c in fake.masters()]
+        check(f"{name}: the speech up to the cut is mastered at 22050 Hz",
+              sent == [speech[:kept].tobytes()]
+              and fake.masters()[0][fake.masters()[0].index("-ar") + 1] == "22050")
+    good = _wav_bytes(speech, 22050)
+    # A LIST chunk ahead of the data that claims more bytes than the file holds.
+    bad = good[:36] + b"LIST" + (1 << 20).to_bytes(4, "little") + b"INFO" + good[36:]
+    bad = bad[:4] + (len(bad) - 8).to_bytes(4, "little") + bad[8:]
+    fake = _Fake()
+    ok, exc = _render_body(mod, fake, bad)
+    check(f"bad chunk size: rendered, nothing raised ({exc!r})", ok is True and exc is None)
+    check("bad chunk size: ffmpeg decodes and masters the body itself",
+          len(fake.masters()) == 1 and "s16le" not in fake.masters()[0]
+          and [kw["input"] for c, kw in fake.calls if c in fake.masters()] == [bad])
+    check("bad chunk size: the reader declines it", mod._read_plain_wav(bad)[0] is None)
+    no_rate = good[:24] + bytes(4) + good[28:]  # a frame rate of 0
+    fake = _Fake()
+    ok, exc = _render_body(mod, fake, no_rate)
+    check(f"no frame rate: handed to ffmpeg, nothing raised ({exc!r})",
+          ok is True and exc is None and len(fake.masters()) == 1
+          and "s16le" not in fake.masters()[0])
+    fake = _Fake(master=_failing("exit"), decode=good)
+    ok, exc = _render_body(mod, fake, bad)
+    check(f"bad chunk size, master failing: the old decode, nothing raised ({exc!r})",
+          ok is True and exc is None and len(fake.decodes()) == 1)
+
+
 def test_silent_or_empty_speech_is_not_sent_to_ffmpeg() -> None:
     mod = _load()
     for name, speech in (("all zero", array.array("h", [0] * 5000)),
