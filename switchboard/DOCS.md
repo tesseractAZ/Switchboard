@@ -310,10 +310,14 @@ sox input.wav -r 8000 -c 1 -t ul sw-greeting.ulaw
 
 Each file is checked at start: a prompt name from the table, in lower case; a
 `.wav` or `.ulaw` extension; a regular file, not a link; between 0.1 s of audio
-and 1 MiB; and for a `.wav`, 8 kHz mono 16-bit PCM. A file that fails is
-skipped with one line in the add-on's **Log** tab saying why, and that prompt
-keeps its built-in recording, so a bad file can never silence a prompt, the
-`911` notice included. One line sums up the start, for example `prompts: 3
+and 1 MiB; not silent (some sound above about -50 dBFS); for a `.wav`, 8 kHz
+mono 16-bit PCM; and for a `.ulaw`, not a WAV, MP3, FLAC, Ogg, AIFF, CAF or MP4
+file renamed. A file that fails is skipped with one line in the add-on's
+**Log** tab saying why, and that prompt keeps its built-in recording, the `911`
+notice included. Raw audio in another encoding (16-bit PCM or A-law, which have
+no header either) cannot be told from µ-law and plays as noise, so make a
+`.ulaw` with one of the commands above and listen to each prompt you replace:
+dial `933` to hear the emergency notice. One line sums up the start, for example `prompts: 3
 custom from /addon_configs/<slug>/prompts, 25 built-in`. The talking clock
 measures the recordings it plays, so its tone still lands on the second it
 names.

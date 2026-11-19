@@ -14,10 +14,11 @@ Recent releases. Releases up to 0.111.0 are in the
   restarting returns the built-in prompt. DOCS.md lists every prompt and what it
   says, with conversion commands.
 - Each file is checked first: a built-in prompt's name, a regular file and not
-  a link, 0.1 s to 1 MiB, and for a `.wav` the format above. A file that fails
-  is skipped with one log line, and that prompt keeps its built-in recording,
-  the `911` notice included. Anything unexpected in this step leaves every
-  prompt built-in and the start carries on. One line sums up the start.
+  a link, 0.1 s to 1 MiB, not silent, for a `.wav` the format above, and for a
+  `.ulaw` not another audio format renamed. A file that fails is skipped with
+  one log line, and that prompt keeps its built-in recording, the `911` notice
+  included. Anything unexpected in this step leaves every prompt built-in and
+  the start carries on. One line sums up the start.
 - The shipped recordings stay write-locked. The accepted files are installed
   under `/run/switchboard/prompts` and played from there by absolute path, so
   a custom `.wav` can never lose to the built-in `.ulaw` beside it. The

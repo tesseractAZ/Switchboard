@@ -8,7 +8,8 @@ What is pinned here:
 
   * switchboard-config installs only files that pass every check, each refusal
     is one log line, and a refused name keeps its built-in prompt (the 911
-    notice included): no bad file can make a prompt silent or unplayable;
+    notice included): no file in the wrong format, no silent one and no other
+    container named .ulaw can replace a prompt;
   * a .wav given alone gets a G.711 µ-law sibling, so it plays in the phones'
     codec and the talking clock can measure it;
   * anything unexpected leaves every prompt built-in and config generation
@@ -87,7 +88,9 @@ def _wav(pcm: bytes = None, rate=8000, channels=1, bits=16, tag=1, extra=b"",
 
 
 def _ulaw(n: int = 2000, byte: int = 0x55) -> bytes:
-    return bytes([byte]) * n
+    """n bytes of raw µ-law: `byte` and its mirror image in turn, a square wave
+    (0xFF is silence either way)."""
+    return bytes([byte, byte ^ 0x80] * (n // 2 + 1))[:n]
 
 
 def _resolver(prompts_dir):
@@ -314,17 +317,91 @@ def test_every_bad_file_is_skipped_with_one_line_and_its_name_stays_built_in():
               len(b.logs) == len(bad) + 1)
 
 
+def test_a_silent_or_renamed_recording_is_refused():
+    """Well-formed but silent audio, and other containers named .ulaw, would
+    play as silence or noise: refused like any other bad file."""
+    with _box() as b:
+        s = b.src
+        bad = {
+            # Digital silence, as a recorder that captured nothing writes it.
+            "sw-no-emergency.wav": ("silent", _wav(_pcm([0] * 16000))),
+            "sw-goodbye.ulaw": ("silent", _ulaw(8000, 0xFF)),
+            # µ-law's two zeros and the smallest steps either side.
+            "sw-connecting.ulaw": ("silent", bytes([0xFF, 0x7F, 0xFE, 0x7E]) * 2000),
+            # A hiss far under any speech: about -50 dBFS at its peak.
+            "sw-greeting.wav": ("silent", _wav(_pcm([0, 8, -8, 96, -96] * 3200))),
+            # A file of zero bytes, sparse or not: µ-law 0x00 is one constant
+            # level, which plays as nothing.
+            "sw-busy.ulaw": ("silent", None),
+            "sw-noanswer.ulaw": ("an MP3 file", b"ID3\x04\x00" + _ulaw(4000)),
+            "sw-unavailable.ulaw": ("a FLAC file", b"fLaC" + _ulaw(4000)),
+            "sw-test.ulaw": ("an Ogg file", b"OggS" + _ulaw(4000)),
+            "sw-wakeup-ask.ulaw": ("an AIFF file", b"FORM" + _ulaw(4000)),
+            "sw-wakeup-set.ulaw": ("a Sun/NeXT audio file", b".snd" + _ulaw(4000)),
+            "sw-wakeup-none.ulaw": ("a CAF file", b"caff" + _ulaw(4000)),
+            "sw-wakeup-change.ulaw": ("an MP4/M4A file", b"\0\0\0\x20ftypM4A " + _ulaw(4000)),
+        }
+        for fname, (_why, body) in bad.items():
+            if body is not None:
+                (s / fname).write_bytes(body)
+        with open(s / "sw-busy.ulaw", "wb") as fh:
+            fh.truncate(16000)
+        good = {
+            # Quiet but audible (about -38 dBFS), and leading silence.
+            "sw-wakeup-exists.wav": _wav(_pcm([0] * 4000 + [400, -400] * 2000)),
+            "sw-seconds.ulaw": _ulaw(4000, 0xFF) + _ulaw(4000),
+            "sw-hours-and.ulaw": _ulaw(1600),
+        }
+        for fname, body in good.items():
+            (s / fname).write_bytes(body)
+        sbc.install_custom_prompts()
+        for fname, (why, _body) in bad.items():
+            name = fname.rsplit(".", 1)[0]
+            lines = [line for line in b.logs if line.startswith(f"prompts: skipped {fname}: ")]
+            check(f"refuse: {fname} is named in exactly one line", len(lines) == 1)
+            check(f"refuse: {fname} says why ({why})", why in lines[0])
+            check(f"refuse: {fname} -> {name} keeps its built-in prompt",
+                  lines[0].endswith(f"; {name} keeps its built-in prompt")
+                  and sbc.prompt(name) == f"switchboard/{name}"
+                  and not any(b.dest.glob(f"{name}.*")))
+        for fname in good:
+            name = fname.rsplit(".", 1)[0]
+            check(f"refuse: {fname} is audible and installed", sbc.prompt(name) == str(b.dest / name))
+        rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
+        ext = sbc.render_extensions({"rooms": rooms, "trunk": {}})
+        check("refuse: a silent 911 notice leaves the built-in one playing",
+              ext.count("Playback(switchboard/sw-no-emergency)") == 2)
+
+
+def test_every_built_in_recording_passes_the_checks_a_custom_one_must():
+    """The checks refuse silence and the wrong format, never real audio: each
+    shipped recording, the three tones included, would be accepted."""
+    for p in sorted(BUNDLED.iterdir()):
+        data = p.read_bytes()
+        if p.suffix == ".wav":
+            pcm, why = sbc.wav_pcm(data)
+            why = why or sbc.silence_check(pcm, "wav")
+        elif p.suffix == ".ulaw":
+            why = sbc.ulaw_check(data)
+        else:
+            continue
+        check(f"built-in {p.name} passes ({why or 'ok'})", why == "")
+
+
 def test_the_911_notice_cannot_be_made_silent_by_a_bad_file():
     with _box() as b:
-        for content in (b"", _ulaw(10), _wav(rate=16000), b"RIFF" + b"\0" * 900):
+        # Each given alone, under the one extension it could otherwise pass as.
+        for ext_, content in (("ulaw", b""), ("ulaw", _ulaw(10)), ("wav", _wav(rate=16000)),
+                              ("wav", b"RIFF" + b"\0" * 900), ("ulaw", b"RIFF" + b"\0" * 900),
+                              ("wav", _wav(_pcm([0] * 16000))), ("ulaw", _ulaw(16000, 0xFF)),
+                              ("ulaw", b"\0" * 16000), ("ulaw", b"ID3\x04\x00" + _ulaw(4000))):
             for f in b.src.iterdir():
                 f.unlink()
-            (b.src / "sw-no-emergency.ulaw").write_bytes(content)
-            (b.src / "sw-no-emergency.wav").write_bytes(content)
+            (b.src / f"sw-no-emergency.{ext_}").write_bytes(content)
             sbc.install_custom_prompts()
             rooms = sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}])
             ext = sbc.render_extensions({"rooms": rooms, "trunk": {}})
-            check(f"911: a bad file ({len(content)} bytes) leaves the built-in notice",
+            check(f"911: a bad .{ext_} ({len(content)} bytes, {content[:4]!r}) leaves the built-in notice",
                   ext.count("Playback(switchboard/sw-no-emergency)") == 2
                   and not b.dest.exists())
 
@@ -778,6 +855,27 @@ def test_the_derived_ulaw_is_g711_with_or_without_audioop():
     every = struct.pack("<65536h", *range(-32768, 32768))
     check("g711: the pure encoder equals audioop on every 16-bit sample",
           sbc.lin2ulaw(every, use_audioop=False) == audioop.lin2ulaw(every, 2))
+    check("g711: the silence check's decoder equals audioop on every code",
+          audioop.ulaw2lin(bytes(range(256)), 2)
+          == struct.pack("<256h", *(sbc._ulaw_linear(c) for c in range(256))))
+
+
+def test_the_silence_check_decodes_ulaw_as_g711():
+    """audioop.ulaw2lin's output for these codes (CPython 3.9)."""
+    want = {0xFF: 0, 0x7F: 0, 0xFE: 8, 0x7E: -8, 0xF3: 96, 0xF2: 104, 0xF0: 120,
+            0x80: 32124, 0x00: -32124, 0x9F: 8316, 0x1F: -8316, 0xCE: 988, 0x4E: -988}
+    got = {c: sbc._ulaw_linear(c) for c in want}
+    check(f"g711 decode: {got}", got == want)
+    check("silence: the swing is peak to peak, so a constant level is silent",
+          sbc.silence_check(bytes([0x00]) * 2000, "ulaw") != ""
+          and sbc.silence_check(bytes([0x00, 0x80]) * 1000, "ulaw") == "")
+    check("silence: the floor is a 200 swing on 16-bit samples, either format",
+          sbc.silence_check(_pcm([-100, 99] * 500), "wav") != ""
+          and sbc.silence_check(_pcm([-100, 100] * 500), "wav") == ""
+          and sbc.silence_check(bytes([0xF3, 0x73]) * 500, "ulaw") != ""     # +-96
+          and sbc.silence_check(bytes([0xF2, 0x72]) * 500, "ulaw") == "")    # +-104
+    check("silence: no audio at all is silent", sbc.silence_check(b"", "wav") != ""
+          and sbc.silence_check(b"", "ulaw") != "")
 
 
 def test_the_config_folder_is_named_as_home_assistant_shows_it():

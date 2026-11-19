@@ -2853,6 +2853,20 @@ PROMPT_EXTS = ("wav", "ulaw")
 PROMPT_MAX_BYTES = 1024 * 1024
 # 0.1 s of audio; the shortest built-in prompt (the beep) is 0.25 s.
 PROMPT_MIN_SAMPLES = 800
+# A recording whose level never swings further than this (peak to peak, 16-bit
+# samples) is silence: about -50 dBFS, far under any speech. It catches what a
+# recorder or a failed conversion writes when it captured nothing (digital
+# silence, a file of zero bytes, one constant level), which would otherwise
+# pass every format check and play as nothing, the 911 notice included. Every
+# built-in prompt, the three tones included, swings over 20000.
+PROMPT_MIN_SWING = 200
+# Other formats' signatures, refused as .ulaw: raw µ-law has no header, so
+# any of these would play as noise. (Raw PCM or A-law has none either and
+# cannot be told from µ-law; DOCS.md says to listen to a replaced prompt.)
+_NOT_ULAW = ((0, b"RIFF", "a WAV file"), (0, b"ID3", "an MP3 file"),
+             (0, b"fLaC", "a FLAC file"), (0, b"OggS", "an Ogg file"),
+             (0, b"FORM", "an AIFF file"), (0, b".snd", "a Sun/NeXT audio file"),
+             (0, b"caff", "a CAF file"), (4, b"ftyp", "an MP4/M4A file"))
 # Asterisk and the AGIs (uid 100) read the installed prompts, and nothing in
 # them is private: they are what any caller hears. Root writes, everyone reads.
 _PROMPT_DIR_MODE = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
@@ -2982,10 +2996,36 @@ def wav_pcm(data: bytes):
 
 def ulaw_check(data: bytes) -> str:
     """"" for raw µ-law audio Asterisk can play as-is, else why not."""
-    if data[:4] == b"RIFF":
-        return "a WAV file named .ulaw (raw µ-law has no header)"
+    for at, magic, what in _NOT_ULAW:
+        if data[at:at + len(magic)] == magic:
+            return f"{what} named .ulaw (raw µ-law has no header)"
     if len(data) < PROMPT_MIN_SAMPLES:
         return "too short (under 0.1 s of audio)"
+    return silence_check(data, "ulaw")
+
+
+def _ulaw_linear(code: int) -> int:
+    """One G.711 µ-law code as a 16-bit sample, exactly as audioop.ulaw2lin
+    decodes it."""
+    u = ~code & 0xFF
+    t = (((u & 0x0F) << 3) + 0x84) << ((u & 0x70) >> 4)
+    return 0x84 - t if u & 0x80 else t - 0x84
+
+
+def silence_check(audio: bytes, fmt: str) -> str:
+    """"" when `audio` (16-bit PCM for "wav", raw µ-law for "ulaw") is
+    audible, else why not: its level must swing PROMPT_MIN_SWING or more."""
+    if fmt == "ulaw":
+        levels = [_ulaw_linear(code) for code in set(audio)]
+    else:
+        import array
+        import sys
+        levels = array.array("h")
+        levels.frombytes(audio[:len(audio) // 2 * 2])
+        if sys.byteorder == "big":
+            levels.byteswap()
+    if not levels or max(levels) - min(levels) < PROMPT_MIN_SWING:
+        return "silent (no sound above about -50 dBFS)"
     return ""
 
 
@@ -3064,6 +3104,7 @@ def _skip_reason(entry: str, names: set, dir_fd: int):
     if not why:
         if ext == "wav":
             data, why = wav_pcm(data)
+            why = why or silence_check(data, "wav")
         else:
             why = ulaw_check(data)
     return stem, ext, data, why
@@ -3149,9 +3190,10 @@ def install_custom_prompts() -> None:
 
     Runs before the dialplan is rendered, which embeds prompt()'s answer. A file
     that fails a check is skipped with one log line and its name keeps the
-    built-in prompt, so no prompt, the 911 notice least of all, can be made
-    silent or unplayable by a bad file. Anything unexpected leaves every prompt
-    built-in, and config generation, and with it Asterisk, carries on."""
+    built-in prompt: the 911 notice included, no prompt can be replaced by a
+    file in the wrong format, a silent one, or another container named .ulaw.
+    Anything unexpected leaves every prompt built-in, and config generation,
+    and with it Asterisk, carries on."""
     if PROMPT_REF is None:
         return
     dest = Path(PROMPT_REF.PROMPTS_DIR)
