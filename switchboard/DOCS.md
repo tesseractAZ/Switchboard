@@ -343,7 +343,7 @@ names.
 | `sw-no-emergency` | `911` and `933` | "This telephone line cannot reach emergency services. Please hang up and dial 9-1-1 from a mobile phone." |
 | `sw-no-such-room` | Operator | "Sorry, I couldn't reach that room." |
 | `sw-noanswer` | Operator | "There's no answer. Please try again later." |
-| `sw-onemoment` | Every voice feature, while it listens | "One moment." |
+| `sw-onemoment` | Every voice feature, after you speak, while it works out what you said | "One moment." |
 | `sw-seconds` | Talking clock | "seconds" |
 | `sw-test` | The dashboard's and the console's test ring | "Switchboard test ring. This line is working." |
 | `sw-time-is` | Not played by anything | (shipped, unused) |

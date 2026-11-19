@@ -1050,6 +1050,10 @@ def test_the_guide_documents_every_prompt():
         check(f"docs: {tone} is marked as a tone", "tone" in rows[tone].lower())
     for name in UNUSED:
         check(f"docs: {name} is marked as not played", "not played" in rows[name].lower())
+    # agi_speech.listen() and the operator and wake-up AGIs play it after
+    # RECORD FILE returns, while the speech is transcribed.
+    check("docs: sw-onemoment plays after the caller speaks, not while it listens",
+          "after you speak" in rows["sw-onemoment"] and "while it listens" not in rows["sw-onemoment"])
     check("docs: says which file plays when both are given",
           "When both are given, the phones play the `.ulaw`" in section)
     check("docs: no File editor (it cannot browse app_configs unless enforce_basepath is off)",
