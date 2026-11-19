@@ -3209,11 +3209,14 @@ def install_custom_prompts() -> None:
     try:
         _install_custom_prompts(dest)
     except Exception as exc:  # noqa: BLE001 — never fail the boot over a prompt
-        log(f"ERROR: custom prompts unusable ({exc!r}); every prompt is the built-in one")
         try:
             _remove_prompt_tree(dest)
-        except OSError as rm_exc:
-            log(f"ERROR: could not remove {dest} ({rm_exc})")
+        except Exception as rm_exc:  # noqa: BLE001 — nor over the cleanup
+            # The resolver still finds what is there, so say so.
+            log(f"ERROR: custom prompts unusable ({exc!r}), and could not remove "
+                f"{dest} ({rm_exc!r}); prompts installed there may still play")
+            return
+        log(f"ERROR: custom prompts unusable ({exc!r}); every prompt is the built-in one")
 
 
 _EID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")

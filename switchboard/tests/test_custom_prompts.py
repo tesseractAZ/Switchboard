@@ -513,6 +513,38 @@ def test_an_unexpected_failure_leaves_every_prompt_built_in():
                   and not re.search(r"Playback\(/", ext))
 
 
+def test_a_failed_cleanup_never_raises_and_never_claims_all_built_in():
+    """A second failure, removing what is installed, must not stop the start
+    either, and the log must not say every prompt is built-in when files an
+    earlier start installed are still there to play."""
+    def boom(*_a, **_k):
+        raise RuntimeError("synthetic")
+    for kind in (RuntimeError, OSError):
+        with _box() as b:
+            (b.src / "sw-busy.wav").write_bytes(_wav())
+            b.dest.mkdir(parents=True)
+            (b.dest / "sw-goodbye.ulaw").write_bytes(_ulaw())        # an earlier start's
+            saved = (sbc.lin2ulaw, sbc._remove_prompt_tree)
+            real_remove = sbc._remove_prompt_tree
+
+            def remove(path, _kind=kind, _dest=b.dest):
+                if path == _dest:
+                    raise _kind("synthetic cleanup failure")
+                real_remove(path)
+            sbc.lin2ulaw, sbc._remove_prompt_tree = boom, remove
+            try:
+                sbc.install_custom_prompts()                        # must not raise
+            finally:
+                sbc.lin2ulaw, sbc._remove_prompt_tree = saved
+            errors = [line for line in b.logs if line.startswith("ERROR:")]
+            check(f"cleanup {kind.__name__}: one ERROR line", len(errors) == 1)
+            check(f"cleanup {kind.__name__}: it does not claim every prompt is built-in",
+                  "every prompt is the built-in one" not in errors[0])
+            check(f"cleanup {kind.__name__}: it says what may still play",
+                  f"could not remove {b.dest}" in errors[0] and "may still play" in errors[0])
+            check(f"cleanup {kind.__name__}: which is true", sbc.prompt("sw-goodbye") == str(b.dest / "sw-goodbye"))
+
+
 def test_a_resolver_that_cannot_load_leaves_config_generation_working():
     saved = sbc.PROMPT_REF
     sbc.PROMPT_REF = None
