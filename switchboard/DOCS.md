@@ -322,10 +322,10 @@ file renamed. A file that fails is skipped with one line in the add-on's
 notice included. Raw audio in another encoding (16-bit PCM or A-law, which have
 no header either) cannot be told from µ-law and plays as noise, so make a
 `.ulaw` with one of the commands above and listen to each prompt you replace:
-dial `933` to hear the emergency notice. One line sums up the start, for example `prompts: 3
-custom from /app_configs/<slug>/prompts, 25 built-in`. The talking clock
-measures the recordings it plays, so its tone still lands on the second it
-names.
+dial `933` to hear the emergency notice. One line sums up the start, for
+example `prompts: 3 custom from /app_configs/<slug>/prompts, 25 built-in`.
+The talking clock measures the recordings it plays, so its tone still lands
+on the second it names.
 
 | Prompt | Played by | What it says |
 |--------|-----------|--------------|
