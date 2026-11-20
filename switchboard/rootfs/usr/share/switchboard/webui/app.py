@@ -983,6 +983,62 @@ def _cleanup_announce_dir(max_age: int = 300) -> None:
     announce_clip.sweep(ANNOUNCE_DIR, max_age)
 
 
+# ★ SPOKEN REPLIES A HANGUP LEFT IN /tmp (v0.123.0). Every reply spoken on a call
+# is rendered by switchboard-tts to /tmp/<prefix>-<pid>-<n>.wav (agi_speech.say,
+# and the say() of switchboard-assistant.agi and switchboard-automation.agi), and
+# the AGI unlinks it in a `finally`. Asterisk ends a hung-up AGI with SIGHUP to its
+# own pid, no AGI handles SIGHUP, and the default action kills Python without
+# running a `finally`. So a hangup during Playback leaves the WAV, and a hangup
+# during synthesis leaves an orphaned switchboard-tts that publishes it
+# afterwards. Both reproduced in the 0.121.0 container. Nothing else removes
+# them until the Supervisor recreates the container, and an assistant reply can
+# quote the caller.
+#
+# The name rule is exactly what the three producers mint, plus the ".part"
+# switchboard-tts writes before its os.replace (left behind when synthesis is
+# killed mid-write). Any other name in /tmp, a switchboard-tts.* one included,
+# falls outside it and is never touched. tests/test_app.py derives the
+# producers' names from their source and fails if one falls outside this.
+REPLY_WAV_DIR = "/tmp"
+_REPLY_WAV_NAME = re.compile(r"sw-(?:voice|asst|auto)-[0-9]+-[0-9]+\.wav(?:\.part)?")
+# Asterisk opens the file when Playback starts and reads that open file, and an
+# unlink never reaches an open inode, so the age only has to outlast the gap
+# between the file appearing and Playback opening it: milliseconds. Ten minutes
+# also outlasts a whole synthesis (the callers' limits are 20 and 25 s), so even
+# a still-growing .part is never taken.
+REPLY_WAV_MAX_AGE_S = 600
+
+
+def _sweep_reply_wavs(directory: str | None = None, max_age: float = REPLY_WAV_MAX_AGE_S,
+                      now: float | None = None) -> int:
+    """Remove the spoken-reply WAVs a hung-up call left in `directory` (default
+    REPLY_WAV_DIR) more than `max_age` seconds after they were last written;
+    return how many went. Only names matching _REPLY_WAV_NAME, only regular
+    files: /tmp is shared by every process in the container, so a link or a
+    directory with such a name is left alone (and unlink, which removes a name
+    and never follows it, could not reach anything else in any case).
+    Best-effort: it never raises, like announce_clip.sweep."""
+    directory = directory or REPLY_WAV_DIR
+    # Wall clock, because mtime is (as in announce_clip.sweep).
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not _REPLY_WAV_NAME.fullmatch(entry.name):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    if stat.S_ISREG(st.st_mode) and now - st.st_mtime > max_age:
+                        os.unlink(entry.path)
+                        removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return removed
+
+
 # ★ ONE CLOCK FOR THE CHORES THAT MUST NOT WAIT FOR TRAFFIC (2026-10-14 review).
 # Both of these used to happen only when something else did: a clip was pruned
 # when the NEXT announcement arrived, so the last speaker clip stayed fetchable
@@ -1001,6 +1057,7 @@ def _housekeeping_once() -> None:
     # switchboard-config prepares, and the speaker AGI could not write into it.
     if os.path.isdir(ANNOUNCE_DIR):
         _cleanup_announce_dir()
+    _sweep_reply_wavs()
     _flush_refusal_summaries()
 
 

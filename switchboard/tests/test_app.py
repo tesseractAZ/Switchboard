@@ -2136,6 +2136,147 @@ def test_the_web_ui_sweeps_clips_on_a_clock() -> None:
             app.ANNOUNCE_DIR = saved
 
 
+def test_the_web_ui_sweeps_spoken_replies_a_hangup_left_in_tmp() -> None:
+    """v0.123.0. Asterisk ends a hung-up AGI with SIGHUP, which kills Python
+    without its `finally`, so a reply WAV in /tmp outlived the call until the
+    container was recreated (reproduced in the 0.121.0 container: a hangup
+    during Playback, and one during synthesis, each left a WAV)."""
+    import os as _os
+    import tempfile
+    import time as _time
+    saved_reply, saved_announce = app.REPLY_WAV_DIR, app.ANNOUNCE_DIR
+    max_age = app.REPLY_WAV_MAX_AGE_S
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            app.REPLY_WAV_DIR = d
+            app.ANNOUNCE_DIR = _os.path.join(d, "no-announce-dir")
+            now = _time.time()
+
+            def put(name, age, data=b"RIFF" + b"\0" * 60, where=d):
+                p = _os.path.join(where, name)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                _os.utime(p, (now - age, now - age))
+                return p
+
+            gone = [put(f"sw-{kind}-4242-3{ext}", max_age + 60)
+                    for kind in ("voice", "asst", "auto") for ext in (".wav", ".wav.part")]
+            young = [put("sw-voice-4242-4.wav", 30), put("sw-asst-4242-5.wav.part", 30)]
+            # Old, in /tmp, and not a reply's name: every one must stay. The
+            # switchboard-tts.* names stand for any file the speech engine
+            # keeps there for itself.
+            others = [put(n, 99999) for n in (
+                "switchboard-tts.master-paused", "switchboard-tts.unmastered-noted",
+                "sw-tts-123.wav", "sw-voice-4242-3.wav.bak", "sw-voice-x-3.wav",
+                "xsw-voice-1-1.wav", "sw-voice-1-1.WAV", "sw-auto-1.wav",
+                "ann-19-" + "0" * 32 + ".wav", "a123.wav", "other.wav")]
+            target = put("link-target", 99999)
+            link = _os.path.join(d, "sw-voice-7-7.wav")
+            _os.symlink(target, link)
+            # Old as itself, so only the regular-file rule can keep it.
+            _os.utime(link, (now - 99999, now - 99999), follow_symlinks=False)
+            check("reply sweep: the planted link is old as itself",
+                  now - _os.lstat(link).st_mtime > max_age)
+            sub = _os.path.join(d, "sw-auto-8-8.wav")
+            _os.mkdir(sub)
+            _os.utime(sub, (now - 99999, now - 99999))
+
+            app._housekeeping_once()
+            check("reply sweep: every reply past its age is gone, .part included",
+                  not any(_os.path.lexists(p) for p in gone))
+            check("reply sweep: a reply still young is kept", all(_os.path.exists(p) for p in young))
+            check("reply sweep: names it does not mint are never touched",
+                  all(_os.path.exists(p) for p in others))
+            check("reply sweep: a link is left, and so is what it points at",
+                  _os.path.islink(link) and _os.path.exists(target))
+            check("reply sweep: a directory is left", _os.path.isdir(sub))
+
+            # The count, and the boundary: strictly older than the age. A
+            # directory of its own, so the clock moved forward here judges
+            # nothing above.
+            e = _os.path.join(d, "edge")
+            _os.mkdir(e)
+            edge_old = put("sw-voice-1-1.wav", 0, where=e)
+            edge_young = put("sw-voice-1-2.wav", 0, where=e)
+            mt = _os.stat(edge_old).st_mtime
+            _os.utime(edge_young, (mt + 2, mt + 2))
+            check("reply sweep: at exactly its age a reply is kept",
+                  app._sweep_reply_wavs(e, now=mt + max_age) == 0 and _os.path.exists(edge_old))
+            check("reply sweep: returns how many it removed",
+                  app._sweep_reply_wavs(e, now=mt + max_age + 1) == 1
+                  and not _os.path.exists(edge_old) and _os.path.exists(edge_young))
+            check("reply sweep: a missing directory is 0, not an error",
+                  app._sweep_reply_wavs(_os.path.join(d, "absent")) == 0)
+        finally:
+            app.REPLY_WAV_DIR, app.ANNOUNCE_DIR = saved_reply, saved_announce
+
+
+def test_every_spoken_reply_producer_mints_a_name_the_sweep_removes() -> None:
+    """The sweep's name rule is a copy of what the producers mint. Derive the
+    producers' names from their own source, so a new prefix, a new directory or
+    a new producer fails here instead of leaking quietly again."""
+    import os as _os
+    import re
+    rootfs = _ROOT / "rootfs"
+    sources = {}
+    for p in sorted(rootfs.rglob("*")):
+        if p.is_file() and p.suffix in ("", ".py", ".agi"):
+            try:
+                text = p.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "[TTS, text, base]" in text:
+                sources[p.relative_to(rootfs).as_posix()] = text
+    check("producers: the three that render a reply with switchboard-tts",
+          sorted(sources) == ["usr/share/switchboard/operator/agi_speech.py",
+                              "var/lib/asterisk/agi-bin/switchboard-assistant.agi",
+                              "var/lib/asterisk/agi-bin/switchboard-automation.agi"])
+    # agi_speech.say() takes a prefix: its default, and any a caller passes.
+    speech = sources["usr/share/switchboard/operator/agi_speech.py"]
+    prefixes = set(re.findall(r'def say\(text: str, prefix: str = "([^"]+)"\)', speech))
+    for p in rootfs.rglob("*"):
+        if p.is_file() and p.suffix in ("", ".py", ".agi"):
+            try:
+                prefixes |= set(re.findall(r'\bsay\([^)]*prefix\s*=\s*"([^"]+)"',
+                                           p.read_text()))
+            except (UnicodeDecodeError, OSError):
+                continue
+    check("producers: agi_speech's prefix is found", prefixes == {"sw-voice"})
+    names = []
+    for rel, text in sources.items():
+        bases = re.findall(r'\bbase = f"([^"]+)"', text)
+        check(f"producers: {rel} names one reply base", len(bases) == 1)
+        for prefix in sorted(prefixes) if "{prefix}" in bases[0] else [None]:
+            base = bases[0].replace("{prefix}", prefix or "")
+            base = re.sub(r"\{os\.getpid\(\)\}", "12345", base)
+            base = re.sub(r"\{_(?:tts_)?seq\}", "7", base)
+            check(f"producers: {rel} base is fully resolved", "{" not in base)
+            names.append(base)
+    tts = (rootfs / "usr/bin/switchboard-tts").read_text()
+    check("producers: switchboard-tts publishes <base>.wav from <base>.wav.part",
+          'out_base + ".wav"' in tts and 'tmp = out_path + ".part"' in tts
+          and "os.replace(tmp, out_path)" in tts)
+    for base in names:
+        check(f"producers: {base} lives in the swept directory",
+              _os.path.dirname(base) == app.REPLY_WAV_DIR)
+        for ext in (".wav", ".wav.part"):
+            check(f"producers: {_os.path.basename(base)}{ext} is swept",
+                  app._REPLY_WAV_NAME.fullmatch(_os.path.basename(base) + ext) is not None)
+    # Whatever switchboard-tts keeps in /tmp for itself stays out of the rule.
+    for name in re.findall(r'"/tmp/([^"{}\s]+)"', tts):
+        check(f"producers: switchboard-tts's own /tmp/{name} is never swept",
+              app._REPLY_WAV_NAME.fullmatch(name) is None)
+
+
+def test_the_reply_sweep_runs_on_the_housekeeping_clock() -> None:
+    import inspect
+    src = inspect.getsource(app._housekeeping_once)
+    check("reply sweep: on the clock, at its own default age",
+          "_sweep_reply_wavs()" in src)
+    check("reply sweep: outlasts the callers' synthesis limits (20 and 25 s) many times over",
+          app.REPLY_WAV_MAX_AGE_S >= 10 * 25)
+
+
 def test_the_housekeeping_clock_runs_first_and_survives_a_failed_chore() -> None:
     import re
 

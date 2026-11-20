@@ -1,7 +1,22 @@
 # Changelog
 
-Recent releases. Releases up to 0.113.0 are in the
+Recent releases. Releases up to 0.114.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.123.0
+
+**A spoken reply no longer stays behind in the add-on after a hang-up.**
+
+- Every reply a voice feature speaks on a call (the directory, home
+  automation, dial-a-status, the phone-to-speaker announce, the wake-up
+  readout and the voice assistant) is rendered to a WAV in the add-on's
+  `/tmp` and deleted once it has played. A call that hung up while a reply
+  was being rendered or played skipped that deletion, and the WAV stayed until
+  the add-on next restarted: about 16 KB per second of speech, and an
+  assistant reply can repeat what the caller said. The web UI's once-a-minute
+  housekeeping now removes such a file 10 to 11 minutes after it was written.
+  It takes only regular files with the names the voice scripts give them,
+  never a link or a directory, and leaves every other file in `/tmp` alone.
 
 ## 0.122.0
 
@@ -380,31 +395,3 @@ Recent releases. Releases up to 0.113.0 are in the
   completed time could be wiped back to empty before the click landed, and Set
   answered "pick a time" without saving anything. A completed time is now kept
   for its line across rebuilds until Set or Cancel succeeds.
-
-## 0.114.0
-
-**The operator console is reached over SSH instead of telnet, and the board no
-longer listens on the network at all.**
-
-- **SSH on `console_port` (2300):** `ssh -p 2300 <user>@<ha-host>`, as a
-  `console_users` entry. Password login only, with the web terminal's
-  per-address lockout (counted separately); while `console_users` has no valid
-  entry, every login is refused. Commands, sftp/scp and all forwarding are
-  refused. The ed25519 host key is created on first start in `/data` (0600) and
-  its fingerprint is logged at every start. No username, password or command
-  line is logged.
-- **The board listens only on a 0600 root Unix socket**,
-  `/run/switchboard/console.sock`, which SSH, the web terminal and the sidebar
-  console all connect to. It stops only when `console_enabled` and
-  `console_web_enabled` are both `false`.
-- **Upgrading:** telnet on 2300 is gone; that port now speaks SSH. An existing
-  install keeps its saved `console_bind`, probably `127.0.0.1`, so set it to
-  `0.0.0.0` for SSH from the LAN (the new default). SSH needs at least one
-  `console_users` entry (now labelled "Console Users"). A blank
-  `console_web_bind` now means `127.0.0.1`. `console_enabled: false` no longer
-  turns off the web terminal. Sessions: SSH 16 connections (4 per address),
-  web terminal 5, sidebar 5; the board's own cap rose from 5 to 32.
-- Lines a stranger can cause on the SSH port (a failed or throttled login, the
-  no-users warning) are written at most once per address per minute, with a
-  count of those held back; a password that SSH's text preparation reduces to
-  nothing is skipped, so it can never accept an empty password.
