@@ -27,6 +27,11 @@ Recent releases. Releases up to 0.113.0 are in the
   stalled ffmpeg delays one reply, not every reply after it. Silence, replies
   under 20 ms and speech of 120 seconds or more are spoken unshaped and not
   logged.
+- `switchboard-tts` now writes its own lines straight to the Log tab, so one
+  is not lost when the caller hangs up while a reply is being made. The
+  directory, dial-a-status, announce and wake-up features used to drop them; the
+  lights menu and the assistant, which carried them on their own `tts failed`
+  line, now show them on the line before it. They never contain the words.
 
 ## 0.121.0
 

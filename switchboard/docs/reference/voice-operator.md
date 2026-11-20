@@ -29,8 +29,10 @@ a reply's whole synthesis must finish within 20 seconds and espeak-ng alone may
 take 15; after a run past it, the shaping is skipped for 10 minutes, so a
 stalled ffmpeg delays one reply rather than every reply after it. The Log tab
 gets one line per add-on start naming the cause, never the words, for example
-`[speech] [switchboard-tts] phone-band mastering failed (ffmpeg not found), so a
-reply was spoken unmastered; later fallbacks are not logged`. Silence, a reply
+`[switchboard-tts] phone-band mastering failed (ffmpeg not found), so a reply was
+spoken unmastered; later fallbacks are not logged`. `switchboard-tts` writes its
+lines to the Log tab itself, so a caller hanging up while a reply is being made
+does not lose one. Silence, a reply
 shorter than 20 ms, and speech of 120 seconds or more are spoken unshaped and
 not logged.
 

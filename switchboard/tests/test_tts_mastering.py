@@ -2,9 +2,10 @@
 
     python3 -m pytest switchboard/tests/test_tts_mastering.py
 
-switchboard-tts speaks every dynamic reply on a call (the operator, directory,
-dial-a-status, wake-up, the announce confirmation, the lights menu, the
-assistant). Since v0.122.0 it runs the handset announcements' mastering
+switchboard-tts speaks every reply on a call that has no recording: the
+directory (411), the lights menu (43), dial-a-status (45), the announce line's
+prompts and read-back (46), the wake-up weather and calendar, and the assistant
+(47). Since v0.122.0 it runs the handset announcements' mastering
 (announce_asterisk, v0.121.0) on espeak-ng's output. These tests pin:
 
   * with a real ffmpeg (skipped cleanly without one): a reply comes out at the
@@ -16,7 +17,11 @@ assistant). Since v0.122.0 it runs the handset announcements' mastering
   * ffmpeg's limit for a reply is MASTER_TIMEOUT_S (3 s), and a run past it
     pauses the mastering across processes for MASTER_PAUSE_S;
   * silence and over-long speech skip the mastering without a log line;
-  * the three callers pass the note on after a successful reply.
+  * a link or a FIFO at the pause file is neither a pause nor a hang;
+  * the mastering code is loaded from where the image installs it;
+  * the three callers leave switchboard-tts's stderr theirs (the journal) and
+    its stdout off the AGI channel, so the note lands even when a hangup ends
+    the caller first.
 
 espeak-ng is stubbed through switchboard-tts's `subprocess`; ffmpeg, unless a
 test asks for the real one, through a private copy of announce_asterisk.
@@ -49,8 +54,6 @@ for _p in (WEBUI, OPERATOR):
 
 ESPEAK_RATE = 22050  # what espeak-ng writes
 SECRET = "the zebra lamp is on"
-NOTE = ("[switchboard-tts] phone-band mastering failed (ffmpeg not found), "
-        "so a reply was spoken unmastered; later fallbacks are not logged")
 
 
 @functools.lru_cache(maxsize=None)
@@ -207,6 +210,28 @@ def test_a_quieter_voice_is_raised_too(rig):
     assert peak <= rig.aa.LIMIT_CEILING + 1 / 32768, peak
 
 
+def _good_master(cmd, kw):  # what the chain returns: whole float samples, right length
+    n = len(kw["input"]) // 2 * 8000 // ESPEAK_RATE
+    y = array.array("f", (0.05 * math.sin(2 * math.pi * 1000 * i / 8000) for i in range(n)))
+    if sys.byteorder == "big":
+        y.byteswap()
+    return types.SimpleNamespace(returncode=0, stdout=y.tobytes(), stderr=b"")
+
+
+def test_a_mastered_reply_is_what_is_written_without_a_real_ffmpeg(rig, capsys):
+    """The suite's check that synthesize() keeps a successful master, where CI
+    has no ffmpeg and the real-ffmpeg tests above skip."""
+    _stub_ffmpeg(rig, _good_master)
+    capsys.readouterr()
+    got = _speak(rig)
+    assert got != _pre_0122(rig.espeak_pcm)
+    ann, why = rig.aa._master_speech(rig.espeak_pcm, ESPEAK_RATE, len(rig.espeak_pcm) // 2)
+    assert why == "" and _le(ann) == got
+    cmd, kw = rig.ffmpeg_calls[0]
+    assert kw["timeout"] == 3 and kw["input"] == rig.espeak_pcm, "ffmpeg got other PCM"
+    assert _err(capsys) == "" and not os.path.exists(rig.tts.NOTED_FILE)
+
+
 # --------------------------------------------------------------------------- #
 # Every fallback is the pre-0.122 output, byte for byte, noted once.
 # --------------------------------------------------------------------------- #
@@ -268,6 +293,16 @@ def test_an_error_inside_the_mastering_is_a_fallback(rig, capsys, monkeypatch):
     assert "(mastering error ZeroDivisionError)" in _err(capsys)
 
 
+def test_an_error_in_switchboard_tts_own_part_is_a_fallback(rig, capsys, monkeypatch):
+    def boom(*a, **k):
+        raise ZeroDivisionError
+    monkeypatch.setattr(rig.aa, "_nothing_to_master", boom)  # before announce_asterisk's guard
+    capsys.readouterr()
+    assert _speak(rig) == _pre_0122(rig.espeak_pcm)
+    err = _err(capsys)
+    assert "(mastering error ZeroDivisionError)" in err and "zebra" not in err, err
+
+
 def test_without_the_note_file_every_fallback_is_logged(rig, capsys, tmp_path):
     rig.tts.NOTED_FILE = str(tmp_path / "no-such-dir" / "noted")
     _stub_ffmpeg(rig, _missing)
@@ -311,6 +346,10 @@ def test_a_stalled_ffmpeg_costs_one_reply_its_wait(rig, capsys):
     os.utime(rig.tts.PAUSE_FILE, (t, t - rig.tts.MASTER_PAUSE_S - 1))
     _speak(rig)
     assert len(rig.ffmpeg_calls) == 2
+    # ...and that second stall starts the pause again.
+    rig.aa._master_paused_until = 0.0
+    _speak(rig)
+    assert len(rig.ffmpeg_calls) == 2, "the second timeout did not restart the pause"
 
 
 def test_announcements_keep_their_own_limit(rig):
@@ -327,12 +366,23 @@ def test_announcements_keep_their_own_limit(rig):
 
 def test_a_link_is_never_a_pause_nor_followed(rig, tmp_path):
     target = tmp_path / "elsewhere"
-    target.write_text("x")
-    os.utime(target, (0, 0))
+    target.write_text("x")  # fresh: a followed link would read as a pause
     os.symlink(target, rig.tts.PAUSE_FILE)
-    assert rig.tts._paused() is False
+    assert rig.tts._paused() is False, "the pause check followed a link"
+    os.utime(target, (0, 0))
     rig.tts._pause()
     assert target.stat().st_mtime == 0, "the pause followed a link"
+
+
+def test_a_fifo_at_the_pause_file_neither_pauses_nor_hangs(rig, tmp_path):
+    os.mkfifo(rig.tts.PAUSE_FILE)
+    assert rig.tts._paused() is False
+    code = ("import sys\n"
+            "from importlib.machinery import SourceFileLoader\n"
+            f"t = SourceFileLoader('t', {str(TTS_PATH)!r}).load_module()\n"
+            f"t.PAUSE_FILE = {rig.tts.PAUSE_FILE!r}\n"
+            "t._pause()\n")
+    _sp.run([sys.executable, "-c", code], timeout=10, check=True)  # a block times out here
 
 
 def test_a_future_pause_stamp_is_no_pause(rig):
@@ -340,6 +390,23 @@ def test_a_future_pause_stamp_is_no_pause(rig):
     t = os.stat(rig.tts.PAUSE_FILE).st_mtime
     os.utime(rig.tts.PAUSE_FILE, (t, t + 3600))  # a clock set back after the stall
     assert rig.tts._paused() is False
+
+
+def test_the_mastering_is_loaded_from_where_the_image_installs_it(monkeypatch):
+    tts = SourceFileLoader("sbtts_dir", str(TTS_PATH)).load_module()
+    assert tts.MASTER_DIR == "/usr/share/switchboard/webui"
+    assert (ADDON / "rootfs" / tts.MASTER_DIR.lstrip("/") / "announce_asterisk.py").is_file()
+    # The import goes through MASTER_DIR: with the web UI off sys.path and no
+    # module loaded, _master still finds it there.
+    monkeypatch.delitem(sys.modules, "announce_asterisk", raising=False)
+    monkeypatch.delitem(sys.modules, "announce_audio", raising=False)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(WEBUI)])
+    tts.MASTER_DIR = str(WEBUI)
+    try:
+        tts._master(bytes(2 * ESPEAK_RATE), ESPEAK_RATE)  # silence: no ffmpeg run
+        assert Path(sys.modules["announce_asterisk"].__file__) == WEBUI / "announce_asterisk.py"
+    finally:
+        sys.modules.pop("announce_asterisk", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -368,14 +435,8 @@ def test_stereo_is_never_handed_to_the_mastering(rig, capsys):
 
 
 # --------------------------------------------------------------------------- #
-# The callers pass the note on after a successful reply.
+# The callers: switchboard-tts's stderr stays theirs, its stdout off the channel.
 # --------------------------------------------------------------------------- #
-def _ok_tts(stderr: str):
-    def run(cmd, **kw):
-        return types.SimpleNamespace(returncode=0, stdout="", stderr=stderr)
-    return run
-
-
 def _load_agi(name: str):
     hc = types.ModuleType("ha_client")
     hc.available = lambda: True
@@ -386,21 +447,69 @@ def _load_agi(name: str):
 
 
 @pytest.mark.parametrize("which", ["agi_speech", "assistant", "automation"])
-def test_each_caller_logs_the_note_after_a_successful_reply(which, capsys, monkeypatch):
+def test_each_caller_leaves_the_tts_stderr_to_the_journal(which, capsys, monkeypatch):
     if which == "agi_speech":
         import agi_speech as mod
     else:
         mod = _load_agi(which)
-    played = []
+    played, runs = [], []
     monkeypatch.setattr(mod, "agi", lambda cmd: played.append(cmd) or "")
-    monkeypatch.setattr(mod.subprocess, "run", _ok_tts(NOTE + "\n"))
-    monkeypatch.setattr(os.path, "exists", lambda p: True)
-    capsys.readouterr()
-    assert mod.say(SECRET) is True
-    err = _err(capsys)
-    assert NOTE in err and "zebra" not in err, err
-    assert played and played[0].startswith("EXEC Playback "), played
 
-    monkeypatch.setattr(mod.subprocess, "run", _ok_tts(""))
+    def run(cmd, **kw):
+        runs.append((cmd, kw))
+        return types.SimpleNamespace(returncode=rc, stdout=None, stderr=None)
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    monkeypatch.setattr(os.path, "exists", lambda p: True)
+    rc = 0
     assert mod.say(SECRET) is True
-    assert _err(capsys) == "", "a clean reply logged something"
+    cmd, kw = runs[0]
+    assert cmd[0] == "/usr/bin/switchboard-tts" and cmd[1] == SECRET, cmd
+    assert kw.get("stdout") is _sp.DEVNULL, "the child's stdout would be the AGI channel"
+    assert not kw.get("capture_output") and kw.get("stderr") is None, kw
+    assert played and played[0].startswith("EXEC Playback "), played
+    rc = 1  # a failure is still reported, with nothing of the child's to read
+    capsys.readouterr()
+    assert mod.say(SECRET) is False
+    assert "tts failed rc=1" in capsys.readouterr().err
+
+
+def test_the_note_lands_when_the_caller_is_gone(tmp_path):
+    """A caller killed by a hangup (Asterisk SIGHUPs the AGI's own pid) while
+    switchboard-tts runs: the line still reaches the caller's stderr, the
+    journal, because the child writes it there itself."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "espeak-ng"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import io, sys, time, wave\n"
+        "time.sleep(0.5)  # the caller is gone by now\n"
+        "b = io.BytesIO(); w = wave.open(b, 'wb'); w.setnchannels(1); w.setsampwidth(2)\n"
+        "w.setframerate(22050); w.writeframes(b'\\x10\\x00' * 22050); w.close()\n"
+        "sys.stdout.buffer.write(b.getvalue())\n")
+    fake.chmod(0o755)
+    src = TTS_PATH.read_text()
+    for old, new in (('"/usr/share/switchboard/webui"', repr(str(tmp_path / "no-webui"))),
+                     ('"/tmp/switchboard-tts.master-paused"', repr(str(tmp_path / "paused"))),
+                     ('"/tmp/switchboard-tts.unmastered-noted"', repr(str(tmp_path / "noted")))):
+        assert src.count(old) == 1, old
+        src = src.replace(old, new)
+    tts = tmp_path / "switchboard-tts"
+    tts.write_text(src)
+    journal = tmp_path / "journal"
+    caller = (
+        "import os, subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-I', {str(tts)!r}, {SECRET!r}, {str(tmp_path / 'r')!r}],\n"
+        "                 stdout=subprocess.DEVNULL)\n"
+        "os._exit(0)  # gone before switchboard-tts writes anything\n")
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    with open(journal, "w") as j:
+        _sp.run([sys.executable, "-c", caller], stderr=j, env=env, timeout=10, check=True)
+    for _ in range(100):
+        if (tmp_path / "r.wav").exists():
+            break
+        __import__("time").sleep(0.1)
+    __import__("time").sleep(0.2)
+    text = journal.read_text()
+    assert "phone-band mastering failed (the mastering code could not be loaded)" in text, text
+    assert "zebra" not in text and (tmp_path / "noted").exists()

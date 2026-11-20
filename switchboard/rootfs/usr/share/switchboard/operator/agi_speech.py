@@ -113,13 +113,13 @@ def say(text: str, prefix: str = "sw-voice") -> bool:
     base = f"/tmp/{prefix}-{os.getpid()}-{_seq}"
     wav = base + ".wav"
     try:
-        proc = subprocess.run([TTS, text, base], capture_output=True, text=True, timeout=20)
+        # Not captured (v0.122.0): switchboard-tts's stderr, which never names the
+        # text, is this process's, the journal, so its lines land even if a
+        # hangup ends this AGI first. Its stdout would be the AGI channel.
+        proc = subprocess.run([TTS, text, base], stdout=subprocess.DEVNULL, timeout=20)
         if proc.returncode != 0 or not os.path.exists(wav):
             log("speech", f"tts failed rc={proc.returncode} for {text[:40]!r}")
             return False
-        note = (proc.stderr or "").strip()
-        if note:  # its one line about the mastering (v0.122.0); never the text
-            log("speech", note)
         agi(f"EXEC Playback {base}")  # Playback wants the path WITHOUT extension
         return True
     except (subprocess.TimeoutExpired, OSError) as exc:
