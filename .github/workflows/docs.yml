@@ -46,12 +46,64 @@ jobs:
   docs:
     name: Build documentation (.docx + .pdf)
     runs-on: ubuntu-26.04
+    # Bounded: no step here can hold the check for GitHub's 6 h default. The job
+    # bound covers the sum of the step bounds (63 min) plus runner set-up;
+    # tests/test_docs_apt_bounds.py keeps the two in step.
+    timeout-minutes: 70
+    # Every apt-get here reads these. apt has no minimum-speed option: a mirror
+    # that trickles never errors, so the Retries/Timeout options only catch a
+    # stall, and the `timeout` bound on each command catches the trickle. The
+    # lock wait lets apt queue behind a dpkg a killed command left running.
+    env:
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
 
-      - name: Ensure pandoc
+      # 2026-11-19: the runners' first apt mirror trickled the pandoc and
+      # LibreOffice packages at 53-215 kB/s, and the step took 10 min against a
+      # normal 1. The first mirror is regional, and the cloud decides it:
+      # azure.archive.ubuntu.com on an Azure runner, <region>.ec2.archive.ubuntu.com
+      # on an AWS one. apt moves down /etc/apt/apt-mirrors.txt only when a mirror
+      # fails outright, never when it is slow. So the regional mirror, whichever
+      # it is, is dropped while archive.ubuntu.com stays listed. The one index
+      # update for the job runs here, after that change.
+      - name: Prefer the main Ubuntu archive
+        timeout-minutes: 3
         run: |
-          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          f=/etc/apt/apt-mirrors.txt
+          if [ -f "$f" ] && grep -q '://archive\.ubuntu\.com/' "$f"; then
+            grep -E '://[^/]+\.archive\.ubuntu\.com/' "$f" | sed 's/^/dropped: /' || true
+            sudo sed -i -E '\#://[^/]+\.archive\.ubuntu\.com/#d' "$f"
+          fi
+          cat "$f" 2>/dev/null || true
+          sudo timeout -k 10 120 apt-get $APT_OPTS update
+
+      # pandoc 3.7.0.2, the same version Ubuntu 26.04 packages, from the upstream
+      # release .deb on GitHub, pinned by sha256 (33,152,090 bytes). apt is the
+      # fallback, and a warning says when it ran: a pin that stopped matching
+      # must not hide behind a green check.
+      # Each apt install is split into a bounded download, then an install from
+      # the local cache. A kill can then land only in the download, never while
+      # dpkg is unpacking, so it leaves no half-configured package or held lock.
+      - name: Ensure pandoc
+        timeout-minutes: 12
+        env:
+          PANDOC_DEB_URL: https://github.com/jgm/pandoc/releases/download/3.7.0.2/pandoc-3.7.0.2-1-amd64.deb
+          PANDOC_DEB_SHA256: 4db8bad3d9f8451a3d52171664f3c58b08af6450fbd54a28dd05f6b00b0bbb04
+        run: |
+          if ! command -v pandoc >/dev/null; then
+            deb="$RUNNER_TEMP/pandoc.deb"
+            if curl -fsSL --retry 2 --max-time 60 -o "$deb" "$PANDOC_DEB_URL" \
+               && echo "$PANDOC_DEB_SHA256  $deb" | sha256sum -c - \
+               && sudo timeout -k 10 60 dpkg -i "$deb"; then
+              echo "pandoc: installed from the pinned upstream .deb"
+            else
+              echo "::warning::The pinned pandoc .deb did not install; installing pandoc with apt."
+              sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only pandoc
+              sudo timeout -k 10 120 apt-get $APT_OPTS install -y pandoc
+            fi
+          fi
           pandoc --version | head -1
 
       # The manual embeds switchboard/docs/img/*.png. On a release this job builds
@@ -61,18 +113,23 @@ jobs:
       # picturing the old one. Render them here, from this checkout's own UI
       # source, before the manual is built (the commit back to main is unchanged).
       - name: Ensure a Chrome/Chromium binary
+        timeout-minutes: 8
         run: |
-          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
-            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null || {
+            sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only --no-install-recommends chromium-browser
+            sudo timeout -k 10 120 apt-get $APT_OPTS install -y --no-install-recommends chromium-browser
+          }
           (google-chrome --version || chromium-browser --version) 2>/dev/null | head -1
 
       - name: Render the screenshots this manual embeds
+        timeout-minutes: 3
         run: |
           python3 scripts/build-screenshots.py
           test -s switchboard/docs/img/dashboard.png
           test -s switchboard/docs/img/console.png
 
       - name: Build .docx
+        timeout-minutes: 3
         run: |
           python3 scripts/build-docs-docx.py \
             --ref "${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}" \
@@ -82,9 +139,14 @@ jobs:
       # generated TOC + page breaks) via LibreOffice headless (no LaTeX). This is
       # a HARD gate (test -s below): a docs or toolchain change that can't
       # produce a PDF fails the check rather than silently shipping without one.
+      # About 100 MB: a minute at a normal mirror's speed, 16 min on the slow one.
       - name: Ensure LibreOffice (docx → pdf)
+        timeout-minutes: 14
         run: |
-          command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
+          command -v libreoffice >/dev/null || {
+            sudo timeout -k 10 600 apt-get $APT_OPTS install -y --download-only --no-install-recommends libreoffice-writer
+            sudo timeout -k 10 180 apt-get $APT_OPTS install -y --no-install-recommends libreoffice-writer
+          }
           libreoffice --version | head -1
 
       # The typefaces the PDF must use, checked by ROLE before the build. The
@@ -96,11 +158,11 @@ jobs:
       # used. Without this the first 26.04 manual shipped plain serif headings
       # and proportional code, and every check here was green.
       - name: Fonts for the PDF
+        timeout-minutes: 7
         run: |
-          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20)
-          timeout -k 10 120 sudo apt-get "${apt_opts[@]}" update
-          timeout -k 10 300 sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends \
-            fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu
+          fonts=(fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu)
+          sudo timeout -k 10 240 apt-get $APT_OPTS install -y --download-only --no-install-recommends "${fonts[@]}"
+          sudo timeout -k 10 120 apt-get $APT_OPTS install -y --no-install-recommends "${fonts[@]}"
           conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fontconfig/conf.d"
           mkdir -p "$conf_dir"
           cat > "$conf_dir/99-switchboard-manual.conf" <<'FONTCONF'
@@ -124,6 +186,7 @@ jobs:
           exit $fail
 
       - name: Build .pdf (render the .docx)
+        timeout-minutes: 3
         run: |
           libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
             --convert-to pdf --outdir . "Switchboard-Documentation.docx"
@@ -134,6 +197,7 @@ jobs:
       # proof that LibreOffice used it. Alternatives as A|B: Ubuntu's Carlito is
       # Carlito-Regular, LibreOffice's bundled copy Carlito.
       - name: Check the PDF's typefaces
+        timeout-minutes: 1
         run: |
           embedded=" $(python3 - Switchboard-Documentation.pdf <<'PY'
           import re, sys, zlib
@@ -161,6 +225,7 @@ jobs:
       # Uploaded even when a check above failed, so the PDF can be looked at.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
+        timeout-minutes: 3
         with:
           name: documentation
           path: |
@@ -172,6 +237,7 @@ jobs:
       # assets. Race-free: the release already exists when this event fires.
       - name: Attach to release
         if: github.event_name == 'release' || inputs.tag != ''
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -194,16 +260,27 @@ jobs:
   screenshots:
     name: Render documentation screenshots
     runs-on: ubuntu-26.04
+    # The runner image ships Chrome, so the apt branch below normally never runs;
+    # bounded as the docs job is all the same (steps 19 min).
+    timeout-minutes: 25
+    env:
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
 
       - name: Ensure a Chrome/Chromium binary
+        timeout-minutes: 10
         run: |
-          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
-            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update
+            sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only --no-install-recommends chromium-browser
+            sudo timeout -k 10 120 apt-get $APT_OPTS install -y --no-install-recommends chromium-browser
+          }
           (google-chrome --version || chromium-browser --version) 2>/dev/null | head -1
 
       - name: Render screenshots from the live UI source
+        timeout-minutes: 3
         run: |
           python3 scripts/build-screenshots.py --out-dir "$RUNNER_TEMP/shots"
           ls -la "$RUNNER_TEMP/shots"
@@ -211,6 +288,7 @@ jobs:
           test -s "$RUNNER_TEMP/shots/console.png"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 3
         with:
           name: screenshots-rendered
           path: ${{ runner.temp }}/shots/*.png
@@ -226,22 +304,33 @@ jobs:
     name: Refresh committed screenshots (on release)
     if: github.event_name == 'release' || inputs.tag != ''
     runs-on: ubuntu-26.04
+    # Bounded as the screenshots job is (steps 19 min).
+    timeout-minutes: 25
+    env:
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           ref: main
 
       - name: Ensure a Chrome/Chromium binary
+        timeout-minutes: 10
         run: |
-          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null \
-            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium-browser; }
+          command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update
+            sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only --no-install-recommends chromium-browser
+            sudo timeout -k 10 120 apt-get $APT_OPTS install -y --no-install-recommends chromium-browser
+          }
 
       - name: Re-render into the repo
+        timeout-minutes: 3
         run: python3 scripts/build-screenshots.py
 
       - name: Commit only if the render actually changed
+        timeout-minutes: 3
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
