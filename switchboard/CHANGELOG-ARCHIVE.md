@@ -3,6 +3,33 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.114.0
+
+**The operator console is reached over SSH instead of telnet, and the board no
+longer listens on the network at all.**
+
+- **SSH on `console_port` (2300):** `ssh -p 2300 <user>@<ha-host>`, as a
+  `console_users` entry. Password login only, with the web terminal's
+  per-address lockout (counted separately); while `console_users` has no valid
+  entry, every login is refused. Commands, sftp/scp and all forwarding are
+  refused. The ed25519 host key is created on first start in `/data` (0600) and
+  its fingerprint is logged at every start. No username, password or command
+  line is logged.
+- **The board listens only on a 0600 root Unix socket**,
+  `/run/switchboard/console.sock`, which SSH, the web terminal and the sidebar
+  console all connect to. It stops only when `console_enabled` and
+  `console_web_enabled` are both `false`.
+- **Upgrading:** telnet on 2300 is gone; that port now speaks SSH. An existing
+  install keeps its saved `console_bind`, probably `127.0.0.1`, so set it to
+  `0.0.0.0` for SSH from the LAN (the new default). SSH needs at least one
+  `console_users` entry (now labelled "Console Users"). A blank
+  `console_web_bind` now means `127.0.0.1`. `console_enabled: false` no longer
+  turns off the web terminal. Sessions: SSH 16 connections (4 per address),
+  web terminal 5, sidebar 5; the board's own cap rose from 5 to 32.
+- Lines a stranger can cause on the SSH port (a failed or throttled login, the
+  no-users warning) are written at most once per address per minute, with a
+  count of those held back; a password that SSH's text preparation reduces to
+  nothing is skipped, so it can never accept an empty password.
 ## 0.113.0
 
 **A new look for the dashboard, the telnet console and the browser terminal: the

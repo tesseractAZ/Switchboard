@@ -2137,7 +2137,7 @@ def test_the_web_ui_sweeps_clips_on_a_clock() -> None:
 
 
 def test_the_web_ui_sweeps_spoken_replies_a_hangup_left_in_tmp() -> None:
-    """v0.121.1. Asterisk ends a hung-up AGI with SIGHUP, which kills Python
+    """v0.123.0. Asterisk ends a hung-up AGI with SIGHUP, which kills Python
     without its `finally`, so a reply WAV in /tmp outlived the call until the
     container was recreated (reproduced in the 0.121.0 container: a hangup
     during Playback, and one during synthesis, each left a WAV)."""

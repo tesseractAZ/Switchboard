@@ -174,7 +174,7 @@ not. Nothing spoken is written to either `asterisk.log`.
 
 Each reply is spoken from a WAV the add-on renders in its container's `/tmp`
 and deletes once it has played. A call that hangs up while its reply is being
-rendered or played skips that deletion. Since v0.121.1 the web UI's
+rendered or played skips that deletion. Since v0.123.0 the web UI's
 once-a-minute housekeeping removes such a file 10 to 11 minutes after it was
 written; before that it stayed until the add-on restarted. Like the turn
 file, it is out of reach of a file browser, a Samba share or another add-on.

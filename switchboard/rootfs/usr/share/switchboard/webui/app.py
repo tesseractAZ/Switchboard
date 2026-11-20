@@ -983,7 +983,7 @@ def _cleanup_announce_dir(max_age: int = 300) -> None:
     announce_clip.sweep(ANNOUNCE_DIR, max_age)
 
 
-# ★ SPOKEN REPLIES A HANGUP LEFT IN /tmp (v0.121.1). Every reply spoken on a call
+# ★ SPOKEN REPLIES A HANGUP LEFT IN /tmp (v0.123.0). Every reply spoken on a call
 # is rendered by switchboard-tts to /tmp/<prefix>-<pid>-<n>.wav (agi_speech.say,
 # and the say() of switchboard-assistant.agi and switchboard-automation.agi), and
 # the AGI unlinks it in a `finally`. Asterisk ends a hung-up AGI with SIGHUP to its
