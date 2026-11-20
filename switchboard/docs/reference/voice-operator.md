@@ -6,6 +6,34 @@ system acts. No keypress is ever required, and nothing connects a call or toggle
 light on a low-confidence guess — it asks again instead. Speech never leaves the
 box.
 
+**How the replies are spoken.** What a feature says that has no recording is
+synthesized on the box by espeak-ng (`switchboard-tts`): the directory's
+listings and its "connecting you" line, the lights menu's rooms, lights and
+states, every dial-a-status line and reading, the announce line's prompts and
+its read-back, the wake-up weather and calendar, and the voice assistant's
+questions and answers. Since v0.122.0 that speech is mastered exactly as a
+handset announcement is ("Shaped for the phone band" under [Announce onto a
+handset](paging-and-announcements.md#announce-onto-a-handset--post-apiannounceext-home-assistant--phone)), by
+the same code: one ffmpeg process filters it to the band with the consonants
+lifted and resamples it to 8 kHz, then its speech level is set to the built-in
+prompts' -15 dBFS and its peaks are held at -1 dBFS. espeak-ng's own output
+measures -18.6 dBFS, so the replies are about 3.5 dB louder than before, level
+with the prompts around them. Measured on a Home Assistant host, a 2-second
+reply renders in about 0.20 s instead of 0.06 s, and a 9-second one in 0.28 s
+instead of 0.08 s.
+
+If ffmpeg is missing, exits with an error, runs past 3 seconds or returns
+something that is not audio of the expected length, the reply is spoken exactly
+as before v0.122.0. The limit is 3 seconds, not the announcements' 10, because
+a reply's whole synthesis must finish within 20 seconds and espeak-ng alone may
+take 15; after a run past it, the shaping is skipped for 10 minutes, so a
+stalled ffmpeg delays one reply rather than every reply after it. The Log tab
+gets one line per add-on start naming the cause, never the words, for example
+`[speech] [switchboard-tts] phone-band mastering failed (ffmpeg not found), so a
+reply was spoken unmastered; later fallbacks are not logged`. Silence, a reply
+shorter than 20 ms, and speech of 120 seconds or more are spoken unshaped and
+not logged.
+
 ## Operator — dial `0`
 
 Say what you want:

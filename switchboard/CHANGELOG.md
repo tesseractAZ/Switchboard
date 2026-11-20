@@ -1,7 +1,32 @@
 # Changelog
 
-Recent releases. Releases up to 0.112.0 are in the
+Recent releases. Releases up to 0.113.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.122.0
+
+**Spoken replies on a call are shaped for the phone band too.**
+
+- Everything the voice features say that has no recording is spoken by
+  espeak-ng through `switchboard-tts`: the directory (`411`), the lights menu
+  (`43`), dial-a-status (`45`), the announce line's prompts and read-back
+  (`46`), the wake-up weather and calendar, and the voice assistant (`47`).
+  That speech now goes through the handset announcements' mastering (0.121.0),
+  by the same code: the ffmpeg chain to the 300–3400 Hz band with the
+  consonants lifted and ffmpeg's resampler to 8 kHz, then the speech level set
+  to the built-in prompts' -15 dBFS under a -1 dBFS peak limit. espeak-ng's own
+  output measures -18.6 dBFS, so the replies are about 3.5 dB louder, level with
+  the prompts around them. On a Home Assistant host a 2-second reply renders in
+  about 0.20 s instead of 0.06 s, and a 9-second one in 0.28 s instead of
+  0.08 s.
+- If ffmpeg is missing, fails, runs past 3 seconds or returns unusable audio,
+  the reply is spoken exactly as in 0.121.0, and the Log tab says so once per
+  start, without the words. The limit is 3 seconds, not the announcements' 10,
+  because a reply's synthesis must finish within 20 seconds and espeak-ng alone
+  may take 15. After a run past it the shaping is skipped for 10 minutes, so a
+  stalled ffmpeg delays one reply, not every reply after it. Silence, replies
+  under 20 ms and speech of 120 seconds or more are spoken unshaped and not
+  logged.
 
 ## 0.121.0
 
@@ -378,28 +403,3 @@ longer listens on the network at all.**
   no-users warning) are written at most once per address per minute, with a
   count of those held back; a password that SSH's text preparation reduces to
   nothing is skipped, so it can never accept an empty password.
-
-## 0.113.0
-
-**A new look for the dashboard, the telnet console and the browser terminal: the
-operator's position of a 1940s cord switchboard.** Nothing behaves differently.
-
-- **Dashboard.** A walnut board with an engraved brass nameplate. Each line is a
-  jack position: a lamp cap above a brass jack ring, beside a cream designation
-  strip with the typed number, room name and state. Lamps are unlit for unknown,
-  white for registered, amber for in use, flickering amber for ringing and red
-  for offline, and every lamp also states its condition in words. On first paint
-  the lamps warm up in turn; with reduced motion they appear lit. Buttons are
-  typed words instead of emoji. The page keeps one theme whatever Home
-  Assistant's light or dark setting is.
-- **Telnet console.** A brass nameplate rule, lamp glyphs on each position
-  (`◉` lit, `○` unlit, `✕` fault) with dotted leaders, amber for calls and
-  ringing, in 256-colour ANSI. Every key binding and view is unchanged.
-- **Browser terminal.** The terminal takes the same palette and typeface, with
-  the page chrome as the brass nameplate.
-- **Fonts are part of the add-on.** Federo (the nameplates) and Cutive Mono (the
-  typed text), both under the SIL Open Font License, are served by the add-on
-  itself: nothing is fetched from the internet, so the interface looks the same
-  with the WAN down and makes no request that would reveal the household's
-  address. Both web servers answer only the two file names, behind their
-  existing guards.

@@ -209,6 +209,9 @@ def say(text: str) -> bool:
             log(f"tts failed rc={proc.returncode} for {said(text, _journal_words)}: "
                 f"{(proc.stderr or '').strip()}")
             return False
+        note = (proc.stderr or "").strip()
+        if note:  # its one line about the mastering (v0.122.0); never the text
+            log(note)
         # Playback wants the path WITHOUT extension.
         agi(f"EXEC Playback {base}")
         return True

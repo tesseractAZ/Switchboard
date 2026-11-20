@@ -8,8 +8,9 @@
   generator, under its own AppArmor child profile, may write those files.
 - **Offline voice.** Speech-to-text is **whisper.cpp** (English `base.en` model,
   ~142 MB), kept resident in RAM by a loopback-only server with a per-call
-  `whisper-cli` fallback. Text-to-speech is **espeak-ng**. Both run on-box under
-  the unprivileged `asterisk` user — no cloud, no API key.
+  `whisper-cli` fallback. Text-to-speech is **espeak-ng**, shaped for the phone
+  band by ffmpeg since 0.122.0. Both run on-box under the unprivileged
+  `asterisk` user — no cloud, no API key.
 - The **Ingress dashboard** is a small single-worker FastAPI app that reads live
   state over the loopback-only Asterisk Manager (AMI) socket.
 - **Services** run under s6-overlay: a one-shot config generator, then Asterisk,

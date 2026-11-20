@@ -106,6 +106,9 @@ def say(text: str) -> bool:
         if proc.returncode != 0 or not os.path.exists(wav):
             log(f"tts failed rc={proc.returncode} for {text!r}: {(proc.stderr or '').strip()}")
             return False
+        note = (proc.stderr or "").strip()
+        if note:  # its one line about the mastering (v0.122.0); never the text
+            log(note)
         # Playback wants the path WITHOUT extension.
         agi(f"EXEC Playback {base}")
         return True

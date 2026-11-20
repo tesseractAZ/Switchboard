@@ -4,24 +4,37 @@
 The home-automation voice operator must say things that have no canned prompt and
 that Asterisk's SayUnixTime/SayNumber can't produce: light names, on/off state,
 the room/light lists. There's no cloud TTS on this box, so we use **espeak-ng**
-(tiny, offline, musl-friendly) and resample its output to the 8 kHz mono the
-analog FXS path wants, with the stdlib only (audioop, linear fallback) — the same
-approach switchboard-stt uses going the other way.
+(tiny, offline, musl-friendly) and turn its output into the 8 kHz mono every
+phone here hears (G.711 µ-law, wired and SIP alike).
+
+Since v0.122.0 that is the handset announcements' phone-band mastering (v0.121.0,
+announce_asterisk): one ffmpeg process shapes the speech for the band and
+resamples it, then the speech level is set and the peaks limited. If the
+mastering cannot run, or fails, the reply is resampled exactly as before, with
+the stdlib only (audioop, linear fallback) — the same approach switchboard-stt
+uses going the other way.
 
     switchboard-tts "Kitchen Lights are on" /tmp/sw-tts-123
 
 writes /tmp/sw-tts-123.wav (8 kHz, 16-bit, mono). The dialplan then plays it with
 Playback(/tmp/sw-tts-123). Exit non-zero (and write nothing) if espeak-ng is
 missing or fails, so the AGI can fall back to a canned prompt instead of silence.
+
+Nothing written to stderr names the text: the callers send it to the add-on
+journal, after a failure and, for the one line about the mastering, after a
+success too.
 """
 
 from __future__ import annotations
 
+import array
 import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import time
 import warnings
 import wave
 
@@ -30,6 +43,24 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 OUT_RATE = 8000
 ESPEAK_VOICE = os.environ.get("SW_TTS_VOICE", "en-us")
 ESPEAK_WPM = os.environ.get("SW_TTS_WPM", "150")  # words/min — clear on narrowband
+
+# The mastering is the handset announcements' own code (announce_asterisk), loaded
+# from the web UI's directory, so a reply and an announcement are shaped by the
+# same chain and cannot drift apart.
+MASTER_DIR = "/usr/share/switchboard/webui"
+# ffmpeg's limit for one reply. The callers allow the whole synthesis 20 s
+# (agi_speech, the automation menu; the assistant 25 s) and espeak alone may take
+# 15 s, so the announcements' 10 s would let a stalled ffmpeg turn a slow reply
+# into a failed one. A reply masters in about 0.1 s on a Home Assistant host.
+MASTER_TIMEOUT_S = 3
+# After a run past MASTER_TIMEOUT_S, replies skip the mastering for this long, so
+# a stalled ffmpeg costs one reply its wait, not every reply after it. Each reply
+# is a process of its own, so the pause is the mtime of PAUSE_FILE.
+MASTER_PAUSE_S = 600
+PAUSE_FILE = "/tmp/switchboard-tts.master-paused"
+# Created by the first reply that falls back, so the journal gets one line per
+# add-on start (each start is a new container with an empty /tmp).
+NOTED_FILE = "/tmp/switchboard-tts.unmastered-noted"
 
 
 def log(msg: str) -> None:
@@ -63,6 +94,105 @@ def _linear_resample(data: bytes, in_rate: int, out_rate: int) -> bytes:
         else:
             out[i] = samples[min(j, n_in - 1)]
     return out.tobytes()
+
+
+def _resample_unmastered(data: bytes, ch: int, fr: int) -> bytes:
+    """16-bit PCM -> 8 kHz mono, unmastered: every reply before v0.122.0, and any
+    reply since that the mastering does not take."""
+    try:
+        import audioop
+        if ch != 1:
+            data = audioop.tomono(data, 2, 0.5, 0.5)
+        if fr != OUT_RATE:
+            data, _ = audioop.ratecv(data, 2, 1, fr, OUT_RATE, None)
+    except Exception as exc:  # noqa: BLE001 — any audioop issue -> linear path
+        log(f"audioop unavailable ({exc}); linear resample")
+        if ch != 1:
+            # crude downmix: take left channel
+            a = array.array("h"); a.frombytes(data)
+            data = array.array("h", a[0::ch]).tobytes()
+        data = _linear_resample(data, fr, OUT_RATE)
+    return data
+
+
+def _paused() -> bool:
+    """True within MASTER_PAUSE_S of a reply whose mastering ran past
+    MASTER_TIMEOUT_S (PAUSE_FILE's mtime; a link or anything not a regular file
+    counts as no pause)."""
+    try:
+        st = os.stat(PAUSE_FILE, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and 0 <= time.time() - st.st_mtime < MASTER_PAUSE_S
+
+
+def _pause() -> None:
+    """Start the pause (see _paused). Best effort: a pause that cannot be kept
+    leaves each reply its own MASTER_TIMEOUT_S."""
+    try:
+        fd = os.open(PAUSE_FILE, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        try:
+            os.utime(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _note_unmastered(reason: str) -> None:
+    """Say, once per add-on start, that a reply was spoken without the mastering.
+    `reason` is a fixed phrase, never the text. If NOTED_FILE cannot be made,
+    every fallback says so rather than none."""
+    once = True
+    try:
+        os.close(os.open(NOTED_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o644))
+    except FileExistsError:
+        return
+    except OSError:
+        once = False
+    log(f"phone-band mastering failed ({reason}), so a reply was spoken unmastered"
+        + ("; later fallbacks are not logged" if once else ""))
+
+
+def _master(data: bytes, rate: int) -> "bytes | None":
+    """espeak's mono 16-bit PCM at `rate`, mastered for the phone band, as 8 kHz
+    16-bit PCM; or None, and the reply takes _resample_unmastered. Never raises.
+
+    Speech with nothing to master (silence, under 20 ms) and speech of the
+    announcements' MASTER_MAX_SECONDS or more take the unmastered path without a
+    log line, as an announcement does."""
+    try:
+        if _paused():
+            _note_unmastered("paused after an ffmpeg timeout")
+            return None
+        if MASTER_DIR not in sys.path:
+            sys.path.insert(0, MASTER_DIR)
+        try:
+            import announce_asterisk as aa
+        except Exception:  # noqa: BLE001 — missing, or broken by an image change
+            _note_unmastered("the mastering code could not be loaded")
+            return None
+        samples = array.array("h")
+        samples.frombytes(data)
+        if sys.byteorder == "big":
+            samples.byteswap()  # the WAV's PCM is little-endian
+        if (aa._nothing_to_master(samples, rate)
+                or len(samples) >= aa.MASTER_MAX_SECONDS * rate):
+            return None
+        out, reason = aa._master_speech(data, rate, len(samples), timeout=MASTER_TIMEOUT_S)
+        if out is None:
+            if reason == aa._TIMED_OUT:
+                _pause()
+            if reason != aa._TOO_LONG:
+                _note_unmastered(reason)
+            return None
+        if sys.byteorder == "big":
+            out.byteswap()
+        return out.tobytes()
+    except Exception as exc:  # noqa: BLE001 — a reply must not be lost to the mastering
+        _note_unmastered(f"mastering error {type(exc).__name__}")
+        return None
 
 
 def synthesize(text: str, out_base: str) -> bool:
@@ -107,20 +237,8 @@ def synthesize(text: str, out_base: str) -> bool:
     if sw != 2:  # we only handle 16-bit; bail rather than emit noise
         log(f"unexpected sample width {sw}")
         return False
-    try:
-        import audioop
-        if ch != 1:
-            data = audioop.tomono(data, 2, 0.5, 0.5)
-        if fr != OUT_RATE:
-            data, _ = audioop.ratecv(data, 2, 1, fr, OUT_RATE, None)
-    except Exception as exc:  # noqa: BLE001 — any audioop issue -> linear path
-        log(f"audioop unavailable ({exc}); linear resample")
-        if ch != 1:
-            # crude downmix: take left channel
-            import array
-            a = array.array("h"); a.frombytes(data)
-            data = array.array("h", a[0::ch]).tobytes()
-        data = _linear_resample(data, fr, OUT_RATE)
+    mastered = _master(data, fr) if ch == 1 else None  # espeak-ng writes mono
+    data = mastered if mastered is not None else _resample_unmastered(data, ch, fr)
 
     out_path = out_base if out_base.endswith(".wav") else out_base + ".wav"
     tmp = out_path + ".part"

@@ -97,13 +97,14 @@ RUN apk add --no-cache espeak-ng 2>/dev/null \
       || echo "NOTE: espeak-ng unavailable; home-automation voice readback limited to canned prompts"
 
 # ffmpeg: transcode a fetched TTS clip to the 8 kHz mono WAV Asterisk Playback needs,
-# and shape the speech of every handset announcement for the phone band (v0.121.0).
+# and shape the speech of every handset announcement (v0.121.0) and every spoken
+# reply on a call (switchboard-tts, v0.122.0) for the phone band.
 # Home Assistant's tts_proxy serves MP3 by default (even for Piper), which the pure-
 # Python WAV reader can't decode — ffmpeg handles MP3/OGG/etc. Best-effort: without it
 # the announce {url} branch is limited to WAV input (the {text} branch still works),
-# and handset announcements play unmastered.
+# and handset announcements and spoken replies play unmastered.
 RUN apk add --no-cache ffmpeg 2>/dev/null \
-      || echo "NOTE: ffmpeg unavailable; announce url-branch limited to WAV input, handset announcements unmastered"
+      || echo "NOTE: ffmpeg unavailable; announce url-branch limited to WAV input, handset announcements and spoken replies unmastered"
 
 # Asterisk modules for the operator page-all intercom (ConfBridge / Page) and
 # message-waiting stutter tone (res_mwi_external). PJSIP, app_confbridge,
@@ -230,4 +231,4 @@ LABEL \
     org.opencontainers.image.title="Switchboard" \
     org.opencontainers.image.description="Asterisk PBX for analog home phones" \
     org.opencontainers.image.source="https://github.com/tesseractAZ/Switchboard" \
-    io.hass.version="0.121.0"
+    io.hass.version="0.122.0"
