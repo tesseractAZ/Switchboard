@@ -10,8 +10,9 @@
   ~142 MB), kept resident in RAM by a loopback-only server with a per-call
   `whisper-cli` fallback. Text-to-speech is **espeak-ng**, shaped for the phone
   band by ffmpeg (handset announcements since 0.121.0, spoken replies on a call
-  since 0.122.0). Both run on-box under the unprivileged `asterisk` user — no
-  cloud, no API key.
+  since 0.122.0). All of it runs on-box — no cloud, no API key. Recognition and
+  the spoken replies on a call run under the unprivileged `asterisk` user;
+  handset announcements are rendered by the web UI, which runs as root.
 - The **Ingress dashboard** is a small single-worker FastAPI app that reads live
   state over the loopback-only Asterisk Manager (AMI) socket.
 - **Services** run under s6-overlay: a one-shot config generator, then Asterisk,

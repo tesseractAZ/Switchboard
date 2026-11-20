@@ -62,7 +62,7 @@ def _speechlike(seconds: float = 2.0, rate: int = ESPEAK_RATE, peak: float = 0.9
     test_announce_mastering builds them: the harmonics of a 120 Hz voice under
     three formant peaks, with spread phases as in speech (not a buzz whose every
     harmonic peaks at once), reaching past 4 kHz; peak-normalized to `peak`, as
-    TTS output is. 16-bit little-endian PCM."""
+    TTS output is. 16-bit PCM in native order, as wave reads and writes it."""
     harmonics = []
     for k in range(1, 46):
         f = 120.0 * k
@@ -76,10 +76,7 @@ def _speechlike(seconds: float = 2.0, rate: int = ESPEAK_RATE, peak: float = 0.9
             continue
         vals.append(sum(a * math.sin(w * i + ph) for w, a, ph in harmonics))
     scale = peak * 32767 / max(abs(v) for v in vals)
-    out = array.array("h", [round(v * scale) for v in vals])
-    if sys.byteorder == "big":
-        out.byteswap()
-    return out.tobytes()
+    return array.array("h", [round(v * scale) for v in vals]).tobytes()
 
 
 def _wav(pcm: bytes, rate: int = ESPEAK_RATE, ch: int = 1) -> bytes:
@@ -155,8 +152,18 @@ def _speak(rig) -> bytes:
     return data
 
 
-def _le(samples) -> bytes:
-    a = array.array("h", samples)
+def _s16le(native: bytes) -> bytes:
+    """Native-order 16-bit PCM (what wave hands switchboard-tts) as the s16le
+    ffmpeg is fed."""
+    a = array.array("h")
+    a.frombytes(native)
+    if sys.byteorder == "big":
+        a.byteswap()
+    return a.tobytes()
+
+
+def _f32le(values) -> bytes:
+    a = array.array("f", values)
     if sys.byteorder == "big":
         a.byteswap()
     return a.tobytes()
@@ -171,9 +178,7 @@ def _err(capsys) -> str:
 
 def _level_and_peak(pcm: bytes, aa) -> tuple[float, float]:
     s = array.array("h")
-    s.frombytes(pcm)
-    if sys.byteorder == "big":
-        s.byteswap()
+    s.frombytes(pcm)  # native order, as wave read it
     f = array.array("f", (v / 32768.0 for v in s))
     return aa._speech_level_dbfs(f, 8000), max(abs(min(s)), max(s)) / 32768.0
 
@@ -197,8 +202,8 @@ def test_a_reply_is_mastered_to_the_prompts_level(rig, capsys):
     assert not os.path.exists(rig.tts.NOTED_FILE)
     assert _speak(rig) == got, "the same reply rendered different bytes"
     # ...and it is the announcements' mastering, not a copy of it.
-    ann, why = rig.aa._master_speech(rig.espeak_pcm, ESPEAK_RATE, n_in)
-    assert why == "" and _le(ann) == got
+    ann, why = rig.aa._master_speech(_s16le(rig.espeak_pcm), ESPEAK_RATE, n_in)
+    assert why == "" and ann.tobytes() == got
 
 
 def test_a_quieter_voice_is_raised_too(rig):
@@ -212,10 +217,8 @@ def test_a_quieter_voice_is_raised_too(rig):
 
 def _good_master(cmd, kw):  # what the chain returns: whole float samples, right length
     n = len(kw["input"]) // 2 * 8000 // ESPEAK_RATE
-    y = array.array("f", (0.05 * math.sin(2 * math.pi * 1000 * i / 8000) for i in range(n)))
-    if sys.byteorder == "big":
-        y.byteswap()
-    return types.SimpleNamespace(returncode=0, stdout=y.tobytes(), stderr=b"")
+    y = (0.05 * math.sin(2 * math.pi * 1000 * i / 8000) for i in range(n))
+    return types.SimpleNamespace(returncode=0, stdout=_f32le(y), stderr=b"")
 
 
 def test_a_mastered_reply_is_what_is_written_without_a_real_ffmpeg(rig, capsys):
@@ -225,10 +228,11 @@ def test_a_mastered_reply_is_what_is_written_without_a_real_ffmpeg(rig, capsys):
     capsys.readouterr()
     got = _speak(rig)
     assert got != _pre_0122(rig.espeak_pcm)
-    ann, why = rig.aa._master_speech(rig.espeak_pcm, ESPEAK_RATE, len(rig.espeak_pcm) // 2)
-    assert why == "" and _le(ann) == got
+    ann, why = rig.aa._master_speech(_s16le(rig.espeak_pcm), ESPEAK_RATE,
+                                     len(rig.espeak_pcm) // 2)
+    assert why == "" and ann.tobytes() == got
     cmd, kw = rig.ffmpeg_calls[0]
-    assert kw["timeout"] == 3 and kw["input"] == rig.espeak_pcm, "ffmpeg got other PCM"
+    assert kw["timeout"] == 3 and kw["input"] == _s16le(rig.espeak_pcm), "ffmpeg got other PCM"
     assert _err(capsys) == "" and not os.path.exists(rig.tts.NOTED_FILE)
 
 
@@ -245,8 +249,7 @@ def _exit_1(cmd, kw):
 
 def _short(cmd, kw):  # a quarter of the samples the input implies
     n = len(kw["input"]) // 2 * 8000 // ESPEAK_RATE // 4
-    return types.SimpleNamespace(returncode=0, stdout=array.array("f", [0.1] * n).tobytes(),
-                                 stderr=b"")
+    return types.SimpleNamespace(returncode=0, stdout=_f32le([0.1] * n), stderr=b"")
 
 
 def _zeros(cmd, kw):
@@ -287,7 +290,7 @@ def test_an_error_inside_the_mastering_is_a_fallback(rig, capsys, monkeypatch):
     monkeypatch.setattr(rig.aa, "_clip_gain_db", boom)
     _stub_ffmpeg(rig, lambda cmd, kw: types.SimpleNamespace(
         returncode=0, stderr=b"",
-        stdout=array.array("f", [0.1] * (len(kw["input"]) // 2 * 8000 // ESPEAK_RATE)).tobytes()))
+        stdout=_f32le([0.1] * (len(kw["input"]) // 2 * 8000 // ESPEAK_RATE))))
     capsys.readouterr()
     assert _speak(rig) == _pre_0122(rig.espeak_pcm)
     assert "(mastering error ZeroDivisionError)" in _err(capsys)
@@ -392,8 +395,10 @@ def test_a_future_pause_stamp_is_no_pause(rig):
     assert rig.tts._paused() is False
 
 
-def test_the_mastering_is_loaded_from_where_the_image_installs_it(monkeypatch):
+def test_the_mastering_is_loaded_from_where_the_image_installs_it(monkeypatch, tmp_path):
     tts = SourceFileLoader("sbtts_dir", str(TTS_PATH)).load_module()
+    tts.PAUSE_FILE = str(tmp_path / "paused")  # never the machine's own /tmp files
+    tts.NOTED_FILE = str(tmp_path / "noted")
     assert tts.MASTER_DIR == "/usr/share/switchboard/webui"
     assert (ADDON / "rootfs" / tts.MASTER_DIR.lstrip("/") / "announce_asterisk.py").is_file()
     # The import goes through MASTER_DIR: with the web UI off sys.path and no
