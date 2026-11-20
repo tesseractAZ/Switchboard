@@ -605,7 +605,8 @@ def test_words_and_replies_reach_the_journal_only_when_transcripts_are_on(capsys
 
             def _run(cmd, **kw):
                 raise _sp.TimeoutExpired(cmd, 25)
-            mod.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=_sp.TimeoutExpired)
+            mod.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=_sp.TimeoutExpired,
+                                                   DEVNULL=_sp.DEVNULL)
             capsys.readouterr()
             mod.main()
             err = capsys.readouterr().err

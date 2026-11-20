@@ -101,6 +101,13 @@ phrase after the beep, and the speech is recognised on the box. No keypress is
 ever needed, so rotary phones work. Nothing connects a call or switches a light
 on a low-confidence guess; it asks again instead.
 
+What a feature says that has no recording (a room or light name, a status
+reading, the wake-up weather, the assistant's answer) is spoken by the add-on's
+own voice, espeak-ng. Since 0.122.0 that speech is shaped for the phone line the
+way a handset announcement is, and set to the level of the built-in prompts; if
+ffmpeg is missing or fails, it is spoken as before, and the Log tab says so once
+per start.
+
 ### Wake-up calls
 
 Dial `42` (or say "wake me up" to the operator) and, after the beep, say a time:

@@ -3,6 +3,31 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.113.0
+
+**A new look for the dashboard, the telnet console and the browser terminal: the
+operator's position of a 1940s cord switchboard.** Nothing behaves differently.
+
+- **Dashboard.** A walnut board with an engraved brass nameplate. Each line is a
+  jack position: a lamp cap above a brass jack ring, beside a cream designation
+  strip with the typed number, room name and state. Lamps are unlit for unknown,
+  white for registered, amber for in use, flickering amber for ringing and red
+  for offline, and every lamp also states its condition in words. On first paint
+  the lamps warm up in turn; with reduced motion they appear lit. Buttons are
+  typed words instead of emoji. The page keeps one theme whatever Home
+  Assistant's light or dark setting is.
+- **Telnet console.** A brass nameplate rule, lamp glyphs on each position
+  (`◉` lit, `○` unlit, `✕` fault) with dotted leaders, amber for calls and
+  ringing, in 256-colour ANSI. Every key binding and view is unchanged.
+- **Browser terminal.** The terminal takes the same palette and typeface, with
+  the page chrome as the brass nameplate.
+- **Fonts are part of the add-on.** Federo (the nameplates) and Cutive Mono (the
+  typed text), both under the SIL Open Font License, are served by the add-on
+  itself: nothing is fetched from the internet, so the interface looks the same
+  with the WAN down and makes no request that would reveal the household's
+  address. Both web servers answer only the two file names, behind their
+  existing guards.
+
 ## 0.112.0
 
 **Phones may register only from the LAN, and registrations survive a restart.**

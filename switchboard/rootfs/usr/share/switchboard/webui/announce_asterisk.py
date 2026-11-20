@@ -84,6 +84,7 @@ MASTER_TIMEOUT_S = 10
 # after it; then it is tried again. Failures that cost no time pause nothing.
 MASTER_PAUSE_S = 600
 _PAUSED = "mastering paused after an ffmpeg timeout"
+_TIMED_OUT = "ffmpeg timed out"  # also read by switchboard-tts, which keeps its own pause
 # Speech longer than this is not mastered: the announce endpoint refuses any clip
 # over 90 seconds, so the work would be thrown away, and the limiter's cost grows
 # with the clip. Such a clip takes the pre-0.121 path, without a log line.
@@ -327,7 +328,8 @@ _master_paused_until = 0.0  # time.monotonic(); see MASTER_PAUSE_S
 
 
 def _ffmpeg_master(payload: bytes, rate: "int | None" = None,
-                   n_in: "int | None" = None) -> tuple["array.array | None", str]:
+                   n_in: "int | None" = None,
+                   timeout: "float | None" = None) -> tuple["array.array | None", str]:
     """Run MASTER_FILTERS over `payload` (see _master_argv). `n_in` is the number
     of input samples when it is PCM, so the output length can be checked.
 
@@ -336,16 +338,18 @@ def _ffmpeg_master(payload: bytes, rate: "int | None" = None,
     unless ffmpeg exited 0 and wrote whole float samples, of the length the input
     implies, finite, not all zero, and within a range real audio can reach. Output
     that reaches the MASTER_MAX_SECONDS cut is (None, _TOO_LONG). For
-    MASTER_PAUSE_S after a timeout, ffmpeg is not run: (None, _PAUSED)."""
+    MASTER_PAUSE_S after a timeout, ffmpeg is not run: (None, _PAUSED). `timeout`
+    replaces MASTER_TIMEOUT_S for one call (switchboard-tts's spoken replies)."""
     global _master_paused_until
     if time.monotonic() < _master_paused_until:
         return None, _PAUSED
     try:
         proc = subprocess.run(_master_argv(rate), input=payload,
-                              capture_output=True, timeout=MASTER_TIMEOUT_S)
+                              capture_output=True,
+                              timeout=MASTER_TIMEOUT_S if timeout is None else timeout)
     except subprocess.TimeoutExpired:
         _master_paused_until = time.monotonic() + MASTER_PAUSE_S
-        return None, "ffmpeg timed out"
+        return None, _TIMED_OUT
     except FileNotFoundError:
         return None, "ffmpeg not found"
     except (subprocess.SubprocessError, OSError):
@@ -374,12 +378,13 @@ def _ffmpeg_master(payload: bytes, rate: "int | None" = None,
 
 
 def _master_speech(payload: bytes, rate: "int | None" = None,
-                   n_in: "int | None" = None) -> tuple["array.array | None", str]:
+                   n_in: "int | None" = None,
+                   timeout: "float | None" = None) -> tuple["array.array | None", str]:
     """The mastered speech as 8 kHz int16 — ffmpeg's chain, then the per-clip gain
     and the limiter — and "", or (None, reason). Never raises: an announcement
     must not be lost to the mastering, whatever goes wrong in it."""
     try:
-        y, reason = _ffmpeg_master(payload, rate, n_in)
+        y, reason = _ffmpeg_master(payload, rate, n_in, timeout)
         if y is None:
             return None, reason
         gain_db = _clip_gain_db(_frame_powers(y, TARGET_RATE))

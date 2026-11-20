@@ -104,6 +104,9 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   start of the web UI naming the cause, never the message or the URL, for example
   `announce: phone-band mastering failed (ffmpeg not found), so the clip was
   rendered unmastered; later fallbacks are not logged`.
+  Since v0.122.0 the voice features' spoken replies on a call are mastered by
+  the same code, with a 3-second limit of their own ("How the replies are
+  spoken" in [The voice operator](voice-operator.md)).
 - **Busy-guard:** when the target phone is already on (or being offered) a call —
   its device state reads `INUSE`, `RINGING`, `RINGINUSE`, `BUSY` or `ONHOLD` — the
   call is **not** placed. A second INVITE cannot auto-answer mid-call and would
