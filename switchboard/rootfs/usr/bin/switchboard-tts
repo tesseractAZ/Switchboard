@@ -136,7 +136,7 @@ def _pause() -> None:
         # O_NONBLOCK: a FIFO at PAUSE_FILE fails with ENXIO instead of blocking
         # until a reader opens it; only a regular file has its mtime moved.
         fd = os.open(PAUSE_FILE, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                     0o644)
+                     0o600)
         try:
             if stat.S_ISREG(os.fstat(fd).st_mode):
                 os.utime(fd)
@@ -153,7 +153,7 @@ def _note_unmastered(reason: str) -> None:
     once = True
     try:
         os.close(os.open(NOTED_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o644))
+                         0o600))
     except FileExistsError:
         return
     except OSError:
