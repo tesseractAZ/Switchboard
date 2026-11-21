@@ -89,8 +89,13 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   another machine; it is kept as a fallback reachable from the Home Assistant host
   itself. A blank `console_web_bind` also means `127.0.0.1` (since 0.114.0 it no
   longer follows `console_bind`). The sidebar console above supersedes it and
-  needs no `console_users` entry. Toggle with `console_web_enabled` /
-  `console_web_port`; since 0.114.0 it keeps running when `console_enabled` is off.
+  needs no `console_users` entry. **Since 0.125.0 this terminal starts only when
+  `console_users` has a valid entry**: with none it stays off, and the start-up
+  log says so. Loopback was not enough on its own, because under host
+  networking `127.0.0.1` is the host's own address, reachable by every program
+  on it and by every other host-network add-on. Toggle with
+  `console_web_enabled` / `console_web_port`; since 0.114.0 it keeps running when
+  `console_enabled` is off.
 
 The board itself listens on no network port, only on the Unix socket
 `/run/switchboard/console.sock` (mode 0600, root), and all three front-ends
@@ -122,9 +127,9 @@ both `false` does the board stop, and the sidebar console then shows
 >   the page redirects to a login form, the `/ws` upgrade re-checks the session
 >   cookie (so a saved socket URL is no way around it), sessions are 256-bit
 >   tokens with a 12-hour lifetime dropped on restart, and failed attempts are
->   throttled per source address. With `console_users` **empty** the gate is off,
->   which is why the bind matters; the start-up log states which mode is live and
->   whether the bind actually exposes it.
+>   throttled per source address. With `console_users` **empty** it does not
+>   start at all (since 0.125.0; before, it ran with no login); the start-up log
+>   says which applies.
 >
 > Independently of any login, **both** browser front-ends cap concurrent sessions
 > at 5 and reclaim one after 15 minutes of browser idle; the sidebar console also

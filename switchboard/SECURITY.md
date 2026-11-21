@@ -631,7 +631,10 @@ standalone web terminal and the Ingress console. Each one guards its own door.
 The telnet listener on `:2300`, which had no login, is gone, and that port now
 speaks SSH. That is also why the board and the Home Assistant broker listen on
 Unix sockets rather than loopback ports: under `host_network`, `127.0.0.1` is
-shared with every host-network add-on and process on the machine.
+shared with every host-network add-on and process on the machine. For the same
+reason, since v0.125.0 the standalone web terminal (`:8100`) starts only when
+`console_users` has a valid entry: before, with the shipped defaults it ran on
+`127.0.0.1:8100` with no login, so any of those could drive the board through it.
 
 All three can ring, connect, hang up, transfer, page, set message-waiting, and
 control lights. Each caps its own sessions (the web terminal 5, the Ingress
@@ -644,8 +647,9 @@ every SSH login needs a password:
 - **Password login only**, against `console_users`, read by the web terminal's own
   parser. There is no public-key, keyboard-interactive, host-based or GSSAPI
   login, and no anonymous or default account. While `console_users` has no valid
-  row, **every login is refused**. That includes a value that fails to parse, so
-  SSH fails closed where the web terminal fails open.
+  row, **every login is refused**. That includes a value that fails to parse.
+  Since v0.125.0 the web terminal fails closed the same way: without a valid
+  row it does not start.
 - **A per-address throttle, charged before the password is checked**: 5 attempts
   per address in any 300 s. It is the web terminal's rule, with a separate count.
   A connection also gets at most 3 password attempts.
@@ -817,8 +821,10 @@ Set **`cordless_cert_sha256`** (obtain it with `WP826_HOST=<cordless-ip> node to
 and the device-health monitor verifies the exact certificate **before**
 transmitting the admin password, refusing to continue on a mismatch. The
 maintenance tool does not read add-on options: it takes the same fingerprint
-from the `WP826_CERT_SHA256` environment variable, checks it before logging in,
-and exits on a mismatch. Left blank (or, for the tool, unset), the connection
+from the `WP826_CERT_SHA256` environment variable and, since v0.125.0, checks it
+on every connection before that connection carries a request, the login
+included, refusing on a mismatch. (Before, it checked once on a separate
+connection and then sent the login on new connections nobody checked.) Left blank (or, for the tool, unset), the connection
 still works but is unauthenticated (the tool prints a warning): a LAN-positioned
 attacker could impersonate the handset and capture that password.
 
@@ -828,8 +834,9 @@ attacker could impersonate the handset and capture that password.
 that administers a Grandstream WP826 cordless over its HTTPS API. The phone presents
 a self-signed certificate with no validatable chain, so the tool sets
 `rejectUnauthorized: false`, compares the certificate's SHA-256 against
-`WP826_CERT_SHA256` before it logs in (warning and proceeding unverified when
-that is unset), and reads its admin password from a local file. This is
+`WP826_CERT_SHA256` on every connection before a request goes out on it
+(warning and proceeding unverified when that is unset), and reads its admin
+password from a local file, only when a command logs in. This is
 an accepted LAN-local risk for a personal device-admin tool and is not part of the
 add-on's request path. (CodeQL flags each of the tool's `rejectUnauthorized: false`
 settings. The rule `js/disabling-certificate-validation` is listed for

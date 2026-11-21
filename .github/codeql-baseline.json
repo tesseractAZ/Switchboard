@@ -27,7 +27,7 @@
       "paths": [
         "tools/wp826.mjs"
       ],
-      "reason": "The WP826 serves a self-signed certificate it cannot be told to replace, so chain validation can never succeed and rejectUnauthorized must stay false to reach the device at all. Trust is established instead by PINNING: verifyPin() compares the certificate's SHA-256 against WP826_CERT_SHA256 before login() sends the password, and exits non-zero on a mismatch (the same pin guards the production health monitor). The rule still fires because the flag itself is unavoidable; the risk it describes is mitigated."
+      "reason": "The WP826 serves a self-signed certificate it cannot be told to replace, so chain validation can never succeed and rejectUnauthorized must stay false to reach the device at all. Trust is established instead by PINNING: since v0.125.0 pinnedSocket() compares the certificate's SHA-256 against WP826_CERT_SHA256 on every connection before that connection carries a request, the login included, and refuses on a mismatch; verifyPin() also checks once up front (the same pin guards the production health monitor). The rule still fires because the flag itself is unavoidable; the risk it describes is mitigated."
     },
     {
       "rule": "py/weak-sensitive-data-hashing",

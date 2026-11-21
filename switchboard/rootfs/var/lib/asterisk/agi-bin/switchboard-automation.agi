@@ -201,9 +201,16 @@ def join_names(names: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 # Flow steps
 # --------------------------------------------------------------------------- #
-def pick_area(by_area: dict) -> str | None:
-    """Speak the area prompt, listen, resolve to an area name. 'list' speaks the
-    areas and re-prompts; no match retries once then returns None (goodbye)."""
+# What pick_area returns when the caller says "cancel". Not a string: Home
+# Assistant's lights with no area sit under the key '' ("Unassigned"), which used
+# to double as this sentinel, so choosing "Unassigned" hung up (v0.125.0).
+CANCELLED = object()
+
+
+def pick_area(by_area: dict) -> "str | object | None":
+    """Speak the area prompt, listen, resolve to an area key ('' is the
+    "Unassigned" bucket). 'list' speaks the areas and re-prompts; "cancel"
+    returns CANCELLED; no match retries once then returns None (goodbye)."""
     areas = list(by_area.keys())
     nice_areas = [a if a else "Unassigned" for a in areas]
     # Bias whisper toward the area names AND the command words the prompt
@@ -223,7 +230,7 @@ def pick_area(by_area: dict) -> str | None:
         if lights_match is None:
             return None
         if lights_match.match_intent(text) == "cancel":
-            return ""  # explicit cancel sentinel (caller treats as goodbye)
+            return CANCELLED
         if lights_match.match_intent(text) == "list":
             say(f"The rooms are: {join_names(nice_areas)}.")
             continue  # re-prompt without consuming an attempt
@@ -313,11 +320,11 @@ def main() -> None:
         return
 
     area = pick_area(by_area)
-    if not area and area != "":
-        # None -> exhausted retries; speak a polite goodbye.
+    if area is None:
+        # Exhausted retries; speak a polite goodbye.
         say_or("Sorry, I didn't get that. Goodbye.", PROMPT_GOODBYE)
         return
-    if area == "":
+    if area is CANCELLED:
         say_or("Okay, goodbye.", PROMPT_GOODBYE)
         return
 

@@ -85,15 +85,25 @@ sw_is_loopback() {
     esac
 }
 
-# Unauthenticated AND reachable is the condition worth a notice. Either alone is
-# not: a loopback-bound terminal with no users is not "on the LAN", and an
-# authenticated one on 0.0.0.0 has a gate.
-if [ "${VALID_USERS}" = "0" ] && ! sw_is_loopback "${BIND}"; then
-    bashio::log.notice "The console web terminal is UNAUTHENTICATED on ${BIND} and drives the operator console (ring/connect/hang up). Add console_users entries to require a sign-in, or set console_web_enabled:false to turn it off."
-elif [ "${VALID_USERS}" = "0" ]; then
-    bashio::log.info "Console web terminal has no login gate, but is bound to ${BIND} — not reachable from the LAN directly."
+# v0.125.0 — NO LOGIN, NO TERMINAL. Without console_users this terminal drives
+# the operator console (ring, connect, hang up) for anyone who can reach its
+# port, and "bound to loopback" did not make that safe: under host_network the
+# container's 127.0.0.1 is the host's own, so every program on the host and
+# every other host-network add-on could connect. The Ingress console in the web
+# UI is the way in without a login of its own (Home Assistant signs the caller
+# in), so this service now idles instead. VALID_USERS is the server's own count
+# (webauth.parse_users) and reads 0 when it cannot be parsed, so this fails
+# closed, and anything that is not a positive whole number idles too.
+# switchboard-opt reads the init snapshot, not bashio, so a transient blank
+# options read cannot reach it.
+if ! [ "${VALID_USERS}" -gt 0 ] 2>/dev/null; then
+    bashio::log.notice "Console web terminal NOT started: console_users is empty, and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${BIND}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add console_users entries to run this terminal with a sign-in."
+    exec sleep infinity
+fi
+if sw_is_loopback "${BIND}"; then
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${BIND}."
 else
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s))."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${BIND}:${PORT}."
 fi
 # The bridge target is the operator console's Unix socket at a fixed path
 # (server.py's CONSOLE_SOCKET default). console_port is the SSH service's port

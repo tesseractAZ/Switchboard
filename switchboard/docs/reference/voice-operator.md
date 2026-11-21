@@ -110,7 +110,8 @@ unresolved replies end the call.
 A guided flow: it asks for a room, then a light in that room, tells you whether
 it's on or off, and asks you to say "turn on", "turn off", or "cancel". It reads
 your lights and areas live from Home Assistant. Say "list" at any step to hear the
-options. Lights with no assigned area appear under "Unassigned".
+options. Lights with no assigned area appear under "Unassigned"; say
+"Unassigned" to choose them (since v0.125.0: before, saying it ended the call).
 
 ## Dial-a-status — dial `45`
 
