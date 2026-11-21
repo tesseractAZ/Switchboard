@@ -446,7 +446,7 @@ def analyse_speech_module(src: str, shared=None):
     stderr outside said(), directly or through another call)}. A first version
     of this scan looked inside one scope only, so the announce AGI's words, which
     reach agi_speech.say()'s log line through _record() and say_or(), passed it
-    (v0.122.1)."""
+    (v0.126.0)."""
     shared_rec, shared_leaky = shared or (frozenset(), {})
     tree = ast.parse(src)
     funcs = [n for n in ast.walk(tree) if isinstance(n, _DEFS)]
@@ -544,7 +544,7 @@ def test_the_speech_scanner_can_see_what_it_forbids():
 def test_the_speech_scanner_follows_the_words_across_calls():
     """Words reach a log line through a helper's return value or another
     function's parameter, as the announce AGI's did through _record() and
-    agi_speech.say_or() -> say() until v0.122.1."""
+    agi_speech.say_or() -> say() until v0.126.0."""
     leaky_say = 'def say(text):\n    log("speech", f"tts failed for {text[:40]!r}")\n\n'
     gated_say = 'def say(text):\n    log("speech", f"tts failed for {said(text, w)}")\n\n'
     cases = {
@@ -572,8 +572,8 @@ def test_the_speech_scanner_follows_the_words_across_calls():
         assert bool(scan_speech_to_stderr(agi, shared)[0]) is flagged, speech
 
 
-# agi_speech.say() before v0.122.1, in the shape the announce AGI's words reached.
-_SAY_BEFORE_0_122_1 = (
+# agi_speech.say() before v0.126.0, in the shape the announce AGI's words reached.
+_SAY_BEFORE_0_126_0 = (
     'def log(tag, msg):\n    sys.stderr.write(f"[{tag}] {msg}\\n")\n\n'
     'def say(text, prefix="sw-voice"):\n'
     '    log("speech", f"tts failed rc=1 for {text[:40]!r}")\n\n'
@@ -582,12 +582,12 @@ _SAY_BEFORE_0_122_1 = (
 
 
 def test_the_scan_sees_the_announce_words_that_reached_say():
-    """The real announce AGI against the pre-v0.122.1 say(): exactly its spoken
+    """The real announce AGI against the pre-v0.126.0 say(): exactly its spoken
     confirmation is flagged. Run against the current agi_speech, the tree scan
     below must then find nothing; if this stops flagging, a refactor of the AGI
     or of the scanner blinded it, and the tree scan proves nothing about it."""
     src = ANNOUNCE.read_text()
-    bad, _ = scan_speech_to_stderr(src, analyse_speech_module(_SAY_BEFORE_0_122_1))
+    bad, _ = scan_speech_to_stderr(src, analyse_speech_module(_SAY_BEFORE_0_126_0))
     lines = src.splitlines()
     assert [("Announcing on the speakers" in lines[ln - 1], names) for ln, names in bad] \
         == [(True, ("text via say_or()",))], bad
@@ -636,15 +636,18 @@ def test_a_failed_reply_names_the_words_only_when_transcripts_are_on(
     flow hands it the caller's own words. Its failure lines follow the policy
     switchboard-stt and the assistant follow, failing closed (no file, or a
     truthy value that is not true, withholds). A TimeoutExpired renders its whole
-    command line, the text included; real child processes, cut to 0.3 s."""
+    command line, the text included; real child processes, the hung one's limit
+    cut to 0.3 s. ★ This test, not the scan above, guards the exception line:
+    the text rides inside the exception, which no name in the source carries."""
     sp = _speech(tmp_path, monkeypatch, policy)
     tts = tmp_path / "tts"
     tts.write_text("#!/bin/sh\nexec sleep 5\n" if how == "timeout" else "#!/bin/sh\nexit 1\n")
     tts.chmod(0o755)
     monkeypatch.setattr(sp, "TTS", str(tts))
-    real_run = subprocess.run
-    monkeypatch.setattr(sp.subprocess, "run",
-                        lambda cmd, **kw: real_run(cmd, **{**kw, "timeout": 0.3}))
+    if how == "timeout":     # the rc case keeps say()'s own limit: no flake on a slow runner
+        real_run = subprocess.run
+        monkeypatch.setattr(sp.subprocess, "run",
+                            lambda cmd, **kw: real_run(cmd, **{**kw, "timeout": 0.3}))
     text = f"Announcing on the speakers: {SECRET_WORDS}. Goodbye."
     capsys.readouterr()
     assert sp.say(text) is False

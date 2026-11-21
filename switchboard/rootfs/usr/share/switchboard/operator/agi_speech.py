@@ -126,7 +126,7 @@ def say(text: str, prefix: str = "sw-voice") -> bool:
     """Synthesize text with switchboard-tts and Playback it. True on success;
     never raises (caller falls back to a canned prompt).
 
-    A failure names the text only when transcripts are on (v0.122.1): the
+    A failure names the text only when transcripts are on (v0.126.0): the
     announce flow speaks the caller's own words back ("Announcing on the
     speakers: …"), and this line cannot tell those from a room name. The policy
     is read on the failure path only, so a spoken reply costs no file read."""
