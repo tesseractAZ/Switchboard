@@ -13,8 +13,8 @@ import crypto from 'node:crypto';
 // on your router and set WP826_HOST=<ip>; the default below is only a placeholder.
 const HOST = process.env.WP826_HOST || '192.168.1.84';
 // WP826_PORT: a port other than 443 (a forwarded port, or a local stand-in).
-// Checked here, once: an invalid value used to be dropped silently by the
-// unpinned requests (back to 443) and rejected by the pinned ones.
+// Anything that is not a whole number from 1 to 65535 is refused here, once,
+// before any connection.
 const PORT = process.env.WP826_PORT ? Number(process.env.WP826_PORT) : 443;
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error(`WP826_PORT must be a port number from 1 to 65535, not ${JSON.stringify(process.env.WP826_PORT)}`);
@@ -63,8 +63,11 @@ function peerConnect(host, port = PORT) {
     sock.on('error', rej);
   });
 }
+// The check connection carries no request, so it is closed outright: end()
+// would wait for the peer to close its side, with peerConnect's timer already
+// off, and a handset that never does would keep the tool from exiting.
 const peerFingerprint = (host, port) =>
-  peerConnect(host, port).then(({ sock, fp }) => { sock.end(); return fp; });
+  peerConnect(host, port).then(({ sock, fp }) => { sock.destroy(); return fp; });
 
 async function verifyPin() {
   const want = normPin(CERT_PIN);

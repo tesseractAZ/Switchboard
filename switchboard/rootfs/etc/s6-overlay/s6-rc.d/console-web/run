@@ -24,7 +24,9 @@ fi
 # which parses raw options.json and would silently bypass an options overlay.
 # The enable-flag gates above deliberately STAY on bashio — their empty-read
 # semantics are load-bearing (see the comment at the top) and the overlay is
-# for values, not for turning services off.
+# for values, not for turning services off. One value does decide whether this
+# terminal starts (since v0.125.0): console_users, read below through
+# switchboard-opt, so an overlay's console_users counts for the login gate.
 PORT="$(switchboard-opt console_web_port 8100)"
 if [ -z "${PORT}" ] || [ "${PORT}" = "null" ]; then
     PORT="8100"
@@ -76,9 +78,9 @@ export CONSOLE_WEB_BIND="${BIND}"
 # `127.*` rather than a literal 127.0.0.1: the whole 127/8 block is loopback and
 # a bind of 127.0.1.1 is just as unreachable from the LAN.
 #
-# The DEFAULT (0.0.0.0, and an empty read) deliberately falls through to "not
-# loopback", so the failure direction is a warning nobody needed rather than a
-# silence on a genuinely exposed terminal.
+# It only picks which start-up line describes the bind. Anything it does not
+# recognise (0.0.0.0, a LAN address) is described as reachable from the LAN, so
+# a wrong guess overstates the exposure rather than hiding it.
 sw_is_loopback() {
     case "${1:-}" in
         127.*|::1|\[::1\]|localhost) return 0 ;;

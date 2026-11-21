@@ -150,7 +150,10 @@ renderer, the dashboard, the operator console, and the health monitors all read
 the post-overlay snapshot (via `switchboard-opt`), so they share one effective
 view.
 
-**The overlay cannot turn a service on or off.** Each s6 `run` script decides
+**The overlay cannot turn a service on or off**, with one exception: since
+0.125.0 the standalone web terminal starts only when `console_users` has a
+valid entry, and it reads `console_users` after the overlay, so an overlay's
+`console_users` decides whether it starts. Otherwise, each s6 `run` script decides
 whether to start or idle by reading its enable flag with `bashio::config`, which
 parses the saved `options.json` directly and never sees the overlay. That is
 deliberate — `bashio::config` can momentarily return an empty string during a

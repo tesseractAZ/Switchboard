@@ -112,14 +112,17 @@ it's on or off, and asks you to say "turn on", "turn off", or "cancel". It reads
 your lights and areas live from Home Assistant. Say "list" at any step to hear the
 options. Lights with no assigned area appear under "Unassigned"; say
 "Unassigned" to choose them (since v0.125.0: before, saying it ended the call).
-If Home Assistant has an area actually named "Unassigned", they join it.
+If Home Assistant has an area actually named "Unassigned", they join it, except
+one named like a light already in that area.
 
 Saying a room's or a light's whole name chooses it even when the name holds or
 sounds like a command word, such as "Top Floor" (close to "stop"), "Exit Sign"
-or "All Lights"; the command word on its own still cancels or lists (since
-v0.125.0: before, such names could not be chosen). "Cancel" at any step ends
-the call with "okay, goodbye"; two replies in a row that it cannot match end it
-with "sorry, I didn't get that".
+or "All Lights" (since v0.125.0: before, such names could not be chosen). A
+command word on its own still cancels or lists, unless a room or light is named
+exactly that word. Two lights with the same name in one room cannot be told
+apart; give them different names in Home Assistant. "Cancel" at any step ends
+the call with "okay, goodbye"; two replies at one step that it cannot match
+(asking for the list does not count) end it with "sorry, I didn't get that".
 
 ## Dial-a-status — dial `45`
 

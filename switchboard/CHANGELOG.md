@@ -7,15 +7,16 @@ Recent releases. Releases up to 0.114.2 are in the
 
 **Fixes found by a documentation review.**
 
-- **Lights menu (`43`): every room and light can be chosen by name.** Lights
-  with no area are read out as "Unassigned", but saying it ended the call,
-  because that area's internal name was also the menu's signal for "cancel".
-  A room or light whose name holds or sounds like a command word ("Top Floor"
-  is close to "stop"; "Exit Sign", "All Lights") could not be chosen either,
-  because the command words were checked first. Saying a whole name now
-  chooses it, and a command word on its own still cancels or lists. An area
-  actually named "Unassigned" now takes the lights with no area, instead of
-  standing beside a second "Unassigned" that could not be told apart. The
+- **Lights menu (`43`): rooms and lights that could not be chosen by name now
+  can be.** Lights with no area are read out as "Unassigned", but saying it
+  ended the call, because that area's internal name was also the menu's signal
+  for "cancel". A room or light whose name holds or sounds like a command word
+  ("Top Floor" is close to "stop"; "Exit Sign", "All Lights") could not be
+  chosen either, because the command words were checked first. Saying a whole
+  name now chooses it; a command word on its own still cancels or lists, unless
+  something is named exactly that word. An area actually named "Unassigned" now
+  takes the lights with no area (except one named like a light already in it),
+  instead of standing beside a second "Unassigned" that could not be told apart. The
   goodbyes also say what happened: a cancel at the light step was answered as
   a mishearing, and two mishearings at the on/off step as a cancel.
 - **The standalone web terminal (`:8100`) starts only with a login.** With

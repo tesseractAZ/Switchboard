@@ -110,6 +110,17 @@ def test_the_command_words_alone_still_win():
     assert any(s.startswith("The lights are:") for s in spoken), spoken
 
 
+def test_a_name_that_is_exactly_a_command_word_is_chosen():
+    # Documented: the whole name wins, so a light named "Exit" is reachable;
+    # cancel and the other command words still cancel beside it.
+    by_area = {"Hall": [{"entity_id": "light.exit", "name": "Exit"},
+                        {"entity_id": "light.hall", "name": "Ceiling"}]}
+    spoken, sets = _run(["Hall", "exit", "turn on"], by_area)
+    assert sets == [("light.exit", True)], (spoken, sets)
+    spoken, sets = _run(["Hall", "cancel"], by_area)
+    assert sets == [] and spoken[-1] == "Okay, goodbye.", spoken
+
+
 def test_cancel_at_the_light_step_says_okay():
     spoken, sets = _run(["Kitchen", "cancel"])
     assert sets == [] and spoken[-1] == "Okay, goodbye.", spoken
@@ -132,3 +143,15 @@ def test_a_real_area_named_unassigned_takes_the_lights_with_no_area():
         spoken, sets = _run(["list", "Unassigned", "Porch Lamp", "turn on"], by_area)
         assert f"The rooms are: {real}." in spoken, spoken
         assert sets == [("light.porch_lamp", True)], (real, spoken, sets)
+
+
+def test_a_no_area_light_named_like_one_in_the_real_unassigned_area_stays_out():
+    # Joining would tie the two "Desk Lamp"s, and neither could be chosen; the
+    # area's own one could before v0.125.0, and still can.
+    by_area = {"Unassigned": [{"entity_id": "light.desk", "name": "Desk Lamp"}],
+               "": [{"entity_id": "light.desk_2", "name": "desk lamp"},
+                    {"entity_id": "light.porch_lamp", "name": "Porch Lamp"}]}
+    spoken, sets = _run(["Unassigned", "Desk Lamp", "turn on"], by_area)
+    assert sets == [("light.desk", True)], (spoken, sets)
+    spoken, sets = _run(["Unassigned", "Porch Lamp", "turn on"], by_area)
+    assert sets == [("light.porch_lamp", True)], (spoken, sets)

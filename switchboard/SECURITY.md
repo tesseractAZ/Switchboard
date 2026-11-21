@@ -709,8 +709,9 @@ exact-match allowlist of two filenames (no directory serving, no path joining on
 the parameter), which is the surface that keeps that trade acceptable.
 
 **Mitigations you control:** `console_bind: 127.0.0.1` keeps SSH on the Home
-Assistant host. `console_web_bind` stays on loopback unless you change it; if you
-do put the `:8100` terminal on the LAN, configure `console_users` first.
+Assistant host. `console_web_bind` stays on loopback unless you change it; the
+`:8100` terminal starts only with a `console_users` entry, so wherever it listens
+it asks for that sign-in.
 
 `console_enabled: false` stops only the SSH service, and `console_web_enabled:
 false` only the standalone terminal; neither alone affects the Ingress console.
@@ -849,9 +850,10 @@ where they remain listed among the closed alerts.)
 1. **Change the default room secrets** (`change-me-101`, `change-me-102`, …) before
    your phones register. Use a strong, unique `secret` per room; the validator
    rejects `;`, whitespace, and control characters.
-2. **A `console_users` entry, to use the SSH console.** With none, every SSH
-   login is refused. The same entries gate the web terminal, which defaults to
-   `127.0.0.1` (`console_web_bind`); configure one before you move that bind. An
+2. **A `console_users` entry, to use the SSH console or the standalone web
+   terminal.** With none, every SSH login is refused and the web terminal does
+   not start; with one, both ask for it. The web terminal defaults to
+   `127.0.0.1` (`console_web_bind`). An
    upgraded install keeps its stored binds, so check them: a `console_bind` of
    `127.0.0.1` keeps SSH on the Home Assistant host.
 3. **To allow LAN-triggered announcements**, set a non-empty `announce_token`;

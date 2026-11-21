@@ -4,9 +4,11 @@ The web terminal fronts the operator console (ring / connect / hang up every
 phone), so LAN exposure needs a credential. The design mirrors the household's
 other TUI add-ons: a `console_users` options list of {username, password} rows
 (password masked in the Configuration UI), a login page, an HttpOnly session
-cookie, and a per-source-IP throttle. An EMPTY users list disables the gate —
-backward-compatible with every existing install (the run script's boot NOTICE
-says which mode is live).
+cookie, and a per-source-IP throttle. An EMPTY users list disables the gate in
+server.py, but since v0.125.0 the console-web run script counts users with
+parse_users first and does not start the server at all when it finds none (it
+idles with a NOTICE). The SSH console reads the same rows and refuses every
+login while there are none.
 
 Everything stateful or judgemental lives here so it unit-tests without a
 server; server.py only wires sockets to these helpers.
@@ -43,19 +45,27 @@ _MAX_SESSIONS = 64          # session-store bound (a home has a handful of brows
 def parse_users(raw: str) -> list:
     """CONSOLE_WEB_USERS env (compact JSON from switchboard-opt) → [(user, pw)].
 
-    Malformed input yields [] — which DISABLES the login gate, matching the
-    add-on-wide fail-open-to-previous-behavior convention for bad options; the
-    run script logs which mode is active so a misconfiguration is visible."""
+    Malformed input yields [], and both readers fail closed on it: the web
+    terminal's run script does not start the terminal, and the SSH console
+    refuses every login. A row counts only when both fields are text or a whole
+    number (a hand-written overlay may say 1234): null, true/false, a list or an
+    object is dropped, never turned into a password such as "None"."""
     try:
         rows = json.loads(raw or "[]")
     except ValueError:
         return []
+
+    def _text(v) -> str:
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            return ""
+        return str(v)
+
     users = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        name = str(row.get("username", "")).strip()
-        password = str(row.get("password", ""))
+        name = _text(row.get("username", "")).strip()
+        password = _text(row.get("password", ""))
         if name and password:
             users.append((name, password))
     return users

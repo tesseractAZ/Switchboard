@@ -526,8 +526,9 @@ def test_the_web_terminal_never_runs_without_a_login():
     """v0.125.0: with no valid console_users the standalone terminal idles,
     whatever the bind. Under host_network 127.0.0.1 is the host's own loopback,
     so a no-login terminal there was reachable by every program on the host and
-    every other host-network add-on. Runs the REAL gate under bash, with the
-    count the run script computes from webauth.parse_users."""
+    every other host-network add-on. Runs the REAL gate under bash on count
+    values given directly; the next two tests run the real count, and the
+    whole script."""
     gates = [g for g in _idle_gates(_S6 / "console-web" / "run") if "VALID_USERS" in g]
     check("console-web/run: the login gate is a top-level idle gate", len(gates) == 1)
     for users, bind, want in (("0", "127.0.0.1", "IDLE"), ("0", "0.0.0.0", "IDLE"),
@@ -566,6 +567,7 @@ def test_the_login_count_is_the_one_the_server_would_use():
     for users, want in (("[]", "IDLE"), ("", "IDLE"), ("not json", "IDLE"), ("{}", "IDLE"),
                         ('[{"username":"op","password":""}]', "IDLE"),
                         ('[{"username":"  ","password":"pw"}]', "IDLE"),
+                        ('[{"username":"op","password":null}]', "IDLE"),
                         (good, "IDLE"),
                         (f"[{good}]", "RUN"),
                         (f'[{good},{{"username":"x"}}]', "RUN")):
@@ -582,6 +584,52 @@ def test_the_login_count_is_the_one_the_server_would_use():
                         + broken + "\n" + gate + "\necho RUN\n"],
                        capture_output=True, text=True, timeout=30, env=dict(os.environ, USERS_JSON=f"[{good}]"))
     check(f"console-web/run: an unimportable parser idles (got {r.stdout.split()})", r.stdout.split()[-1:] == ["IDLE"])
+
+
+def _run_console_web(users: str, enabled: str = "true", bind: str = "127.0.0.1"):
+    """The WHOLE console-web run script under bash in strict mode, with bashio
+    and switchboard-opt stubbed and its two execs replaced by markers.
+    Returns (outcome, log lines in order)."""
+    import shlex
+    webdir = str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console-web")
+    src = (_S6 / "console-web" / "run").read_text().split("\n", 1)[1]  # drop the with-contenv shebang
+    src = (src.replace("/usr/share/switchboard/console-web", webdir)
+              .replace("exec sleep infinity", "echo OUTCOME=IDLE; exit 0")
+              .replace("exec python3 server.py", "echo OUTCOME=SERVER; exit 0"))
+    stubs = (
+        "set -o errexit -o nounset -o pipefail\n"
+        f'bashio::config() {{ case "$1" in console_web_enabled) printf %s {shlex.quote(enabled)} ;; *) printf null ;; esac; }}\n'
+        'bashio::log.info() { echo "INFO: $*"; }\nbashio::log.notice() { echo "NOTICE: $*"; }\n'
+        'bashio::log.warning() { echo "WARNING: $*"; }\n'
+        f'switchboard-opt() {{ case "$1" in console_users) printf %s {shlex.quote(users)} ;; '
+        f'console_web_bind) printf %s {shlex.quote(bind)} ;; *) printf %s "${{2:-}}" ;; esac; }}\n')
+    r = subprocess.run(["bash", "-c", stubs + src], capture_output=True, text=True, timeout=30)
+    lines = r.stdout.splitlines()
+    outcome = next((l.split("=", 1)[1] for l in lines if l.startswith("OUTCOME=")), f"none (rc {r.returncode}: {r.stderr.strip()[-200:]})")
+    return outcome, [l for l in lines if not l.startswith("OUTCOME=")]
+
+
+def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
+    """End to end: nothing between the count and the gate can change the
+    outcome, and every start-up line is true for the case it prints in."""
+    good = '[{"username":"op","password":"pw"}]'
+    for users in ("[]", "", "not json", '[{"username":"op","password":""}]',
+                  '[{"username":"op","password":null}]'):
+        outcome, log = _run_console_web(users)
+        check(f"console-web/run end to end: console_users={users!r} -> IDLE (got {outcome}, {log})", outcome == "IDLE")
+        check(f"console-web/run end to end: console_users={users!r} says why",
+              any(l.startswith("NOTICE: Console web terminal NOT started") and "no valid entry" in l for l in log))
+        check(f"console-web/run end to end: console_users={users!r} never claims a start ({log})",
+              not any("Starting" in l or "ACTIVE" in l for l in log))
+    for bind, where in (("127.0.0.1", "bound to 127.0.0.1"), ("0.0.0.0", "reachable from the LAN on 0.0.0.0:8100")):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run end to end: one valid user on {bind} -> SERVER (got {outcome}, {log})", outcome == "SERVER")
+        check(f"console-web/run end to end: {bind} start-up lines ({log})",
+              any(l == f"INFO: Starting Switchboard console web terminal on {bind}:8100 ..." for l in log)
+              and any("login gate ACTIVE (1 user(s))" in l and where in l for l in log)
+              and not any(l.startswith("NOTICE") for l in log))
+    outcome, log = _run_console_web(good, enabled="false")
+    check(f"console-web/run end to end: console_web_enabled false -> IDLE (got {outcome})", outcome == "IDLE")
 
 def _code(svc):
     """A run script with its comment lines removed."""

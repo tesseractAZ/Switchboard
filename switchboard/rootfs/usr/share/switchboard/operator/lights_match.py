@@ -158,6 +158,11 @@ def _all_words(text: str) -> list[str]:
     return [NUM_WORDS.get(t, t) for t in low.split()]
 
 
+def same_name(a: str, b: str) -> bool:
+    """True when said_whole_name could not tell the two names apart."""
+    return _all_words(a) == _all_words(b)
+
+
 def said_whole_name(text: str, names: list[str]) -> int | None:
     """Index of the one entry in ``names`` whose every word is exactly what the
     caller said, or None when no entry is, or more than one is.

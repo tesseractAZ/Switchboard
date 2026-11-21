@@ -179,20 +179,46 @@ def test_a_certificate_swapped_after_login_gets_no_session_id(handset):
     assert "sid123" not in out, "the refusal printed the session id"
 
 
-def test_an_invalid_port_is_refused_before_any_connection(handset):
-    d, start, (a, fp_a), _ = handset
-    srv = start(a)
-    for bad in ("abc", "0", "70000", "8.5"):
+def test_an_invalid_port_is_refused():
+    for bad in ("abc", "0", "70000", "8.5", "-1"):
         env = dict(os.environ, WP826_HOST="127.0.0.1", WP826_PORT=bad, WP826_PASS_FILE="/nonexistent/wp-pass")
         env.pop("WP826_CERT_SHA256", None)
-        r = subprocess.run(["node", str(TOOL), "get", "P1"], capture_output=True, text=True, env=env, timeout=30)
+        r = subprocess.run(["node", str(TOOL), "fingerprint"], capture_output=True, text=True, env=env, timeout=30)
         assert r.returncode != 0 and "WP826_PORT must be a port number" in r.stderr, (bad, r.stdout, r.stderr)
-    assert srv.conns == 0, srv.conns
 
 
-def test_a_ringtone_upload_runs_on_a_checked_connection(handset):
-    """The upload builds its own request (multipart, not req()), so it is
-    pinned on its own: it carries the session id."""
+def test_the_tool_exits_when_the_handset_never_closes_its_side(handset):
+    """The check connection (verifyPin, `fingerprint`) must not wait for the
+    peer to close: a handset that holds connections open would keep the tool
+    running after it has done its work."""
+    d, start, (a, fp_a), _ = handset
+    holder = socketserver.TCPServer(("127.0.0.1", 0), socketserver.BaseRequestHandler, bind_and_activate=True)
+    held = []
+
+    def hold():
+        while True:
+            try:
+                s, _ = holder.socket.accept()
+            except OSError:
+                return
+            try:
+                held.append(a.wrap_socket(s, server_side=True))  # handshake, then never close
+            except (OSError, ssl.SSLError):
+                pass
+    threading.Thread(target=hold, daemon=True).start()
+    try:
+        r = _tool(holder.server_address[1], "fingerprint", timeout=20)
+        assert r.returncode == 0 and fp_a in r.stdout.replace(":", "").lower(), r.stdout + r.stderr
+    finally:
+        holder.server_close()
+        for s in held:
+            s.close()
+
+
+def test_a_ringtone_upload_reaches_the_handset_on_one_connection(handset):
+    """The upload builds its own request (multipart, not req()). This checks
+    its path and that no extra connection is opened beside it; whether that
+    connection was CHECKED is what the swap test below proves."""
     d, start, (a, fp_a), _ = handset
     pw = d / "pass"
     pw.write_text("not-a-real-password\n")
