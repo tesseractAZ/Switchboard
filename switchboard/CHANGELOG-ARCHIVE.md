@@ -3,6 +3,18 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.115.0
+
+**Documentation opens quickly in Home Assistant.** No change to how the add-on runs.
+
+- Home Assistant renders the add-on's `DOCS.md` whole each time Documentation is
+  opened, and it had grown to 137 KB. It is now a short operator guide (about
+  25 KB): what to dial, everyday tasks, the options most often changed and the
+  most common fixes, each linking to its full reference page.
+- The full reference moved, unchanged in substance, to `docs/reference/` (sixteen
+  pages and an index). README and SECURITY links point there, the Word and PDF
+  manual is built from the guide plus every reference page, and tests keep the
+  guide under 32 KiB and fail on any dead link or anchor.
 ## 0.114.2
 
 **A way back from the console to the dashboard.**
