@@ -12,7 +12,13 @@ import crypto from 'node:crypto';
 // The handset takes its address from DHCP and will move. Give it a reservation
 // on your router and set WP826_HOST=<ip>; the default below is only a placeholder.
 const HOST = process.env.WP826_HOST || '192.168.1.84';
-const PORT = Number(process.env.WP826_PORT || 443);
+// WP826_PORT: a port other than 443 (a forwarded port, or a local stand-in).
+// Checked here, once: an invalid value used to be dropped silently by the
+// unpinned requests (back to 443) and rejected by the pinned ones.
+const PORT = process.env.WP826_PORT ? Number(process.env.WP826_PORT) : 443;
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error(`WP826_PORT must be a port number from 1 to 65535, not ${JSON.stringify(process.env.WP826_PORT)}`);
+}
 const USER = 'admin';
 // Read from a file, never an argv or an env value: both land in shell
 // history and in `ps` output for every process on the box. Read only when a
@@ -75,14 +81,18 @@ async function verifyPin() {
   }
 }
 // A TLS connection to the handset whose certificate matches the pin, checked
-// before it is returned, or null when no pin is set.
-async function pinnedSocket() {
+// before it is returned, or null when no pin is set. `what` names the request
+// it was for (its path, never its query: that carries the session id). The
+// check runs per request, so a mismatch partway through a command stops it
+// there, after the requests before it have gone out.
+async function pinnedSocket(what) {
   const want = normPin(CERT_PIN);
   if (!want) return null;
   const { sock, fp } = await peerConnect(HOST);
   if (fp !== want) {
     sock.destroy();
-    throw new Error(`WP826 certificate mismatch at ${HOST} (expected ${want}, got ${fp}); nothing was sent`);
+    throw new Error(`WP826 certificate mismatch at ${HOST} (expected ${want}, got ${fp}); ` +
+      `${what} was not sent, and the command stopped there`);
   }
   return sock;
 }
@@ -91,9 +101,12 @@ async function pinnedSocket() {
 // `agent: false` would mean a NEW agent, which opens its own, unchecked
 // connection and never uses createConnection; with no agent, the request
 // runs on exactly the socket createConnection returns.
+// defaultPort: with no agent Node has no default port to compare against, and
+// would send `Host: <ip>:443` where every other path (and the add-on's poller)
+// sends `Host: <ip>`.
 async function send(opts, data) {
-  const sock = await pinnedSocket();
-  if (sock) { delete opts.agent; opts.createConnection = () => sock; }
+  const sock = await pinnedSocket(`${opts.method} ${String(opts.path).split('?')[0]}`);
+  if (sock) { delete opts.agent; opts.defaultPort = 443; opts.createConnection = () => sock; }
   return new Promise((res, rej) => {
     const r = https.request(opts, (resp) => {
       (resp.headers['set-cookie'] || []).forEach((c) => { const kv = c.split(';')[0]; const i = kv.indexOf('='); cookies[kv.slice(0, i)] = kv.slice(i + 1); });

@@ -331,6 +331,21 @@ def test_stt_rooms_decision():
           stt.resolve_rooms_text("kitchin", rooms) == "11")
 
 
+def test_said_whole_name():
+    names = ["Top Floor", "All Lights", "Unassigned", "Bedroom 2", "Left Hallway"]
+    w = lm.said_whole_name
+    check("whole 'Top Floor' -> 0", w("Top Floor", names) == 0)
+    check("whole 'top floor.' -> 0 (case, punctuation)", w("top floor.", names) == 0)
+    check("whole 'all lights' -> 1", w("all lights", names) == 1)
+    check("whole 'bedroom two' -> 3 (number words)", w("bedroom two", names) == 3)
+    check("whole 'all' -> None (filler counts)", w("all", names) is None)
+    check("whole 'top' -> None (part of a name)", w("top", names) is None)
+    check("whole 'left' -> None (part of a name)", w("left", names) is None)
+    check("whole 'the top floor' -> None (extra word)", w("the top floor", names) is None)
+    check("whole '' -> None", w("", names) is None)
+    check("whole duplicate -> None", w("Office", ["Office", "office"]) is None)
+
+
 def test_wakeup_gate():
     check("wakeup 'wake up call'", matcher.is_wakeup_request("wake up call") is True)
     check("wakeup 'wakeup'", matcher.is_wakeup_request("wakeup") is True)

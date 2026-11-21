@@ -270,8 +270,8 @@ doesn't stop when it has queued a call; it records what actually happened.
   - **SSH console (`2300`):** password-only, checked against `console_users`. It
     refuses every login until a user is configured, and also refuses exec, SFTP
     and port forwarding.
-  - **Browser terminal (`8100`):** defaults to `127.0.0.1` and has no login until
-    `console_users` has an entry, so configure one before you move its bind.
+  - **Browser terminal (`8100`):** defaults to `127.0.0.1`, and starts only once
+    `console_users` has an entry, which it then asks for.
 - **Change the default room secrets before your phones register.**
 
 The threat model, the toll-fraud defences, the accepted LAN-local risks and the

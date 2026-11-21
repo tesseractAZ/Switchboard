@@ -20,8 +20,8 @@ essentials:
   every login needs a `console_users` password: with none configured, every
   login is refused. The board itself has no network listener, only a root-only
   Unix socket. The standalone web terminal binds to `127.0.0.1` by default, and
-  its sign-in is off until `console_users` has an entry — so configure one before
-  you move its bind. The [sidebar console](operator-console.md) needs neither.
+  starts only once `console_users` has an entry, which it then asks for. The
+  [sidebar console](operator-console.md) needs neither.
 - Two read-only GETs on port 8099 are deliberately reachable from the LAN
   without authentication. `/phonebook.xml` lets the cordless fetch its remote
   phonebook and exposes room names and internal extensions only

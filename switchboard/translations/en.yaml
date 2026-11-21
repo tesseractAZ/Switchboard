@@ -114,16 +114,16 @@ configuration:
     description: Interface the SSH console listens on. Default '0.0.0.0' (every interface), so an SSH client on the LAN can reach it; every login still needs a Console Users password. '127.0.0.1' restricts it to the Home Assistant host. Only SSH uses it; the sidebar console and the web terminal are not affected by it.
   console_web_enabled:
     name: Console Web Terminal
-    description: A standalone browser version of the operator console on its own port, with the same powers as the console. It is separate from the console in the Switchboard sidebar, which turning this off does not affect unless the SSH console is off too. It listens on the Home Assistant host only by default. If its bind is moved onto the LAN, it has no login unless Console Users are configured.
+    description: A standalone browser version of the operator console on its own port, with the same powers as the console. It is separate from the console in the Switchboard sidebar, which turning this off does not affect unless the SSH console is off too. It listens on the Home Assistant host only by default, and it starts only once Console Users has an entry, which it then asks for.
   console_web_port:
     name: Console Web Terminal Port
     description: TCP port for the web terminal. Default 8100.
   console_web_bind:
     name: Console Web Terminal Bind Address
-    description: Interface the web terminal listens on. Defaults to 127.0.0.1 (this machine only), and blank also means 127.0.0.1. Set 0.0.0.0 to reach it from the LAN, and configure Console Users first, or anyone on the LAN gets a terminal with no login.
+    description: Interface the web terminal listens on. Defaults to 127.0.0.1 (this machine only), and blank also means 127.0.0.1. Set 0.0.0.0 to reach it from the LAN. It runs only with a Console Users entry, so it always asks for a sign-in.
   console_users:
     name: Console Users
-    description: "Sign-in accounts for the SSH console and the web terminal. Each entry has 'username' and 'password' (shown masked). SSH accepts only these accounts, by password, and refuses every login while the list is empty. The web terminal requires a sign-in once any user is configured; with the list EMPTY it stays open (no login), its historical behavior. Too many wrong attempts from one address are throttled for a few minutes. The console in the Switchboard sidebar needs none of these: Home Assistant has already signed you in."
+    description: "Sign-in accounts for the SSH console and the web terminal. Each entry has 'username' and 'password' (shown masked). SSH accepts only these accounts, by password, and refuses every login while the list is empty. The web terminal starts only once the list has a valid entry, and then requires a sign-in; with none it does not start (before 0.125.0 it ran with no login). Too many wrong attempts from one address are throttled for a few minutes. The console in the Switchboard sidebar needs none of these: Home Assistant has already signed you in."
 
   # ── Time, clock & wake-up ────────────────────────────────────────────
   timezone:

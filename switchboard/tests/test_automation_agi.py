@@ -78,3 +78,57 @@ def test_two_misses_still_end_with_the_retry_goodbye():
 def test_a_named_area_still_works():
     spoken, sets = _run(["kitchen", "kitchen ceiling", "turn off"])
     assert sets == [("light.kitchen_ceiling", False)], (spoken, sets)
+
+
+# Names that hold, or sound like, the cancel and list words: before v0.125.0
+# the command words were checked first, so these could never be chosen.
+WORDY = {
+    "Top Floor": [{"entity_id": "light.all_lights", "name": "All Lights"},
+                  {"entity_id": "light.stoop", "name": "Stoop Light"}],
+    "Left Hallway": [{"entity_id": "light.exit_sign", "name": "Exit Sign"}],
+}
+
+
+def test_a_whole_name_beats_a_command_word_inside_it():
+    spoken, sets = _run(["Top Floor", "All Lights", "turn on"], WORDY)
+    assert sets == [("light.all_lights", True)], (spoken, sets)
+    spoken, sets = _run(["top floor.", "Stoop Light", "turn off"], WORDY)
+    assert sets == [("light.stoop", False)], (spoken, sets)
+    spoken, sets = _run(["Left Hallway", "Exit Sign", "turn on"], WORDY)
+    assert sets == [("light.exit_sign", True)], (spoken, sets)
+
+
+def test_the_command_words_alone_still_win():
+    # "stop" is not the whole name "Top Floor": it cancels.
+    spoken, sets = _run(["stop"], WORDY)
+    assert sets == [] and spoken[-1] == "Okay, goodbye.", spoken
+    # A lone "left" (a mishearing of "list") lists, beside "Left Hallway".
+    spoken, _ = _run(["left", "cancel"], WORDY)
+    assert any(s.startswith("The rooms are:") for s in spoken), spoken
+    # "all" is not the whole name "All Lights": it lists the lights.
+    spoken, _ = _run(["Top Floor", "all", "cancel"], WORDY)
+    assert any(s.startswith("The lights are:") for s in spoken), spoken
+
+
+def test_cancel_at_the_light_step_says_okay():
+    spoken, sets = _run(["Kitchen", "cancel"])
+    assert sets == [] and spoken[-1] == "Okay, goodbye.", spoken
+
+
+def test_two_misses_at_the_action_step_say_not_understood():
+    spoken, sets = _run(["Kitchen", "Kitchen Ceiling", "zzzz", "qqqq"])
+    assert sets == [] and spoken[-1] == "Sorry, I didn't get that. Goodbye.", spoken
+
+
+def test_cancel_at_the_action_step_says_okay():
+    spoken, sets = _run(["Kitchen", "Kitchen Ceiling", "cancel"])
+    assert sets == [] and spoken[-1] == "Okay, goodbye.", spoken
+
+
+def test_a_real_area_named_unassigned_takes_the_lights_with_no_area():
+    for real in ("Unassigned", "unassigned"):
+        by_area = {real: [{"entity_id": "light.desk", "name": "Desk Lamp"}],
+                   "": [{"entity_id": "light.porch_lamp", "name": "Porch Lamp"}]}
+        spoken, sets = _run(["list", "Unassigned", "Porch Lamp", "turn on"], by_area)
+        assert f"The rooms are: {real}." in spoken, spoken
+        assert sets == [("light.porch_lamp", True)], (real, spoken, sets)

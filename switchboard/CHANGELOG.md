@@ -5,13 +5,19 @@ Recent releases. Releases up to 0.114.2 are in the
 
 ## 0.125.0
 
-**Three fixes found by a documentation review.**
+**Fixes found by a documentation review.**
 
-- **Lights menu (`43`): the "Unassigned" lights can be chosen.** Lights with
-  no area are read out as "Unassigned", but saying it ended the call, because
-  that area's internal name was also the menu's signal for "cancel". The two
-  are now distinct, so "Unassigned" leads to its lights, and "cancel" still
-  ends the call politely.
+- **Lights menu (`43`): every room and light can be chosen by name.** Lights
+  with no area are read out as "Unassigned", but saying it ended the call,
+  because that area's internal name was also the menu's signal for "cancel".
+  A room or light whose name holds or sounds like a command word ("Top Floor"
+  is close to "stop"; "Exit Sign", "All Lights") could not be chosen either,
+  because the command words were checked first. Saying a whole name now
+  chooses it, and a command word on its own still cancels or lists. An area
+  actually named "Unassigned" now takes the lights with no area, instead of
+  standing beside a second "Unassigned" that could not be told apart. The
+  goodbyes also say what happened: a cancel at the light step was answered as
+  a mishearing, and two mishearings at the on/off step as a cancel.
 - **The standalone web terminal (`:8100`) starts only with a login.** With
   `console_users` empty it used to run on `127.0.0.1:8100` with no login. Under
   host networking that address is the host's own, so every program on the host
@@ -23,10 +29,11 @@ Recent releases. Releases up to 0.114.2 are in the
   With `WP826_CERT_SHA256` set, it compared the pin once on a separate
   connection, then sent the login, password included, on new connections it
   did not check. Each request now runs on a connection whose certificate was
-  checked first, and a mismatch stops it before anything is sent. Its
-  `fingerprint` command, the documented way to get the pin, no longer needs a
-  password file, and `WP826_PORT` sets a port other than 443. The tool is not
-  part of the add-on image.
+  checked first, and a mismatch stops the command before that request is sent,
+  naming it. Its `fingerprint` command, the documented way to get the pin, no
+  longer needs a password file, and `WP826_PORT` sets a port other than 443 (a
+  value that is not a port number is refused). The tool is not part of the
+  add-on image.
 
 ## 0.124.0
 

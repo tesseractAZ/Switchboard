@@ -612,8 +612,8 @@ these defenses are generated automatically:
 
 These are deliberate design choices, documented here so you can decide whether they
 fit your network. Where the add-on can flag one at start-up it does — the web
-terminal logs its bind, escalating from INFO to a NOTICE only when it is actually
-reachable from the LAN without a login; the SSH console logs its bind, its host-key
+terminal logs a NOTICE when it does not start for want of a valid
+`console_users` entry, and its bind when it does; the SSH console logs its bind, its host-key
 fingerprint and how many console users can log in, with a WARNING when none can;
 and a blank `cordless_cert_sha256` prints a NOTE — but the
 AppArmor and developer-tool items are structural and emit no start-up line, so
@@ -680,21 +680,19 @@ every SSH login needs a password:
 also means `127.0.0.1`: it no longer falls back to `console_bind`, which is now
 the SSH bind and defaults to every interface. An upgrade keeps whatever bind is
 already stored in its options. Loopback here is the **host's** loopback, so on
-the default bind any host-network add-on or process can open an ungated `:8100`
-and drive the board. The terminal's same-origin WebSocket gate blocks cross-site
-drive-by hijacking, but anyone who can reach the port from a same-origin context
-can drive the board.
+the default bind any host-network add-on or process can reach `:8100`; since
+v0.125.0 what it reaches always asks for a sign-in. The terminal's same-origin
+WebSocket gate also blocks cross-site drive-by hijacking of a signed-in session.
 
-The **web terminal supports a login**: configure `console_users` (username +
-masked password) and both its page and its WebSocket require a signed-in session,
-with per-address throttling of failed attempts. With an empty `console_users`
-the web terminal has no login at all — **and so it is with a `console_users`
-value that fails to parse, or whose rows are missing a username or a password**:
-those rows are dropped, and a list left with no valid rows disables the gate
-entirely. The start-up log line reports which mode is actually live
-(`login gate ACTIVE (n user(s))` vs `no login gate`); trust that line over the
-options page. **This is the only login-free network path to the board left**:
-the web terminal with an empty `console_users`, moved off loopback.
+**The web terminal requires a login**: both its page and its WebSocket require a
+session signed in against `console_users` (username + masked password), with
+per-address throttling of failed attempts. Since v0.125.0 it does not start
+without a valid row: an empty `console_users`, a value that fails to parse, and
+a list whose rows all miss a username or a password (such rows are dropped) each
+leave it idle, with a NOTICE saying so in the start-up log. Before, each of
+those ran it with no login at all. When it does start, the log line reads
+`login gate ACTIVE (n user(s))`. **No login-free network path to the board
+remains.**
 
 **Prefer the Ingress console.** Since v0.93.0 the same terminal is served at
 `/console/` on the Ingress port, where Home Assistant's own session authenticates

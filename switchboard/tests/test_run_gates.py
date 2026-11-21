@@ -19,6 +19,7 @@ permanently idle the resident recognizer. It now uses the explicit-``false`` for
 too, and the lint below is multi-line-aware so any idle gate keying off
 ``bashio::config.true`` (single- or multi-flag) is caught.
 """
+import os
 import subprocess
 import re
 import sys
@@ -544,6 +545,43 @@ def test_the_web_terminal_never_runs_without_a_login():
           '2>/dev/null || echo 0)"' in src)
     check("console-web/run: the gate comes after the count and before the server starts",
           src.index('VALID_USERS="$(') < src.index('if ! [ "${VALID_USERS}" -gt 0 ]') < src.index("exec python3 server.py"))
+
+
+def test_the_login_count_is_the_one_the_server_would_use():
+    """The gate above is only as good as VALID_USERS, and server.py serves with
+    no login when its own parse of the same JSON finds nobody. So this runs the
+    run script's REAL count lines (against the source tree's webauth.py) and
+    then its gate, for console_users values the server would treat as empty."""
+    lines = (_S6 / "console-web" / "run").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith('VALID_USERS="$('))
+    end = next(i for i in range(start, len(lines)) if '|| echo 0)"' in lines[i])
+    count = "\n".join(lines[start:end + 1])
+    webdir = str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console-web")
+    check("console-web/run: the count reads the installed webauth.py",
+          "/usr/share/switchboard/console-web" in count)
+    count = count.replace("/usr/share/switchboard/console-web", webdir)
+    gate = next(g for g in _idle_gates(_S6 / "console-web" / "run") if "VALID_USERS" in g)
+    gate = gate.replace("exec sleep infinity", "echo IDLE; exit 0")
+    good = '{"username":"op","password":"pw"}'
+    for users, want in (("[]", "IDLE"), ("", "IDLE"), ("not json", "IDLE"), ("{}", "IDLE"),
+                        ('[{"username":"op","password":""}]', "IDLE"),
+                        ('[{"username":"  ","password":"pw"}]', "IDLE"),
+                        (good, "IDLE"),
+                        (f"[{good}]", "RUN"),
+                        (f'[{good},{{"username":"x"}}]', "RUN")):
+        body = ("bashio::log.notice() { :; }\nBIND=127.0.0.1; PORT=8100\n"
+                + count + '\necho "count=${VALID_USERS}"\n' + gate + "\necho RUN\n")
+        r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, USERS_JSON=users))
+        out = r.stdout.split()
+        check(f"console-web/run: console_users={users!r} -> {want} (got {out})", out[-1:] == [want])
+    # A count that cannot run at all (python3 missing, webauth unimportable)
+    # reads 0, so it idles too.
+    broken = count.replace(webdir, "/nonexistent")
+    r = subprocess.run(["bash", "-c", "bashio::log.notice() { :; }\nBIND=127.0.0.1; PORT=8100\n"
+                        + broken + "\n" + gate + "\necho RUN\n"],
+                       capture_output=True, text=True, timeout=30, env=dict(os.environ, USERS_JSON=f"[{good}]"))
+    check(f"console-web/run: an unimportable parser idles (got {r.stdout.split()})", r.stdout.split()[-1:] == ["IDLE"])
 
 def _code(svc):
     """A run script with its comment lines removed."""

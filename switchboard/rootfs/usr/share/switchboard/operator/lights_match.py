@@ -152,6 +152,29 @@ def match_light(text: str, lights: list[dict], threshold: float = 0.6,
                  threshold=threshold, margin=margin)
 
 
+def _all_words(text: str) -> list[str]:
+    """normalize() without dropping FILLER: every word counts."""
+    low = re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())
+    return [NUM_WORDS.get(t, t) for t in low.split()]
+
+
+def said_whole_name(text: str, names: list[str]) -> int | None:
+    """Index of the one entry in ``names`` whose every word is exactly what the
+    caller said, or None when no entry is, or more than one is.
+
+    The flow checks this before the cancel and list words, so a room or light
+    whose name contains or sounds like one ("Top Floor" ~ "stop", "Exit Sign",
+    "All Lights", "Lisa" ~ "list") can still be chosen by saying its name.
+    Filler words count here: "All Lights" without them is "all", which must
+    stay the list request; and only the whole name counts, so a lone "left"
+    (a mishearing of "list") stays the list request beside a "Left Hallway"."""
+    said = _all_words(text)
+    if not said:
+        return None
+    hits = [i for i, n in enumerate(names) if _all_words(str(n or "")) == said]
+    return hits[0] if len(hits) == 1 else None
+
+
 def match_intent(text: str) -> str | None:
     """Classify a transcript as 'on' | 'off' | 'list' | 'cancel' | None.
 

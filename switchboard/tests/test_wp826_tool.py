@@ -61,6 +61,8 @@ class _Handset(BaseHTTPRequestHandler):
             self._reply({"body": "SALT"})
         elif self.path.startswith("/cgi-bin/dologin"):
             self._reply({"response": "success", "body": {"sid": "sid123456789"}})
+        elif self.path.startswith("/cgi-bin/ringtone"):
+            self._reply({"ringtones": [{"id": 7, "fileName": "stand-in.wav", "type": "user"}]})
         else:
             self._reply({})
 
@@ -132,9 +134,10 @@ def test_a_correct_pin_logs_in_and_reads(handset):
     r = _tool(srv.server_address[1], "get", "P1", pin=fp_a, pass_file=pw)
     assert r.returncode == 0 and "stand-in" in r.stdout, r.stdout + r.stderr
     assert [p for p, _ in srv.seen][:2] == ["/cgi-bin/access", "/cgi-bin/dologin"], srv.seen
-    # One checked connection per request, plus verifyPin's up-front check. An
-    # agent opening its own, unchecked connection (what `agent: false` does)
-    # shows up here as extra connections.
+    # One connection per request, plus verifyPin's up-front check. This counts
+    # connections, it cannot see whether each was checked (the swap tests below
+    # do that); what it catches is an agent opening its own connection beside
+    # the checked one (what `agent: false` does), which shows up here as extra.
     assert srv.conns == len(srv.seen) + 1, (srv.conns, srv.seen)
 
 
@@ -158,4 +161,60 @@ def test_a_certificate_swapped_after_the_check_gets_no_password(handset):
     r = _tool(srv.server_address[1], "get", "P1", pin=fp_a, pass_file=pw)
     assert r.returncode != 0, r.stdout
     assert not any(p == "/cgi-bin/dologin" for p, _ in srv.seen), srv.seen
+    assert "mismatch" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+def test_a_certificate_swapped_after_login_gets_no_session_id(handset):
+    """The handset's certificate for the check, access and login (connections
+    0-2), another one from the first request that carries the session id on."""
+    d, start, (a, fp_a), (b, _) = handset
+    pw = d / "pass"
+    pw.write_text("not-a-real-password\n")
+    srv = start(a, a, a, b)
+    r = _tool(srv.server_address[1], "get", "P1", pin=fp_a, pass_file=pw)
+    assert r.returncode != 0, r.stdout
+    assert [p for p, _ in srv.seen] == ["/cgi-bin/access", "/cgi-bin/dologin"], srv.seen
+    out = r.stdout + r.stderr
+    assert "mismatch" in out and "GET /cgi-bin/config_get was not sent" in out, out
+    assert "sid123" not in out, "the refusal printed the session id"
+
+
+def test_an_invalid_port_is_refused_before_any_connection(handset):
+    d, start, (a, fp_a), _ = handset
+    srv = start(a)
+    for bad in ("abc", "0", "70000", "8.5"):
+        env = dict(os.environ, WP826_HOST="127.0.0.1", WP826_PORT=bad, WP826_PASS_FILE="/nonexistent/wp-pass")
+        env.pop("WP826_CERT_SHA256", None)
+        r = subprocess.run(["node", str(TOOL), "get", "P1"], capture_output=True, text=True, env=env, timeout=30)
+        assert r.returncode != 0 and "WP826_PORT must be a port number" in r.stderr, (bad, r.stdout, r.stderr)
+    assert srv.conns == 0, srv.conns
+
+
+def test_a_ringtone_upload_runs_on_a_checked_connection(handset):
+    """The upload builds its own request (multipart, not req()), so it is
+    pinned on its own: it carries the session id."""
+    d, start, (a, fp_a), _ = handset
+    pw = d / "pass"
+    pw.write_text("not-a-real-password\n")
+    wav = d / "ring.wav"
+    wav.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt " + bytes(24))
+    srv = start(a)
+    r = _tool(srv.server_address[1], "ring-upload", str(wav), pin=fp_a, pass_file=pw)
+    assert r.returncode == 0 and "UPLOADED" in r.stdout, r.stdout + r.stderr
+    assert [p for p, _ in srv.seen] == ["/cgi-bin/access", "/cgi-bin/dologin", "/cgi-bin/ringtone"], srv.seen
+    assert srv.conns == len(srv.seen) + 1, (srv.conns, srv.seen)
+
+
+def test_a_certificate_swapped_before_the_upload_gets_no_session(handset):
+    """The handset's certificate for the check, access and login (connections
+    0-2), another one from the upload's connection on."""
+    d, start, (a, fp_a), (b, _) = handset
+    pw = d / "pass"
+    pw.write_text("not-a-real-password\n")
+    wav = d / "ring.wav"
+    wav.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt " + bytes(24))
+    srv = start(a, a, a, b)
+    r = _tool(srv.server_address[1], "ring-upload", str(wav), pin=fp_a, pass_file=pw)
+    assert r.returncode != 0, r.stdout
+    assert [p for p, _ in srv.seen] == ["/cgi-bin/access", "/cgi-bin/dologin"], srv.seen
     assert "mismatch" in (r.stdout + r.stderr), r.stdout + r.stderr
