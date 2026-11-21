@@ -279,10 +279,15 @@ def test_no_source_claims_agi_stderr_reaches_the_asterisk_log(claim):
 # tripwire for the NEXT log line, the one nobody has written yet.
 # --------------------------------------------------------------------------- #
 import ast  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
+from importlib.machinery import SourceFileLoader  # noqa: E402
 
+SPEECH = ADDON / "rootfs/usr/share/switchboard/operator/agi_speech.py"
+ANNOUNCE = ADDON / "rootfs/var/lib/asterisk/agi-bin/switchboard-announce.agi"
 VOICE_SCRIPTS = (sorted((ADDON / "rootfs/var/lib/asterisk/agi-bin").glob("*.agi"))
-                 + [ADDON / "rootfs/usr/bin/switchboard-stt",
-                    ADDON / "rootfs/usr/share/switchboard/operator/agi_speech.py"])
+                 + [ADDON / "rootfs/usr/bin/switchboard-stt", SPEECH])
 # Calls whose return value IS what the caller said. Not `recognize`: the operator
 # and wake-up AGIs name that for helpers that return a room token or HH:MM.
 RECOGNISERS = {"listen", "_recording_to_text", "transcribe"}
@@ -337,33 +342,177 @@ def _scope_nodes(scope):
     return out
 
 
-def scan_speech_to_stderr(src: str):
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _own_nodes(func):
+    """`func`'s nodes without the bodies of the functions nested in it: where its
+    own `return` statements are."""
+    out, stack = [], list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if not isinstance(node, (*_DEFS, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _carries(expr, tainted, recognisers) -> bool:
+    """Is `expr` still the words: a recogniser's answer, the name, a slice or a
+    string method of it, or a string built around it. A call that MAPS the words
+    to something else (a room token, an HH:MM, a light) is not, which is why the
+    operator may log the extension it resolved."""
+    if isinstance(expr, ast.Name):
+        return expr.id in tainted
+    if isinstance(expr, ast.JoinedStr):
+        return any(isinstance(v, ast.FormattedValue) and _carries(v.value, tainted, recognisers)
+                   for v in expr.values)
+    if isinstance(expr, ast.BinOp):
+        return any(_carries(s, tainted, recognisers) for s in (expr.left, expr.right))
+    if isinstance(expr, ast.Subscript):
+        return _carries(expr.value, tainted, recognisers)
+    if isinstance(expr, ast.IfExp):
+        return any(_carries(s, tainted, recognisers) for s in (expr.body, expr.orelse))
+    if isinstance(expr, (ast.BoolOp, ast.List, ast.Tuple)):
+        parts = expr.values if isinstance(expr, ast.BoolOp) else expr.elts
+        return any(_carries(s, tainted, recognisers) for s in parts)
+    if isinstance(expr, ast.Call):
+        f = expr.func
+        if _call_name(expr) in recognisers:
+            return True                                           # text = listen(...)
+        if isinstance(f, ast.Attribute) and _carries(f.value, tainted, recognisers):
+            return True                                           # text.strip()
+        if ((isinstance(f, ast.Attribute) and isinstance(f.value, ast.Constant))
+                or (isinstance(f, ast.Name) and f.id in ("str", "repr"))):
+            return any(_carries(a, tainted, recognisers) for a in expr.args)  # " ".join([text])
+    return False
+
+
+def _recognised_names(nodes, recognisers) -> set:
+    """The names in a scope that hold recognised words: bound from a recogniser,
+    or from an expression that still carries them (to a fixed point)."""
+    tainted, changed = set(), True
+    while changed:
+        changed = False
+        for n in nodes:
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and n.value is not None:
+                if not _carries(n.value, tainted, recognisers):
+                    continue
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                new = {t.id for tgt in targets for t in ast.walk(tgt)
+                       if isinstance(t, ast.Name)} - tainted
+                if new:
+                    tainted |= new
+                    changed = True
+    return tainted
+
+
+def _signature(func):
+    a = func.args
+    positional = [p.arg for p in a.posonlyargs + a.args]
+    return positional, set(positional) | {p.arg for p in a.kwonlyargs}
+
+
+def _into_leaky(call, names, local, shared):
+    """The `names` that `call` hands to a parameter which reaches stderr ungated.
+    A bare name resolves in this module first; `sp.say_or(...)` in the shared
+    one (agi_speech)."""
+    f = call.func
+    if isinstance(f, ast.Name):
+        entry = local.get(f.id) or shared.get(f.id)
+    elif isinstance(f, ast.Attribute):
+        entry = shared.get(f.attr)
+    else:
+        entry = None
+    if not entry or not entry[1]:
+        return []
+    positional, leaky = entry
+    out = []
+    for i, arg in enumerate(call.args):
+        if i < len(positional) and positional[i] in leaky:
+            out += _names(arg, names, gated=False)
+    for k in call.keywords:
+        if k.arg in leaky:
+            out += _names(k.value, names, gated=False)
+    return out
+
+
+def analyse_speech_module(src: str, shared=None):
+    """(recognisers, leaky) for one module, to a fixed point.
+
+    recognisers: the RECOGNISERS plus every function here whose return value
+    still carries recognised words (the announce AGI's _record() returns what
+    listen() heard). leaky: {function: (positional params, the params that reach
+    stderr outside said(), directly or through another call)}. A first version
+    of this scan looked inside one scope only, so the announce AGI's words, which
+    reach agi_speech.say()'s log line through _record() and say_or(), passed it
+    (v0.122.1)."""
+    shared_rec, shared_leaky = shared or (frozenset(), {})
+    tree = ast.parse(src)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, _DEFS)]
+    rec = set(RECOGNISERS) | set(shared_rec)
+    leaky = {fn.name: (_signature(fn)[0], set()) for fn in funcs}
+    changed = True
+    while changed:
+        changed = False
+        for fn in funcs:
+            nodes = _scope_nodes(fn)
+            tainted = _recognised_names(nodes, rec)
+            if fn.name not in rec and any(
+                    isinstance(n, ast.Return) and n.value is not None
+                    and _carries(n.value, tainted, rec) for n in _own_nodes(fn)):
+                rec.add(fn.name)
+                changed = True
+            params = _signature(fn)[1]
+            hits = set()
+            for n in nodes:
+                if not isinstance(n, ast.Call):
+                    continue
+                if _is_stderr_sink(n):
+                    for arg in list(n.args) + [k.value for k in n.keywords]:
+                        hits |= set(_names(arg, params, gated=False))
+                else:
+                    hits |= set(_into_leaky(n, params, leaky, shared_leaky))
+            if hits - leaky[fn.name][1]:
+                leaky[fn.name][1].update(hits)
+                changed = True
+    return rec, leaky
+
+
+def scan_speech_to_stderr(src: str, shared=None):
     """(ungated, gated) stderr writes that interpolate recognised text.
 
-    A name is recognised text when a scope binds it from a RECOGNISERS call. The
-    AST is scanned, not the characters, so a comment explaining this rule cannot
-    trip it."""
+    A name is recognised text when a scope binds it from a recogniser, or from an
+    expression that still carries the words. Ungated: such a name written to
+    stderr outside said(), or handed to a parameter that is (`via say_or()`,
+    resolved through `shared`, agi_speech's analyse_speech_module()). Gated: a
+    stderr write that passes recognised text, or a parameter, through said().
+    The AST is scanned, not the characters, so a comment explaining this rule
+    cannot trip it."""
     tree = ast.parse(src)
-    scopes = [tree] + [n for n in ast.walk(tree)
-                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    rec, leaky = analyse_speech_module(src, shared)
+    shared_leaky = (shared or (None, {}))[1]
+    scopes = [tree] + [n for n in ast.walk(tree) if isinstance(n, _DEFS)]
     ungated, gated = set(), set()
     for scope in scopes:
         nodes = _scope_nodes(scope)
-        tainted = set()
+        tainted = _recognised_names(nodes, rec)
+        params = _signature(scope)[1] if isinstance(scope, _DEFS) else set()
         for n in nodes:
-            if (isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Call)
-                    and _call_name(n.value) in RECOGNISERS):
-                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-                tainted |= {t.id for tgt in targets for t in ast.walk(tgt)
-                            if isinstance(t, ast.Name)}
-        for n in nodes:
-            if isinstance(n, ast.Call) and _is_stderr_sink(n):
+            if not isinstance(n, ast.Call):
+                continue
+            if _is_stderr_sink(n):
                 for arg in list(n.args) + [k.value for k in n.keywords]:
                     bad = _names(arg, tainted, gated=False)
                     if bad:
                         ungated.add((n.lineno, tuple(sorted(set(bad)))))
-                    if _names(arg, tainted, gated=True):
+                    if _names(arg, tainted | params, gated=True):
                         gated.add(n.lineno)
+                continue
+            via = _into_leaky(n, tainted, leaky, shared_leaky)
+            if via:
+                ungated.add((n.lineno, tuple(sorted({f"{v} via {_call_name(n)}()"
+                                                     for v in via}))))
     return sorted(ungated), sorted(gated)
 
 
@@ -392,21 +541,151 @@ def test_the_speech_scanner_can_see_what_it_forbids():
             assert gated, f"the gated form was not seen as gated:\n{src}"
 
 
+def test_the_speech_scanner_follows_the_words_across_calls():
+    """Words reach a log line through a helper's return value or another
+    function's parameter, as the announce AGI's did through _record() and
+    agi_speech.say_or() -> say() until v0.122.1."""
+    leaky_say = 'def say(text):\n    log("speech", f"tts failed for {text[:40]!r}")\n\n'
+    gated_say = 'def say(text):\n    log("speech", f"tts failed for {said(text, w)}")\n\n'
+    cases = {
+        # A helper that returns what listen() heard is a recogniser too.
+        ('def _record():\n    text = ""\n    text = sp.listen("x")\n    return text\n\n'
+         'def main():\n    text = _record()\n    log(f"{text}")\n'): True,
+        # The words handed to a parameter that is logged outside said()...
+        leaky_say + 'def main():\n    text = listen("x")\n    say(f"You said {text}")\n': True,
+        # ...through a second hop, under another name that still carries them...
+        (leaky_say + 'def say_or(t):\n    if not say(t):\n        pass\n\n'
+         'def main():\n    text = listen("x")\n    msg = "Heard: " + text.strip()\n'
+         '    say_or(msg)\n'): True,
+        # ...but not to a parameter that goes through said()...
+        gated_say + 'def main():\n    text = listen("x")\n    say(f"You said {text}")\n': False,
+        # ...nor once a call has mapped the words to something else.
+        (leaky_say + 'def main():\n    text = listen("x")\n    room = resolve(text)\n'
+         '    say(f"Calling {room}")\n'): False,
+    }
+    for src, flagged in cases.items():
+        assert bool(scan_speech_to_stderr(src)[0]) is flagged, src
+    # Across modules: an AGI's sp.say_or() resolves in agi_speech's summary.
+    agi = 'def main():\n    text = sp.listen("x")\n    sp.say_or(f"Announcing: {text}")\n'
+    for speech, flagged in ((leaky_say, True), (gated_say, False)):
+        shared = analyse_speech_module(speech + 'def say_or(text):\n    return say(text)\n')
+        assert bool(scan_speech_to_stderr(agi, shared)[0]) is flagged, speech
+
+
+# agi_speech.say() before v0.122.1, in the shape the announce AGI's words reached.
+_SAY_BEFORE_0_122_1 = (
+    'def log(tag, msg):\n    sys.stderr.write(f"[{tag}] {msg}\\n")\n\n'
+    'def say(text, prefix="sw-voice"):\n'
+    '    log("speech", f"tts failed rc=1 for {text[:40]!r}")\n\n'
+    'def say_or(text, fallback_prompt=None):\n'
+    '    if not say(text):\n        stream(fallback_prompt)\n')
+
+
+def test_the_scan_sees_the_announce_words_that_reached_say():
+    """The real announce AGI against the pre-v0.122.1 say(): exactly its spoken
+    confirmation is flagged. Run against the current agi_speech, the tree scan
+    below must then find nothing; if this stops flagging, a refactor of the AGI
+    or of the scanner blinded it, and the tree scan proves nothing about it."""
+    src = ANNOUNCE.read_text()
+    bad, _ = scan_speech_to_stderr(src, analyse_speech_module(_SAY_BEFORE_0_122_1))
+    lines = src.splitlines()
+    assert [("Announcing on the speakers" in lines[ln - 1], names) for ln, names in bad] \
+        == [(True, ("text via say_or()",))], bad
+
+
 def test_no_voice_script_writes_recognised_words_to_stderr_ungated():
     assert len(VOICE_SCRIPTS) >= 11, [p.name for p in VOICE_SCRIPTS]
+    shared = analyse_speech_module(SPEECH.read_text())
     offenders, gated = [], {}
     for p in VOICE_SCRIPTS:
-        bad, ok = scan_speech_to_stderr(p.read_text())
+        bad, ok = scan_speech_to_stderr(p.read_text(), shared)
         offenders += [f"{p.name}:{line}: {names}" for line, names in bad]
         gated[p.name] = len(ok)
     assert not offenders, (
         "recognised speech reaches stderr, which is the add-on journal, without "
         "said():\n  " + "\n  ".join(offenders))
     # ...and the scan SEES the sites it is there for: the six heard= lines in
-    # switchboard-stt and the assistant's per-turn line. Fewer means a rename
-    # blinded it, not that the lines went away.
+    # switchboard-stt, the assistant's per-turn line, and agi_speech.say()'s two
+    # failure lines. Fewer means a rename blinded it, not that the lines went away.
     assert gated["switchboard-stt"] >= 6, gated
     assert gated["switchboard-assistant.agi"] >= 1, gated
+    assert gated["agi_speech.py"] >= 2, gated
+
+
+SECRET_WORDS = "meet me in the zebra room at six"
+
+
+def _speech(tmp_path, monkeypatch, policy):
+    """A fresh agi_speech whose features.json says `policy` (None: no file)."""
+    sp = SourceFileLoader("agi_speech_privacy", str(SPEECH)).load_module()
+    feats = tmp_path / "features.json"
+    if policy is not None:
+        feats.write_text(json.dumps({"announce": {"players": ["media_player.kitchen"]},
+                                     "assistant": {"transcripts": policy}}))
+    monkeypatch.setattr(sp, "FEATURES", str(feats))
+    monkeypatch.setattr(sp, "agi", lambda cmd: "")
+    monkeypatch.setattr(sp, "stream", lambda soundfile: None)
+    return sp
+
+
+@pytest.mark.parametrize("how", ["rc", "timeout"])
+@pytest.mark.parametrize("policy", [False, None, "true", True])
+def test_a_failed_reply_names_the_words_only_when_transcripts_are_on(
+        how, policy, tmp_path, monkeypatch, capsys):
+    """agi_speech.say() speaks whatever its caller hands it, and the announce
+    flow hands it the caller's own words. Its failure lines follow the policy
+    switchboard-stt and the assistant follow, failing closed (no file, or a
+    truthy value that is not true, withholds). A TimeoutExpired renders its whole
+    command line, the text included; real child processes, cut to 0.3 s."""
+    sp = _speech(tmp_path, monkeypatch, policy)
+    tts = tmp_path / "tts"
+    tts.write_text("#!/bin/sh\nexec sleep 5\n" if how == "timeout" else "#!/bin/sh\nexit 1\n")
+    tts.chmod(0o755)
+    monkeypatch.setattr(sp, "TTS", str(tts))
+    real_run = subprocess.run
+    monkeypatch.setattr(sp.subprocess, "run",
+                        lambda cmd, **kw: real_run(cmd, **{**kw, "timeout": 0.3}))
+    text = f"Announcing on the speakers: {SECRET_WORDS}. Goodbye."
+    capsys.readouterr()
+    assert sp.say(text) is False
+    err = capsys.readouterr().err
+    assert ("tts failed rc=1" if how == "rc" else "tts error") in err, err
+    if policy is True:
+        assert SECRET_WORDS in err, err      # the gate opens, so this test can see words
+    else:
+        assert "zebra" not in err and f"<{len(text)} chars>" in err, err
+        assert how == "rc" or err.rstrip().endswith(": TimeoutExpired"), err
+
+
+@pytest.mark.parametrize("policy", [False, True])
+def test_the_announce_flow_keeps_the_callers_words_out_of_the_journal(
+        policy, tmp_path, monkeypatch, capsys):
+    """End to end through the announce AGI: the words it heard, spoken back in its
+    confirmation, reach stderr only when transcripts are on. Every reply's TTS
+    times out (the real exception, with the real command line)."""
+    sp = _speech(tmp_path, monkeypatch, policy)
+    monkeypatch.setattr(sp, "read_env", lambda: {})
+    monkeypatch.setattr(sp, "listen", lambda *a, **k: SECRET_WORDS)
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    monkeypatch.setattr(sp.subprocess, "run", run)
+    hc = types.SimpleNamespace(resolve_entities=lambda players: (players, [], True),
+                               call_service=lambda *a, **k: True)
+    aa = types.SimpleNamespace(build_announcement=lambda text, out: True,
+                               lan_ip=lambda: "192.168.1.20")
+    ac = types.SimpleNamespace(ANNOUNCE_DIR=str(tmp_path), sweep=lambda: None,
+                               speaker_clip_name=lambda: "clip.wav")
+    for name, mod in (("agi_speech", sp), ("ha_client", hc), ("announce_audio", aa),
+                      ("announce_clip", ac)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(sys, "path", list(sys.path))   # the AGI prepends its own
+    agi = SourceFileLoader("switchboard_announce_privacy", str(ANNOUNCE)).load_module()
+    capsys.readouterr()
+    agi.main()
+    err = capsys.readouterr().err
+    assert err.count("tts error") == 2, err    # the opening prompt and the confirmation
+    assert (SECRET_WORDS in err) is policy, err
 
 
 def test_the_tts_helper_does_not_echo_the_text_it_failed_to_speak(tmp_path, capsys):
