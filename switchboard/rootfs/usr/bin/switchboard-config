@@ -262,11 +262,12 @@ def _scrub(value: str) -> str:
     return _CONTROL_RE.sub("", value)
 
 
-def valid_rooms(rooms: list) -> list[dict]:
+def valid_rooms(rooms: list, emergency: "set | frozenset" = frozenset(("911", "933"))) -> list[dict]:
     """Validate/sanitize room entries once; both renderers consume the result.
 
     Skips (with a secret-safe log) rooms that are missing fields, have a
-    non-numeric ext, duplicate an earlier ext, or carry control characters in
+    non-numeric ext, sit on an emergency number (`emergency`: see
+    emergency_exts), duplicate an earlier ext, or carry control characters in
     the secret — so one bad entry can't inject config or shadow another room.
     Returns dicts with cleaned ext/name/secret.
     """
@@ -288,6 +289,12 @@ def valid_rooms(rooms: list) -> list[dict]:
             # allow-list with Asterisk's regex operator, whose captured "0…" reads
             # as FALSE, so the call never routes. Reject it loudly.
             log(f"skipping room ext={ext!r}: an all-zero extension is undialable")
+            continue
+        if ext in emergency:
+            # The emergency notice's literal extension outranks the room
+            # pattern, so dialling this room would play the notice instead.
+            log(f"skipping room ext={ext!r}: it is an emergency number, answered "
+                "with the emergency notice, so the room could never be dialled")
             continue
         if ext in seen:
             log(f"skipping duplicate room ext={ext!r}")
@@ -1093,6 +1100,37 @@ def _generated_header() -> str:
             + " — edits here are overwritten.")
 
 
+# The numbers answered with the emergency notice (render_emergency_notices), and,
+# with the trunk on in prefix mode, their prefixed forms (render_outbound_rules).
+EMERGENCY_NUMBERS = ("911", "933")
+
+
+def dial_prefix(trunk: dict) -> str:
+    """The outside-line prefix render_extensions uses: "" in direct-dial mode,
+    else a valid `dial_prefix`, else "9". Pure (render_extensions logs the
+    fallback)."""
+    if bool(trunk.get("direct_dial", False)):
+        return ""
+    raw = str(trunk.get("dial_prefix", "9") or "9").strip()
+    return raw if re.fullmatch(r"[0-9*#]+", raw) else "9"
+
+
+def emergency_exts(opts: dict) -> set:
+    """Every extension the dialplan answers with the emergency notice: 911 and
+    933 always, and <prefix>911 and <prefix>933 when the trunk is on in prefix
+    mode. A room or a feature code on one of these never gets a call: the
+    literal emergency extension comes first in the file and outranks a room
+    pattern, so the feature code would take the emergency number's calls (it is
+    emitted earlier) and the room could not be dialled. Both are refused with a
+    log line instead (v0.124.0)."""
+    trunk = opts.get("trunk") or {}
+    nums = set(EMERGENCY_NUMBERS)
+    prefix = dial_prefix(trunk)
+    if trunk.get("enabled") and prefix:
+        nums |= {prefix + n for n in EMERGENCY_NUMBERS}
+    return nums
+
+
 def render_emergency_notices() -> list:
     """911 and 933, answered with a spoken notice — INDEPENDENT of the trunk.
 
@@ -1511,13 +1549,11 @@ def render_extensions(opts: dict) -> str:
     # the internal signal for direct mode, set only when direct_dial is true.
     direct_dial = bool(trunk.get("direct_dial", False))
     prefix_raw = str(trunk.get("dial_prefix", "9") or "9").strip()
-    if direct_dial:
-        prefix = ""  # direct-dial (length-based) mode
-    elif re.fullmatch(r"[0-9*#]+", prefix_raw):
-        prefix = prefix_raw
-    else:
-        prefix = "9"
+    prefix = dial_prefix(trunk)  # "" = direct-dial (length-based) mode
+    if not direct_dial and prefix != prefix_raw:
         log(f"trunk: invalid dial_prefix {prefix_raw!r}; using '9'")
+    # No room and no feature code may sit on a number the emergency notice answers.
+    emergency = emergency_exts(opts)
     if trunk.get("enabled"):
         log("trunk: outbound dialing = "
             + ("DIRECT (1 + 10-digit, no prefix)" if prefix == "" else f"prefix '{prefix}'"))
@@ -1555,6 +1591,8 @@ def render_extensions(opts: dict) -> str:
     if clock_on and exts:
         if not re.fullmatch(r"[0-9]{2,6}", clock_ext):
             log(f"clock: invalid clock_ext {clock_ext!r}; talking clock disabled")
+        elif clock_ext in emergency:
+            log(f"clock: clock_ext {clock_ext} is an emergency number; talking clock disabled")
         elif clock_ext in exts:
             log(f"clock: clock_ext {clock_ext} collides with a room ext; talking clock disabled")
         else:
@@ -1594,6 +1632,8 @@ def render_extensions(opts: dict) -> str:
     if wakeup_on and exts:
         if not re.fullmatch(r"[0-9]{2,6}", wakeup_ext):
             log(f"wakeup: invalid wakeup_ext {wakeup_ext!r}; dial code disabled")
+        elif wakeup_ext in emergency:
+            log(f"wakeup: wakeup_ext {wakeup_ext} is an emergency number; dial code disabled")
         elif wakeup_ext in exts or (clock_on and wakeup_ext == clock_ext):
             log(f"wakeup: wakeup_ext {wakeup_ext} collides with a room/clock ext; dial code disabled")
         else:
@@ -1607,11 +1647,16 @@ def render_extensions(opts: dict) -> str:
     # checked against rooms, '0' (operator), the ENABLED clock/wakeup codes, AND any
     # earlier feature code — never silently shadowing or being shadowed. A disabled
     # clock/wakeup doesn't reserve its ext, so another feature may reuse it.
-    reserved = set(exts) | {"0"}
+    reserved = set(exts) | {"0"} | emergency
     if clock_on:
         reserved.add(clock_ext)
     if wakeup_on:
         reserved.add(wakeup_ext)
+
+    def _clash(code: str) -> str:
+        """Why a feature code was refused, for its log line."""
+        return ("is an emergency number" if code in emergency
+                else "collides with a reserved/room ext")
 
     # Page intercom — a phone dialing this pages the whole house duplex (Page's
     # 'd' flag = everyone can talk back). Literal extension; skipped on collision.
@@ -1622,7 +1667,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", page_ext):
             log(f"page: invalid page_ext {page_ext!r}; page dial code disabled")
         elif page_ext in reserved:
-            log(f"page: page_ext {page_ext} collides with a reserved/room ext; page dial code disabled")
+            log(f"page: page_ext {page_ext} {_clash(page_ext)}; page dial code disabled")
         else:
             # Ring every room duplex. Ringing the dialer's own (now busy) line is
             # harmless. Channels are PJSIP endpoints, joined with '&'.
@@ -1648,7 +1693,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", automation_ext):
             log(f"automation: invalid automation_ext {automation_ext!r}; dial code disabled")
         elif automation_ext in reserved:
-            log(f"automation: automation_ext {automation_ext} collides with a reserved/room ext; dial code disabled")
+            log(f"automation: automation_ext {automation_ext} {_clash(automation_ext)}; dial code disabled")
         else:
             parts += [
                 f"exten = {automation_ext},1,NoOp(Automation)",
@@ -1666,7 +1711,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", assistant_ext):
             log(f"assistant: invalid assistant_ext {assistant_ext!r}; dial code disabled")
         elif assistant_ext in reserved:
-            log(f"assistant: assistant_ext {assistant_ext} collides with a reserved/room ext; dial code disabled")
+            log(f"assistant: assistant_ext {assistant_ext} {_clash(assistant_ext)}; dial code disabled")
         else:
             parts += [
                 f"exten = {assistant_ext},1,NoOp(Assistant)",
@@ -1684,7 +1729,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", status_ext):
             log(f"status: invalid status_ext {status_ext!r}; dial code disabled")
         elif status_ext in reserved:
-            log(f"status: status_ext {status_ext} collides with a reserved/room ext; dial code disabled")
+            log(f"status: status_ext {status_ext} {_clash(status_ext)}; dial code disabled")
         else:
             parts += [
                 f"exten = {status_ext},1,NoOp(Status menu)",
@@ -1701,7 +1746,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", announce_ext):
             log(f"announce: invalid announce_ext {announce_ext!r}; dial code disabled")
         elif announce_ext in reserved:
-            log(f"announce: announce_ext {announce_ext} collides with a reserved/room ext; dial code disabled")
+            log(f"announce: announce_ext {announce_ext} {_clash(announce_ext)}; dial code disabled")
         else:
             parts += [
                 f"exten = {announce_ext},1,NoOp(Announce)",
@@ -1720,7 +1765,7 @@ def render_extensions(opts: dict) -> str:
         if not re.fullmatch(r"[0-9]{2,6}", directory_ext):
             log(f"directory: invalid directory_ext {directory_ext!r}; dial code disabled")
         elif directory_ext in reserved:
-            log(f"directory: directory_ext {directory_ext} collides with a reserved/room ext; dial code disabled")
+            log(f"directory: directory_ext {directory_ext} {_clash(directory_ext)}; dial code disabled")
         else:
             parts += [
                 f"exten = {directory_ext},1,NoOp(Directory assistance)",
@@ -3370,7 +3415,7 @@ def main() -> None:
     # and would bypass the overlay, so switchboard-opt reads this instead.
     effective = dict(opts)
     # Validate/sanitize/dedupe rooms once; both renderers consume the cleaned list.
-    opts["rooms"] = valid_rooms(opts.get("rooms", []) or [])
+    opts["rooms"] = valid_rooms(opts.get("rooms", []) or [], emergency_exts(opts))
     if not opts["rooms"]:
         log("WARNING: no valid rooms configured — no phones will register")
     stray = check_gateway_ports(opts)

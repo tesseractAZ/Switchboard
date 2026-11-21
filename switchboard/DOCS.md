@@ -83,7 +83,10 @@ placeholder rooms use `101` and `102`; the `gateway_ports` default
 (`11`–`18`) and `cordless_ext` default (`19`) assume wired ports on `11`–`18` and
 the cordless on `19`, so set those two options to match your own scheme. A
 feature code that collides with a room or another code is skipped at start, with
-a log line.
+a log line. `911` and `933` (and, with a trunk in prefix mode, the prefix
+followed by either) always play the emergency notice: since 0.124.0 a feature
+code or a room set to one of them is skipped at start, with a log line saying
+it is an emergency number.
 
 **`41` pauses before it connects.** Because `411` starts with the same two
 digits, the gateway waits out its no-key-entry timeout before sending `41`.
