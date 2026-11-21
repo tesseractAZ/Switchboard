@@ -158,9 +158,11 @@ def _all_words(text: str) -> list[str]:
     return [NUM_WORDS.get(t, t) for t in low.split()]
 
 
-def same_name(a: str, b: str) -> bool:
-    """True when said_whole_name could not tell the two names apart."""
-    return _all_words(a) == _all_words(b)
+def would_tie(a: str, b: str) -> bool:
+    """True when two names have the same words once FILLER is set aside
+    ("Porch Light" / "porch lights", "Desk Lamp" / "Desk Light"): match_light
+    then scores them alike for every reply except their exact names."""
+    return normalize(a) == normalize(b)
 
 
 def said_whole_name(text: str, names: list[str]) -> int | None:

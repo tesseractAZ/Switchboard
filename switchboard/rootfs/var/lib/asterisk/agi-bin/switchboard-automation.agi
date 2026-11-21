@@ -212,9 +212,11 @@ def fold_unassigned(by_area: dict) -> dict:
     """Lights with no area (key '') are read out as "Unassigned". A real Home
     Assistant area of that name, in any case, would sit beside them as a second
     "Unassigned" that the caller cannot tell apart, so they join it instead.
-    Except one named like a light already in that area: joining would make the
-    two names tie, so neither could be chosen, where the area's own light could
-    be before. It stays out, unreachable as every no-area light was then."""
+    Except one named like a light already in that area (the same words once
+    filler such as "light" or "lamp" is set aside): joining would make the two
+    tie, so the area's own light would answer only to its exact name, where
+    "porch" or "the porch light" reached it before. It stays out, unreachable as
+    every no-area light was then."""
     if "" not in by_area:
         return by_area
     real = next((k for k in by_area if k and k.strip().lower() == "unassigned"), None)
@@ -226,7 +228,7 @@ def fold_unassigned(by_area: dict) -> dict:
 
     taken = [label(lt) for lt in by_area[real]]
     extra = [lt for lt in by_area[""]
-             if not any(lights_match.same_name(label(lt), t) for t in taken)]
+             if not any(lights_match.would_tie(label(lt), t) for t in taken)]
     out = {k: v for k, v in by_area.items() if k != ""}
     out[real] = list(by_area[real]) + extra
     return out

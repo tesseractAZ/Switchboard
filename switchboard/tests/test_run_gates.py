@@ -588,14 +588,19 @@ def test_the_login_count_is_the_one_the_server_would_use():
 
 def _run_console_web(users: str, enabled: str = "true", bind: str = "127.0.0.1"):
     """The WHOLE console-web run script under bash in strict mode, with bashio
-    and switchboard-opt stubbed and its two execs replaced by markers.
+    and switchboard-opt stubbed and its two execs replaced by markers. In place
+    of the server, the users it would be handed are counted with its own
+    parser, from the environment it would inherit (SERVER_USERS=n), since
+    server.py serves with no login when that count is 0.
     Returns (outcome, log lines in order)."""
     import shlex
     webdir = str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console-web")
     src = (_S6 / "console-web" / "run").read_text().split("\n", 1)[1]  # drop the with-contenv shebang
+    server_probe = ("echo OUTCOME=SERVER; python3 -c 'import os, webauth; "
+                    "print(\"SERVER_USERS=%d\" % len(webauth.parse_users(os.environ.get(\"CONSOLE_WEB_USERS\", \"\"))))'; exit 0")
     src = (src.replace("/usr/share/switchboard/console-web", webdir)
               .replace("exec sleep infinity", "echo OUTCOME=IDLE; exit 0")
-              .replace("exec python3 server.py", "echo OUTCOME=SERVER; exit 0"))
+              .replace("exec python3 server.py", server_probe))
     stubs = (
         "set -o errexit -o nounset -o pipefail\n"
         f'bashio::config() {{ case "$1" in console_web_enabled) printf %s {shlex.quote(enabled)} ;; *) printf null ;; esac; }}\n'
@@ -611,7 +616,8 @@ def _run_console_web(users: str, enabled: str = "true", bind: str = "127.0.0.1")
 
 def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
     """End to end: nothing between the count and the gate can change the
-    outcome, and every start-up line is true for the case it prints in."""
+    outcome, the server is handed the users the gate counted, and the
+    start-up lines checked here match the case they print in."""
     good = '[{"username":"op","password":"pw"}]'
     for users in ("[]", "", "not json", '[{"username":"op","password":""}]',
                   '[{"username":"op","password":null}]'):
@@ -628,6 +634,8 @@ def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
               any(l == f"INFO: Starting Switchboard console web terminal on {bind}:8100 ..." for l in log)
               and any("login gate ACTIVE (1 user(s))" in l and where in l for l in log)
               and not any(l.startswith("NOTICE") for l in log))
+        check(f"console-web/run end to end: the server is handed the 1 user the gate counted ({log})",
+              "SERVER_USERS=1" in log)
     outcome, log = _run_console_web(good, enabled="false")
     check(f"console-web/run end to end: console_web_enabled false -> IDLE (got {outcome})", outcome == "IDLE")
 

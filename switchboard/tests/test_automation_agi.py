@@ -155,3 +155,16 @@ def test_a_no_area_light_named_like_one_in_the_real_unassigned_area_stays_out():
     assert sets == [("light.desk", True)], (spoken, sets)
     spoken, sets = _run(["Unassigned", "Porch Lamp", "turn on"], by_area)
     assert sets == [("light.porch_lamp", True)], (spoken, sets)
+
+
+def test_a_near_twin_with_no_area_stays_out_too():
+    # Same words once "light"/"lamp" are set aside: joining would tie them for
+    # every reply but the exact names, and "porch" reached the area's own before.
+    for own, twin, said in (("Porch Light", "Porch Lights", "porch"),
+                            ("Porch Light", "Porch Lights", "the porch light"),
+                            ("Desk Lamp", "Desk Light", "desk"),
+                            ("Ceiling Light", "The Ceiling", "ceiling")):
+        by_area = {"Unassigned": [{"entity_id": "light.own", "name": own}],
+                   "": [{"entity_id": "light.twin", "name": twin}]}
+        spoken, sets = _run(["Unassigned", said, "turn on"], by_area)
+        assert sets == [("light.own", True)], (own, twin, said, spoken, sets)
