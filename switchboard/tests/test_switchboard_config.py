@@ -2586,6 +2586,114 @@ def test_no_emergency_number_can_reach_the_trunk() -> None:
                   e.index(f"exten = {prefix}{num},1,") < e.index(catch_all))
 
 
+
+# --------------------------------------------------------------------------- #
+# v0.124.0 — no room and no feature code may sit on an emergency number.
+# --------------------------------------------------------------------------- #
+_FEATURE_CODES = ("clock_ext", "wakeup_ext", "page_ext", "automation_ext",
+                  "assistant_ext", "status_ext", "announce_ext", "directory_ext")
+_ALL_ON = {k.replace("_ext", "_enabled"): True for k in _FEATURE_CODES}
+_TRUNK = {"enabled": True, "provider_host": "sip.example.com", "username": "u",
+          "secret": "x", "outbound_caller_id": "12025550123"}
+
+
+def _logged(fn):
+    """Run fn() with switchboard-config's log() captured; (result, lines)."""
+    lines, real = [], sbc.log
+    sbc.log = lines.append
+    try:
+        return fn(), lines
+    finally:
+        sbc.log = real
+
+
+def test_emergency_exts_names_every_number_the_notice_answers() -> None:
+    check("the shared list is 911 and 933", sbc.EMERGENCY_NUMBERS == ("911", "933"))
+    check("valid_rooms' default is the same list",
+          set(inspect.signature(sbc.valid_rooms).parameters["emergency"].default)
+          == set(sbc.EMERGENCY_NUMBERS))
+    notices = "\n".join(sbc.render_emergency_notices())
+    check("the notice answers exactly the shared list",
+          sorted(re.findall(r"^exten = (\d+),1,", notices, re.M)) == sorted(sbc.EMERGENCY_NUMBERS))
+    check("trunk off: bare numbers only", sbc.emergency_exts({"trunk": {}}) == {"911", "933"})
+    check("trunk on, prefix 9: bare and prefixed",
+          sbc.emergency_exts({"trunk": dict(_TRUNK, dial_prefix="9")}) == {"911", "933", "9911", "9933"})
+    check("trunk on, prefix 99", sbc.emergency_exts({"trunk": dict(_TRUNK, dial_prefix="99")})
+          == {"911", "933", "99911", "99933"})
+    check("trunk on, invalid prefix falls back to 9, as the dialplan does",
+          sbc.emergency_exts({"trunk": dict(_TRUNK, dial_prefix="x")}) == {"911", "933", "9911", "9933"})
+    check("trunk on, direct dial: no prefixed forms",
+          sbc.emergency_exts({"trunk": dict(_TRUNK, direct_dial=True)}) == {"911", "933"})
+    # The helper and the dialplan agree on every prefix the dialplan emits.
+    for trunk in ({}, dict(_TRUNK, dial_prefix="9"), dict(_TRUNK, dial_prefix="*8"),
+                  dict(_TRUNK, direct_dial=True)):
+        opts = {"rooms": sbc.valid_rooms([{"ext": "11", "name": "K", "secret": "s1"}]),
+                "trunk": trunk, "operator": {"enabled": True}}
+        e, _ = _logged(lambda: sbc.render_extensions(opts))
+        notice = set(re.findall(r"^exten = ([0-9*#]+),1,NoOp\(EMERGENCY", e, re.M))
+        check(f"emergency_exts matches the emitted notices ({trunk.get('dial_prefix', 'off')})",
+              notice == sbc.emergency_exts(opts))
+
+
+def test_no_feature_code_can_take_an_emergency_number() -> None:
+    """Before 0.124.0 the collision check held rooms and '0' only: a feature
+    code set to 911 was emitted with no log line, AHEAD of the emergency notice
+    for the same number, and took its calls."""
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    for trunk, nums in (({}, ("911", "933")),
+                        (dict(_TRUNK, dial_prefix="9"), ("911", "933", "9911", "9933"))):
+        for key in _FEATURE_CODES:
+            for num in nums:
+                opts = dict(_ALL_ON, rooms=rooms, trunk=trunk, operator={"enabled": True},
+                            **{key: num})
+                e, lines = _logged(lambda: sbc.render_extensions(opts))
+                firsts = re.findall(rf"^exten = {re.escape(num)},1,(.*)$", e, re.M)
+                check(f"{key}={num}: the emergency notice is the only {num}",
+                      len(firsts) == 1 and firsts[0].startswith("NoOp(EMERGENCY"))
+                check(f"{key}={num}: refused with a log line naming why",
+                      any(key in l and num in l and "is an emergency number" in l for l in lines))
+    # A prefixed form is free when nothing answers it: trunk off, 9911 is a valid code.
+    opts = dict(_ALL_ON, rooms=rooms, trunk={}, operator={"enabled": True}, directory_ext="9911")
+    e, lines = _logged(lambda: sbc.render_extensions(opts))
+    check("trunk off: 9911 may be a feature code", "exten = 9911,1,NoOp(Directory assistance)" in e)
+    check("trunk off: no emergency log line for 9911", not any("emergency" in l for l in lines))
+
+
+def test_a_room_on_an_emergency_number_is_kept_with_a_warning() -> None:
+    """Skipping such a room protects nothing (the notice's literal already
+    outranks the room pattern) and would stop its phone registering, so it is
+    kept, with one WARNING naming what dialling it does."""
+    rooms_in = [{"ext": x, "name": f"R{x}", "secret": "s1"} for x in ("11", "911", "933", "9911")]
+    got, lines = _logged(lambda: sbc.valid_rooms(rooms_in))
+    check("trunk off: every room kept", [r["ext"] for r in got] == ["11", "911", "933", "9911"])
+    warn = [l for l in lines if l.startswith("WARNING: room") and "is an emergency number" in l]
+    check("trunk off: a warning for 911 and 933 only", len(warn) == 2 and not any("9911" in l for l in warn))
+    opts = {"rooms": rooms_in, "trunk": dict(_TRUNK, dial_prefix="9")}
+    got, lines = _logged(lambda: sbc.valid_rooms(rooms_in, sbc.emergency_exts(opts)))
+    check("trunk on, prefix 9: every room still kept", len(got) == 4)
+    check("trunk on: 9911 warned too", sum("is an emergency number" in l for l in lines) == 3)
+    # Kept rooms stay reachable by endpoint, and the notice keeps the number.
+    o = dict(opts, rooms=got, operator={"enabled": True})
+    e, _ = _logged(lambda: sbc.render_extensions(o))
+    pj = sbc.render_pjsip(o)
+    check("the 911 room keeps its endpoint", "[911](room-endpoint)" in pj or "\n[911]" in pj)
+    firsts = re.findall(r"^exten = 911,1,(.*)$", e, re.M)
+    check("in [rooms] the notice still answers 911 first",
+          firsts and firsts[0].startswith("NoOp(EMERGENCY"))
+
+
+def test_an_ordinary_collision_is_not_called_an_emergency() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    for key in ("page_ext", "automation_ext", "assistant_ext", "status_ext",
+                "announce_ext", "directory_ext"):
+        opts = dict(_ALL_ON, rooms=rooms, trunk={}, operator={"enabled": True}, **{key: "11"})
+        _, lines = _logged(lambda: sbc.render_extensions(opts))
+        mine = [l for l in lines if key in l]
+        check(f"{key}=11: one line, a room collision, not an emergency",
+              len(mine) == 1 and "collides with a reserved/room ext" in mine[0]
+              and "emergency" not in mine[0])
+
+
 def test_every_rooms_extension_declares_what_kind_of_call_it_is() -> None:
     """`rooms` must mean "unclassified", not "five different things".
 

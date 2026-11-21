@@ -1,7 +1,30 @@
 # Changelog
 
-Recent releases. Releases up to 0.114.0 are in the
+Recent releases. Releases up to 0.114.1 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.124.0
+
+**No feature code or room can take the place of the emergency notice.**
+
+- `911` and `933` are always answered with the spoken notice that emergency
+  calls cannot be made from these phones, and with a trunk in prefix mode so
+  are the prefix followed by either (`9911` and `9933` by default). The check
+  that skips a feature code colliding with a room or another code did not
+  include them: a feature code set to `911` or `933` was written into the
+  dialplan ahead of the notice and answered those calls in its place, and the
+  start-up check said nothing about it. Now any of the eight feature codes set
+  to one of these numbers is skipped at start, with a log line saying it is an
+  emergency number, and the notice keeps the number.
+- A room numbered `911`, `933`, or a prefixed form while the trunk is on, gets
+  a WARNING at start. Dialling its number from a phone plays the notice, because
+  the notice's extension outranks the room pattern, while the operator,
+  directory assistance, transfers, paging and inbound calls still reach it.
+  The room is kept, so its phone still registers and places calls. A prefixed
+  form is an ordinary number while the trunk is off, since nothing answers it
+  then.
+- Configurations that use none of these numbers produce the same dialplan as
+  before.
 
 ## 0.123.0
 
@@ -385,13 +408,3 @@ Recent releases. Releases up to 0.114.0 are in the
   on the terminal led back. Its nameplate now carries a "← Dashboard" link when it
   is the dashboard's own console; the standalone terminal on its own port, which
   has no dashboard behind it, does not show one.
-
-## 0.114.1
-
-**The dashboard keeps the wake-up time you entered.**
-
-- The dashboard rebuilds every line each 4 s, and held off only while a wake-up
-  time box had focus. Safari moves focus off the box when Set is clicked, so a
-  completed time could be wiped back to empty before the click landed, and Set
-  answered "pick a time" without saving anything. A completed time is now kept
-  for its line across rebuilds until Set or Cancel succeeds.

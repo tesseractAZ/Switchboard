@@ -714,14 +714,16 @@ def test_switchboard_config_imports_when_its_resolver_cannot_load():
             shutil.rmtree(root, ignore_errors=True)
 
 
-def _drive_main(b, explode=False):
-    """Run switchboard-config's main() with every path it writes inside `b`."""
+def _drive_main(b, explode=False, options_json=None):
+    """Run switchboard-config's main() with every path it writes inside `b`
+    (with `options_json` as options.json, if given)."""
     names = ("OPTIONS_PATH", "OVERLAY_PATH", "EFFECTIVE_PATH", "ASTERISK_ETC", "RUN_DIR",
              "DATA_DIR", "STATE_DIR", "SHARE_DIR", "SHARE_LOG", "apply_timezone",
              "resolve_timezone", "_install_custom_prompts")
     saved = {n: getattr(sbc, n) for n in names}
     opts = b.root / "options.json"
-    opts.write_text('{"rooms": [{"ext": "11", "name": "Kitchen", "secret": "s3cret11"},'
+    opts.write_text(options_json or
+                    '{"rooms": [{"ext": "11", "name": "Kitchen", "secret": "s3cret11"},'
                     ' {"ext": "12", "name": "Den", "secret": "s3cret12"}]}')
     sbc.OPTIONS_PATH = opts
     sbc.OVERLAY_PATH = b.root / "config" / "options-overlay.json"
@@ -1235,6 +1237,28 @@ def test_the_guide_documents_every_prompt():
     for words in ("/app_configs/<slug>/prompts", "`addon_configs`", "8 kHz", "mono", "16-bit", "µ-law",
                   "ffmpeg", "sox", "restart"):
         check(f"docs: the section says {words!r}", words in section)
+
+
+
+def test_main_warns_about_a_room_on_a_prefixed_emergency_number():
+    """v0.124.0: main() checks rooms against every number the emergency notice
+    answers, the prefixed forms included when the trunk is on. A room numbered
+    9911 is kept (its phone still registers) with a WARNING."""
+    import json as _json
+    options = _json.dumps({
+        "rooms": [{"ext": "11", "name": "Kitchen", "secret": "s3cret11"},
+                  {"ext": "9911", "name": "Shadowed", "secret": "s3cret99"}],
+        "trunk": {"enabled": True, "provider_host": "sip.example.com", "username": "u",
+                  "secret": "x", "dial_prefix": "9", "outbound_caller_id": "12025550123"}})
+    with _box() as b:
+        ext = _drive_main(b, options_json=options)
+        pj = (b.root / "etc" / "asterisk" / "pjsip.conf").read_text()
+        check("main: the room on 9911 is warned about",
+              any(l.startswith("WARNING: room ext='9911'") and "is an emergency number" in l
+                  for l in b.logs))
+        check("main: 9911 keeps its endpoint", "[9911]" in pj and "[11]" in pj)
+        check("main: 9911 is still the emergency notice", "exten = 9911,1,NoOp(EMERGENCY" in ext)
+        check("main: both rooms configured", any(l.startswith("done: 2 room(s)") for l in b.logs))
 
 
 if __name__ == "__main__":
