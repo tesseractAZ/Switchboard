@@ -12,15 +12,17 @@ Recent releases. Releases up to 0.114.1 are in the
   are the prefix followed by either (`9911` and `9933` by default). The check
   that skips a feature code colliding with a room or another code did not
   include them: a feature code set to `911` or `933` was written into the
-  dialplan ahead of the notice, with no log line, and answered those calls in
-  its place. Now any of the eight feature codes set to one of these numbers is
-  skipped at start, with a log line saying it is an emergency number, and the
-  notice keeps the number.
-- A room numbered `911`, `933`, or a prefixed form while the trunk is on, could
-  never be dialled, because the notice's own extension outranks the room
-  pattern. Such a room is now skipped at start with a log line, as a room with
-  an all-zero number already was. A prefixed form stays usable while the trunk
-  is off, since nothing answers it then.
+  dialplan ahead of the notice and answered those calls in its place, and the
+  start-up check said nothing about it. Now any of the eight feature codes set
+  to one of these numbers is skipped at start, with a log line saying it is an
+  emergency number, and the notice keeps the number.
+- A room numbered `911`, `933`, or a prefixed form while the trunk is on, gets
+  a WARNING at start. Dialling its number from a phone plays the notice, because
+  the notice's extension outranks the room pattern, while the operator,
+  directory assistance, transfers, paging and inbound calls still reach it.
+  The room is kept, so its phone still registers and places calls. A prefixed
+  form is an ordinary number while the trunk is off, since nothing answers it
+  then.
 - Configurations that use none of these numbers produce the same dialplan as
   before.
 

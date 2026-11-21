@@ -266,10 +266,10 @@ def valid_rooms(rooms: list, emergency: "set | frozenset" = frozenset(("911", "9
     """Validate/sanitize room entries once; both renderers consume the result.
 
     Skips (with a secret-safe log) rooms that are missing fields, have a
-    non-numeric ext, sit on an emergency number (`emergency`: see
-    emergency_exts), duplicate an earlier ext, or carry control characters in
+    non-numeric ext, duplicate an earlier ext, or carry control characters in
     the secret — so one bad entry can't inject config or shadow another room.
-    Returns dicts with cleaned ext/name/secret.
+    A room on an emergency number (`emergency`: see emergency_exts) is KEPT,
+    with a warning. Returns dicts with cleaned ext/name/secret.
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -291,11 +291,15 @@ def valid_rooms(rooms: list, emergency: "set | frozenset" = frozenset(("911", "9
             log(f"skipping room ext={ext!r}: an all-zero extension is undialable")
             continue
         if ext in emergency:
-            # The emergency notice's literal extension outranks the room
-            # pattern, so dialling this room would play the notice instead.
-            log(f"skipping room ext={ext!r}: it is an emergency number, answered "
-                "with the emergency notice, so the room could never be dialled")
-            continue
+            # KEPT, not skipped. The notice's literal extension already outranks
+            # the room pattern, so the room never took the notice's calls;
+            # skipping it would only stop its phone registering, and with it
+            # every call it places (911 included) and every path that dials it
+            # by endpoint: the operator, 411, transfers, Page, inbound calls.
+            log(f"WARNING: room ext={ext!r} is an emergency number: dialling it "
+                "from a phone plays the emergency notice, while the operator, "
+                "directory assistance, transfers, paging and inbound calls still "
+                "reach it; renumber the room")
         if ext in seen:
             log(f"skipping duplicate room ext={ext!r}")
             continue
@@ -1118,11 +1122,11 @@ def dial_prefix(trunk: dict) -> str:
 def emergency_exts(opts: dict) -> set:
     """Every extension the dialplan answers with the emergency notice: 911 and
     933 always, and <prefix>911 and <prefix>933 when the trunk is on in prefix
-    mode. A room or a feature code on one of these never gets a call: the
-    literal emergency extension comes first in the file and outranks a room
-    pattern, so the feature code would take the emergency number's calls (it is
-    emitted earlier) and the room could not be dialled. Both are refused with a
-    log line instead (v0.124.0)."""
+    mode. A feature code on one of these is emitted earlier in the file and
+    would take the emergency number's calls, so it is refused with a log line
+    (v0.124.0). A room on one is kept with a warning: the notice's literal
+    extension already outranks the room pattern, so dialling the number plays
+    the notice, while every path that dials the room's endpoint still works."""
     trunk = opts.get("trunk") or {}
     nums = set(EMERGENCY_NUMBERS)
     prefix = dial_prefix(trunk)

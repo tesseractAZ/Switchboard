@@ -2659,16 +2659,39 @@ def test_no_feature_code_can_take_an_emergency_number() -> None:
     check("trunk off: no emergency log line for 9911", not any("emergency" in l for l in lines))
 
 
-def test_a_room_on_an_emergency_number_is_skipped() -> None:
+def test_a_room_on_an_emergency_number_is_kept_with_a_warning() -> None:
+    """Skipping such a room protects nothing (the notice's literal already
+    outranks the room pattern) and would stop its phone registering, so it is
+    kept, with one WARNING naming what dialling it does."""
     rooms_in = [{"ext": x, "name": f"R{x}", "secret": "s1"} for x in ("11", "911", "933", "9911")]
     got, lines = _logged(lambda: sbc.valid_rooms(rooms_in))
-    check("trunk off: 911 and 933 skipped, 9911 kept", [r["ext"] for r in got] == ["11", "9911"])
-    check("trunk off: one log line per skipped room",
-          sum("is an emergency number" in l for l in lines) == 2)
+    check("trunk off: every room kept", [r["ext"] for r in got] == ["11", "911", "933", "9911"])
+    warn = [l for l in lines if l.startswith("WARNING: room") and "is an emergency number" in l]
+    check("trunk off: a warning for 911 and 933 only", len(warn) == 2 and not any("9911" in l for l in warn))
     opts = {"rooms": rooms_in, "trunk": dict(_TRUNK, dial_prefix="9")}
     got, lines = _logged(lambda: sbc.valid_rooms(rooms_in, sbc.emergency_exts(opts)))
-    check("trunk on, prefix 9: 9911 skipped too", [r["ext"] for r in got] == ["11"])
-    check("trunk on: three log lines", sum("is an emergency number" in l for l in lines) == 3)
+    check("trunk on, prefix 9: every room still kept", len(got) == 4)
+    check("trunk on: 9911 warned too", sum("is an emergency number" in l for l in lines) == 3)
+    # Kept rooms stay reachable by endpoint, and the notice keeps the number.
+    o = dict(opts, rooms=got, operator={"enabled": True})
+    e, _ = _logged(lambda: sbc.render_extensions(o))
+    pj = sbc.render_pjsip(o)
+    check("the 911 room keeps its endpoint", "[911](room-endpoint)" in pj or "\n[911]" in pj)
+    firsts = re.findall(r"^exten = 911,1,(.*)$", e, re.M)
+    check("in [rooms] the notice still answers 911 first",
+          firsts and firsts[0].startswith("NoOp(EMERGENCY"))
+
+
+def test_an_ordinary_collision_is_not_called_an_emergency() -> None:
+    rooms = sbc.valid_rooms([{"ext": "11", "name": "Kitchen", "secret": "s1"}])
+    for key in ("page_ext", "automation_ext", "assistant_ext", "status_ext",
+                "announce_ext", "directory_ext"):
+        opts = dict(_ALL_ON, rooms=rooms, trunk={}, operator={"enabled": True}, **{key: "11"})
+        _, lines = _logged(lambda: sbc.render_extensions(opts))
+        mine = [l for l in lines if key in l]
+        check(f"{key}=11: one line, a room collision, not an emergency",
+              len(mine) == 1 and "collides with a reserved/room ext" in mine[0]
+              and "emergency" not in mine[0])
 
 
 def test_every_rooms_extension_declares_what_kind_of_call_it_is() -> None:

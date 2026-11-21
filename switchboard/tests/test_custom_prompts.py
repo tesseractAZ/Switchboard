@@ -1240,10 +1240,10 @@ def test_the_guide_documents_every_prompt():
 
 
 
-def test_main_refuses_a_room_on_a_prefixed_emergency_number():
-    """v0.124.0: main() validates rooms against every number the emergency
-    notice answers, the prefixed forms included when the trunk is on, so a
-    room numbered 9911 never reaches pjsip.conf or the room allow-list."""
+def test_main_warns_about_a_room_on_a_prefixed_emergency_number():
+    """v0.124.0: main() checks rooms against every number the emergency notice
+    answers, the prefixed forms included when the trunk is on. A room numbered
+    9911 is kept (its phone still registers) with a WARNING."""
     import json as _json
     options = _json.dumps({
         "rooms": [{"ext": "11", "name": "Kitchen", "secret": "s3cret11"},
@@ -1253,11 +1253,12 @@ def test_main_refuses_a_room_on_a_prefixed_emergency_number():
     with _box() as b:
         ext = _drive_main(b, options_json=options)
         pj = (b.root / "etc" / "asterisk" / "pjsip.conf").read_text()
-        check("main: the room on 9911 is skipped with a log line",
-              any("ext='9911'" in l and "is an emergency number" in l for l in b.logs))
-        check("main: no endpoint for 9911", "[9911]" not in pj and "[11]" in pj)
+        check("main: the room on 9911 is warned about",
+              any(l.startswith("WARNING: room ext='9911'") and "is an emergency number" in l
+                  for l in b.logs))
+        check("main: 9911 keeps its endpoint", "[9911]" in pj and "[11]" in pj)
         check("main: 9911 is still the emergency notice", "exten = 9911,1,NoOp(EMERGENCY" in ext)
-        check("main: one room configured", any(l.startswith("done: 1 room(s)") for l in b.logs))
+        check("main: both rooms configured", any(l.startswith("done: 2 room(s)") for l in b.logs))
 
 
 if __name__ == "__main__":
