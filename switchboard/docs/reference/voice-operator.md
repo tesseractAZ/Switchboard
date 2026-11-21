@@ -192,8 +192,12 @@ written; before that it stayed until the add-on restarted. Like the turn
 file, it is out of reach of a file browser, a Samba share or another add-on.
 
 The add-on's log is a different matter. Each voice feature's recognizer writes a
-line there for everything it hears, and the assistant adds one per turn. That log
-is readable by Home Assistant administrators through the Supervisor, and it is
+line there for everything it hears, and the assistant adds one per turn. A reply
+that dial-a-status, the directory, the announce or the wake-up readout could not
+render adds one too, and the announce's confirmation repeats what the caller
+said; since v0.126.0 that line follows the same switch. (The wake-up readout's
+separate note that it skipped the weather or a calendar entry still names what
+it skipped.) That log is readable by Home Assistant administrators through the Supervisor, and it is
 kept for about two days, across a restart of the host. With
 `assistant_transcripts` on, those lines quote the words; with it off, they give
 only the outcome and the length.

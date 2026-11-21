@@ -105,9 +105,31 @@ def wakeup_scene_for(wk: dict, ext: str) -> str:
     return str(wk.get("scene", "") or "")
 
 
+def transcripts_allowed() -> bool:
+    """May what a caller said reach this process's stderr, the add-on journal?
+
+    The same policy as switchboard-stt's transcripts_allowed() and the assistant
+    AGI's _journal_words: the `assistant_transcripts` option, and FAILS CLOSED —
+    only a policy that was read and says true lets the words through, because
+    the journal is served to anyone with log access and kept about two days."""
+    section = load_features().get("assistant")
+    return isinstance(section, dict) and section.get("transcripts") is True
+
+
+def said(text: str, words: bool) -> str:
+    """What a log line may say about a text: the words, or only their length.
+    The assistant AGI and switchboard-stt keep twins."""
+    return repr(text) if words else f"<{len(text or '')} chars>"
+
+
 def say(text: str, prefix: str = "sw-voice") -> bool:
     """Synthesize text with switchboard-tts and Playback it. True on success;
-    never raises (caller falls back to a canned prompt)."""
+    never raises (caller falls back to a canned prompt).
+
+    A failure names the text only when transcripts are on (v0.126.0): the
+    announce flow speaks the caller's own words back ("Announcing on the
+    speakers: …"), and this line cannot tell those from a room name. The policy
+    is read on the failure path only, so a spoken reply costs no file read."""
     global _seq
     _seq += 1
     base = f"/tmp/{prefix}-{os.getpid()}-{_seq}"
@@ -118,12 +140,17 @@ def say(text: str, prefix: str = "sw-voice") -> bool:
         # hangup ends this AGI first. Its stdout would be the AGI channel.
         proc = subprocess.run([TTS, text, base], stdout=subprocess.DEVNULL, timeout=20)
         if proc.returncode != 0 or not os.path.exists(wav):
-            log("speech", f"tts failed rc={proc.returncode} for {text[:40]!r}")
+            log("speech", f"tts failed rc={proc.returncode} for "
+                          f"{said(text, transcripts_allowed())}")
             return False
         agi(f"EXEC Playback {base}")  # Playback wants the path WITHOUT extension
         return True
     except (subprocess.TimeoutExpired, OSError) as exc:
-        log("speech", f"tts error: {exc}")
+        # A TimeoutExpired renders its whole command line, and the text is an
+        # argument on it, so with the words withheld only the error's type goes.
+        words = transcripts_allowed()
+        log("speech", f"tts error for {said(text, words)}: "
+                      f"{exc if words else type(exc).__name__}")
         return False
     finally:
         try:

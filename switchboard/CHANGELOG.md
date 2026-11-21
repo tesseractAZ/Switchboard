@@ -1,7 +1,25 @@
 # Changelog
 
-Recent releases. Releases up to 0.114.2 are in the
+Recent releases. Releases up to 0.115.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.126.0
+
+**What a caller said no longer reaches the add-on's log when a spoken reply fails.**
+
+- The phone-to-speaker announce confirms with "Announcing on the speakers:"
+  followed by the words it heard. When that reply could not be rendered, the
+  line logged for the failure quoted the start of its text, and a render that
+  timed out logged all of it, so the caller's words reached the add-on's log
+  (the Log tab) whatever `assistant_transcripts` said.
+- The line logged when a reply cannot be rendered, for dial-a-status, the
+  directory, the announce and the wake-up readout, now follows the rule the
+  speech recognizer and the voice assistant already follow: it quotes the reply
+  only while `assistant_transcripts` is on, and otherwise gives its length and,
+  for a render that failed with an error, only the kind of error. If the
+  setting cannot be read, the reply is left out. The wake-up readout's own note
+  that it skipped the weather or a calendar entry still names what it skipped.
+- Calls sound the same; only the log line of a failed reply differs.
 
 ## 0.125.0
 
@@ -419,16 +437,3 @@ Recent releases. Releases up to 0.114.2 are in the
 - Asterisk 20.11.1's own score (MES) gives jitter almost no weight, because it
   multiplies the jitter in seconds. The README and the health-monitoring
   reference now say so.
-
-## 0.115.0
-
-**Documentation opens quickly in Home Assistant.** No change to how the add-on runs.
-
-- Home Assistant renders the add-on's `DOCS.md` whole each time Documentation is
-  opened, and it had grown to 137 KB. It is now a short operator guide (about
-  25 KB): what to dial, everyday tasks, the options most often changed and the
-  most common fixes, each linking to its full reference page.
-- The full reference moved, unchanged in substance, to `docs/reference/` (sixteen
-  pages and an index). README and SECURITY links point there, the Word and PDF
-  manual is built from the guide plus every reference page, and tests keep the
-  guide under 32 KiB and fail on any dead link or anchor.
