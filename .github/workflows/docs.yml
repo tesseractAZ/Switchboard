@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-26.04
     # Bounded: no step here can hold the check for GitHub's 6 h default. The job
     # bound covers the sum of the step bounds (63 min) plus runner set-up;
-    # tests/test_docs_apt_bounds.py keeps the two in step.
+    # tests/test_workflow_apt_bounds.py keeps the two in step.
     timeout-minutes: 70
     # Every apt-get here reads these. apt has no minimum-speed option: a mirror
     # that trickles never errors, so the Retries/Timeout options only catch a

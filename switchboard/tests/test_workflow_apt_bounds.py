@@ -1,6 +1,6 @@
-"""Bounds and mirror choice for the documentation workflow's package installs.
+"""Bounds on every workflow's package installs, and the docs job's mirror choice.
 
-    python3 -m pytest switchboard/tests/test_docs_apt_bounds.py
+    python3 -m pytest switchboard/tests/test_workflow_apt_bounds.py
 
 On 2026-11-19 the docs job's pandoc and LibreOffice installs took 10 and 16 min
 against a normal 1: the runner's first apt mirror trickled packages at
@@ -17,6 +17,11 @@ This file pins the repair in .github/workflows/docs.yml:
 - every apt-get and dpkg command is bounded, every install is split into a
   bounded download and an install from the cache, every step is bounded, and
   every job's bound covers the sum of its steps' bounds.
+
+The bound checks apply to every job in docs.yml, and to every job in ANY workflow
+that runs apt-get or dpkg. ci.yml's AppArmor job had the same unbounded apt-get
+until 2026-11-21. Its install branch runs only when the runner image lacks
+apparmor_parser, so no run would have shown it, and a scan of all workflows does.
 """
 import re
 from pathlib import Path
@@ -24,7 +29,8 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-DOCS_YML = REPO / ".github" / "workflows" / "docs.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+DOCS_YML = WORKFLOWS / "docs.yml"
 
 # The slack a job bound keeps above the sum of its steps: runner set-up and
 # the post-job steps, which no step bound covers.
@@ -45,6 +51,17 @@ AWS_LIST = AZURE_LIST.replace("azure.archive", "us-east-2.ec2.archive")
 
 def _doc():
     return yaml.safe_load(DOCS_YML.read_text())
+
+
+def _bounded_jobs():
+    """(label, job) for every docs.yml job and every job anywhere that fetches packages."""
+    out = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+            fetches = any(re.search(r"\b(apt-get|dpkg)\b", str(s.get("run", ""))) for s in job["steps"])
+            if path == DOCS_YML or fetches:
+                out.append((f"{path.name}:{name}", job))
+    return out
 
 
 def _steps(job):
@@ -144,9 +161,8 @@ def test_pandoc_is_the_pinned_upstream_deb_with_apt_as_a_visible_fallback():
 
 
 def test_every_apt_and_dpkg_command_is_bounded_and_reads_apt_opts():
-    doc = _doc()
     seen = 0
-    for job_name, job in doc["jobs"].items():
+    for job_name, job in _bounded_jobs():
         uses_apt = False
         for s in job["steps"]:
             for line in _lines(s.get("run", "")):
@@ -167,15 +183,19 @@ def test_every_apt_and_dpkg_command_is_bounded_and_reads_apt_opts():
                 assert want in opts, (job_name, want)
     # Named rather than "at least one", so an apt-get that slipped out of the
     # pattern (and out of this check) shows as a count change: 9 in the docs
-    # job, 3 in each screenshots job.
-    assert seen == 15, seen
+    # job, 3 in each screenshots job, 3 in ci.yml's AppArmor job.
+    assert seen == 18, seen
+    # And by file, the same way: a workflow gaining an apt-get joins this list.
+    files = sorted({label.split(":")[0] for label, job in _bounded_jobs()
+                    if any("apt-get" in str(s.get("run", "")) for s in job["steps"])})
+    assert files == ["ci.yml", "docs.yml"], files
 
 
 def test_every_install_downloads_first_then_installs_from_the_cache():
     # A bound that fires while dpkg unpacks leaves a half-configured package and
     # a dpkg still holding the lock. Downloading first puts the long, network-
     # bound part where a kill is harmless.
-    for job_name, job in _doc()["jobs"].items():
+    for job_name, job in _bounded_jobs():
         for s in job["steps"]:
             installs = [APT_LINE.match(line) for line in _lines(s.get("run", ""))
                         if "apt-get" in line and " install " in line]
@@ -190,7 +210,7 @@ def test_every_install_downloads_first_then_installs_from_the_cache():
 
 
 def test_every_step_bound_covers_its_commands_bounds():
-    for job_name, job in _doc()["jobs"].items():
+    for job_name, job in _bounded_jobs():
         for s in job["steps"]:
             run = str(s.get("run", ""))
             need = sum(int(k) + int(n) for k, n in BOUND.findall(run))
@@ -202,6 +222,6 @@ def test_every_step_bound_covers_its_commands_bounds():
 
 
 def test_every_job_bound_covers_the_sum_of_its_steps():
-    for job_name, job in _doc()["jobs"].items():
+    for job_name, job in _bounded_jobs():
         total = sum(s["timeout-minutes"] for s in job["steps"])
         assert job.get("timeout-minutes", 0) >= total + JOB_SLACK_MIN, (job_name, job.get("timeout-minutes"), total)
