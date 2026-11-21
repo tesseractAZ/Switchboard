@@ -3,6 +3,15 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.114.1
+
+**The dashboard keeps the wake-up time you entered.**
+
+- The dashboard rebuilds every line each 4 s, and held off only while a wake-up
+  time box had focus. Safari moves focus off the box when Set is clicked, so a
+  completed time could be wiped back to empty before the click landed, and Set
+  answered "pick a time" without saving anything. A completed time is now kept
+  for its line across rebuilds until Set or Cancel succeeds.
 ## 0.114.0
 
 **The operator console is reached over SSH instead of telnet, and the board no

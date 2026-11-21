@@ -29,6 +29,15 @@ Dial these from any room phone. All are configurable (`*_ext`) and can be disabl
 | `47`  | **Local voice assistant** — ask Home Assistant anything (*off by default*) | [Local voice assistant](voice-operator.md#local-voice-assistant--dial-47) |
 | `411` | **Directory assistance** | [Directory assistance](voice-operator.md#directory-assistance--dial-411) |
 
+`911` and `933` always answer with the emergency notice, and so do the dial
+prefix followed by either when the trunk is on in prefix mode (`9911`, `9933`
+with the default prefix). Since v0.124.0 a feature code set to one of those
+numbers is skipped at start with a log line saying it is an emergency number;
+before, it was emitted ahead of the notice and took its calls. A room numbered
+that way is kept, with a warning at start: its phone registers and places calls,
+and the operator, directory assistance, transfers, paging and inbound calls
+reach it, but dialling its number plays the notice, so renumber it.
+
 A feature's dial code is skipped (with a log line) if it collides with a room
 extension or another code, but the underlying feature usually still works via
 the operator, the scheduler, or the dashboard. Two exceptions: the talking
