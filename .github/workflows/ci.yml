@@ -71,16 +71,32 @@ jobs:
   apparmor:
     name: AppArmor profile compiles
     runs-on: ubuntu-26.04
+    # The runner image ships apparmor_parser, so the apt branch below normally
+    # never runs. It is bounded all the same, as docs.yml's installs are
+    # (2026-11-21): unbounded, a slow apt mirror holds this check for GitHub's
+    # 6 h default. Steps 16 min; tests/test_workflow_apt_bounds.py keeps the
+    # job bound above them.
+    timeout-minutes: 21
+    env:
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
 
+      # A bounded download, then an install from the local cache, so the bound
+      # can fire only while packages download, never while dpkg unpacks them.
       - name: Ensure apparmor_parser
+        timeout-minutes: 10
         run: |
-          command -v apparmor_parser >/dev/null \
-            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends apparmor; }
+          command -v apparmor_parser >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update
+            sudo timeout -k 10 300 apt-get $APT_OPTS install -y --download-only --no-install-recommends apparmor
+            sudo timeout -k 10 120 apt-get $APT_OPTS install -y --no-install-recommends apparmor
+          }
           apparmor_parser --version | head -1
 
       - name: Compile switchboard/apparmor.txt
+        timeout-minutes: 3
         run: |
           sudo apparmor_parser -Q -K switchboard/apparmor.txt
           names="$(sudo apparmor_parser -N -K switchboard/apparmor.txt)"

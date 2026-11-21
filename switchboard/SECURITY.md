@@ -70,9 +70,10 @@ job's runner and these checks.
 The documentation build takes pandoc from the upstream project's release package
 on GitHub, pinned by its sha256, instead of from the runner's apt mirrors. apt
 stays the fallback, and the build log carries a warning whenever the fallback
-ran. Every apt and dpkg command in that workflow has a time bound, each install
-downloads first and only then unpacks, and every job's bound covers the sum of
-its steps' bounds. `tests/test_docs_apt_bounds.py` pins these.
+ran. Every apt and dpkg command in every workflow has a time bound, each install
+downloads first and only then unpacks, and the bound of every job that installs
+packages (and of every documentation job) covers the sum of its steps' bounds.
+`tests/test_workflow_apt_bounds.py` pins these.
 
 `.github/workflows/dependabot-automerge.yml` merges that pull request without a
 review only when all of these hold:
