@@ -19,15 +19,25 @@ def test_parse_users_happy() -> None:
     assert users == [("eric", "pw1"), ("guest", "pw2")]
 
 
-def test_parse_users_bad_inputs_disable_gate() -> None:
-    # Malformed JSON, non-list roots, incomplete rows: all yield [] (gate off),
-    # matching the add-on's fail-open-to-previous-behavior convention.
+def test_parse_users_bad_inputs_yield_no_users() -> None:
+    # Malformed JSON, non-list roots, incomplete rows: all yield []. Both readers
+    # fail closed on that: the web terminal does not start, SSH refuses logins.
     assert webauth.parse_users("") == []
     assert webauth.parse_users("not json") == []
     assert webauth.parse_users('{"username":"x"}') == []
     assert webauth.parse_users('[{"username":"","password":"p"}]') == []
     assert webauth.parse_users('[{"username":"u","password":""}]') == []
     assert webauth.parse_users('[42, null, "x"]') == []
+
+
+def test_parse_users_counts_only_text_or_whole_number_fields() -> None:
+    # str() of these used to make a usable row with the password "None",
+    # "False" or "[]" (reachable through a hand-edited options overlay).
+    for bad in ("null", "false", "true", "[]", "{}", "1.5"):
+        assert webauth.parse_users(f'[{{"username":"op","password":{bad}}}]') == [], bad
+        assert webauth.parse_users(f'[{{"username":{bad},"password":"pw"}}]') == [], bad
+    # A whole number is still a password, as written.
+    assert webauth.parse_users('[{"username":"op","password":1234}]') == [("op", "1234")]
 
 
 def test_parse_users_strips_username_not_password() -> None:

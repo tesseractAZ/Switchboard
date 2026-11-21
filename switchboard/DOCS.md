@@ -258,7 +258,8 @@ There are three ways in:
   `-o WarnWeakCrypto=no-pq-kex` silences it.
 - **Standalone web terminal (port 8100).** Bound to `127.0.0.1` by default, so it
   answers only on the Home Assistant host itself; it is a fallback for the
-  sidebar console.
+  sidebar console. Since 0.125.0 it starts only when `console_users` has an
+  entry, and asks for that sign-in.
 
 Keys: **↑↓** / **j k** move · **R** ring · **C** connect · **H** hang up ·
 **T** transfer · **W** set wake-up · **X** cancel wake-up · **M**
@@ -402,7 +403,7 @@ the options people change most often; all of them, with their limits, are in the
 | `announce_token` | `""` | Shared secret for `POST /api/announce` from the LAN. Blank: only the Supervisor can call it. |
 | `announce_retry_attempts` | `2` | How many times a handset announcement that never played is sent again (0–3; `0` turns it off). |
 | `assistant_enabled` | `false` | The local voice assistant on `47`. |
-| `console_users` | `[]` | Accounts (`username`, `password`) for the SSH console and the standalone web terminal. SSH refuses every login while it is empty. |
+| `console_users` | `[]` | Accounts (`username`, `password`) for the SSH console and the standalone web terminal. While it is empty, SSH refuses every login and the standalone web terminal does not start. |
 | `console_bind` | `0.0.0.0` | The interface the SSH console listens on; `127.0.0.1` keeps it on the Home Assistant host. An upgraded install keeps the value it had saved. |
 | `console_web_bind` | `127.0.0.1` | The interface the standalone web terminal (port 8100) listens on. |
 | `log_level` | `info` | How much of Asterisk reaches the Log tab. `info` includes the dialplan trace, dialled numbers among it; `notice`, `warning`, `error` and `critical` leave the trace out; `debug` adds trunk detail for diagnosis. |

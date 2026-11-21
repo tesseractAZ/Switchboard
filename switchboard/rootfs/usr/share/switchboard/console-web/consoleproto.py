@@ -74,9 +74,9 @@ def is_websocket_upgrade(headers: dict) -> bool:
 def origin_allowed(headers: dict, extra_allowed=()) -> bool:
     """Reject a cross-origin WebSocket upgrade (drive-by / CSWSH protection).
 
-    This is a *browser-reachable, unauthenticated call-control* surface, so a
-    malicious LAN web page must not be able to cross-origin-connect and drive the
-    console. Browsers always send Origin; the HA panel_iframe loads the terminal
+    This is a *browser-reachable call-control* surface, so a malicious LAN web
+    page must not be able to cross-origin-connect and drive the console with a
+    signed-in browser's session. Browsers always send Origin; the HA panel_iframe loads the terminal
     page from this same host, so its Origin authority equals the Host header and
     is allowed. A page served from any other origin is rejected. Non-browser
     clients (CLI, tests) send no Origin and are allowed: a script is not a

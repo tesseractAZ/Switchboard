@@ -19,6 +19,7 @@ permanently idle the resident recognizer. It now uses the explicit-``false`` for
 too, and the lint below is multi-line-aware so any idle gate keying off
 ``bashio::config.true`` (single- or multi-flag) is caught.
 """
+import os
 import subprocess
 import re
 import sys
@@ -254,7 +255,7 @@ def test_the_bind_is_resolved_before_the_warning_that_depends_on_it():
     for name in ("console-web",):
         src = (root / name / "run").read_text().splitlines()
         assign = next((i for i, l in enumerate(src) if re.match(r'^\s*BIND="\$\(switchboard-opt', l)), None)
-        notice = next((i for i, l in enumerate(src) if "bashio::log.notice" in l and "UNAUTHENTICATED" in l), None)
+        notice = next((i for i, l in enumerate(src) if "bashio::log.notice" in l and "NOT started" in l), None)
         check(f"{name}: both the bind assignment and the notice exist",
               assign is not None and notice is not None)
         if assign is not None and notice is not None:
@@ -267,7 +268,7 @@ def test_the_warning_is_inside_a_guard_not_at_the_top_level():
     for name in ("console-web",):
         src = (root / name / "run").read_text().splitlines()
         for line in src:
-            if "bashio::log.notice" in line and "UNAUTHENTICATED" in line:
+            if "bashio::log.notice" in line and "NOT started" in line:
                 check(f"{name}: the notice is nested inside a conditional",
                       line.startswith((" ", "\t")))
 
@@ -470,13 +471,15 @@ def _idle_gates(run_path):
     return blocks
 
 
-def _gate_verdict(svc, values):
-    """IDLE or RUN: what the service's idle gates decide for these option reads."""
+def _gate_verdict(svc, values, prelude=""):
+    """IDLE or RUN: what the service's idle gates decide for these option reads
+    (`prelude`: shell run first, for state a gate reads besides the options)."""
     import shlex
     gates = _idle_gates(_S6 / svc / "run")
     arms = " ".join(f"{k}) printf %s {shlex.quote(v)} ;;" for k, v in values.items())
-    body = (f'bashio::config() {{ case "$1" in {arms} *) printf null ;; esac; }}\n'
-            "bashio::log.info() { :; }\n"
+    body = (prelude + "\n"
+            + f'bashio::config() {{ case "$1" in {arms} *) printf null ;; esac; }}\n'
+            "bashio::log.info() { :; }\nbashio::log.notice() { :; }\n"
             + "\n".join(g.replace("exec sleep infinity", "echo IDLE; exit 0") for g in gates)
             + "\necho RUN\n")
     r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, timeout=30)
@@ -503,7 +506,9 @@ def test_the_board_idles_only_when_ssh_and_the_web_terminal_are_both_off():
 
 def test_the_web_terminal_no_longer_idles_when_ssh_is_off():
     """console_enabled used to idle the web terminal too, because it switched the
-    board the terminal bridges to. It now switches SSH only."""
+    board the terminal bridges to. It now switches SSH only. (With a valid
+    console user: without one the terminal idles whatever the flags say, see
+    test_the_web_terminal_never_runs_without_a_login.)"""
     cases = [
         ({"console_enabled": "false", "console_web_enabled": "true"}, "RUN"),
         ({"console_enabled": "true", "console_web_enabled": "false"}, "IDLE"),
@@ -511,10 +516,128 @@ def test_the_web_terminal_no_longer_idles_when_ssh_is_off():
         ({"console_enabled": "true", "console_web_enabled": ""}, "RUN"),
     ]
     for values, want in cases:
-        got, n = _gate_verdict("console-web", values)
+        got, n = _gate_verdict("console-web", values, prelude="VALID_USERS=1")
         check("console-web/run: the idle gate was found and executed", n >= 1)
         check(f"console-web/run: {values} -> {want} (got {got!r})", got == want)
 
+
+
+def test_the_web_terminal_never_runs_without_a_login():
+    """v0.125.0: with no valid console_users the standalone terminal idles,
+    whatever the bind. Under host_network 127.0.0.1 is the host's own loopback,
+    so a no-login terminal there was reachable by every program on the host and
+    every other host-network add-on. Runs the REAL gate under bash on count
+    values given directly; the next two tests run the real count, and the
+    whole script."""
+    gates = [g for g in _idle_gates(_S6 / "console-web" / "run") if "VALID_USERS" in g]
+    check("console-web/run: the login gate is a top-level idle gate", len(gates) == 1)
+    for users, bind, want in (("0", "127.0.0.1", "IDLE"), ("0", "0.0.0.0", "IDLE"),
+                              ("", "127.0.0.1", "IDLE"), ("x", "127.0.0.1", "IDLE"),
+                              ("-1", "0.0.0.0", "IDLE"), ("1", "127.0.0.1", "RUN"),
+                              ("3", "0.0.0.0", "RUN")):
+        body = (f"VALID_USERS={users!r}; BIND={bind!r}; PORT=8100\n"
+                "bashio::log.notice() { :; }\n"
+                + gates[0].replace("exec sleep infinity", "echo IDLE; exit 0") + "\necho RUN\n")
+        r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, timeout=30)
+        # Fails closed: empty, non-numeric and negative counts idle as 0 does.
+        check(f"console-web/run: VALID_USERS={users!r}, bind {bind} -> {want}", r.stdout.strip() == want)
+    src = (_S6 / "console-web" / "run").read_text()
+    check("console-web/run: a failed parse counts as 0 users (fails closed)",
+          '2>/dev/null || echo 0)"' in src)
+    check("console-web/run: the gate comes after the count and before the server starts",
+          src.index('VALID_USERS="$(') < src.index('if ! [ "${VALID_USERS}" -gt 0 ]') < src.index("exec python3 server.py"))
+
+
+def test_the_login_count_is_the_one_the_server_would_use():
+    """The gate above is only as good as VALID_USERS, and server.py serves with
+    no login when its own parse of the same JSON finds nobody. So this runs the
+    run script's REAL count lines (against the source tree's webauth.py) and
+    then its gate, for console_users values the server would treat as empty."""
+    lines = (_S6 / "console-web" / "run").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith('VALID_USERS="$('))
+    end = next(i for i in range(start, len(lines)) if '|| echo 0)"' in lines[i])
+    count = "\n".join(lines[start:end + 1])
+    webdir = str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console-web")
+    check("console-web/run: the count reads the installed webauth.py",
+          "/usr/share/switchboard/console-web" in count)
+    count = count.replace("/usr/share/switchboard/console-web", webdir)
+    gate = next(g for g in _idle_gates(_S6 / "console-web" / "run") if "VALID_USERS" in g)
+    gate = gate.replace("exec sleep infinity", "echo IDLE; exit 0")
+    good = '{"username":"op","password":"pw"}'
+    for users, want in (("[]", "IDLE"), ("", "IDLE"), ("not json", "IDLE"), ("{}", "IDLE"),
+                        ('[{"username":"op","password":""}]', "IDLE"),
+                        ('[{"username":"  ","password":"pw"}]', "IDLE"),
+                        ('[{"username":"op","password":null}]', "IDLE"),
+                        (good, "IDLE"),
+                        (f"[{good}]", "RUN"),
+                        (f'[{good},{{"username":"x"}}]', "RUN")):
+        body = ("bashio::log.notice() { :; }\nBIND=127.0.0.1; PORT=8100\n"
+                + count + '\necho "count=${VALID_USERS}"\n' + gate + "\necho RUN\n")
+        r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, USERS_JSON=users))
+        out = r.stdout.split()
+        check(f"console-web/run: console_users={users!r} -> {want} (got {out})", out[-1:] == [want])
+    # A count that cannot run at all (python3 missing, webauth unimportable)
+    # reads 0, so it idles too.
+    broken = count.replace(webdir, "/nonexistent")
+    r = subprocess.run(["bash", "-c", "bashio::log.notice() { :; }\nBIND=127.0.0.1; PORT=8100\n"
+                        + broken + "\n" + gate + "\necho RUN\n"],
+                       capture_output=True, text=True, timeout=30, env=dict(os.environ, USERS_JSON=f"[{good}]"))
+    check(f"console-web/run: an unimportable parser idles (got {r.stdout.split()})", r.stdout.split()[-1:] == ["IDLE"])
+
+
+def _run_console_web(users: str, enabled: str = "true", bind: str = "127.0.0.1"):
+    """The WHOLE console-web run script under bash in strict mode, with bashio
+    and switchboard-opt stubbed and its two execs replaced by markers. In place
+    of the server, the users it would be handed are counted with its own
+    parser, from the environment it would inherit (SERVER_USERS=n), since
+    server.py serves with no login when that count is 0.
+    Returns (outcome, log lines in order)."""
+    import shlex
+    webdir = str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share" / "switchboard" / "console-web")
+    src = (_S6 / "console-web" / "run").read_text().split("\n", 1)[1]  # drop the with-contenv shebang
+    server_probe = ("echo OUTCOME=SERVER; python3 -c 'import os, webauth; "
+                    "print(\"SERVER_USERS=%d\" % len(webauth.parse_users(os.environ.get(\"CONSOLE_WEB_USERS\", \"\"))))'; exit 0")
+    src = (src.replace("/usr/share/switchboard/console-web", webdir)
+              .replace("exec sleep infinity", "echo OUTCOME=IDLE; exit 0")
+              .replace("exec python3 server.py", server_probe))
+    stubs = (
+        "set -o errexit -o nounset -o pipefail\n"
+        f'bashio::config() {{ case "$1" in console_web_enabled) printf %s {shlex.quote(enabled)} ;; *) printf null ;; esac; }}\n'
+        'bashio::log.info() { echo "INFO: $*"; }\nbashio::log.notice() { echo "NOTICE: $*"; }\n'
+        'bashio::log.warning() { echo "WARNING: $*"; }\n'
+        f'switchboard-opt() {{ case "$1" in console_users) printf %s {shlex.quote(users)} ;; '
+        f'console_web_bind) printf %s {shlex.quote(bind)} ;; *) printf %s "${{2:-}}" ;; esac; }}\n')
+    r = subprocess.run(["bash", "-c", stubs + src], capture_output=True, text=True, timeout=30)
+    lines = r.stdout.splitlines()
+    outcome = next((l.split("=", 1)[1] for l in lines if l.startswith("OUTCOME=")), f"none (rc {r.returncode}: {r.stderr.strip()[-200:]})")
+    return outcome, [l for l in lines if not l.startswith("OUTCOME=")]
+
+
+def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
+    """End to end: nothing between the count and the gate can change the
+    outcome, the server is handed the users the gate counted, and the
+    start-up lines checked here match the case they print in."""
+    good = '[{"username":"op","password":"pw"}]'
+    for users in ("[]", "", "not json", '[{"username":"op","password":""}]',
+                  '[{"username":"op","password":null}]'):
+        outcome, log = _run_console_web(users)
+        check(f"console-web/run end to end: console_users={users!r} -> IDLE (got {outcome}, {log})", outcome == "IDLE")
+        check(f"console-web/run end to end: console_users={users!r} says why",
+              any(l.startswith("NOTICE: Console web terminal NOT started") and "no valid entry" in l for l in log))
+        check(f"console-web/run end to end: console_users={users!r} never claims a start ({log})",
+              not any("Starting" in l or "ACTIVE" in l for l in log))
+    for bind, where in (("127.0.0.1", "bound to 127.0.0.1"), ("0.0.0.0", "reachable from the LAN on 0.0.0.0:8100")):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run end to end: one valid user on {bind} -> SERVER (got {outcome}, {log})", outcome == "SERVER")
+        check(f"console-web/run end to end: {bind} start-up lines ({log})",
+              any(l == f"INFO: Starting Switchboard console web terminal on {bind}:8100 ..." for l in log)
+              and any("login gate ACTIVE (1 user(s))" in l and where in l for l in log)
+              and not any(l.startswith("NOTICE") for l in log))
+        check(f"console-web/run end to end: the server is handed the 1 user the gate counted ({log})",
+              "SERVER_USERS=1" in log)
+    outcome, log = _run_console_web(good, enabled="false")
+    check(f"console-web/run end to end: console_web_enabled false -> IDLE (got {outcome})", outcome == "IDLE")
 
 def _code(svc):
     """A run script with its comment lines removed."""

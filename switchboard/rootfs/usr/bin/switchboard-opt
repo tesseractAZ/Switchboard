@@ -36,7 +36,8 @@ def main() -> int:
     # but switchboard-config degrades to empty defaults on a transient
     # options.json read error and would then write an empty snapshot; without
     # this fallback that single hiccup would silently drop real settings (e.g.
-    # disable the console login gate) for the whole container lifetime.
+    # lose console_users, which idles the web terminal) for the whole container
+    # lifetime.
     for path in (SNAPSHOT, FALLBACK):
         try:
             with open(path) as fh:

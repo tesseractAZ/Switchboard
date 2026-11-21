@@ -47,8 +47,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 
 # Login gate (see webauth.py). CONSOLE_WEB_USERS is compact JSON exported by the
-# run script from the console_users option; an empty list disables the gate
-# (backward-compatible — the run script's NOTICE says which mode is live).
+# run script from the console_users option. An empty list here disables the
+# gate, but since v0.125.0 the run script does not start this server unless the
+# same parser finds at least one valid user, so the add-on never serves that mode.
 _USERS = webauth.parse_users(os.environ.get("CONSOLE_WEB_USERS", ""))
 AUTH_REQUIRED = bool(_USERS)
 _SESSIONS = webauth.Sessions()
@@ -77,8 +78,8 @@ CONSOLE_SOCKET = os.environ.get("CONSOLE_SOCKET", "").strip() or "/run/switchboa
 CONNECT_TIMEOUT = 5
 
 # This front end's own share of the board. console.py's cap is the backstop
-# behind every front end together; this one keeps the browser terminal, which
-# has no login while console_users is empty, from taking all of it.
+# behind every front end together; this one keeps the browser terminal from
+# taking all of it.
 MAX_SESSIONS = 5
 
 # Close a browser session that has sent no input for this long. The board redraws

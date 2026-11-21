@@ -24,22 +24,24 @@ fi
 # which parses raw options.json and would silently bypass an options overlay.
 # The enable-flag gates above deliberately STAY on bashio — their empty-read
 # semantics are load-bearing (see the comment at the top) and the overlay is
-# for values, not for turning services off.
+# for values, not for turning services off. One value does decide whether this
+# terminal starts (since v0.125.0): console_users, read below through
+# switchboard-opt, so an overlay's console_users counts for the login gate.
 PORT="$(switchboard-opt console_web_port 8100)"
 if [ -z "${PORT}" ] || [ "${PORT}" = "null" ]; then
     PORT="8100"
 fi
-bashio::log.info "Starting Switchboard console web terminal on :${PORT} ..."
 
-# Login gate: a non-empty console_users list requires a sign-in (and the WS
-# upgrade itself is cookie-checked). Empty = the historical open behavior.
+# Login gate: the terminal runs only with at least one valid console_users row,
+# and then requires a sign-in (the WS upgrade itself is cookie-checked). With
+# none it does not start (the gate below, v0.125.0).
 USERS_JSON="$(switchboard-opt console_users '[]')"
 export CONSOLE_WEB_USERS="${USERS_JSON}"
-# Decide the log line with the SERVER'S OWN parser, not a string compare on the
-# raw JSON: webauth.parse_users drops rows missing a username or password, so a
-# list of only-invalid rows leaves the gate OFF. Deciding differently here would
-# print "gate ACTIVE" over a wide-open terminal. (server.py also logs the real
-# mode at startup.)
+# Count with the SERVER'S OWN parser, not a string compare on the raw JSON:
+# webauth.parse_users drops rows missing a username or password, and server.py
+# serves with no login at all when that leaves nothing. A list of only-invalid
+# rows therefore counts 0 here and the terminal idles; counting it any other way
+# would start a terminal with no login. (server.py also logs its mode at start.)
 VALID_USERS="$(CONSOLE_WEB_USERS="${USERS_JSON}" python3 -c "
 import os, sys
 sys.path.insert(0, '/usr/share/switchboard/console-web')
@@ -49,10 +51,11 @@ print(len(webauth.parse_users(os.environ.get('CONSOLE_WEB_USERS', ''))))
 export CONSOLE_WEB_PORT="${PORT}"
 # Bind address: console_web_bind, and 127.0.0.1 when it is blank.
 #
-# A blank bind no longer follows console_bind. That option is now the SSH
-# service's bind, which defaults to every interface because SSH always asks for
-# a password; this terminal has no login at all while console_users is empty,
-# so following it would put an open terminal on the LAN.
+# A blank bind does not follow console_bind. That option is the SSH service's
+# bind, which defaults to every interface because SSH always asks for a
+# password; this terminal keeps its own bind, loopback unless console_web_bind
+# says otherwise (before v0.125.0 it also ran with no login while console_users
+# was empty, so following the SSH bind would have put an open terminal on the LAN).
 #
 # v0.71.0 — RESOLVED BEFORE THE NOTICE BELOW, not after. The warning used to be
 # printed here-1 and BIND computed here+8, so the line claiming the terminal was
@@ -75,9 +78,9 @@ export CONSOLE_WEB_BIND="${BIND}"
 # `127.*` rather than a literal 127.0.0.1: the whole 127/8 block is loopback and
 # a bind of 127.0.1.1 is just as unreachable from the LAN.
 #
-# The DEFAULT (0.0.0.0, and an empty read) deliberately falls through to "not
-# loopback", so the failure direction is a warning nobody needed rather than a
-# silence on a genuinely exposed terminal.
+# It only picks which start-up line describes the bind. Anything it does not
+# recognise (0.0.0.0, a LAN address) is described as reachable from the LAN, so
+# a wrong guess overstates the exposure rather than hiding it.
 sw_is_loopback() {
     case "${1:-}" in
         127.*|::1|\[::1\]|localhost) return 0 ;;
@@ -85,15 +88,26 @@ sw_is_loopback() {
     esac
 }
 
-# Unauthenticated AND reachable is the condition worth a notice. Either alone is
-# not: a loopback-bound terminal with no users is not "on the LAN", and an
-# authenticated one on 0.0.0.0 has a gate.
-if [ "${VALID_USERS}" = "0" ] && ! sw_is_loopback "${BIND}"; then
-    bashio::log.notice "The console web terminal is UNAUTHENTICATED on ${BIND} and drives the operator console (ring/connect/hang up). Add console_users entries to require a sign-in, or set console_web_enabled:false to turn it off."
-elif [ "${VALID_USERS}" = "0" ]; then
-    bashio::log.info "Console web terminal has no login gate, but is bound to ${BIND} — not reachable from the LAN directly."
+# v0.125.0 — NO LOGIN, NO TERMINAL. Without console_users this terminal drives
+# the operator console (ring, connect, hang up) for anyone who can reach its
+# port, and "bound to loopback" did not make that safe: under host_network the
+# container's 127.0.0.1 is the host's own, so every program on the host and
+# every other host-network add-on could connect. The Ingress console in the web
+# UI is the way in without a login of its own (Home Assistant signs the caller
+# in), so this service now idles instead. VALID_USERS is the server's own count
+# (webauth.parse_users) and reads 0 when it cannot be parsed, so this fails
+# closed, and anything that is not a positive whole number idles too.
+# switchboard-opt reads the init snapshot, not bashio, so a transient blank
+# options read cannot reach it.
+if ! [ "${VALID_USERS}" -gt 0 ] 2>/dev/null; then
+    bashio::log.notice "Console web terminal NOT started: console_users has no valid entry (a username and a password), and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${BIND}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add a console_users entry to run this terminal with a sign-in."
+    exec sleep infinity
+fi
+bashio::log.info "Starting Switchboard console web terminal on ${BIND}:${PORT} ..."
+if sw_is_loopback "${BIND}"; then
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${BIND}."
 else
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s))."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${BIND}:${PORT}."
 fi
 # The bridge target is the operator console's Unix socket at a fixed path
 # (server.py's CONSOLE_SOCKET default). console_port is the SSH service's port

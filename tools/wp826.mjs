@@ -12,19 +12,31 @@ import crypto from 'node:crypto';
 // The handset takes its address from DHCP and will move. Give it a reservation
 // on your router and set WP826_HOST=<ip>; the default below is only a placeholder.
 const HOST = process.env.WP826_HOST || '192.168.1.84';
+// WP826_PORT: a port other than 443 (a forwarded port, or a local stand-in).
+// Anything that is not a whole number from 1 to 65535 is refused here, once,
+// before any connection.
+const PORT = process.env.WP826_PORT ? Number(process.env.WP826_PORT) : 443;
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error(`WP826_PORT must be a port number from 1 to 65535, not ${JSON.stringify(process.env.WP826_PORT)}`);
+}
 const USER = 'admin';
 // Read from a file, never an argv or an env value: both land in shell
-// history and in `ps` output for every process on the box.
+// history and in `ps` output for every process on the box. Read only when a
+// login needs it, so `fingerprint` (which sends no credentials) works without it.
 const PASS_FILE = process.env.WP826_PASS_FILE || '/tmp/.wp_pass';
-const PASS = readFileSync(PASS_FILE, 'utf8').trim();
+let passCache = null;
+const pass = () => (passCache ??= readFileSync(PASS_FILE, 'utf8').trim());
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 // ── Certificate pinning ─────────────────────────────────────────────────────
 // The handset serves its own self-signed certificate and cannot be given a
 // CA-signed one, so chain validation can never succeed and every request below
 // sets rejectUnauthorized:false. Trust comes instead from pinning the
-// certificate's SHA-256: verifyPin() runs ONCE, BEFORE login, so the admin
-// password is never sent to a peer presenting an unexpected certificate.
+// certificate's SHA-256. With a pin set, EVERY request runs on a connection
+// whose certificate was checked before the request was handed to it
+// (pinnedSocket), so neither the login nor anything after it can reach a peer
+// presenting an unexpected certificate. verifyPin() also checks once up front,
+// for a clear message and exit code before anything else is tried.
 // Set WP826_CERT_SHA256=<hex> (get it with: node tools/wp826.mjs fingerprint).
 // Unset => unverified, i.e. the previous behaviour, with a warning.
 const CERT_PIN = process.env.WP826_CERT_SHA256 || '';
@@ -33,7 +45,8 @@ const normPin = (p) => String(p || '').trim().toLowerCase()
 
 const isIp = (h) => /^[0-9.]+$/.test(h) || h.includes(':');
 
-function peerFingerprint(host, port = 443) {
+// The one TLS connection site: resolves {sock, fp} with the socket still open.
+function peerConnect(host, port = PORT) {
   return new Promise((res, rej) => {
     // SNI must NOT be set to an IP literal — Node rejects it outright, and the
     // cordless is normally reached by address.
@@ -42,13 +55,19 @@ function peerFingerprint(host, port = 443) {
     const sock = tls.connect(opts, () => {
       const cert = sock.getPeerCertificate();
       const fp = normPin(cert && cert.fingerprint256);
-      sock.end();
-      fp ? res(fp) : rej(new Error('no peer certificate'));
+      if (!fp) { sock.destroy(); rej(new Error('no peer certificate')); return; }
+      sock.setTimeout(0);
+      res({ sock, fp });
     });
     sock.setTimeout(8000, () => sock.destroy(new Error('TLS connect timed out')));
     sock.on('error', rej);
   });
 }
+// The check connection carries no request, so it is closed outright: end()
+// would wait for the peer to close its side, with peerConnect's timer already
+// off, and a handset that never does would keep the tool from exiting.
+const peerFingerprint = (host, port) =>
+  peerConnect(host, port).then(({ sock, fp }) => { sock.destroy(); return fp; });
 
 async function verifyPin() {
   const want = normPin(CERT_PIN);
@@ -64,10 +83,45 @@ async function verifyPin() {
     process.exit(3);
   }
 }
+// A TLS connection to the handset whose certificate matches the pin, checked
+// before it is returned, or null when no pin is set. `what` names the request
+// it was for (its path, never its query: that carries the session id). The
+// check runs per request, so a mismatch partway through a command stops it
+// there, after the requests before it have gone out.
+async function pinnedSocket(what) {
+  const want = normPin(CERT_PIN);
+  if (!want) return null;
+  const { sock, fp } = await peerConnect(HOST);
+  if (fp !== want) {
+    sock.destroy();
+    throw new Error(`WP826 certificate mismatch at ${HOST} (expected ${want}, got ${fp}); ` +
+      `${what} was not sent, and the command stopped there`);
+  }
+  return sock;
+}
+
+// One HTTPS request on a pinned connection when a pin is set. No agent at all:
+// `agent: false` would mean a NEW agent, which opens its own, unchecked
+// connection and never uses createConnection; with no agent, the request
+// runs on exactly the socket createConnection returns.
+// defaultPort: with no agent Node has no default port to compare against, and
+// would send `Host: <ip>:443` where every other path (and the add-on's poller)
+// sends `Host: <ip>`.
+async function send(opts, data) {
+  const sock = await pinnedSocket(`${opts.method} ${String(opts.path).split('?')[0]}`);
+  if (sock) { delete opts.agent; opts.defaultPort = 443; opts.createConnection = () => sock; }
+  return new Promise((res, rej) => {
+    const r = https.request(opts, (resp) => {
+      (resp.headers['set-cookie'] || []).forEach((c) => { const kv = c.split(';')[0]; const i = kv.indexOf('='); cookies[kv.slice(0, i)] = kv.slice(i + 1); });
+      let b = ''; resp.on('data', (d) => (b += d)); resp.on('end', () => res({ status: resp.statusCode, body: b }));
+    });
+    r.on('error', rej); if (data != null) r.write(data); r.end();
+  });
+}
 let cookies = {};
 
 function req(method, path, { body, json, sid } = {}) {
-  return new Promise((res, rej) => {
+  {
     let data = null, ctype = null;
     if (json != null) { data = JSON.stringify(json); ctype = 'application/json'; }
     else if (body != null) { data = new URLSearchParams(body).toString(); ctype = 'application/x-www-form-urlencoded'; }
@@ -77,12 +131,9 @@ function req(method, path, { body, json, sid } = {}) {
       'X-Requested-With': 'XMLHttpRequest', Referer: `https://${HOST}/`, Origin: `https://${HOST}`,
       ...(Object.keys(cookies).length ? { Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ') } : {}),
       ...(data != null ? { 'Content-Type': ctype, 'Content-Length': Buffer.byteLength(data) } : {}) } };
-    const r = https.request(opts, (resp) => {
-      (resp.headers['set-cookie'] || []).forEach((c) => { const kv = c.split(';')[0]; const i = kv.indexOf('='); cookies[kv.slice(0, i)] = kv.slice(i + 1); });
-      let b = ''; resp.on('data', (d) => (b += d)); resp.on('end', () => res({ status: resp.statusCode, body: b }));
-    });
-    r.on('error', rej); if (data != null) r.write(data); r.end();
-  });
+    opts.port = PORT;
+    return send(opts, data);
+  }
 }
 const J = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
@@ -90,7 +141,7 @@ export async function login() {
   const a = await req('POST', '/access', { body: { access: sha256(USER) } });
   const salt = J(a.body)?.body;
   if (!salt) throw new Error('access failed: ' + a.status + ' ' + a.body.slice(0, 120));
-  const d = await req('POST', '/dologin', { body: { username: USER, password: sha256(PASS + salt) } });
+  const d = await req('POST', '/dologin', { body: { username: USER, password: sha256(pass() + salt) } });
   const dj = J(d.body);
   if (dj?.response !== 'success') throw new Error('dologin failed: ' + d.status + ' ' + d.body.slice(0, 160));
   return dj.body.sid;
@@ -125,14 +176,10 @@ export async function uploadRing(sid, filePath) {
   const head = Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: audio/x-wav\r\n\r\n`);
   const body = Buffer.concat([head, buf, Buffer.from(`\r\n--${B}--\r\n`)]);
   let p = '/cgi-bin/ringtone?tags=&sid=' + encodeURIComponent(sid);
-  const r = await new Promise((res, rej) => {
-    const rq = https.request({ host: HOST, port: 443, method: 'POST', path: p, rejectUnauthorized: false, headers: {
-      'X-Requested-With': 'XMLHttpRequest', Referer: `https://${HOST}/`, Origin: `https://${HOST}`,
-      Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; '),
-      'Content-Type': `multipart/form-data; boundary=${B}`, 'Content-Length': body.length } }, (resp) => {
-      let b = ''; resp.on('data', (d) => (b += d)); resp.on('end', () => res({ status: resp.statusCode, body: b }));
-    }); rq.on('error', rej); rq.write(body); rq.end();
-  });
+  const r = await send({ host: HOST, port: PORT, method: 'POST', path: p, rejectUnauthorized: false, headers: {
+    'X-Requested-With': 'XMLHttpRequest', Referer: `https://${HOST}/`, Origin: `https://${HOST}`,
+    Cookie: Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; '),
+    'Content-Type': `multipart/form-data; boundary=${B}`, 'Content-Length': body.length } }, body);
   return { status: r.status, ring: (J(r.body)?.ringtones || [])[0], body: r.body };
 }
 export async function listRings(sid, type = 0) { const r = await req('GET', '/ringtone?type=' + type, { sid }); return J(r.body)?.ringtones || []; }

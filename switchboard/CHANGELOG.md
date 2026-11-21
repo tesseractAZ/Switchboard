@@ -1,7 +1,40 @@
 # Changelog
 
-Recent releases. Releases up to 0.114.1 are in the
+Recent releases. Releases up to 0.114.2 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.125.0
+
+**Fixes found by a documentation review.**
+
+- **Lights menu (`43`): rooms and lights that could not be chosen by name now
+  can be.** Lights with no area are read out as "Unassigned", but saying it
+  ended the call, because that area's internal name was also the menu's signal
+  for "cancel". A room or light whose name holds or sounds like a command word
+  ("Top Floor" is close to "stop"; "Exit Sign", "All Lights") could not be
+  chosen either, because the command words were checked first. Saying a whole
+  name now chooses it; a command word on its own still cancels or lists, unless
+  something is named exactly that word. An area actually named "Unassigned" now
+  takes the lights with no area (except one named like a light already in it),
+  instead of standing beside a second "Unassigned" that could not be told apart. The
+  goodbyes also say what happened: a cancel at the light step was answered as
+  a mishearing, and two mishearings at the on/off step as a cancel.
+- **The standalone web terminal (`:8100`) starts only with a login.** With
+  `console_users` empty it used to run on `127.0.0.1:8100` with no login. Under
+  host networking that address is the host's own, so every program on the host
+  and every other host-network add-on could drive the operator console through
+  it. It now stays off until `console_users` has a valid entry, and the start-up
+  log says why. The operator console in the add-on's panel in Home Assistant is
+  not affected; it is signed in by Home Assistant.
+- **`tools/wp826.mjs` checks the handset's certificate on every connection.**
+  With `WP826_CERT_SHA256` set, it compared the pin once on a separate
+  connection, then sent the login, password included, on new connections it
+  did not check. Each request now runs on a connection whose certificate was
+  checked first, and a mismatch stops the command before that request is sent,
+  naming it. Its `fingerprint` command, the documented way to get the pin, no
+  longer needs a password file, and `WP826_PORT` sets a port other than 443 (a
+  value that is not a port number is refused). The tool is not part of the
+  add-on image.
 
 ## 0.124.0
 
@@ -399,12 +432,3 @@ Recent releases. Releases up to 0.114.1 are in the
   pages and an index). README and SECURITY links point there, the Word and PDF
   manual is built from the guide plus every reference page, and tests keep the
   guide under 32 KiB and fail on any dead link or anchor.
-
-## 0.114.2
-
-**A way back from the console to the dashboard.**
-
-- The dashboard's Console button replaced the page with the terminal, and nothing
-  on the terminal led back. Its nameplate now carries a "← Dashboard" link when it
-  is the dashboard's own console; the standalone terminal on its own port, which
-  has no dashboard behind it, does not show one.

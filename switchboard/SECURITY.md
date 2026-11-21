@@ -612,8 +612,8 @@ these defenses are generated automatically:
 
 These are deliberate design choices, documented here so you can decide whether they
 fit your network. Where the add-on can flag one at start-up it does — the web
-terminal logs its bind, escalating from INFO to a NOTICE only when it is actually
-reachable from the LAN without a login; the SSH console logs its bind, its host-key
+terminal logs a NOTICE when it does not start for want of a valid
+`console_users` entry, and its bind when it does; the SSH console logs its bind, its host-key
 fingerprint and how many console users can log in, with a WARNING when none can;
 and a blank `cordless_cert_sha256` prints a NOTE — but the
 AppArmor and developer-tool items are structural and emit no start-up line, so
@@ -631,7 +631,10 @@ standalone web terminal and the Ingress console. Each one guards its own door.
 The telnet listener on `:2300`, which had no login, is gone, and that port now
 speaks SSH. That is also why the board and the Home Assistant broker listen on
 Unix sockets rather than loopback ports: under `host_network`, `127.0.0.1` is
-shared with every host-network add-on and process on the machine.
+shared with every host-network add-on and process on the machine. For the same
+reason, since v0.125.0 the standalone web terminal (`:8100`) starts only when
+`console_users` has a valid entry: before, with the shipped defaults it ran on
+`127.0.0.1:8100` with no login, so any of those could drive the board through it.
 
 All three can ring, connect, hang up, transfer, page, set message-waiting, and
 control lights. Each caps its own sessions (the web terminal 5, the Ingress
@@ -644,8 +647,9 @@ every SSH login needs a password:
 - **Password login only**, against `console_users`, read by the web terminal's own
   parser. There is no public-key, keyboard-interactive, host-based or GSSAPI
   login, and no anonymous or default account. While `console_users` has no valid
-  row, **every login is refused**. That includes a value that fails to parse, so
-  SSH fails closed where the web terminal fails open.
+  row, **every login is refused**. That includes a value that fails to parse.
+  Since v0.125.0 the web terminal fails closed the same way: without a valid
+  row it does not start.
 - **A per-address throttle, charged before the password is checked**: 5 attempts
   per address in any 300 s. It is the web terminal's rule, with a separate count.
   A connection also gets at most 3 password attempts.
@@ -676,21 +680,19 @@ every SSH login needs a password:
 also means `127.0.0.1`: it no longer falls back to `console_bind`, which is now
 the SSH bind and defaults to every interface. An upgrade keeps whatever bind is
 already stored in its options. Loopback here is the **host's** loopback, so on
-the default bind any host-network add-on or process can open an ungated `:8100`
-and drive the board. The terminal's same-origin WebSocket gate blocks cross-site
-drive-by hijacking, but anyone who can reach the port from a same-origin context
-can drive the board.
+the default bind any host-network add-on or process can reach `:8100`; since
+v0.125.0 what it reaches always asks for a sign-in. The terminal's same-origin
+WebSocket gate also blocks cross-site drive-by hijacking of a signed-in session.
 
-The **web terminal supports a login**: configure `console_users` (username +
-masked password) and both its page and its WebSocket require a signed-in session,
-with per-address throttling of failed attempts. With an empty `console_users`
-the web terminal has no login at all — **and so it is with a `console_users`
-value that fails to parse, or whose rows are missing a username or a password**:
-those rows are dropped, and a list left with no valid rows disables the gate
-entirely. The start-up log line reports which mode is actually live
-(`login gate ACTIVE (n user(s))` vs `no login gate`); trust that line over the
-options page. **This is the only login-free network path to the board left**:
-the web terminal with an empty `console_users`, moved off loopback.
+**The web terminal requires a login**: both its page and its WebSocket require a
+session signed in against `console_users` (username + masked password), with
+per-address throttling of failed attempts. Since v0.125.0 it does not start
+without a valid row: an empty `console_users`, a value that fails to parse, and
+a list whose rows all miss a username or a password (such rows are dropped) each
+leave it idle, with a NOTICE saying so in the start-up log. Before, each of
+those ran it with no login at all. When it does start, the log line reads
+`login gate ACTIVE (n user(s))`. **No login-free network path to the board
+remains.**
 
 **Prefer the Ingress console.** Since v0.93.0 the same terminal is served at
 `/console/` on the Ingress port, where Home Assistant's own session authenticates
@@ -707,8 +709,9 @@ exact-match allowlist of two filenames (no directory serving, no path joining on
 the parameter), which is the surface that keeps that trade acceptable.
 
 **Mitigations you control:** `console_bind: 127.0.0.1` keeps SSH on the Home
-Assistant host. `console_web_bind` stays on loopback unless you change it; if you
-do put the `:8100` terminal on the LAN, configure `console_users` first.
+Assistant host. `console_web_bind` stays on loopback unless you change it; the
+`:8100` terminal starts only with a `console_users` entry, so wherever it listens
+it asks for that sign-in.
 
 `console_enabled: false` stops only the SSH service, and `console_web_enabled:
 false` only the standalone terminal; neither alone affects the Ingress console.
@@ -817,8 +820,10 @@ Set **`cordless_cert_sha256`** (obtain it with `WP826_HOST=<cordless-ip> node to
 and the device-health monitor verifies the exact certificate **before**
 transmitting the admin password, refusing to continue on a mismatch. The
 maintenance tool does not read add-on options: it takes the same fingerprint
-from the `WP826_CERT_SHA256` environment variable, checks it before logging in,
-and exits on a mismatch. Left blank (or, for the tool, unset), the connection
+from the `WP826_CERT_SHA256` environment variable and, since v0.125.0, checks it
+on every connection before that connection carries a request, the login
+included, refusing on a mismatch. (Before, it checked once on a separate
+connection and then sent the login on new connections nobody checked.) Left blank (or, for the tool, unset), the connection
 still works but is unauthenticated (the tool prints a warning): a LAN-positioned
 attacker could impersonate the handset and capture that password.
 
@@ -828,8 +833,9 @@ attacker could impersonate the handset and capture that password.
 that administers a Grandstream WP826 cordless over its HTTPS API. The phone presents
 a self-signed certificate with no validatable chain, so the tool sets
 `rejectUnauthorized: false`, compares the certificate's SHA-256 against
-`WP826_CERT_SHA256` before it logs in (warning and proceeding unverified when
-that is unset), and reads its admin password from a local file. This is
+`WP826_CERT_SHA256` on every connection before a request goes out on it
+(warning and proceeding unverified when that is unset), and reads its admin
+password from a local file, only when a command logs in. This is
 an accepted LAN-local risk for a personal device-admin tool and is not part of the
 add-on's request path. (CodeQL flags each of the tool's `rejectUnauthorized: false`
 settings. The rule `js/disabling-certificate-validation` is listed for
@@ -844,9 +850,10 @@ where they remain listed among the closed alerts.)
 1. **Change the default room secrets** (`change-me-101`, `change-me-102`, …) before
    your phones register. Use a strong, unique `secret` per room; the validator
    rejects `;`, whitespace, and control characters.
-2. **A `console_users` entry, to use the SSH console.** With none, every SSH
-   login is refused. The same entries gate the web terminal, which defaults to
-   `127.0.0.1` (`console_web_bind`); configure one before you move that bind. An
+2. **A `console_users` entry, to use the SSH console or the standalone web
+   terminal.** With none, every SSH login is refused and the web terminal does
+   not start; with one, both ask for it. The web terminal defaults to
+   `127.0.0.1` (`console_web_bind`). An
    upgraded install keeps its stored binds, so check them: a `console_bind` of
    `127.0.0.1` keeps SSH on the Home Assistant host.
 3. **To allow LAN-triggered announcements**, set a non-empty `announce_token`;

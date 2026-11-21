@@ -3,6 +3,14 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.114.2
+
+**A way back from the console to the dashboard.**
+
+- The dashboard's Console button replaced the page with the terminal, and nothing
+  on the terminal led back. Its nameplate now carries a "← Dashboard" link when it
+  is the dashboard's own console; the standalone terminal on its own port, which
+  has no dashboard behind it, does not show one.
 ## 0.114.1
 
 **The dashboard keeps the wake-up time you entered.**

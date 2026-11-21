@@ -63,9 +63,9 @@ its default is fine.
 | `console_bind` | `0.0.0.0` | Interface the SSH console listens on. Every login needs a `console_users` password; `127.0.0.1` restricts it to the Home Assistant host. Only SSH uses it. An upgraded install keeps the bind it had saved, and the default from 0.94.0 to 0.113.0 was `127.0.0.1`: set `0.0.0.0` to reach SSH from the LAN. |
 | `console_enabled` | `true` | The SSH operator console (ring/connect/hang up; see [The operator console](operator-console.md)). Password login only, against `console_users`; while that list has no valid entry, **every login is refused**. Turning it off stops SSH only: the sidebar console and the web terminal keep working. With this and `console_web_enabled` both off, the board itself stops and the sidebar console shows "unavailable". |
 | `console_port` | `2300` | TCP port of the SSH console. The sidebar console and the web terminal do not use it. |
-| `console_users` | `[]` | Sign-in accounts for the **SSH console** and the **web terminal** — each entry has `username` and `password` (masked); a row missing either is ignored. SSH accepts only these accounts and refuses every login while the list is empty. The web terminal with the list empty has no login (the historical open behavior); when any user is configured, its page **and its WebSocket** require a signed-in session. Repeated wrong attempts from one address are throttled (5 per 5 minutes, counted separately by SSH and the web terminal). The sidebar console needs none of this. |
+| `console_users` | `[]` | Sign-in accounts for the **SSH console** and the **web terminal** — each entry has `username` and `password` (masked); a row missing either is ignored. SSH accepts only these accounts and refuses every login while the list is empty. With the list empty the web terminal does not start (since 0.125.0; before, it ran with no login); when any user is configured, its page **and its WebSocket** require a signed-in session. Repeated wrong attempts from one address are throttled (5 per 5 minutes, counted separately by SSH and the web terminal). The sidebar console needs none of this. |
 | `console_web_bind` | `127.0.0.1` | Interface the web terminal listens on. Blank also means `127.0.0.1`; since 0.114.0 it no longer follows `console_bind`. The browser console is served through the Home Assistant sidebar instead ([The operator console](operator-console.md)), so this terminal does not need to be on your network. |
-| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. Its sign-in is off until `console_users` has an entry, so configure one before moving the bind. |
+| `console_web_enabled` | `true` | Browser version of the console (xterm.js), bound to loopback by default. It starts only when `console_users` has a valid entry (since 0.125.0) and then requires that sign-in. |
 | `console_web_port` | `8100` | TCP port for the web terminal. |
 
 ## Time, clock & wake-up
@@ -150,7 +150,10 @@ renderer, the dashboard, the operator console, and the health monitors all read
 the post-overlay snapshot (via `switchboard-opt`), so they share one effective
 view.
 
-**The overlay cannot turn a service on or off.** Each s6 `run` script decides
+**The overlay cannot turn a service on or off**, with one exception: since
+0.125.0 the standalone web terminal starts only when `console_users` has a
+valid entry, and it reads `console_users` after the overlay, so an overlay's
+`console_users` decides whether it starts. Otherwise, each s6 `run` script decides
 whether to start or idle by reading its enable flag with `bashio::config`, which
 parses the saved `options.json` directly and never sees the overlay. That is
 deliberate — `bashio::config` can momentarily return an empty string during a

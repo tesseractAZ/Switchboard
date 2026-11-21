@@ -74,7 +74,7 @@ OPTIONS_PATH = os.environ.get("SWITCHBOARD_OPTIONS", "/data/options.json")
 POLL_SECONDS = 3.0
 # The one place the board listens. No TCP listener exists any more: the SSH
 # service, the browser terminal and the sidebar console all connect here, and
-# each applies its own login (the web terminal's is off while console_users is empty). CONSOLE_SOCKET exists for the
+# each applies its own login (the web terminal does not start without one). CONSOLE_SOCKET exists for the
 # tests, which bind a throwaway path; nothing in the add-on sets it.
 SOCKET_PATH = os.environ.get("CONSOLE_SOCKET", "").strip() or "/run/switchboard/console.sock"
 # Concurrent board sessions across EVERY client together. Each front door caps
