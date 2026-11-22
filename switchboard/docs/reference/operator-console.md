@@ -77,7 +77,8 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   or X11 forwarding are all refused, and the connection closes when the console
   is quit. A connection has 60 s to log in and is closed after 15 minutes without
   input. Wrong passwords are throttled per address — 5 attempts in any 5 minutes,
-  at most 3 on one connection — separately from the web terminal's count. A
+  at most 3 on one connection, and over IPv6 also 30 per `/64` network — separately
+  from the web terminal's count. A
   `console_users` entry holding a character an SSH client cannot send (a control
   character, say) cannot log in over SSH; the start-up log counts such entries.
   Recent OpenSSH clients warn that the connection "is not using a post-quantum

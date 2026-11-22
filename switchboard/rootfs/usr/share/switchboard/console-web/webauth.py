@@ -37,6 +37,7 @@ from urllib.parse import parse_qs
 COOKIE_NAME = "sbconsole"
 SESSION_TTL = 12 * 3600     # absolute session lifetime (seconds)
 MAX_ATTEMPTS = 5            # login attempts allowed per source IP per window
+MAX_NET_ATTEMPTS = 30       # per IPv6 /64 per window (see throttle_keys)
 WINDOW_SECONDS = 300        # rolling throttle window
 MAX_FORM_BYTES = 4096       # a login form is tiny; anything bigger is abuse
 _MAX_TRACKED_IPS = 1024     # throttle memory bound
@@ -105,63 +106,83 @@ def parse_cookies(header: str) -> dict:
     return out
 
 
-def throttle_key(ip: str) -> str:
-    """The key failed logins are counted under. An IPv4 address counts on its
-    own. An IPv4-mapped IPv6 address (what a dual-stack ``::`` listener reports
-    for an IPv4 client) counts as that IPv4 address. Any other IPv6 address
-    counts by its /64: a single host is normally given a whole /64 and can pick
-    a fresh source address in it for every attempt, so counting each address
-    alone would let one host retry without limit (v0.128.0, when the web
-    terminal first became reachable over IPv6). Anything else (``"?"``) is
-    used as given."""
+def throttle_keys(ip: str) -> tuple:
+    """(address key, network key) a login attempt is counted under.
+
+    The address key is the address itself; an IPv4-mapped IPv6 address (what
+    a dual-stack ``::`` listener reports for an IPv4 client) counts as its IPv4
+    address. The network key is the /64 of any other IPv6 address, and None for
+    IPv4 or a value that is not an address (``"?"``).
+
+    The /64 gets its own, higher ceiling (MAX_NET_ATTEMPTS), never the
+    per-address limit: on a home LAN the router advertises ONE /64 and every
+    IPv6 device on it takes its addresses from it, so a per-/64 limit of 5
+    would let one device with a stale password lock all the others out. One
+    host rotating through fresh addresses in that /64 still meets the ceiling
+    (v0.128.0, when the web terminal first became reachable over IPv6)."""
     try:
         addr = ipaddress.ip_address(str(ip).split("%", 1)[0])
     except ValueError:
-        return ip
+        return ip, None
     if addr.version == 6:
         if addr.ipv4_mapped is not None:
-            return str(addr.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
-    return str(addr)
+            return str(addr.ipv4_mapped), None
+        return str(addr), str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr), None
 
 
 class LoginThrottle:
-    """Rolling per-source-IP attempt limiter (per /64 for IPv6, see
-    throttle_key). charge() records the attempt and says whether it may
-    proceed — call it BEFORE verifying credentials."""
+    """Rolling attempt limiter: MAX_ATTEMPTS per source address per window,
+    and for IPv6 also MAX_NET_ATTEMPTS per /64 (see throttle_keys). charge()
+    records the attempt and says whether it may proceed — call it BEFORE
+    verifying credentials."""
 
     def __init__(self, max_attempts: int = MAX_ATTEMPTS,
-                 window: float = WINDOW_SECONDS, now=time.monotonic) -> None:
+                 window: float = WINDOW_SECONDS, now=time.monotonic,
+                 max_net_attempts: int = MAX_NET_ATTEMPTS) -> None:
         self._max = max_attempts
+        self._net_max = max_net_attempts
         self._window = window
         self._now = now
-        self._hits = {}  # ip -> [monotonic, ...]
+        self._hits = {}  # address or /64 key -> [monotonic, ...]
         # Every request runs on its own ThreadingTCPServer thread, and charge()
         # is a read-modify-write: without this lock two concurrent attempts can
         # both read the same pre-limit list and both write back, losing a count
         # (i.e. more attempts than the limit allows).
         self._lock = threading.Lock()
 
+    def _recent(self, key: str, t: float) -> list:
+        return [x for x in self._hits.get(key, []) if t - x < self._window]
+
     def charge(self, ip: str) -> bool:
-        ip = throttle_key(ip)
+        key, net = throttle_keys(ip)
         t = self._now()
         with self._lock:
-            hits = [x for x in self._hits.get(ip, []) if t - x < self._window]
+            hits = self._recent(key, t)
             allowed = len(hits) < self._max
             hits.append(t)
-            self._hits[ip] = hits
-            if len(self._hits) > _MAX_TRACKED_IPS:
+            self._hits[key] = hits
+            # Only an attempt its own address was allowed counts toward the /64:
+            # an address already refused (a neighbour retrying a stale password)
+            # must not spend the budget of every other device on the LAN.
+            if net is not None and allowed:
+                net_hits = self._recent(net, t)
+                allowed = len(net_hits) < self._net_max
+                net_hits.append(t)
+                self._hits[net] = net_hits
+            while len(self._hits) > _MAX_TRACKED_IPS:
                 # Bound memory under an address-spraying flood; dropping the
-                # oldest tracked IP only ever FORGIVES attempts, never blocks a
+                # oldest tracked key only ever FORGIVES attempts, never blocks a
                 # fresh user.
                 self._hits.pop(next(iter(self._hits)))
         return allowed
 
     def clear(self, ip: str) -> None:
-        """A successful login stops penalizing its source."""
-        ip = throttle_key(ip)
+        """A successful login stops penalizing its own address. Not its /64:
+        one device signing in does not reset a rotating neighbour's count."""
+        key, _ = throttle_keys(ip)
         with self._lock:
-            self._hits.pop(ip, None)
+            self._hits.pop(key, None)
 
 
 class Sessions:

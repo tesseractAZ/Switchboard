@@ -45,8 +45,8 @@ def test_a_resize_never_reaches_the_console_as_keystrokes():
 
     So: opening the sidebar panel would have typed it into the board, where its
     ``p`` opens the page-all confirmation (or, with the selected room on a
-    call, its ``t`` opens a transfer), which swallows every key after it. This
-    test is the reason the sniff normalises to bytes first.
+    call, its ``t`` opens a transfer); neither acts on any key left in the
+    string. This test is the reason the sniff normalises to bytes first.
     """
     # The TEXT-frame shape — a str, which is what the browser actually sends.
     out = cb.encode_for_console('{"type":"resize","cols":120,"rows":40}')

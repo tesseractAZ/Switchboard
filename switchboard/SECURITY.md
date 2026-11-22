@@ -695,7 +695,8 @@ every SSH login needs a password:
   Since v0.125.0 the web terminal fails closed the same way: without a valid
   row it does not start.
 - **A per-address throttle, charged before the password is checked**: 5 attempts
-  per address in any 300 s, an IPv6 client counted by its `/64` (since v0.128.0).
+  per address in any 300 s, and for IPv6 also 30 per `/64` in that time, which
+  one host rotating through addresses meets (since v0.128.0).
   It is the web terminal's rule, with a separate count.
   A connection also gets at most 3 password attempts.
 - **Caps before the handshake**: at most 16 connections in total and 4 per

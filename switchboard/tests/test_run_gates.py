@@ -654,6 +654,19 @@ def test_an_ipv6_bind_is_written_in_brackets_beside_its_port():
     check(f"console-web/run: the NOTICE brackets it too ({log})",
           any("through [::]:8100." in l for l in log) and outcome == "IDLE")
 
+
+def test_a_bind_blank_inside_its_brackets_is_loopback_in_the_log_too():
+    """server.py reads "[]", "[ ]" and whitespace as blank and listens on
+    127.0.0.1; the run script must not log those as reachable from the LAN."""
+    good = '[{"username":"op","password":"pw"}]'
+    for bind in ("[]", " [ ] ", "   "):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run: bind {bind!r} -> SERVER (got {outcome})", outcome == "SERVER")
+        check(f"console-web/run: bind {bind!r} is logged as loopback ({log})",
+              "INFO: Starting Switchboard console web terminal on 127.0.0.1:8100 ..." in log
+              and any("bound to 127.0.0.1." in l for l in log)
+              and not any("reachable from the LAN" in l for l in log))
+
 def _code(svc):
     """A run script with its comment lines removed."""
     return "\n".join(ln for ln in (_S6 / svc / "run").read_text().splitlines()

@@ -468,10 +468,10 @@ def main() -> None:
 
     try:
         srv = Server((host, port), Handler)
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, OverflowError) as exc:
         # One line that names the address and the reason, rather than a bare
         # traceback (a name that cannot be encoded raises TypeError/ValueError
-        # before any lookup); s6 still restarts the service, as for any failed
+        # before any lookup, a port outside 0-65535 OverflowError); s6 still restarts the service, as for any failed
         # start.
         log(f"cannot listen on {shown}:{port}: {exc}")
         raise SystemExit(1)

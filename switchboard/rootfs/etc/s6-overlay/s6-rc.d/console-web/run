@@ -62,6 +62,19 @@ export CONSOLE_WEB_PORT="${PORT}"
 # "UNAUTHENTICATED on the LAN" could not see the bind that decided whether it was
 # on the LAN at all.
 BIND="$(switchboard-opt console_web_bind)"
+# Read it the way server.py's bind_address does (v0.128.0): outer spaces are
+# trimmed, and a value that is blank inside its brackets ("[]", "[ ]") is
+# blank. Otherwise this script would log "[]" as reachable from the LAN while
+# the server, failing closed, listened on 127.0.0.1.
+BIND="${BIND#"${BIND%%[![:space:]]*}"}"
+BIND="${BIND%"${BIND##*[![:space:]]}"}"
+case "${BIND}" in
+    \[*\])
+        INNER="${BIND#\[}"
+        INNER="${INNER%\]}"
+        case "${INNER}" in *[![:space:]]*) ;; *) BIND="" ;; esac
+        ;;
+esac
 if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     # Fail CLOSED (since v0.94.0). This fires when the option is blank, or on a
     # transient blank read during a config reload. The old fallback was

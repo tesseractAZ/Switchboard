@@ -619,8 +619,9 @@ def test_a_bind_that_cannot_be_used_fails_with_one_line() -> None:
     """A name the socket layer cannot even encode raised TypeError past the
     OSError handler, so the service died with a traceback."""
     import subprocess
-    for bind in ("\u00e9" * 64, "no-such-host.invalid"):
-        env = dict(os.environ, CONSOLE_WEB_BIND=bind, CONSOLE_WEB_PORT="8199",
+    for bind, port in (("\u00e9" * 64, "8199"), ("no-such-host.invalid", "8199"),
+                       ("127.0.0.1", "70000")):          # OverflowError, not OSError
+        env = dict(os.environ, CONSOLE_WEB_BIND=bind, CONSOLE_WEB_PORT=port,
                    CONSOLE_WEB_USERS='[{"username":"op","password":"pw"}]',
                    CONSOLE_SOCKET=os.path.join(_sock_dir(), "absent.sock"))
         r = subprocess.run([sys.executable, str(SERVER_PATH)], cwd=str(SERVER_PATH.parent),

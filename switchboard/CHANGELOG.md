@@ -14,12 +14,16 @@ documentation pass are corrected.**
   start-up log said it had started. It now opens an IPv6 socket for an IPv6
   address, and the log writes it as `[::1]:8100`. A bind that fails for any
   reason logs one line naming the address and the reason. A value that is blank
-  inside its brackets (`[]`) means `127.0.0.1`, as a blank value does. IPv4
+  inside its brackets (`[]`) means `127.0.0.1`, as a blank value does, in the
+  start-up log as well as in the server. IPv4
   binds, the default included, behave as before.
-- Failed logins to the web terminal and the SSH console are now counted per
-  `/64` network for an IPv6 client, since one host can pick a fresh address in
-  its `/64` for every try, and an IPv4 client reached through a dual-stack `::`
-  bind counts as its IPv4 address. IPv4 clients are counted as before.
+- Failed logins to the web terminal and the SSH console are still limited to
+  5 per address in 5 minutes, and an IPv6 network (`/64`) now also has a
+  ceiling of 30 in that time, since one host can pick a fresh address in it for
+  every try. Only attempts their own address was allowed count toward it, so a
+  device on the same LAN retrying a stale password locks out only itself. An
+  IPv4 client reached through a dual-stack `::` bind counts as its IPv4
+  address. IPv4 clients are counted as before.
 - Code comments, test notes, the operator-console reference and two changelog
   archive entries that still repeated claims the 0.127.0 documentation pass
   corrected now match the code: the console's footer order, what a mistyped

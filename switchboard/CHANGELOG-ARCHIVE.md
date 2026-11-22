@@ -2133,8 +2133,8 @@ the number instead: the caller's on the way in, the dialled digits on the way
 out. That record is mirrored to the shared folder, which is readable from
 outside the add-on and included in backups. Forty-five of the last 252 calls had
 a complete number in them. Ten belong to people who rang this house and two are
-numbers it dialled, none of whom had any say in the matter; the other 32 were
-the household's own caller ID.
+numbers it dialled, none of whom had any say in the matter; 32 of the
+remaining 33 were the household's own caller ID.
 
 The mirror now keeps only the last four digits; the private copy, which cannot
 be read from outside, still holds the number in full. The mirror was made

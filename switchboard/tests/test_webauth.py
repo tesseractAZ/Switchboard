@@ -40,23 +40,52 @@ def test_parse_users_counts_only_text_or_whole_number_fields() -> None:
     assert webauth.parse_users('[{"username":"op","password":1234}]') == [("op", "1234")]
 
 
-def test_throttle_key_counts_ipv6_by_its_64() -> None:
-    k = webauth.throttle_key
-    assert k("192.0.2.7") == "192.0.2.7"
-    assert k("::ffff:192.0.2.7") == "192.0.2.7"            # dual-stack '::' listener
-    assert k("2001:db8:1:2::5") == k("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
-    assert k("2001:db8:1:3::5") != k("2001:db8:1:2::5")
-    assert k("fe80::1%eth0") == "fe80::/64"
-    assert k("?") == "?"
+def test_throttle_keys() -> None:
+    k = webauth.throttle_keys
+    assert k("192.0.2.7") == ("192.0.2.7", None)
+    assert k("::ffff:192.0.2.7") == ("192.0.2.7", None)      # dual-stack '::' listener
+    assert k("2001:db8:1:2::5") == ("2001:db8:1:2::5", "2001:db8:1:2::/64")
+    assert k("fe80::1%eth0") == ("fe80::1", "fe80::/64")
+    assert k("?") == ("?", None)
 
 
-def test_one_host_cannot_rotate_ipv6_addresses_past_the_limit() -> None:
-    t = webauth.LoginThrottle(max_attempts=5, window=300, now=lambda: 100.0)
-    allowed = [t.charge(f"2001:db8:1:2::{i:x}") for i in range(1, 51)]
-    assert allowed.count(True) == 5, allowed
-    assert t.charge("2001:db8:9:9::1") is True               # another /64 is another host
-    t.clear("2001:db8:1:2::77")                              # a success clears its /64
-    assert t.charge("2001:db8:1:2::1") is True
+# One home LAN = one /64: every device below is a different host on it.
+LAN = "2001:db8:1:2:"
+
+
+def _throttle():
+    return webauth.LoginThrottle(max_attempts=5, window=300, now=lambda: 100.0)
+
+
+def test_each_address_still_gets_five_tries() -> None:
+    t = _throttle()
+    assert [t.charge(LAN + ":a") for _ in range(7)] == [True] * 5 + [False] * 2
+    t4 = _throttle()
+    assert [t4.charge("192.0.2.7") for _ in range(7)] == [True] * 5 + [False] * 2
+
+
+def test_a_neighbour_with_a_stale_password_locks_out_only_itself() -> None:
+    """Before this rule, counting the /64 with the per-address limit let one
+    device on the LAN lock every other IPv6 device out."""
+    t = _throttle()
+    for _ in range(50):
+        t.charge(LAN + "aaaa:bbbb:cccc:1")                # keeps failing
+    assert t.charge(LAN + "1111:2222:3333:4") is True     # another device is unaffected
+
+
+def test_one_host_rotating_addresses_meets_the_64_ceiling() -> None:
+    t = _throttle()
+    allowed = [t.charge(LAN + f":{i:x}") for i in range(1, 101)]
+    assert allowed.count(True) == webauth.MAX_NET_ATTEMPTS == 30, allowed.count(True)
+    assert t.charge("2001:db8:9:9::1") is True               # another /64 is another LAN
+
+
+def test_a_success_clears_only_its_own_address() -> None:
+    t = _throttle()
+    for i in range(1, 31):
+        t.charge(LAN + f":{i:x}")                          # a rotating attacker fills the /64
+    t.clear(LAN + ":1")                                    # some device signs in
+    assert t.charge(LAN + ":fff0") is False                # the /64 count was not reset
 
 
 def test_parse_users_strips_username_not_password() -> None:
