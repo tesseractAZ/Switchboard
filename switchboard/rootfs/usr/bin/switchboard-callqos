@@ -1079,8 +1079,11 @@ def append_outcome(rec: dict) -> None:
     # in add-on backups. The reasoning for mirroring the full record was that a
     # partial mirror is "not a smaller truth, it is a different claim" — argued
     # about field completeness for auditing, and never about disclosure. It does
-    # not extend to other people's telephone numbers, most of which belong to
-    # callers who never chose to be in this system at all.
+    # not extend to telephone numbers. The 32 on `rooms` legs were the
+    # household's own public caller ID (set before an outbound Dial, see above);
+    # the inbound legs held ten numbers of people who called this house, and two
+    # operator legs numbers it dialled out, none of whom chose to be in this
+    # system.
     #
     # The last four digits are kept so a reader can still correlate two legs of
     # the same call; the ledger in /data, which cannot be read from outside,

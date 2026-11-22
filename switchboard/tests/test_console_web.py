@@ -530,6 +530,87 @@ def test_the_dashboard_console_has_a_way_back() -> None:
     assert "/\\/console\\/$/.test(location.pathname)" in page and "back.hidden = false" in page
 
 
+def test_bind_address_picks_the_family_from_the_address() -> None:
+    """v0.128.0: an IPv6 console_web_bind needs an AF_INET6 socket."""
+    import socket
+    with _server_module({"CONSOLE_SOCKET": "", "CONSOLE_WEB_USERS": ""}) as srv:
+        check("server.py loads", srv is not None)
+        for raw, want in (
+            ("::1", (socket.AF_INET6, "::1", "[::1]")),
+            ("[::1]", (socket.AF_INET6, "::1", "[::1]")),
+            (" [::] ", (socket.AF_INET6, "::", "[::]")),
+            ("fe80::1", (socket.AF_INET6, "fe80::1", "[fe80::1]")),
+            ("127.0.0.1", (socket.AF_INET, "127.0.0.1", "127.0.0.1")),
+            ("0.0.0.0", (socket.AF_INET, "0.0.0.0", "0.0.0.0")),
+            ("localhost", (socket.AF_INET, "localhost", "localhost")),
+            ("", (socket.AF_INET, "0.0.0.0", "0.0.0.0")),
+        ):
+            got = srv.bind_address(raw)
+            check(f"bind_address({raw!r}) -> {want} (got {got})", got == want)
+
+
+def _ipv6_loopback_port():
+    """A free port on ::1, or None where this machine cannot bind IPv6 loopback."""
+    import socket
+    if not socket.has_ipv6:
+        return None
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.bind(("::1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+    except OSError:
+        return None
+
+
+def test_the_terminal_serves_on_an_ipv6_bind() -> None:
+    """v0.128.0: with console_web_bind ::1 (or [::1]) server.py died with
+    gaierror before listening, and s6 restarted it forever. The real server,
+    started the way the run script starts it, must answer over IPv6 with the
+    login page."""
+    import socket
+    import subprocess
+    import time
+    for bind in ("::1", "[::1]"):
+        port = _ipv6_loopback_port()
+        if port is None:
+            print("  SKIP: this machine cannot bind ::1")
+            return
+        env = dict(os.environ, CONSOLE_WEB_BIND=bind, CONSOLE_WEB_PORT=str(port),
+                   CONSOLE_WEB_USERS='[{"username":"op","password":"pw"}]',
+                   CONSOLE_SOCKET=os.path.join(_sock_dir(), "absent.sock"))
+        proc = subprocess.Popen([sys.executable, str(SERVER_PATH)], cwd=str(SERVER_PATH.parent),
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            body = b""
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and proc.poll() is None:
+                try:
+                    with socket.create_connection(("::1", port), timeout=2) as c:
+                        c.sendall(b"GET / HTTP/1.0\r\nHost: [::1]:%d\r\n\r\n" % port)
+                        while True:
+                            chunk = c.recv(4096)
+                            if not chunk:
+                                break
+                            body += chunk
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            check(f"bind {bind}: the server is still running (rc {proc.poll()})", proc.poll() is None)
+            check(f"bind {bind}: answered over IPv6 with the login page ({body[:60]!r})",
+                  body.startswith(b"HTTP/1.1 200") and b"password" in body.lower())
+        finally:
+            proc.terminate()
+            try:
+                out, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate()
+        check(f"bind {bind}: it logs the bracketed address ({out.strip()[-160:]!r})",
+              f"listening on [::1]:{port}" in out)
+
+
 if __name__ == "__main__":
     import _runner
     raise SystemExit(_runner.run(globals()))

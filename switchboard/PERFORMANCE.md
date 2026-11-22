@@ -196,7 +196,7 @@ not, and calling the detector "exercised" — as a first draft of this section d
 transitions are recoveries from the 27 restarts; 100 of the 174 predate the first
 restart carrying the flag.
 
-The one fleet outage this system is known to have had — all eight ports dropping
+A fleet outage — all eight ports dropping
 from 01:00:07 MST on 2026-09-01 and all back by 01:02:06, 119 seconds from first
 drop to last recovery — falls **inside** this file's window, at
 08:00 UTC. It is absent because it fell entirely between two five-minute samples:
@@ -363,7 +363,7 @@ quiet because the system is healthy or because they cannot fire.
 | Assistant health | — | No ledger before 0.80.0 (§4). |
 | Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
-| Fleet outage (point sample) | 0 | Needs the outage on two consecutive samples, so it cannot see one shorter than a single poll interval (300 s by default) and is certain to see one only from two intervals. The one real outage lasted 119 s. |
+| Fleet outage (point sample) | 0 | Needs the outage on two consecutive samples, so it cannot see one shorter than a single poll interval (300 s by default) and is certain to see one only from two intervals. The outage in this file's window lasted 119 s. |
 | Poor-call alert | 11 legs | Fired, but not on every leg it should have. Until 0.104.0 a wake-up, page or announcement leg whose clip played could cross the MES, loss or round-trip threshold and raise nothing; a later pass over 50 days of the ledger found 5 such legs. From 0.104.0 those legs alert like any other. A truncated page or announcement still raises nothing; a truncated wake-up raises its own `undelivered` alert. |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0: it now alerts on `rtt_mean_ms` above 250 ms or `rtt_max_ms` above 500 ms, and applies the 400 ms test to `rtt_ms` only when neither is recorded. |
 | Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, close to the 50 packets/s expected at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |

@@ -71,6 +71,13 @@ if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
     BIND="127.0.0.1"
 fi
 export CONSOLE_WEB_BIND="${BIND}"
+# The bind as written beside a port in the lines below: an IPv6 literal goes in
+# brackets ([::1]:8100), as server.py writes it. server.py takes either form.
+case "${BIND}" in
+    \[*) SHOWN="${BIND}" ;;
+    *:*) SHOWN="[${BIND}]" ;;
+    *) SHOWN="${BIND}" ;;
+esac
 
 # v0.71.0 — is this bind address loopback-only?
 #
@@ -100,14 +107,14 @@ sw_is_loopback() {
 # switchboard-opt reads the init snapshot, not bashio, so a transient blank
 # options read cannot reach it.
 if ! [ "${VALID_USERS}" -gt 0 ] 2>/dev/null; then
-    bashio::log.notice "Console web terminal NOT started: console_users has no valid entry (a username and a password), and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${BIND}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add a console_users entry to run this terminal with a sign-in."
+    bashio::log.notice "Console web terminal NOT started: console_users has no valid entry (a username and a password), and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${SHOWN}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add a console_users entry to run this terminal with a sign-in."
     exec sleep infinity
 fi
-bashio::log.info "Starting Switchboard console web terminal on ${BIND}:${PORT} ..."
+bashio::log.info "Starting Switchboard console web terminal on ${SHOWN}:${PORT} ..."
 if sw_is_loopback "${BIND}"; then
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${BIND}."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${SHOWN}."
 else
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${BIND}:${PORT}."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${SHOWN}:${PORT}."
 fi
 # The bridge target is the operator console's Unix socket at a fixed path
 # (server.py's CONSOLE_SOCKET default). console_port is the SSH service's port

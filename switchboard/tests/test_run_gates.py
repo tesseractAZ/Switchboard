@@ -639,6 +639,21 @@ def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
     outcome, log = _run_console_web(good, enabled="false")
     check(f"console-web/run end to end: console_web_enabled false -> IDLE (got {outcome})", outcome == "IDLE")
 
+
+def test_an_ipv6_bind_is_written_in_brackets_beside_its_port():
+    """v0.128.0: '::1:8100' reads as an address with no port; the run script
+    writes an IPv6 bind as [::1]:8100, as server.py does, in either input form."""
+    good = '[{"username":"op","password":"pw"}]'
+    for bind in ("::1", "[::1]"):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run: bind {bind} -> SERVER (got {outcome}, {log})", outcome == "SERVER")
+        check(f"console-web/run: bind {bind} start-up lines ({log})",
+              "INFO: Starting Switchboard console web terminal on [::1]:8100 ..." in log
+              and any("login gate ACTIVE (1 user(s)), bound to [::1]." in l for l in log))
+    outcome, log = _run_console_web("[]", bind="::")
+    check(f"console-web/run: the NOTICE brackets it too ({log})",
+          any("through [::]:8100." in l for l in log) and outcome == "IDLE")
+
 def _code(svc):
     """A run script with its comment lines removed."""
     return "\n".join(ln for ln in (_S6 / svc / "run").read_text().splitlines()

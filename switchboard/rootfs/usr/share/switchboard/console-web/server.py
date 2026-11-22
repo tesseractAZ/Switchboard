@@ -69,6 +69,23 @@ def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, "").strip() or default)
 
 
+def bind_address(raw: str) -> tuple:
+    """CONSOLE_WEB_BIND -> (address family, host to bind, host as written in logs).
+
+    An IPv6 literal, bare (``::1``) or in brackets (``[::1]``), needs an AF_INET6
+    socket. socketserver's default is AF_INET, which cannot bind one: before
+    v0.128.0 a ``console_web_bind`` of ``::1`` failed with ``gaierror`` before
+    listening, and s6 restarted the service forever while the run script logged
+    it as started. Anything else (an IPv4 address, a host name) stays AF_INET,
+    and a blank value means 0.0.0.0, as before."""
+    host = (raw or "").strip() or "0.0.0.0"
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if ":" in host:
+        return socket.AF_INET6, host, f"[{host}]"
+    return socket.AF_INET, host, host
+
+
 # The operator console we bridge to: its Unix socket, 0600 root, the only place
 # it listens. The browser never reaches the board directly; this server does, on
 # the same host. CONSOLE_SOCKET exists for the tests; the run script sets
@@ -425,7 +442,7 @@ def _handle_client_payload(console: socket.socket, data: bytes) -> bool:
 
 def main() -> None:
     port = _env_int("CONSOLE_WEB_PORT", 8100)
-    host = os.environ.get("CONSOLE_WEB_BIND", "0.0.0.0") or "0.0.0.0"
+    family, host, shown = bind_address(os.environ.get("CONSOLE_WEB_BIND", ""))
     slots = threading.BoundedSemaphore(MAX_SESSIONS)
 
     class Handler(socketserver.BaseRequestHandler):
@@ -442,10 +459,17 @@ def main() -> None:
                 log(f"connection error: {exc}")
 
     class Server(socketserver.ThreadingTCPServer):
+        address_family = family
         allow_reuse_address = True
         daemon_threads = True
 
-    srv = Server((host, port), Handler)
+    try:
+        srv = Server((host, port), Handler)
+    except OSError as exc:
+        # One line that names the address and the reason, rather than a bare
+        # traceback; s6 still restarts the service, as for any failed start.
+        log(f"cannot listen on {shown}:{port}: {exc}")
+        raise SystemExit(1)
 
     def shutdown(*_):
         log("shutting down")
@@ -470,7 +494,7 @@ def main() -> None:
         gate = "no login gate, but bound to loopback — not reachable from the LAN"
     else:
         gate = "NO LOGIN GATE — reachable from the LAN"
-    log(f"console web terminal listening on {host}:{port} "
+    log(f"console web terminal listening on {shown}:{port} "
         f"(bridging to {CONSOLE_SOCKET}) — {gate}")
     try:
         srv.serve_forever()

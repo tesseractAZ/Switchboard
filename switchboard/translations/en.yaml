@@ -120,7 +120,7 @@ configuration:
     description: TCP port for the web terminal. Default 8100.
   console_web_bind:
     name: Console Web Terminal Bind Address
-    description: Interface the web terminal listens on. Defaults to 127.0.0.1 (this machine only), and blank also means 127.0.0.1. Set 0.0.0.0 to reach it from the LAN. It runs only with a Console Users entry, so it always asks for a sign-in.
+    description: Interface the web terminal listens on. Defaults to 127.0.0.1 (this machine only), and blank also means 127.0.0.1. Set 0.0.0.0 to reach it from the LAN. An IPv6 address such as ::1 also works. It runs only with a Console Users entry, so it always asks for a sign-in.
   console_users:
     name: Console Users
     description: "Sign-in accounts for the SSH console and the web terminal. Each entry has 'username' and 'password' (shown masked). SSH accepts only these accounts, by password, and refuses every login while the list is empty. The web terminal starts only once the list has a valid entry, and then requires a sign-in; with none it does not start (before 0.125.0 it ran with no login). Too many wrong attempts from one address are throttled for a few minutes. The console in the Switchboard sidebar needs none of these: Home Assistant has already signed you in."
