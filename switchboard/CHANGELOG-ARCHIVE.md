@@ -1195,7 +1195,7 @@ things came back.
 
 **A caller's telephone number could reach the shared folder unmasked.** Numbers
 are masked down to their last four digits before being written to the folder
-that is visible outside the phone system and captured in backups — because most
+that is visible outside the phone system and captured in backups — because some
 of those numbers belong to people who never chose to be in this system. The
 mask only applied if the number was all digits, and a number can arrive with a
 leading `+`. The same number therefore leaked or was masked depending on how
@@ -2132,8 +2132,9 @@ On a trunk call the call-quality record has no extension to store, so it stores
 the number instead: the caller's on the way in, the dialled digits on the way
 out. That record is mirrored to the shared folder, which is readable from
 outside the add-on and included in backups. Forty-five of the last 252 calls had
-a complete number in them. Most belong to people who rang this house and had no
-say in the matter.
+a complete number in them. Ten belong to people who rang this house and two are
+numbers it dialled, none of whom had any say in the matter; the other 32 were
+the household's own caller ID.
 
 The mirror now keeps only the last four digits; the private copy, which cannot
 be read from outside, still holds the number in full. The mirror was made

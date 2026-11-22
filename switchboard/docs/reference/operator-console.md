@@ -47,8 +47,9 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   0.100.0 **the board itself scrolls the same way**: the roster follows the
   selection and says how many rooms are out of view. When the window is shorter
   still, the active-call and wake-up lists collapse to a count of what they are
-  hiding — but the key bar at the bottom is never given up, which is what used to
-  happen first, because the page was simply cut off at the terminal's last row.
+  hiding — but the key bar is never given up. The page used to be cut off at the
+  terminal's last row, which took the status message first and the key bar just
+  above it soon after.
   The window size comes from your SSH terminal and follows a resize. Toggle with
   `console_enabled`; `console_port` and `console_bind` set its port and interface.
   **Since 0.114.0 `console_bind` defaults to `0.0.0.0`** — on a *fresh* install;

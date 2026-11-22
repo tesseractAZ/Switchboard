@@ -13,9 +13,15 @@ documentation pass are corrected.**
   failed before it listened and the service restarted over and over, while the
   start-up log said it had started. It now opens an IPv6 socket for an IPv6
   address, and the log writes it as `[::1]:8100`. A bind that fails for any
-  reason logs one line naming the address and the reason. IPv4 binds, the
-  default included, behave as before.
-- Code comments that still repeated claims the 0.127.0 documentation pass
+  reason logs one line naming the address and the reason. A value that is blank
+  inside its brackets (`[]`) means `127.0.0.1`, as a blank value does. IPv4
+  binds, the default included, behave as before.
+- Failed logins to the web terminal and the SSH console are now counted per
+  `/64` network for an IPv6 client, since one host can pick a fresh address in
+  its `/64` for every try, and an IPv4 client reached through a dual-stack `::`
+  bind counts as its IPv4 address. IPv4 clients are counted as before.
+- Code comments, test notes, the operator-console reference and two changelog
+  archive entries that still repeated claims the 0.127.0 documentation pass
   corrected now match the code: the console's footer order, what a mistyped
   resize message would have done, the outside line not being the emergency path,
   the cordless battery rule, how announce and wake-up delivery records are named

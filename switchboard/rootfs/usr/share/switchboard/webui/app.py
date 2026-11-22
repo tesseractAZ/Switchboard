@@ -1321,8 +1321,9 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         #
         # `ok` here means AMI ACCEPTED the Originate — what `ring-queued` means
         # on the wake-up side. The names differ (this one is pinned as
-        # delivery.ANNOUNCE_QUEUED); delivery.py's announce reconciler joins it to
-        # the call-quality record by the sound filename.
+        # delivery.ANNOUNCE_QUEUED); delivery.py's announce reconciler joins it,
+        # by the sound filename, to the `audio-delivered` row switchboard-callqos
+        # writes to the delivery ledger from the hangup extension.
         _record_delivery(ext, "announce", "originate-queued",
                          sound=os.path.basename(sound), digest=tag or None)
         # ...and only NOW does the suppression window start. Every path above

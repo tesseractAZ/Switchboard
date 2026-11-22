@@ -40,6 +40,25 @@ def test_parse_users_counts_only_text_or_whole_number_fields() -> None:
     assert webauth.parse_users('[{"username":"op","password":1234}]') == [("op", "1234")]
 
 
+def test_throttle_key_counts_ipv6_by_its_64() -> None:
+    k = webauth.throttle_key
+    assert k("192.0.2.7") == "192.0.2.7"
+    assert k("::ffff:192.0.2.7") == "192.0.2.7"            # dual-stack '::' listener
+    assert k("2001:db8:1:2::5") == k("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
+    assert k("2001:db8:1:3::5") != k("2001:db8:1:2::5")
+    assert k("fe80::1%eth0") == "fe80::/64"
+    assert k("?") == "?"
+
+
+def test_one_host_cannot_rotate_ipv6_addresses_past_the_limit() -> None:
+    t = webauth.LoginThrottle(max_attempts=5, window=300, now=lambda: 100.0)
+    allowed = [t.charge(f"2001:db8:1:2::{i:x}") for i in range(1, 51)]
+    assert allowed.count(True) == 5, allowed
+    assert t.charge("2001:db8:9:9::1") is True               # another /64 is another host
+    t.clear("2001:db8:1:2::77")                              # a success clears its /64
+    assert t.charge("2001:db8:1:2::1") is True
+
+
 def test_parse_users_strips_username_not_password() -> None:
     users = webauth.parse_users('[{"username":"  eric  ","password":" p w "}]')
     assert users == [("eric", " p w ")]  # passwords keep their exact bytes

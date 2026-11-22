@@ -543,7 +543,11 @@ def test_bind_address_picks_the_family_from_the_address() -> None:
             ("127.0.0.1", (socket.AF_INET, "127.0.0.1", "127.0.0.1")),
             ("0.0.0.0", (socket.AF_INET, "0.0.0.0", "0.0.0.0")),
             ("localhost", (socket.AF_INET, "localhost", "localhost")),
-            ("", (socket.AF_INET, "0.0.0.0", "0.0.0.0")),
+            # Blank, or blank inside brackets, fails closed to loopback: an
+            # empty host would be INADDR_ANY, every interface.
+            ("", (socket.AF_INET, "127.0.0.1", "127.0.0.1")),
+            ("[]", (socket.AF_INET, "127.0.0.1", "127.0.0.1")),
+            (" [ ] ", (socket.AF_INET, "127.0.0.1", "127.0.0.1")),
         ):
             got = srv.bind_address(raw)
             check(f"bind_address({raw!r}) -> {want} (got {got})", got == want)
@@ -609,6 +613,22 @@ def test_the_terminal_serves_on_an_ipv6_bind() -> None:
                 out, _ = proc.communicate()
         check(f"bind {bind}: it logs the bracketed address ({out.strip()[-160:]!r})",
               f"listening on [::1]:{port}" in out)
+
+
+def test_a_bind_that_cannot_be_used_fails_with_one_line() -> None:
+    """A name the socket layer cannot even encode raised TypeError past the
+    OSError handler, so the service died with a traceback."""
+    import subprocess
+    for bind in ("\u00e9" * 64, "no-such-host.invalid"):
+        env = dict(os.environ, CONSOLE_WEB_BIND=bind, CONSOLE_WEB_PORT="8199",
+                   CONSOLE_WEB_USERS='[{"username":"op","password":"pw"}]',
+                   CONSOLE_SOCKET=os.path.join(_sock_dir(), "absent.sock"))
+        r = subprocess.run([sys.executable, str(SERVER_PATH)], cwd=str(SERVER_PATH.parent),
+                           env=env, capture_output=True, text=True, timeout=30)
+        out = r.stdout + r.stderr
+        check(f"bind {bind[:12]!r}: exits non-zero (rc {r.returncode})", r.returncode != 0)
+        check(f"bind {bind[:12]!r}: one 'cannot listen' line, no traceback ({out.strip()[-200:]!r})",
+              "cannot listen on" in out and "Traceback" not in out)
 
 
 if __name__ == "__main__":

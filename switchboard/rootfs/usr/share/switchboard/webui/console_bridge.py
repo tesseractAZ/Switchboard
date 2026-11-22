@@ -134,10 +134,11 @@ def classify_payload(data):
     ``r``→ring, ``c``→connect, ``h``→hang up, ``t``→transfer, ``p``→page-all,
     ``l``→lights, ``m``→MWI. That string contains r, e, s, i, z, c, o, l, t, y
     and p — and the page sends it inside ``ws.onopen``. Opening the sidebar panel
-    would have typed it: the ``t`` of ``type`` opens a transfer if the selected
-    room is on a call, and its ``p`` opens the page-all confirmation, which
-    swallows every key after it, leaving the board one Enter or ``Y`` from
-    paging the whole house.
+    would have typed it: the ``p`` of ``type`` opens the page-all
+    confirmation, which swallows every key after it, leaving the board one
+    Enter or ``Y`` from paging the whole house. Had the selected room been on a
+    call, the ``t`` before it would have opened a transfer instead, which takes
+    only Enter or Esc, so nothing after it would have acted either.
 
     So: normalise to bytes FIRST, and be stricter than the old server — any text
     frame that parses as a JSON object is a control message and is never

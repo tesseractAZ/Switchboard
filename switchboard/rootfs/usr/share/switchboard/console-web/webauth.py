@@ -27,6 +27,7 @@ Security notes, hard-won elsewhere and applied from the start:
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import secrets
 import threading
@@ -104,9 +105,30 @@ def parse_cookies(header: str) -> dict:
     return out
 
 
+def throttle_key(ip: str) -> str:
+    """The key failed logins are counted under. An IPv4 address counts on its
+    own. An IPv4-mapped IPv6 address (what a dual-stack ``::`` listener reports
+    for an IPv4 client) counts as that IPv4 address. Any other IPv6 address
+    counts by its /64: a single host is normally given a whole /64 and can pick
+    a fresh source address in it for every attempt, so counting each address
+    alone would let one host retry without limit (v0.128.0, when the web
+    terminal first became reachable over IPv6). Anything else (``"?"``) is
+    used as given."""
+    try:
+        addr = ipaddress.ip_address(str(ip).split("%", 1)[0])
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
 class LoginThrottle:
-    """Rolling per-source-IP attempt limiter. charge() records the attempt and
-    says whether it may proceed — call it BEFORE verifying credentials."""
+    """Rolling per-source-IP attempt limiter (per /64 for IPv6, see
+    throttle_key). charge() records the attempt and says whether it may
+    proceed — call it BEFORE verifying credentials."""
 
     def __init__(self, max_attempts: int = MAX_ATTEMPTS,
                  window: float = WINDOW_SECONDS, now=time.monotonic) -> None:
@@ -121,6 +143,7 @@ class LoginThrottle:
         self._lock = threading.Lock()
 
     def charge(self, ip: str) -> bool:
+        ip = throttle_key(ip)
         t = self._now()
         with self._lock:
             hits = [x for x in self._hits.get(ip, []) if t - x < self._window]
@@ -136,6 +159,7 @@ class LoginThrottle:
 
     def clear(self, ip: str) -> None:
         """A successful login stops penalizing its source."""
+        ip = throttle_key(ip)
         with self._lock:
             self._hits.pop(ip, None)
 

@@ -43,9 +43,10 @@ def test_a_resize_never_reaches_the_console_as_keystrokes():
     ``l``→lights. That string contains r, e, s, i, z, c, o, l, t, y and p — and
     the page sends it from inside ``ws.onopen``.
 
-    So: opening the sidebar panel would ring a phone, then walk the board
-    through connect, page and lights. This test is the reason the sniff
-    normalises to bytes first.
+    So: opening the sidebar panel would have typed it into the board, where its
+    ``p`` opens the page-all confirmation (or, with the selected room on a
+    call, its ``t`` opens a transfer), which swallows every key after it. This
+    test is the reason the sniff normalises to bytes first.
     """
     # The TEXT-frame shape — a str, which is what the browser actually sends.
     out = cb.encode_for_console('{"type":"resize","cols":120,"rows":40}')

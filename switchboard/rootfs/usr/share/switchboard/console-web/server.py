@@ -76,11 +76,14 @@ def bind_address(raw: str) -> tuple:
     socket. socketserver's default is AF_INET, which cannot bind one: before
     v0.128.0 a ``console_web_bind`` of ``::1`` failed with ``gaierror`` before
     listening, and s6 restarted the service forever while the run script logged
-    it as started. Anything else (an IPv4 address, a host name) stays AF_INET,
-    and a blank value means 0.0.0.0, as before."""
-    host = (raw or "").strip() or "0.0.0.0"
+    it as started. Anything else (an IPv4 address, a host name) stays AF_INET.
+    A value that is blank, or blank inside its brackets ("[]"), means 127.0.0.1:
+    the same fail-closed default the run script applies, never "every
+    interface" (an empty host is INADDR_ANY to the socket layer)."""
+    host = (raw or "").strip()
     if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
+        host = host[1:-1].strip()
+    host = host or "127.0.0.1"
     if ":" in host:
         return socket.AF_INET6, host, f"[{host}]"
     return socket.AF_INET, host, host
@@ -465,9 +468,11 @@ def main() -> None:
 
     try:
         srv = Server((host, port), Handler)
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         # One line that names the address and the reason, rather than a bare
-        # traceback; s6 still restarts the service, as for any failed start.
+        # traceback (a name that cannot be encoded raises TypeError/ValueError
+        # before any lookup); s6 still restarts the service, as for any failed
+        # start.
         log(f"cannot listen on {shown}:{port}: {exc}")
         raise SystemExit(1)
 
