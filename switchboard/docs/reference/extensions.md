@@ -2,11 +2,15 @@
 
 ## Room extensions
 
-An extension is **any 2–6 digit number you choose**, one per phone; they only need
-to be unique. Pick a scheme that leaves room for the feature codes. The reference
-home wires its eight GXW FXS ports to **`11`–`18`** and its WiFi cordless to
-**`19`** (this matches the `gateway_ports` default). A `1xx` scheme (`101`, `102`,
-…) works just as well — the shipped placeholder rooms use it.
+An extension is **any 2–6 digit number you choose** except an all-zero one (`00`,
+`000`, …), one per phone; they only need to be unique. Pick a scheme that leaves
+room for the feature codes. The reference home wires its eight GXW FXS ports to
+**`11`–`18`** and its WiFi cordless to **`19`** (this matches the `gateway_ports`
+and `cordless_ext` defaults). A `1xx` scheme (`101`, `102`, …) works just as
+well for calling — the shipped placeholder rooms use it — but then set
+`gateway_ports` and `cordless_ext` to your own extensions: otherwise gateway
+health, wired link health and the cordless's registration check have nothing to
+measure, and a WARNING about `gateway_ports` is logged at every start.
 
 Whatever you pick, keep the single-digit `0` for the operator and (if you use a
 trunk) a leading digit like `9` for the outside line, and don't collide with the
@@ -14,8 +18,9 @@ feature codes below.
 
 ## Feature codes
 
-Dial these from any room phone. All are configurable (`*_ext`) and can be disabled
-(`*_enabled`); the defaults are:
+Dial these from any room phone. Every feature except the operator has a `*_ext`
+option to move its code and a `*_enabled` option to switch it off; the operator
+on `0` has only `operator.enabled`. The defaults are:
 
 | Dial | Feature | Section |
 |-----:|---------|---------|
@@ -50,10 +55,13 @@ unreachable dialplan that still reads as a working feature.
 ## In-call transfer (analog phones)
 
 On a live call, an analog phone can blind-transfer with **`##`** and
-attended-transfer with **`*2`**. Transfers are confined to internal destinations —
-you cannot transfer a call out to the trunk. IP phones (like the cordless) use
-their own Transfer button. A `*2` consult call to the operator counts as an
-outside line for the house features and the message-waiting clear (see the
-operator below): to use those, dial `0` directly.
+attended-transfer with **`*2`**, except on an incoming outside call that rang it
+straight from the line: the inbound trunk `Dial` arms no transfer codes.
+Transfers are confined to internal destinations — you cannot transfer a call
+out to the trunk. IP phones (like the cordless) use their own Transfer button.
+A `*2` consult call to the operator counts as an outside line for the house
+features and the message-waiting clear (see
+[the operator](voice-operator.md#operator--dial-0)): to use those, dial `0`
+directly.
 
 ---

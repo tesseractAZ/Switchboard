@@ -7,8 +7,9 @@ phone, reach a set of voice features that run on the box, and, optionally, an
 outside line over a SIP trunk. Audio is **G.711 µ-law end to end**.
 
 This page is the short guide for everyday use. Everything in detail, every
-option and every log line, is in the
+option and the log lines you are most likely to need, is in the
 **[full reference](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/README.md)**.
+Not every line is listed there; read any start-up WARNING or ERROR in full.
 The security model is in
 **[SECURITY.md](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/SECURITY.md)**.
 
@@ -46,9 +47,12 @@ The security model is in
    to **Registered** as its port comes online.
 6. Pick up a phone and dial another room's extension. Done.
 
-The add-on options are the source of truth. Every start regenerates the whole
-Asterisk configuration from them, so editing `/etc/asterisk/*.conf` by hand is
-pointless: each file is overwritten.
+The add-on options (plus an optional
+[options overlay](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md#the-options-overlay-advanced))
+are the source of truth. Every start regenerates the Asterisk files Switchboard
+manages (`pjsip.conf`, `extensions.conf` and seven others) from them, and the
+add-on's AppArmor profile refuses every other write to `/etc/asterisk`, so
+editing it by hand is pointless.
 
 Full details: [Quick start](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/quick-start.md).
 
@@ -74,7 +78,7 @@ has only `operator.enabled`.
 | `411` | **Directory assistance.** Say a name, or "list". |
 | `911`, `933` | Not carried. Answered with a spoken notice that emergency calls cannot be made from these phones. |
 | `9` + number | Outside line, only when the trunk is enabled. With `direct_dial` on, dial `1` + the 10-digit number instead, with no prefix. International (`011`) and premium (`1-900`) numbers are blocked. |
-| `##` / `*2` during a call | Blind / attended transfer from an analog phone, to an internal destination only. IP phones use their own Transfer button. |
+| `##` / `*2` during a call | Blind / attended transfer from an analog phone, to an internal destination only. Not available on an incoming outside call that rang the phone straight from the line. IP phones use their own Transfer button. |
 
 **Choosing extensions.** An extension is any 2–6 digit number, unique per phone.
 Keep `0` for the operator, keep clear of the feature codes, and, with a trunk in
@@ -102,8 +106,12 @@ Full details: [Extensions & feature codes](https://github.com/tesseractAZ/Switch
 
 All the voice features work the same way: a prompt plays, you speak one short
 phrase after the beep, and the speech is recognised on the box. No keypress is
-ever needed, so rotary phones work. Nothing connects a call or switches a light
-on a low-confidence guess; it asks again instead.
+ever needed, so rotary phones work. A name that matches no room or light well
+enough, or two almost equally, is asked for again; a close but inexact match is
+used: the operator connects it without naming the room, `411` names the room
+first. The lights menu acts on any reply with "on" or "off" in it (unless it
+also holds a cancel word), and the voice assistant passes what it heard to Home
+Assistant.
 
 What a feature says that has no recording (a room or light name, a status
 reading, the wake-up weather, the assistant's answer) is spoken by the add-on's
@@ -115,16 +123,18 @@ per start.
 ### Wake-up calls
 
 Dial `42` (or say "wake me up" to the operator) and, after the beep, say a time:
-"seven thirty", "quarter past six", "nineteen thirty", "noon". The time is read
-back, so you can say it again if it is wrong, or say "cancel" to remove a
-pending wake-up. Each room holds **one** wake-up; setting a new one replaces it.
+"seven thirty", "quarter past six", "nineteen thirty", "noon". The time is set
+straight away and read back. If it is wrong, dial `42` again: you hear the time
+that is set and can say a new one, or say "cancel" to remove it. Each room
+holds **one** wake-up; setting a new one replaces it.
 The dashboard (the **Wake** box and **Set** on a room card) and the console
 (**W** to set, **X** to cancel) set and cancel them too.
 
 At the set time the room rings for `wakeup_ring_seconds` (60 s) and speaks a
-greeting and the time, plus any extras you configured: a scene, the weather, the
-next calendar event. If nobody hears it, the room is rung a second time
-`wakeup_retry_seconds` (90 s) after the first ring started, provided the phone
+greeting and the time, plus the day's weather (on by default, `wakeup_weather`)
+and any extras you configured: a scene, the next calendar event. If nobody
+hears it, the room is rung a second time `wakeup_retry_seconds` (90 s) after
+the first ring started, provided the phone
 is registered and idle; if it still is not heard, a **critical** alert goes to
 `wakeup_push_target`, which sounds through Do Not Disturb. Setting or cancelling
 a wake-up from the ringing room's own phone counts as a snooze: no second ring
@@ -154,9 +164,9 @@ hangs up.
 
 Lights, dial-a-status, announce and page act on the house, so the operator hands
 them only to a room phone that dialled `0` itself; a caller transferred in from
-outside can still be connected to a room, use the directory, hear the clock or
-set a wake-up. Dialling `0` also clears the calling room's own message-waiting
-indicator (below).
+outside can still be connected to a room, use the directory or hear the clock;
+a wake-up can only be set from a room's own phone. Dialling `0` also clears the
+calling room's own message-waiting indicator (below).
 
 Full details: [The voice operator](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/voice-operator.md#operator--dial-0).
 
@@ -213,8 +223,10 @@ Full details: [Page all](https://github.com/tesseractAZ/Switchboard/blob/main/sw
   20 dB), and kept under a peak limit. The chime is left as it is. This uses ffmpeg, which the image
   installs; if ffmpeg is missing or fails, the announcement is sent unshaped,
   as before 0.121.0, and the Log tab says so once per start.
-- A clip whose audio never played is sent again, up to `announce_retry_attempts`
-  times (2), once the phone reports itself registered and idle.
+- While wake-up calls are on, a clip whose audio never played is sent again,
+  up to `announce_retry_attempts` times (2), once the phone reports itself
+  registered and idle, if that is within about two and a half minutes of the
+  original request.
   An announcement nobody answers is retried too, so set
   `announce_retry_attempts` to `0` or `1` if that is too many rings for your
   house. The same audio sent to the same phone within five minutes is not
@@ -244,8 +256,9 @@ call, the outside line's registration, and the same actions as the dashboard.
 There are three ways in:
 
 - **In the sidebar (recommended).** Press **Console** on the dashboard, or open
-  `/console/` under the panel's URL; the address must end in a slash. Home
-  Assistant's own login is the only login, and it works in the mobile app.
+  `/console/` under the panel's URL (`/console` without the slash redirects
+  there). Home Assistant's own login is the only login, and it works in the
+  mobile app.
 - **SSH.** `ssh -p 2300 <user>@<ha-host>`, signing in as a `console_users`
   entry: its username, then its password at the prompt. While `console_users`
   has no valid entry, **every login is refused**, and the Log tab says so. On
@@ -277,7 +290,8 @@ missed call. On an analog phone it produces a **stutter dial tone** once the
 gateway's "Send Stutter Dialtone for MWI" setting (the label varies by firmware)
 is enabled; without it, the indicator still shows on the dashboard. Clear it
 with **Clear** on the card or **M** again, or simply dial `0` from that room
-(while `mwi_enabled` is on). Indicators survive an add-on restart.
+(while the operator and `mwi_enabled` are both on). Indicators survive an
+add-on restart.
 
 Full details: [The stutter-tone setting](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/gxw4216-gateway.md#72-configure-each-fxs-port)
 · [`mwi_enabled`](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/configuration.md#extra-feature-codes).
@@ -289,11 +303,13 @@ health** (each phone's registration and round-trip time, and the outside line),
 **call quality** (a call whose audio was poor) and **device health** (the WP826
 cordless's battery and Wi-Fi, and the gateway). The `*_alerts` options switch
 only the notifications; the sensors keep publishing. Turning
-`link_health_enabled` off also silences gateway health, the trunk sensor and the
-cordless half of device health, so leave it on unless you mean all of that. A
-link-health, device-health or undelivered-wake-up alert raised while Home
-Assistant is not answering (after a host reboot, for example) is kept and posted
-once it answers, unless it is still refused an hour after it was raised. A
+`link_health_enabled` off also silences gateway health and the trunk sensor, and
+stops the cordless's registration check and IP auto-follow (its battery and
+Wi-Fi checks then use `cordless_ip` or the last published address, and stop
+with neither). Leave it on unless you mean all of that. A link-health,
+device-health or undelivered-wake-up alert raised while Home Assistant is not
+answering (after a host reboot, for example) is kept and posted once it answers
+(for up to an hour, at most 20, and not across an add-on restart). A
 phone-system outage, and its recovery, also go to `wakeup_push_target` as a
 push; a push is never retried.
 
@@ -334,8 +350,8 @@ sox input.wav -r 8000 -c 1 -t ul sw-greeting.ulaw
 Each file is checked at start: a prompt name from the table, in lower case; a
 `.wav` or `.ulaw` extension; a regular file, not a link; between 0.1 s of audio
 and 1 MiB; not silent (some sound above about -50 dBFS); for a `.wav`, 8 kHz
-mono 16-bit PCM; and for a `.ulaw`, not a WAV, MP3, FLAC, Ogg, AIFF, CAF or MP4
-file renamed. A file that fails is skipped with one line in the add-on's
+mono 16-bit PCM; and for a `.ulaw`, not a WAV, MP3, FLAC, Ogg, AIFF, Sun/NeXT,
+CAF or MP4 file renamed. A file that fails is skipped with one line in the add-on's
 **Log** tab saying why, and that prompt keeps its built-in recording, the `911`
 notice included. Raw audio in another encoding (16-bit PCM or A-law, which have
 no header either) cannot be told from µ-law and plays as noise, so make a
@@ -354,7 +370,7 @@ on the second it names.
 | `sw-connecting` | Operator | "Connecting you now." |
 | `sw-dial-one-first` | A long number that cannot be dialled, such as 10 digits without the `1` | "That number needs a one in front. For a long-distance call, dial one, the area code, and the number." |
 | `sw-didnt-catch` | Operator | "Sorry, I didn't catch that. Who would you like to reach?" |
-| `sw-endtone` | The end of an operator, directory or wake-up call | Tone: the end-of-call tone |
+| `sw-endtone` | The end of an operator call, a wake-up (`42`) call, or a directory (`411`) call that ends without dialling a room | Tone: the end-of-call tone |
 | `sw-goodbye` | Operator, directory, wake-up and the voice features | "Goodbye." |
 | `sw-greeting` | Operator | "Operator. Say a room name, or ask for the time, weather, directory, or lights." |
 | `sw-hours-and` | Talking clock | "hours, and" |
@@ -428,7 +444,7 @@ The ten most common problems, most common first.
 | A wake-up did not ring | The room must be **registered and idle** at the set time. A room busy or offline through the 10-minute grace window is skipped, with a persistent notification. If Switchboard itself was down at the set time, the wake-up still rings if it is back within that window; otherwise the miss is recorded (`missed`) and the notification says so. |
 | Every wired phone went **Offline** for about a minute and came back on its own | Usually the gateway restarting, which takes about a minute on a GXW4216 V2, often at its own scheduled automatic reboot. The full page explains how to tell from the logs. |
 | **Cannot reach Asterisk Manager** banner | The add-on is still starting, or Asterisk crashed. Check the **Log** tab. |
-| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the Log tab shows `[ha-broker] refused` | On a call transferred in from outside, or a `*2` consult, those features are refused by design: dial `0` or the feature code directly from a room phone. Otherwise the `refused` line names the request and the rule it failed; report it with that line. |
+| A Home Assistant feature over the phone (lights, scenes, announcements, the status menu, the assistant) says it is unavailable, and the Log tab shows `[ha-broker] refused` | The `refused` line names the request and the rule it failed; report it with that line. A call transferred in from outside, or a `*2` consult, is refused these features by design before Home Assistant is asked, with no `[ha-broker]` line: the operator says goodbye, or the feature code hangs up. Dial `0` or the feature code directly from a room phone. |
 | Calls drop after about 30 s | Usually a NAT or registration timer. Set NAT Traversal = **No** on the LAN. |
 
 Full details: [Troubleshooting](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/docs/reference/troubleshooting.md).

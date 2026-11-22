@@ -2,9 +2,18 @@
 
 All voice features share the same rotary-safe shape: a prompt plays, you speak one
 short phrase after the beep, recognition runs **on-box** (whisper.cpp), and the
-system acts. No keypress is ever required, and nothing connects a call or toggles a
-light on a low-confidence guess — it asks again instead. Speech never leaves the
-box.
+system acts. No keypress is ever required. A name that matches nothing (best score
+below 0.6), or matches two rooms or lights almost equally (within 0.08), is asked
+for again rather than guessed. A weaker match that clears 0.6 is acted on: the
+operator connects it after "Connecting you now." without naming the room, 411
+names the room and extension first, and the lights menu names the light (and its
+state, when known) before asking for an action. At that step any reply with the
+word "on" or "off" in it acts unless it also holds a cancel word, as does a one-
+or two-word near-miss such as "of" or "one". The voice assistant (`47`) sends
+whatever it heard, unless the whole reply is a goodbye, to Home Assistant's
+built-in agent, which carries out any command it recognises without
+confirmation. A wake-up is stored as soon as a time is parsed, then read back.
+Speech never leaves the box.
 
 **How the replies are spoken.** What a feature says that has no recording is
 synthesized on the box by espeak-ng (`switchboard-tts`): the directory's
@@ -25,10 +34,11 @@ instead of 0.08 s.
 If ffmpeg is missing, exits with an error, runs past 3 seconds or returns
 something that is not audio of the expected length, the reply is spoken exactly
 as before v0.122.0. The limit is 3 seconds, not the announcements' 10, because
-a reply's whole synthesis must finish within 20 seconds and espeak-ng alone may
-take 15; after a run past it, the shaping is skipped for 10 minutes, so a
-stalled ffmpeg delays one reply rather than every reply after it. The Log tab
-gets one line per add-on start naming the cause, never the words, for example
+a reply's whole synthesis must finish within 20 seconds (25 for the assistant)
+and espeak-ng alone may take 15; after a run past it, the shaping is skipped for
+10 minutes, so a stalled ffmpeg delays one reply rather than every reply after
+it. The Log tab gets one line per add-on start naming the cause, never the
+words, for example
 `[switchboard-tts] phone-band mastering failed (ffmpeg not found), so a reply was
 spoken unmastered; later fallbacks are not logged`. `switchboard-tts` writes its
 lines to the Log tab itself, so a caller hanging up while a reply is being made
@@ -57,8 +67,9 @@ synonym, a full-word hit, or a recognizer-clipped prefix (all score ≥ 0.9) —
 handset named "Office", "Garage", even "Weather", still connects normally. A
 weaker, merely-fuzzy room match does *not* win: the feature word takes it. That
 ordering exists because neither pure precedence is right — a spoken "page" scores
-0.67 against a room named "Garage", clearing the 0.6 room threshold, so
-room-first would send the caller to the Garage phone instead of the intercom.
+0.60 against a room named "Garage", exactly the 0.6 room threshold, which it
+clears, so room-first would send the caller to the Garage phone instead of the
+intercom.
 The two exceptions sit *ahead* of room matching entirely: "wake me up" and
 "lights"/"automation" are tested first, so a room you literally name "Lights"
 would be shadowed by the automation flow.
@@ -79,10 +90,12 @@ outside caller transferred to `0` is skipped, and so is a `*2` consult to `0`
 **House features are for the room phones** (since 0.110.0). Lights, dial-a-status,
 announce and page act on the house, so the operator hands them only to a room
 phone that dialled `0` itself. An outside caller transferred to the operator, or a
-room's `*2` consult to `0`, can still be connected to a room, use the directory,
-hear the clock or set a wake-up; asked for anything else, they hear the operator's
-goodbye. The same check runs again when each of those features starts, including
-when it is dialled by its own code.
+room's `*2` consult to `0`, can still be connected to a room, use the directory or
+hear the clock. A wake-up request reaches the wake-up flow but sets nothing,
+because that flow identifies the room from the calling phone's own channel, so
+they hear "No wake-up call was set". Asked for anything else, they hear the
+operator's goodbye. The same check runs again when each of those features
+starts, including when it is dialled by its own code.
 
 ## Directory assistance — dial `411`
 
@@ -102,8 +115,9 @@ So it does connect on a less-than-confident match — step 4 is the point of the
 service. What it will not do is connect on a name the matcher rejected outright
 or found ambiguous between two similar rooms; those re-prompt. It speaks the room
 name and extension before connecting, which is your cue to hang up if it guessed
-wrong. Saying "list" doesn't burn a retry (capped at three read-outs); three
-unresolved replies end the call.
+wrong. If the add-on's voice fails at that moment, you hear "Goodbye." and are
+connected anyway. Saying "list" doesn't burn a retry (capped at three
+read-outs); three unresolved replies end the call.
 
 ## Home-automation voice menu — dial `43` (or say "lights" to the operator)
 
@@ -171,10 +185,12 @@ Cloud's assistant is *not* used even if you have a subscription.)
 machine" is a statement about the network. It is not, on its own, a statement
 about what stays behind, so here is that separately.
 
-Each turn writes one line to `/data/state/assistant.jsonl` inside the add-on:
+Each turn writes one row to `/data/state/assistant.jsonl` inside the add-on:
 what was heard, what was replied, how long recognition, Home Assistant and the
 voice took, and — when a turn produced nothing — which of the several possible
-reasons applied. It holds the last 400 turns and then discards the oldest.
+reasons applied. Some calls also add a row that is not a turn (`ha-unavailable`,
+`bias-failed`, `ended-unheard`, `ended-max-turns`, `tts-failed` or `fatal`). It
+holds the last 400 rows and then discards the oldest.
 
 That file is inside the add-on's private data, not the shared folder. It cannot
 be read from a file browser, a Samba share, or another add-on; the container
@@ -216,8 +232,11 @@ administers the machine. With the add-on's protection mode turned off and a
 shell on the host:
 
 ```
-sudo docker exec addon_<slug> tail -n 20 /data/state/assistant.jsonl
+sudo docker exec app_<slug> tail -n 20 /data/state/assistant.jsonl
 ```
+
+`<slug>` is the add-on's ID, the name of its config folder; an older Supervisor
+names the container `addon_<slug>`.
 
 A turn that worked looks like this (wrapped for print):
 
@@ -244,21 +263,27 @@ A turn that worked looks like this (wrapped for print):
 | `tts-failed` | The voice failed twice on one call, so it apologised and hung up rather than continuing in silence. `tts_fails` carries the count. One failure is tolerated: a long answer can outrun the synthesiser's time limit while it is perfectly healthy, so one is a slow sentence and two is a broken voice. |
 
 `rec_end` says how the recording finished — `timeout` (the caller stopped
-talking), `hangup` (they put the phone down mid-sentence) or `dtmf` (they
+talking, or the 8-second recording limit was reached; `rec_ms` tells them
+apart), `hangup` (they put the phone down mid-sentence) or `dtmf` (they
 pressed a key). Those three used to be one event, which made an abandoned call
 and a silent one impossible to tell apart.
 
-`call` is Asterisk's unique id for the leg, so a row here lines up with the
-matching row in the call-quality ledger ([Per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts)) for the same call — "it gave a
-wrong answer" and "the audio was bad" become one question rather than two.
+`chan` is the channel name, which the call-quality ledger ([Per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts)) also
+records, so a row here lines up with the matching row there for the same call —
+"it gave a wrong answer" and "the audio was bad" become one question rather
+than two. Match on `chan` and a nearby `ts`, since channel names repeat after an
+Asterisk restart. `call` is Asterisk's unique id for the leg; the call-quality
+ledger does not carry it.
 
 **Who can reach it.** Anyone who can pick up a house phone: family, guests, a
 child, a visitor left alone in a room with an extension. **Not** an outside
-caller. Two independent mechanisms stop that: the inbound trunk `Dial` uses
-`r` only (never `t`/`T`), so no in-call DTMF transfer is ever armed for the
-outside party; and even if one were, transfers are confined by
-`__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
-and `0` — no feature codes at all. See [Toll-fraud protection](sip-trunk.md#toll-fraud-protection).
+caller. Three independent mechanisms stop that: the `[assistant]` context
+answers only a configured room's own phone, identified by its PJSIP endpoint
+(since 0.110.0); the inbound trunk `Dial` arms no `t`/`T` (its options are `r`
+and a `b(...)` pre-dial handler that tags the ring of an outside call), so no
+in-call DTMF transfer is ever armed for the outside party; and even if one were,
+transfers are confined by `__TRANSFER_CONTEXT` to `[internal-xfer]`, which
+contains only room extensions and `0` — no feature codes at all. See [Toll-fraud protection](sip-trunk.md#toll-fraud-protection).
 
 **What it can act on.** Only entities exposed to Assist
 (*Settings → Voice assistants → Expose*). Exposing an entity makes it reachable

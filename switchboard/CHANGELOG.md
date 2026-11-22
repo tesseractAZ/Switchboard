@@ -1,7 +1,31 @@
 # Changelog
 
-Recent releases. Releases up to 0.115.0 are in the
+Recent releases. Releases up to 0.116.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.127.0
+
+**The documentation, checked against the code.**
+
+- Every Markdown file was compared with the code it describes. 238 statements
+  that were wrong, out of date or incomplete are corrected, each re-checked
+  against this release's code first: in the README, DOCS.md, SECURITY.md,
+  PERFORMANCE.md, the reference pages, the option help text, the changelog
+  archive, and code comments that repeated a corrected claim. 18 of them are
+  places where one page still disagreed with another after its own fix, among
+  them the wake-up scene's help text, which said the scene fires when the call
+  rings: it fires when the call is answered.
+- Old release notes stay the record of their release: an entry was corrected
+  only where it misdescribed that release when it was written, never to
+  describe what later releases changed.
+- Example values that looked real now use reserved forms (`sip.example.com`,
+  555-01xx numbers).
+- The device-health monitor's start-up note about an unset
+  `cordless_cert_sha256` names the section with the pinning steps, instead of a
+  numbered section that no longer exists, and says what an impostor would
+  capture: the salted login hash, from which the password can be recovered
+  offline (the password itself is never sent).
+- Nothing else changes: calls, prompts and every option behave as in 0.126.0.
 
 ## 0.126.0
 
@@ -86,9 +110,10 @@ Recent releases. Releases up to 0.115.0 are in the
   readout and the voice assistant) is rendered to a WAV in the add-on's
   `/tmp` and deleted once it has played. A call that hung up while a reply
   was being rendered or played skipped that deletion, and the WAV stayed until
-  the add-on next restarted: about 16 KB per second of speech, and an
-  assistant reply can repeat what the caller said. The web UI's once-a-minute
-  housekeeping now removes such a file 10 to 11 minutes after it was written.
+  the add-on next restarted: about 16 KB per second of speech, and a reply
+  can repeat what the caller said: the announce line's read-back always does,
+  and an assistant reply can. The web UI's once-a-minute housekeeping now
+  removes such a file 10 to 11 minutes after it was written.
   It takes only regular files with the names the voice scripts give them,
   never a link or a directory, and leaves every other file in `/tmp` alone.
 
@@ -111,11 +136,11 @@ Recent releases. Releases up to 0.115.0 are in the
 - If ffmpeg is missing, fails, runs past 3 seconds or returns unusable audio,
   the reply is spoken exactly as in 0.121.0, and the Log tab says so once per
   start, without the words. The limit is 3 seconds, not the announcements' 10,
-  because a reply's synthesis must finish within 20 seconds and espeak-ng alone
-  may take 15. After a run past it the shaping is skipped for 10 minutes, so a
-  stalled ffmpeg delays one reply, not every reply after it. Silence, replies
-  under 20 ms and speech of 120 seconds or more are spoken unshaped and not
-  logged.
+  because the callers allow a reply's synthesis 20 seconds (the assistant 25)
+  and espeak-ng alone may take 15. After a run past it the shaping is skipped
+  for 10 minutes, so a stalled ffmpeg delays one reply, not every reply after
+  it. Silence, replies under 20 ms and speech of 120 seconds or more are spoken
+  unshaped and not logged.
 - `switchboard-tts` now writes its own lines straight to the Log tab, so one
   is not lost when the caller hangs up while a reply is being made. The
   directory, dial-a-status, announce and wake-up features used to drop them; the
@@ -167,12 +192,13 @@ Recent releases. Releases up to 0.115.0 are in the
   says, with conversion commands.
 - Each file is checked first: a built-in prompt's name, a regular file and not
   a link, 0.1 s to 1 MiB, some sound above about -50 dBFS, for a `.wav` the
-  format above, and for a `.ulaw` not a WAV, MP3, FLAC, Ogg, AIFF, CAF or MP4
-  file renamed. A file that fails is skipped with one log line, and that prompt
-  keeps its built-in recording, the `911` notice included. Raw 16-bit PCM or
-  A-law named `.ulaw` cannot be told from µ-law and plays as noise; DOCS.md says
-  how to make the file and to dial `933` to hear the notice. Anything unexpected in this step leaves every prompt built-in and
-  the start carries on. One line sums up the start.
+  format above, and for a `.ulaw` not a WAV, MP3, FLAC, Ogg, AIFF, Sun/NeXT,
+  CAF or MP4 file renamed. A file that fails is skipped with one log line, and
+  that prompt keeps its built-in recording, the `911` notice included. Raw
+  16-bit PCM or A-law named `.ulaw` cannot be told from µ-law and plays as
+  noise; DOCS.md says how to make the file and to dial `933` to hear the
+  notice. Anything unexpected in this step leaves every prompt built-in and the
+  start carries on. One line sums up the start.
 - The shipped recordings stay write-locked. The accepted files are installed
   under `/run/switchboard/prompts` and played from there by absolute path, so
   a custom `.wav` can never lose to the built-in `.ulaw` beside it. The
@@ -296,8 +322,8 @@ Recent releases. Releases up to 0.115.0 are in the
 - The outage alert clears only once two fewer phones than its threshold are
   down (3 of 9) on two consecutive samples, and the recovery names any still
   down ("still down: ext 14"). It cleared on the first sample under the
-  threshold, so four ports dead and a fifth flapping raised and cleared it
-  every 15 minutes.
+  threshold, so four ports dead and a fifth re-registering every 15 minutes
+  raised and cleared it four times in 100 minutes.
 - The outage latch is kept in `/data/state`, with whether the alert was
   shown. A refused card counts as shown once its retry posts it. A restart
   during an outage does not raise or push a shown alert again, and its
@@ -387,53 +413,3 @@ Recent releases. Releases up to 0.115.0 are in the
   retried, since each call's recorder runs once and exits; their
   `notify_status` still records `failed`. The missed-wake-up notification keeps
   the retry it has had since the 2026-10-04 power cut.
-
-## 0.116.0
-
-**Each call-quality score is judged against its own stream; loss alerts at
-1.5 %; a conversation with an abnormal jitter peak alerts.**
-
-- Asterisk names its two quality scores the opposite way round to its loss
-  counters: `rxmes` scores the audio the PBX sends and `txmes` the audio it
-  receives, while `rxploss` and `txploss` count the reverse. The filter that
-  discards a collapsed score as a re-INVITE glitch paired them by name, so each
-  score was checked against the other stream's loss. A wake-up on 2026-09-25 that
-  lost 43.8 % of its audio on the way to the cordless scored 20 for that stream;
-  the filter compared the 20 with the microphone's 0 % loss and dropped it. Each
-  score is now checked against its own stream, and that wake-up's record would
-  show the 20.
-- A short call that loses a few dozen packets now alerts in either direction:
-  the loss alert moves from 3 % to 1.5 %, where loss alone already takes a call
-  below `good`. Asterisk's score could not be relied on to catch it. The score
-  for the audio the PBX sends falls on the running total of lost packets (41
-  lost early in a 38-second call take it from 88 to 28); the score for the
-  audio it receives falls on the loss per 5-second report (the same burst leaves
-  it near 81). Across the last 300 recorded legs this adds two notifications,
-  both short calls from the cordless to set a wake-up.
-- The cordless's own low call score degrades its health sensor only when the
-  PBX's record agrees. That check read `mes_tx`, the PBX's score for the
-  handset's microphone, and now reads `mes_rx`, the score for what the handset
-  heard. Replayed on the 42 low scores captured since 2026-09-15, every verdict
-  is unchanged.
-- A conversation whose receive-jitter peak goes above 60 ms now raises a
-  call-quality notification naming the peak. That covers answered room-to-room,
-  outside, inbound and transferred calls, calls connected by the operator or
-  directory, and pages. An operator or directory call counts only when its
-  connecting Dial() reports `ANSWER`, since one that connected nothing spoke
-  only to the speech recogniser. Each leg now records that value as
-  `dialstatus` (ledger schema 7). The
-  excellent/good/fair/poor grade is unchanged, as with a round-trip alert.
-  Wake-ups, announcements and the voice menus are not checked: the figure
-  measures the stream the PBX receives, which on those legs is a handset
-  microphone nobody hears. There the WiFi cordless often peaks at 40–58 ms, 50
-  times in 33 days with under 0.5 % loss. Across the last 300 recorded legs the
-  check would have raised one notification.
-- The filter that discards a collapsed score caused by a re-INVITE or transfer
-  now reads the same receive-jitter peak, at the same 60 ms line. It used two
-  single-moment readings before. One of those, the far end's last report, read
-  as high as 136 ms on talking-clock and assistant legs whose received audio
-  was steady, so a glitch on such a leg could stay in the score as a false
-  "poor". No verdict in the current ledger changes.
-- Asterisk 20.11.1's own score (MES) gives jitter almost no weight, because it
-  multiplies the jitter in seconds. The README and the health-monitoring
-  reference now say so.

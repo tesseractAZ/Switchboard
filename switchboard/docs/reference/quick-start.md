@@ -1,7 +1,7 @@
 # Quick start
 
-1. **Install** the add-on (you already did if you're reading this from the add-on's
-   Documentation tab).
+1. **Install** the add-on: add the repository and install **Switchboard** (steps
+   in [Rebuild the add-on from GitHub](reproducing.md#rebuild-the-add-on-from-github)).
 2. Open the **Configuration** tab and define one entry under `rooms` per phone,
    each with a unique extension, a friendly name, and a **secret** (the password
    the Grandstream port will use to register). **Replace the `change-me-…`
@@ -20,8 +20,9 @@
 
 The dashboard also carries a **Lights panel**: every Home Assistant light the add-on can see, grouped by area, with on/off toggles — the same control the voice menu on `43` offers, for when you would rather tap than talk.
 
-Changing options and restarting the add-on regenerates the entire Asterisk
-configuration — **the add-on options are the source of truth.** Editing
-`/etc/asterisk/*.conf` by hand is pointless; every file is overwritten on start.
+Changing options and restarting the add-on regenerates the nine Asterisk
+configuration files the add-on controls — **the add-on options (plus the optional
+[options overlay](configuration.md#the-options-overlay-advanced)) are the source
+of truth.** `/etc/asterisk` is write-locked, so hand edits there are refused.
 
 ---

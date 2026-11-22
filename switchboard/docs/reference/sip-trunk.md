@@ -5,11 +5,11 @@
    ```yaml
    trunk:
      enabled: true
-     provider_host: losangeles.voip.ms
+     provider_host: sip.example.com
      port: 5060
      username: "100000_sub"
      secret: "provider-password"
-     from_domain: losangeles.voip.ms
+     from_domain: sip.example.com
      outbound_caller_id: "12135550123"
      inbound_ext: "19"        # ring one room, or "19,20", or "" for the whole house
      dial_prefix: "9"         # or set direct_dial: true to drop the prefix (below)
@@ -18,7 +18,8 @@
 3. **Restart** the add-on.
 4. **Outbound**: dial `9` then the number. Prefer dialing **without** a prefix?
    Set `direct_dial: true` — then you dial **`1` + the 10-digit number** (like a
-   cell), while your 2–3-digit extensions and feature codes still ring internally.
+   cell), while your room extensions (2–6 digits) and feature codes still ring
+   internally.
    The leading `1` is required (a bare 10-digit number won't dial out); that's what
    keeps extension 20 and every feature code except `41` (which overlaps `411`,
    see [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay)) dialing instantly. `011` international and
@@ -41,8 +42,9 @@ layered on automatically (details in [SECURITY.md](../../SECURITY.md#toll-fraud-
 
 - **Blocked prefixes** — international (`011`) and premium (`900`, `1-900`) are
   rejected before any outbound rule.
-- **Inbound calls get no in-call feature codes** — an outside caller can't key
-  `##` to reach an outbound path.
+- **Inbound calls arrive with no in-call feature codes**, and an outside caller
+  can never key `##` into an outbound path: every transfer resolves in a context
+  with rooms and the operator only.
 - **Transfers are internal-only** — a transferred outside caller lands in a context
   with no outbound rule at all.
 - **Provider-initiated transfers (REFER) are rejected.**

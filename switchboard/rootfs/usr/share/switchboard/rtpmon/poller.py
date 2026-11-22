@@ -530,7 +530,7 @@ def is_mass_drop(went_unreachable: list, summ: dict | None) -> bool:
 
     Asterisk's own log is the authority on transitions; the poller's sample is
     only the authority on "now". `endpoint_transitions()` has been harvesting
-    those log lines since v0.68.0 and writing `went_unreachable` into the
+    those log lines since v0.65.0 and writing `went_unreachable` into the
     heartbeat, where NOTHING read it — the detector was built, shipped, and
     wired to no consumer, which is indistinguishable from not having built it.
 

@@ -22,8 +22,8 @@ rows, parsed by the same code (console-web/webauth.parse_users), and the same
 per-address throttle the web terminal uses (webauth.LoginThrottle, charged
 BEFORE the password is checked). No public keys, no keyboard-interactive, no
 host-based, no GSSAPI, no default user and no anonymous access. When
-console_users holds no valid row EVERY login is refused, and each connection
-that tries logs one WARNING saying why. Usernames and passwords are never
+console_users holds no valid row EVERY login is refused, with a WARNING saying
+why, at most once a minute per address (quiet_log). Usernames and passwords are never
 logged, here or by asyncssh (its logger is held at WARNING, below which it
 names users).
 

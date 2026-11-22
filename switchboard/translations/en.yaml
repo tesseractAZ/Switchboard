@@ -60,7 +60,7 @@ configuration:
     description: The WP826's web-admin password. Required for the deep cordless checks (battery %, Wi-Fi signal, MOS); without it the monitor still tracks reachability. Masked on entry and never shown back.
   cordless_cert_sha256:
     name: Cordless Certificate Fingerprint
-    description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the admin password, which stops a device on your LAN impersonating the cordless to capture it. Get the value with: WP826_HOST=<the cordless's IP> node tools/wp826.mjs fingerprint (without WP826_HOST the tool fingerprints its built-in default address, not your handset). Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
+    description: "SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate BEFORE sending the login, a salted hash of the admin password, which stops a device on your LAN impersonating the cordless to capture that hash (the password can be recovered from it offline, or the login relayed). Get the value with: WP826_HOST=<the cordless's IP> node tools/wp826.mjs fingerprint (without WP826_HOST the tool fingerprints its built-in default address, not your handset). Leave blank to skip verification (the previous behaviour). Re-pin after a factory reset, which regenerates the certificate."
   gateway_ports:
     name: Gateway Port Extensions
     description: Comma-separated extensions of the rooms wired to the GXW gateway's FXS ports, used to derive gateway health. The default 11–18 is only an example; list your own wired room extensions.
@@ -146,10 +146,10 @@ configuration:
     description: How long the wake-up call rings the phone before giving up. Default 60. Range 10–600.
   wakeup_scene:
     name: Wake-Up Scene
-    description: Optional Home Assistant scene entity to activate when a wake-up call fires (e.g. gently raise the lights). Leave blank for none.
+    description: Optional Home Assistant scene entity to activate when a wake-up call is answered (e.g. gently raise the lights). Leave blank for none.
   wakeup_scenes:
     name: Wake-up Scenes by Room
-    description: "Per-room wake-up scenes. Each entry has 'ext' (the room extension) and 'scene' (a scene entity id, e.g. scene.wakeup_master_bedroom). The room's own scene fires when that room's wake-up call rings; rooms with no entry fall back to the single Wake-up Scene above. Entries naming an extension that is not a configured room are ignored."
+    description: "Per-room wake-up scenes. Each entry has 'ext' (the room extension) and 'scene' (a scene entity id, e.g. scene.wakeup_master_bedroom). The room's own scene fires when that room's wake-up call is answered; rooms with no entry fall back to the single Wake-up Scene above. Entries naming an extension that is not a configured room are ignored."
   wakeup_weather:
     name: Wake-Up Weather
     description: Speak a short local weather summary during the wake-up call.
@@ -197,10 +197,10 @@ configuration:
     description: >-
       Keep the words people say to the voice features. On, the assistant's own
       diagnostic log keeps what was said and what it replied (inside the add-on,
-      last 400 turns, never copied to the shared folder), and the add-on's log —
+      last 400 rows, never copied to the shared folder), and the add-on's log —
       which Home Assistant administrators can read, and which is kept for about
       two days — quotes what was heard at the operator, wake-up, automation,
-      status, directory and assistant prompts. Nothing is sent anywhere. Off,
+      status, announce, directory and assistant prompts. Nothing is sent anywhere. Off,
       both still record every timing, outcome and failure reason; only the words
       are replaced by their length.
   wakeup_retry_seconds:
@@ -227,13 +227,13 @@ configuration:
     description: Entity whose on/off state says whether utility power is present, spoken by the "power" branch of the status menu. Blank omits it. Optional; if you leave all four power entities blank the status menu simply reports that power reporting is not configured.
   status_power_battery:
     name: Status Menu — Battery Level Entity
-    description: Entity giving battery charge as a PERCENTAGE, spoken by the "power" branch of the status menu as "the home battery is at N percent". A sensor reporting kWh will be read out as if it were a percent. Blank omits it.
+    description: A sensor entity giving battery charge as a PERCENTAGE, spoken by the "power" branch of the status menu as "the home battery is at N percent". A sensor reporting kWh will be read out as if it were a percent. Blank omits it; any other domain is ignored.
   status_power_runway:
     name: Status Menu — Battery Runway Entity
-    description: Numeric entity for how many hours of battery run time remain, spoken by the "power" branch of the status menu. Blank omits it.
+    description: A sensor entity giving how many hours of battery run time remain, spoken by the "power" branch of the status menu. Blank omits it; any other domain is ignored.
   status_power_solar:
     name: Status Menu — Solar Fraction Entity
-    description: Entity giving the solar share of current load as a PERCENTAGE, spoken as "solar is covering N percent of the load". Blank omits it.
+    description: A sensor entity giving the solar share of current load as a PERCENTAGE, spoken as "solar is covering N percent of the load". Blank omits it; any other domain is ignored.
   directory_enabled:
     name: Voice Directory (411)
     description: Enable the spoken room directory — dial the extension below and say (or hear) a room name to be connected, like calling 411.

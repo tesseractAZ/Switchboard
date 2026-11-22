@@ -1835,8 +1835,10 @@ def run() -> None:
     cordless_cert_pin = os.environ.get("CORDLESS_CERT_SHA256", "")
     if cordless_pw and not normalize_pin(cordless_cert_pin):
         print("[devhealth] NOTE: cordless_cert_sha256 is unset — the WP826's "
-              "self-signed certificate is not verified. Set it (see DOCS §8) so "
-              "the admin password cannot be captured by a LAN impostor.", flush=True)
+              "self-signed certificate is not verified. Set it (see 'Pinning the "
+              "cordless certificate' in docs/reference/wp826-cordless.md) so "
+              "a LAN impostor cannot capture the salted login hash, from which the admin "
+              "password can be recovered offline.", flush=True)
     gw_exts = [e.strip() for e in os.environ.get("GATEWAY_PORTS", "11,12,13,14,15,16,17,18").split(",") if e.strip()]
     th = _thresholds()
     cst: dict = {}

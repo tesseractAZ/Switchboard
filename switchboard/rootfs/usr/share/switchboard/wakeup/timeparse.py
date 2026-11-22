@@ -4,7 +4,8 @@ Rotary phones can't key in digits mid-call, so a wake-up time is *spoken* and
 transcribed by whisper. whisper's output for a time is varied — "seven a m",
 "7:30", "half past six", "quarter to eight", "nineteen thirty", "noon" — so this
 parser is deliberately forgiving. It never has to be perfect: the wake-up flow
-reads the parsed time back to the caller, who re-says it if it's wrong.
+stores the parsed time and reads it back, and a wrong time is corrected by
+dialling the wake-up code again.
 
 Pure + stdlib; unit-tested in tests/test_wakeup.py.
 """

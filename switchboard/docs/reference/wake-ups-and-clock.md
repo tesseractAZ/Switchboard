@@ -4,13 +4,15 @@
 
 Dial the code (or say "wake me up" to the operator) and, after the beep, say a
 time — "seven thirty", "quarter past six", "six a.m.", "nineteen thirty", "noon".
-The spoken-time parser is intentionally forgiving; the flow reads the parsed time
-back so you can hear it and re-say it if it's wrong. Say "cancel" (or "clear",
-"never mind") to remove a pending wake-up.
+The spoken-time parser is intentionally forgiving; the flow sets the parsed time
+and reads it back before it hangs up. If it is wrong, dial the code again: it
+reads out the time that is set and asks for a new one or "cancel". Say
+"cancel" (or "clear", "never mind") to remove a pending wake-up.
 
 - **One wake-up per room.** Setting a new one replaces the old.
-- At the set time the room rings for `wakeup_ring_seconds` (default 60). The call
-  speaks a greeting and the time, runs any smart extras, then repeats the greeting
+- At the set time the room rings for `wakeup_ring_seconds` (default 60). Once
+  answered, the call fires the wake-up scene (if one is set), speaks a greeting
+  and the time, then the weather and calendar extras, then repeats the greeting
   and time.
 - If the room is busy or offline through a **10-minute grace window**, the wake-up
   is dropped and surfaced as a Home Assistant persistent notification.
@@ -45,8 +47,9 @@ that was a real source of six-in-the-morning false alarms. The scheduler joins o
 those two, not on the pickup:
 
 1. The phone rings for `wakeup_ring_seconds` (default 60).
-2. `wakeup_retry_seconds` after the ring started (default 90), if nothing
-   answered, the scheduler re-checks the room and — if the handset is registered
+2. `wakeup_retry_seconds` after the ring started (default 90), if the greeting
+   has not been delivered (nobody answered, or it was picked up in silence), the
+   scheduler re-checks the room and — if the handset is registered
    and idle — **rings it a second time**. The second attempt gets the same check
    the first one does, because an origination reports "queued" the moment
    Asterisk accepts it and says nothing about whether a channel was ever
@@ -123,14 +126,14 @@ was heard stays delivered whatever the room does next. If the ledger cannot be
 read, the ring is judged as if this rule did not exist: an unneeded alert to
 somebody awake is the safer mistake than silence for somebody asleep.
 
-A snooze is recorded once the phone has heard the new time, about ten seconds
-after dialling `42`. So if the scheduler comes to judge a ring while the room's
-own phone is **on a call** — usually somebody part-way through that call — it
-waits up to **90 seconds** before judging, looking again on each scheduler pass
-for the change to land. A room still on a call after 90 seconds is judged as
-usual, so a handset that is genuinely busy delays the alert by at most that
-long. A room the phone system cannot report on never waits, and a phone that is
-merely ringing does not count as on a call.
+A snooze is recorded as soon as the new time is stored, just before it is read
+back, about ten seconds after dialling `42`. So if the scheduler comes to judge
+a ring while the room's own phone is **on a call** — usually somebody part-way
+through that call — it waits up to **90 seconds** before judging, looking again
+on each scheduler pass for the change to land. A room still on a call after 90
+seconds is judged as usual, so a handset that is genuinely busy delays the alert
+by at most that long. A room the phone system cannot report on never waits, and
+a phone that is merely ringing does not count as on a call.
 
 This is a fix for a real morning. On 2026-09-14 one handset snoozed three of its
 own wake-ups this way, and was rung a second time twice and sent three critical
@@ -156,9 +159,11 @@ all: on 2026-09-15 a 06:20 wake-up set at 13:10:35Z was replaced at 13:15:09Z by
 a 04:00 one, and the ledger showed the 06:20 being set, then no ring and no
 cancel — which is also exactly what a wake-up the system had lost would look
 like. One more is worth knowing:
-`unjudgeable` means the ledger itself could not be written, so the scheduler
-refused to guess whether anyone answered rather than escalate on a broken
-instrument. Since 0.108.2 that includes a missed wake-up: reading that file end to end tells you
+`unjudgeable` means the scheduler found the ledger unwritable when it came to
+judge a ring, so it refused to guess whether anyone answered rather than escalate
+on a broken instrument. The row goes to that same ledger, so it usually cannot
+land there; look for the scheduler's Log tab line "the delivery ledger is NOT
+WRITABLE" instead. Since 0.108.2 that includes a missed wake-up: reading that file end to end tells you
 what happened to a wake-up without needing the call log.
 
 **Smart extras** (during the wake-up call):
@@ -174,11 +179,11 @@ what happened to a wake-up without needing the call log.
 - **Weather** (`wakeup_weather`, on by default) — speaks a short local forecast.
 - **Calendar** (`wakeup_calendar`) — reads your next event in the coming 18 hours.
 
-You can also set wake-ups from the **dashboard** with the ⏰ time box and **Set** on
-each room card. A room with a pending wake-up shows a **Cancel** button on its own
-line on the card, and another in the Wake-up calls list; a cancel that fails says
-so. The operator console also sets and cancels them (**W** to set, **X** to
-cancel — see [The operator console](operator-console.md)).
+You can also set wake-ups from the **dashboard** with the **Wake** time box and
+**Set** on each room card. A room with a pending wake-up shows a **Cancel**
+button on its own line on the card, and another in the Wake-up calls list; a
+cancel that fails says so. The operator console also sets and cancels them
+(**W** to set, **X** to cancel — see [The operator console](operator-console.md)).
 
 ## Talking clock — dial `41`
 

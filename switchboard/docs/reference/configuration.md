@@ -1,14 +1,16 @@
 # Configuration reference
 
-Every option below appears in the **Configuration** tab with a friendly label and
-inline help. Defaults are shown. A value is *optional* unless noted; leaving it at
-its default is fine.
+Every top-level option below appears in the **Configuration** tab with a friendly
+label and inline help; the sub-fields of a group (such as `trunk.*`,
+`operator.enabled` and the fields of each `rooms` entry) show their raw key
+names, described in the group's help. Defaults are shown. A value is *optional*
+unless noted; leaving it at its default is fine.
 
 ## Core
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — how much of Asterisk reaches the add-on's **Log** tab. Only **three** of the seven behave differently. `info` shows notices, warnings and errors plus Asterisk's verbose trace: the dialplan trace, every dialled and calling number included. `debug` and `trace` are identical to each other: they add Asterisk's debug class, which (the add-on leaves Asterisk's debug level at 0) holds only the messages Asterisk logs at debug unconditionally — each outbound trunk REGISTER attempt among them, naming the trunk's SIP address. `notice`, `warning`, `error` and `critical` are identical too: notices, warnings and errors, **without** the verbose trace — the only other lines are a few of Asterisk's own start-up and shutdown messages, which it prints at any level. Since v0.107.0 those four start Asterisk without `-v`, which is what keeps the trace off the Log tab, and the add-on's own per-call lines (`[rtpqos]`, `Operator dial`) are written at verbosity 1 so they leave with it; before v0.107.0 Asterisk always started with `-vvv` and the trace stayed there at every level. This is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose the trunk, then set it back. The durable `/data/state/asterisk.log` does not follow this setting: it is fixed at `notice,warning,error,verbose(3)` and holds the same content at every level — endpoint reachability (`Endpoint <n> is now Unreachable`, verbosity 2), the `Contact <n>/… is now Unreachable` and `Added`/`Removed contact` lines (verbosity 3), and the whole dialplan trace, numbers included (see SECURITY.md). The `(3)` filters nothing; it keeps Asterisk producing verbosity-3 lines when the console runs without `-v`. The file is private to the add-on, though included in its backups, and trimmed at boot, before Asterisk opens it, keeping the newest half whenever it has grown past 8 MB. The Log tab keeps about two days across a host reboot and is readable by Home Assistant administrators. Since v0.107.0 every line in Asterisk's two log files, and every notice, warning and error in the Log tab, is stamped with the full date, milliseconds and UTC offset — `[2026-10-01 01:00:17.289 -0700]`. |
+| `log_level` | `info` | `trace \| debug \| info \| notice \| warning \| error \| critical` — how much of Asterisk reaches the add-on's **Log** tab. Only **three** of the seven behave differently. `info` shows notices, warnings and errors plus Asterisk's verbose trace: the dialplan trace, every dialled and calling number included. `debug` and `trace` are identical to each other: they add Asterisk's debug class, which (the add-on leaves Asterisk's debug level at 0) holds only the messages Asterisk logs at debug unconditionally — each outbound trunk REGISTER attempt among them, naming the trunk's SIP address. `notice`, `warning`, `error` and `critical` are identical too: notices, warnings and errors, **without** the verbose trace — the only other lines are a few of Asterisk's own start-up and shutdown messages, which it prints at any level. Since v0.107.0 those four start Asterisk without `-v`, which is what keeps the trace off the Log tab, and the add-on's own per-call lines (`[rtpqos]`, `Operator dial`) are written at verbosity 1 so they leave with it; before v0.107.0 Asterisk always started with `-vvv` and the trace stayed there at every level. This is not a severity filter, so picking `error` does *not* silence notices. Drop to `debug` to diagnose the trunk, then set it back. The durable `/data/state/asterisk.log` does not follow this setting: it is fixed at `notice,warning,error,verbose(3)` and holds the same content at every level — endpoint reachability (`Endpoint <n> is now Unreachable`, verbosity 2), the `Contact <n>/… is now Unreachable` and `Added`/`Removed contact` lines (verbosity 3), and the whole dialplan trace, numbers included (see SECURITY.md). The `(3)` filters nothing; it keeps Asterisk producing verbosity-3 lines when the console runs without `-v`. The file is private to the add-on, though included in its backups, and trimmed at boot, before Asterisk opens it, to its newest 4 MB whenever it has grown past 8 MB. The Log tab keeps about two days across a host reboot and is readable by Home Assistant administrators. Since v0.107.0 every line in Asterisk's two log files, and every notice, warning and error in the Log tab, is stamped with the full date, milliseconds and UTC offset — `[2026-10-01 01:00:17.289 -0700]`. |
 | `rtp_start` | `10000` | First UDP port for live call audio (RTP). Must be below `rtp_end`. |
 | `rtp_end` | `10200` | Last RTP port. The default 200-port window is far more than a home needs (~2 ports per call). |
 
@@ -33,9 +35,9 @@ its default is fine.
 | `call_quality_alerts` | `true` | Notify when a call's audio is poor (low MOS, loss of 1.5 % or more in either direction, high round-trip time, one-way audio), or when a conversation's receive-jitter peak exceeds 60 ms (both v0.116.0; loss alerted at 3 % before). Every leg is measured and written to the ledger. Legs the PBX originates to play something at a phone (wake-up delivery, paging, announcements) skip the one-way-audio check and never update the last-call sensor, but a poor connection under one of them alerts like any other leg (v0.104.0). A clip that was cut short stays quiet, except an *undelivered* wake-up, which alerts (v0.78.0). See [Per-call quality](health-monitoring.md#per-call-quality-call_quality_alerts). |
 | `cordless_battery_crit_pct` | `15` | Battery % (while discharging) that flags the cordless CRITICAL. Range 1–100. |
 | `cordless_battery_warn_pct` | `30` | Battery % that flags it low/degraded. Should be higher than the critical %. |
-| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the admin password. Blank skips verification. See [*Pinning the cordless certificate*](wp826-cordless.md#pinning-the-cordless-certificate). |
+| `cordless_cert_sha256` | `""` | SHA-256 fingerprint of the WP826's TLS certificate. When set, the monitor verifies the handset presents exactly that certificate **before** sending the login, a salted hash of the admin password that an impostor could crack offline or relay. Blank skips verification. See [*Pinning the cordless certificate*](wp826-cordless.md#pinning-the-cordless-certificate). |
 | `cordless_ext` | `19` | The extension the cordless registers as. When set, the device-health monitor takes the cordless's **current** IP from its live SIP registration and follows it automatically if DHCP moves the phone — so a changed lease no longer blinds battery/Wi-Fi/MOS monitoring. Its SIP registration is checked too (v0.119.0): not registered on two link-health samples in a row, read after a 360 s grace at start-up, reads `critical`, even with no IP to probe. Blank = use `cordless_ip` only, with no registration check. |
-| `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see below). |
+| `cordless_ip` | `""` | Fallback LAN address of the WP826 cordless (e.g. `192.168.1.71`). Only used if `cordless_ext` is blank or the cordless isn't registered — otherwise the monitor auto-follows the phone's live IP (see `cordless_ext` above). |
 | `cordless_password` | `""` | WP826 web-admin password; required for the deep battery/WiFi/MOS checks. Masked, never shown back. Without it the monitor still tracks reachability. |
 | `cordless_wifi_min_signal` | `2` | Lowest acceptable WiFi bars (0–5) before flagging a weak link. |
 | `device_health_alerts` | `true` | Notify when the cordless or gateway becomes unhealthy (and again on recovery). |
@@ -79,8 +81,8 @@ its default is fine.
 | `wakeup_push_target` | `mobile_app_iphone` | Notify service (no `notify.` prefix) for the phone pushes: undelivered wake-ups and phone-system outages. An undelivered wake-up escalates to it as a critical alert that sounds through Do Not Disturb. A fleet outage ("phones down") and its recovery ("phones back") are ordinary pushes beside their cards, switched by `link_health_alerts` (v0.119.0). Empty pushes nothing: the wake-up falls back to a Home Assistant notification card, and the outage keeps its card. |
 | `wakeup_retry_seconds` | `90` | Seconds after a wake-up starts ringing before an unanswered call is rung a **second** time. At least `wakeup_ring_seconds` + 20 (one scheduler poll); a shorter value is raised to that and a WARNING naming both values is logged at every start. With a ring above 580 s every allowed retry is raised, which is expected. |
 | `wakeup_ring_seconds` | `60` | How long a wake-up rings before giving up. Range 10–600. |
-| `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up fires. |
-| `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up rings; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
+| `wakeup_scene` | `""` | Optional HA `scene.*` entity activated when a wake-up call is answered. |
+| `wakeup_scenes` | `[]` | **Per-room** wake-up scenes. Each entry has `ext` (the room extension) and `scene` (a scene entity id). The room's own scene fires when that room's wake-up is answered; a room with no entry falls back to `wakeup_scene` above, so adding per-room scenes never drops the whole-house behavior. Entries naming an extension that is not a configured room are logged and ignored. |
 | `wakeup_weather` | `true` | Speak a short local weather summary during the wake-up call. |
 
 ## Extra feature codes
@@ -88,7 +90,7 @@ its default is fine.
 | Option | Default | Notes |
 |--------|---------|-------|
 | `assistant_enabled` / `assistant_ext` | **`false`** / `47` | Local voice assistant — talk to Home Assistant's built-in conversation agent from a phone. Off by default; see [Local voice assistant](voice-operator.md#local-voice-assistant--dial-47). |
-| `assistant_transcripts` | `true` | Keep the words people say to the voice features. On: the assistant's private diagnostic log (`/data/state/assistant.jsonl`, last 400 turns, never copied to the shared folder) records what was said and replied, and the add-on's log — shown by the Supervisor to Home Assistant administrators, kept about two days across a host reboot — quotes what the recognizer heard at the operator, wake-up, home-automation, status, directory and assistant prompts. Off: both still record every timing, outcome and failure reason, with each utterance replaced by its length. If the setting cannot be read, the add-on's log leaves the words out. |
+| `assistant_transcripts` | `true` | Keep the words people say to the voice features. On: the assistant's private diagnostic log (`/data/state/assistant.jsonl`, last 400 rows, never copied to the shared folder) records what was said and replied, and the add-on's log — shown by the Supervisor to Home Assistant administrators, kept about two days across a host reboot — quotes what the recognizer heard at the operator, wake-up, home-automation, status, announce, directory and assistant prompts. Off: both still record every timing, outcome and failure reason, with each utterance replaced by its length. If the setting cannot be read, the add-on's log leaves the words out. |
 | `automation_enabled` / `automation_ext` | `true` / `43` | Home-automation voice menu (control HA lights) and its dial code. |
 | `directory_enabled` / `directory_ext` | `true` / `411` | Voice directory (like 411) and its dial code. |
 | `mwi_enabled` | `true` | **Dial-0 auto-clear only.** When on, a room that dials `0` has its own message-waiting indicator cleared. It does **not** switch the indicator feature off: the dashboard button, the console's `M` key, the NOTIFY templates and the boot-time replay all stay live either way. There is no voicemail and no missed-call detection in this system — the indicator is set by you (or another integration), never by a missed call. |
@@ -107,14 +109,14 @@ system. When you enable it, see [Adding an outside line (SIP trunk)](sip-trunk.m
 | Sub-field | Default | Notes |
 |-----------|---------|-------|
 | `dial_prefix` | `9` | Digit(s) to dial first to reach an outside line (prefix mode). Ignored when `direct_dial` is on. |
-| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`16025551234`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay). `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
+| `direct_dial` | `false` | Turn **on** to dial phone numbers with **no outside-line prefix** — dial **`1` + the 10-digit** US/Canada number (`12025550123`), like a cell phone. Extensions and feature codes still ring internally. A **leading `1` is required**: a bare 10-digit number is not routed. This is what keeps the feature codes (`41`–`47`, `411`) and any extension starting `2`–`9` from looking like the start of a phone number, which would stall their dialing on analog phones. Extensions starting `12` through `19` still overlap the outside-number pattern, and `41` waits for its own reason (the `411` overlap); see [Dial plan & the send delay](gxw4216-gateway.md#74-dial-plan--the-send-delay). `011` international and `1-900` premium stay blocked. **911 is not routed** (no E911). Overrides `dial_prefix`. |
 | `enabled` | `false` | Turn the outside line on. **Required** when the group is present. |
 | `from_domain` | `""` | Outbound `From` domain (defaults to `provider_host`). |
 | `from_user` | `""` | Outbound `From` user (defaults to `username`). |
 | `inbound_ext` | `""` | Which extension(s) an incoming outside call rings: one extension or a comma-separated list. Blank rings every room. An entry that is not a configured room is dropped (logged at start) and the call rings the remaining entries. **Fails open:** when no entry is valid, the call rings the whole house. Check the start-up log after changing it. |
 | `outbound_caller_id` | `""` | Number to present on outbound calls (digits/`+` only). |
 | `port` | `5060` | Provider SIP port. |
-| `provider_host` | `""` | Your SIP provider's host, e.g. `losangeles.voip.ms`. |
+| `provider_host` | `""` | Your SIP provider's host name, e.g. `sip.example.com`. |
 | `registns` | `true` | Register to the provider (most trunks need this). |
 | `secret` | `""` | Trunk auth password. Must not contain `;`, control characters or leading/trailing whitespace (Asterisk would truncate it). Such a secret skips the whole trunk at start, with a log line. |
 | `username` | `""` | Trunk auth username / sub-account. |
@@ -125,12 +127,14 @@ system. When you enable it, see [Adding an outside line (SIP trunk)](sip-trunk.m
 
 Everything above is normally edited in the add-on's **Configuration** tab. For
 automation (or when the Supervisor's options API is unreachable), the add-on
-also honors an **overlay file** the administrator can place at
-`/addon_configs/<slug>/options-overlay.json` (visible to the add-on as
-`/config/options-overlay.json`): a JSON object that is **deep-merged over the
-saved options at every start**. Dictionaries merge recursively (so
-`{"trunk": {"inbound_ext": "11,19"}}` refines the trunk without touching its
-credentials); scalars and lists replace.
+also honors an **overlay file** the administrator can place in the add-on's
+config folder, the one that holds custom prompts:
+`/app_configs/<slug>/options-overlay.json` (`addon_configs` on older Home
+Assistant releases; the Samba add-on shares it under both names), visible to
+the add-on as `/config/options-overlay.json`. It is a JSON object that is
+**deep-merged over the saved options at every start**. Dictionaries merge
+recursively (so `{"trunk": {"inbound_ext": "11,19"}}` refines the trunk without
+touching its credentials); scalars and lists replace.
 
 Because the overlay bypasses the add-on's schema, it is **type-checked against
 the saved options**: an entry whose JSON type differs from the value it would
@@ -146,9 +150,11 @@ tab can't show you is still visible. Remove the file and restart to return to
 the saved options.
 
 Services read the merged result for **values**, not `options.json` — the config
-renderer, the dashboard, the operator console, and the health monitors all read
-the post-overlay snapshot (via `switchboard-opt`), so they share one effective
-view.
+renderer merges the overlay itself and writes the result to
+`/run/switchboard/options-effective.json`, and the dashboard, the operator
+console and the health monitors read that snapshot (the run scripts through
+`switchboard-opt`, the Python services through `SWITCHBOARD_OPTIONS`), so they
+share one effective view.
 
 **The overlay cannot turn a service on or off**, with one exception: since
 0.125.0 the standalone web terminal starts only when `console_users` has a
@@ -171,6 +177,15 @@ from the **saved** options even when the overlay names them:
   `status_enabled`, `announce_enabled`, `directory_enabled`,
   `assistant_enabled`),
 - `device_health_alerts`.
+
+The dial plan is the other half, and it does see the overlay: `switchboard-config`
+renders it from the merged options, so an overlay value for `operator.enabled`,
+`wakeup_enabled` or another speech-feature flag adds or removes that feature's
+dial code and contexts while its service keeps the saved setting. An overlay
+`{"wakeup_enabled": false}` removes dial `42` and the `[wakeup-deliver]` context
+while the scheduler keeps placing the wake-ups already set into that missing
+context, and `{"wakeup_enabled": true}` over a saved `false` lets a caller set a
+wake-up that the idle scheduler never rings.
 
 Note the asymmetry: an overlay `{"link_health_enabled": false}` still leaves the
 poller running, while an overlay `{"link_health_interval": 60}` does take effect.
