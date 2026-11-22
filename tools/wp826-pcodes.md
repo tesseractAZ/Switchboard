@@ -5,8 +5,8 @@ Reverse-engineered from the phone's own React bundle + `tl.*.js` schema files
 (firmware Prog **1.0.3.35** / Core 1.0.3.9).
 
 The phone takes its address from DHCP, so give it a reservation on your router
-and point the tool at it with `WP826_HOST=<ip>`; examples below use
-`192.168.1.x`. The admin password is read from a file rather than passed on the
+and point the tool at it with `WP826_HOST=<ip>`; examples below write it as
+`<phone-ip>`. The admin password is read from a file rather than passed on the
 command line, so it does not land in shell history or the process list — set
 `WP826_PASS_FILE` to choose it.
 
@@ -17,13 +17,14 @@ hard-codes no P-codes.
 ## The client — `tools/wp826.mjs`
 
 ```
+node tools/wp826.mjs fingerprint               # print the handset certificate's SHA-256 (the pin); no login
 node tools/wp826.mjs login                     # verify auth
-node tools/wp826.mjs meta [keyword]            # dump the P-code → alias map (filterable)
+node tools/wp826.mjs meta [keyword]            # list the P-code → alias map, first 120 matches (filter with a keyword)
 node tools/wp826.mjs get P330,P331,P332        # read P-values
 node tools/wp826.mjs set P332=60 P330=1        # write P-values (verifies read-back)
 node tools/wp826.mjs rings [type]              # list ringtones (0 = system + user)
-node tools/wp826.mjs ring-upload office_ring.wav   # upload a custom ringtone
-node tools/wp826.mjs mpk                        # dump the virtual/quick-access keys
+node tools/wp826.mjs ring-upload tools/office_ring.wav   # upload a custom ringtone
+node tools/wp826.mjs mpk                        # list the assigned virtual/quick-access keys
 node tools/wp826.mjs speeddial <VKID> <num> [label]  # set a key to Speed Dial
 node tools/wp826.mjs reboot                    # POST /api-sys_operation (request=REBOOT)
 ```
@@ -38,8 +39,13 @@ attempts.
 
 All requests hit **`/cgi-bin/<path>`** and REQUIRE `Referer: https://<phone-ip>/`
 and `Origin: https://<phone-ip>` headers (the tool derives both from its host) (else `403 Forbidden`). TLS is
-self-signed (the client sets `rejectUnauthorized: false`). Login is a SHA-256
-salted challenge-response:
+self-signed, so the client sets `rejectUnauthorized: false` and pins the
+certificate instead. With `WP826_CERT_SHA256` set (to the value
+`node tools/wp826.mjs fingerprint` prints), it checks the handset's certificate
+before login and exits with code 3 on a mismatch without sending the login, and
+it runs every request on a connection whose certificate matched the pin. When it
+is unset, the client prints a warning and continues unverified. Login is a
+SHA-256 salted challenge-response:
 
 1. `POST /cgi-bin/access`  body `access=sha256(username)`  → `{response:"success", body:"<salt>"}`
 2. `POST /cgi-bin/dologin` body `username=admin&password=sha256(password + salt)` → `{response:"success", body:{sid, role}}`
@@ -49,7 +55,7 @@ salted challenge-response:
 
 - **Read:** `GET /cgi-bin/config_get?pvalues=330,331,332&update_session=false&sid=…` → `{configs:[{pvalue,value}]}` (codes are the P-number WITHOUT the leading `P`).
 - **Write:** `PUT /cgi-bin/config_update` (JSON) `{"alias":{},"pvalue":{"332":"60"}}` → `{response:"success", body:{status:"right"}}`. Applies immediately for most settings — no separate `commit` (unlike the SSH shell).
-- **SSH alternative:** `ssh admin@<phone-ip>` → `config` → `CONFIG>` → `get N` / `set N v` / `commit` (an expect helper is committed at [`wp826-cli.exp`](wp826-cli.exp)). Same P-codes, but the SSH path needs an explicit `commit`.
+- **SSH alternative:** `ssh admin@<phone-ip>` → `config` → `CONFIG>` → `get N` / `set N v` / `commit` (an expect helper is committed at [`wp826-cli.exp`](wp826-cli.exp); it always reads the password from `/tmp/.wp_pass`, the default `wp826.mjs` uses when `WP826_PASS_FILE` is unset, and does not honour `WP826_PASS_FILE`). Same P-codes, but the SSH path needs an explicit `commit`.
 
 ## How to find any other code
 
@@ -81,7 +87,7 @@ The Switchboard add-on serves the room directory at
 
 | P-code | field | note |
 |---|---|---|
-| **P95026** | ALERT_INFO_BELLCORE_MAPPING | `1` = `Bellcore-drN` → predefined cadence; `0` = `drN`/`info=text` → a custom ringtone. Either way, a plain-text `info=` tag routes to a **Match Incoming Caller ID** rule. |
+| **P95026** | ALERT_INFO_BELLCORE_MAPPING | `1` = `Bellcore-drN` → predefined cadence; `0` = `drN`/`info=text` → a custom ringtone. Set `0` for the outside-line ring: a plain-text `info=` tag reaches a **Match Incoming Caller ID** rule in text-match mode (see [Reference configured state](#reference-configured-state)). |
 | **P1488 / P1489** | Match rule 1: pattern / ringtone | Ringtone accepts a custom id (>=1001). |
 | P104 | device default ringtone | the fallback when an account sets no ring of its own |
 | P26018 | IGNORE_ALERT_INFO | |
@@ -154,9 +160,10 @@ CALL_WAITING_TONE, `P343` DIAL_TONE, `P348` BUSY_TONE, `P349` REORDER_TONE,
 
 Not P-values — a JSON key array with its own endpoints:
 
-- **Read:** `node tools/wp826.mjs mpk` (`GET /api-mpk_download` → ~76 keys). Key
-  shape: `{VKID, DisplayIndex, Priority, Locked, TypeMode, Description, ValueName,
-  Account, AutoType}`.
+- **Read:** `node tools/wp826.mjs mpk` prints the assigned keys (`TypeMode` ≠
+  `-1`); `GET /api-mpk_download` returns all ~76, and `mpkList()` gives the full
+  list. Key shape: `{VKID, DisplayIndex, Priority, Locked, TypeMode, Description,
+  ValueName, Account, AutoType}`.
 - **Save:** `POST /api-save_mpk` (JSON array; merges by VKID, so send only changed
   keys).
 - **Set a speed dial:** `node tools/wp826.mjs speeddial <VKID> <number> [label]`.
@@ -197,7 +204,8 @@ Access grid), `P2923` CUST_CALL_KEY_LAYOUT, `P22639` QUICK_APP_LONG_PRESS.
   `Alert-Info: <http://127.0.0.1>;info=outsideline`, so outside-line calls ring the
   cordless with the vintage warble. (Text-match mode requires `P95026=0`; Bellcore
   mode ignores the `info=outsideline` tag.) The committed `tools/office_ring.wav` is
-  regenerated by `tools/make-office-ring.py`.
+  regenerated by running `python3 make-office-ring.py` from inside `tools/` (the
+  script writes `office_ring.wav` to the current directory).
 - **Quick-Access speed dials:** VKID 16 = Speed Dial `0` "Operator", VKID 17 =
   Speed Dial `12` "Kitchen" (grid positions 6–7). Re-point with
   `node tools/wp826.mjs speeddial 17 <ext> <name>`.

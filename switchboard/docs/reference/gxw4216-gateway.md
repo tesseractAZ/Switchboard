@@ -36,10 +36,11 @@ For each wired port, under **FXS Ports**:
 Save & **Apply**; reboot the gateway if ports don't register.
 
 > **Message-waiting stutter tone (optional).** For the message-waiting indicator
-> (dashboard ✉, console `M`) to produce the classic **stutter dial tone** on an
-> antique handset, enable **"Send Stutter Dialtone for MWI"** / **"MWI → Stutter
-> Tone"** in Profile 1 (or per port); the label varies by firmware. Without it the
-> indicator still tracks in the dashboard, but the dial tone won't stutter.
+> (dashboard **Message** button / **Msg** badge, console `M` / ✉) to produce the
+> classic **stutter dial tone** on an antique handset, enable **"Send Stutter
+> Dialtone for MWI"** / **"MWI → Stutter Tone"** in Profile 1 (or per port); the
+> label varies by firmware. Without it the indicator still tracks in the
+> dashboard, but the dial tone won't stutter.
 
 ## 7.3 Configuring the gateway from the CLI (reliable path)
 
@@ -102,10 +103,11 @@ reference home's `11`–`20` extensions:
   and waits out `P85` exactly like rooms 12–19 (press `#` to send at once). `411`
   itself is unambiguous once the third digit lands. If that pause on the clock
   bothers you, move one of the two off the collision. Pick a code that is not
-  already taken — `47` is the local voice assistant, and setting `clock_ext: 47`
-  would collide with it and silently disable one of the two (a collided feature
-  code is skipped with a log line, not an error). `48` or `49` are free; or move
-  `directory_ext` to something that isn't a `41…` prefix.
+  already taken — `47` belongs to the local voice assistant: with
+  `assistant_enabled` on, `clock_ext: 47` keeps the clock on `47` and switches the
+  assistant off entirely (a collided feature code is skipped with a log line, not
+  an error). `48` or `49` are free; or move `directory_ext` to something that
+  isn't a `41…` prefix.
 - **`P85 = 3` seconds** is the reference value: it trims that 12–19 pause from the
   firmware default of 4 s while staying above a **rotary/pulse** phone's
   inter-digit gap, so a slow rotary dial of a long number isn't cut off mid-number.

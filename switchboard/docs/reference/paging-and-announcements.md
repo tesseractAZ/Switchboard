@@ -33,9 +33,11 @@ every speaker at once via `media_player.play_media`.
 
 The add-on also exposes an HTTP endpoint that speaks a clip **onto a room handset**
 — the integration that lets Home Assistant (or another add-on) announce to a phone,
-including the WP826 cordless, the way it would to a smart speaker. The phone
-auto-answers hands-free (an intercom `answer-after=0` header, caller ID `8000`) and
-plays the clip.
+including the WP826 cordless, the way it would to a smart speaker. A phone set to
+honour the intercom header, as the WP826 is, answers hands-free and plays the
+clip (the call carries a Call-Info `answer-after=0` header and caller ID `8000`).
+An analog phone on the gateway rings like an ordinary call and plays the clip
+once someone picks up.
 
 ```
 POST http://<ha-host>:8099/api/announce/<ext>
@@ -324,14 +326,15 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   and **never started more than 150 seconds** after
   the original send: an announcement is often time-sensitive, and dinner being
   ready is not worth saying twenty minutes late. Two attempts spaced a poll apart
-  straddle the 30-45 seconds a cordless handset takes to come back after a
-  restart; past that the cause is no longer the restart. The 150 seconds is
+  straddle the 30-45 seconds the cordless took to re-register after a restart
+  when this was measured, before v0.112.0 began keeping registrations across
+  restarts; past that the cause is no longer the restart. The 150 seconds is
   measured against how long a clip lives on disk (five minutes), not against the
-  settling window above — the phone is not even available until most of a minute
-  into that window. The attempt count is the `announce_retry_attempts` option and
-  `0` switches the whole thing off; the two timings are fixed in the code, where
-  they are derived from the clip's life and from this loop's own 20-second poll
-  rather than being independent dials.
+  settling window above — on the build that was measured, the phone was not even
+  available until most of a minute into that window. The attempt count is the
+  `announce_retry_attempts` option and `0` switches the whole thing off; the two
+  timings are fixed in the code, where they are derived from the clip's life and
+  from this loop's own 20-second poll rather than being independent dials.
 
   Each attempt is recorded as `announce-retry-attempted` with the clip, the
   attempt number and the handset state that cleared it; the row is written
@@ -352,8 +355,9 @@ Body:   {"text": "Dinner is ready"}     # spoken on-box (espeak-ng), or
   `announce-undelivered` or `announce-unsettled` for the announcement itself, now
   carrying how many retries it had.
 
-  A restart inside the window abandons the retry, deliberately: the clip lives in
-  memory-backed storage that the restart clears, and a run that may not judge an
-  announcement may certainly not replay one.
+  A restart inside the window abandons the retry, deliberately: a run that may
+  not judge an announcement may certainly not replay one. After an add-on restart
+  the clip itself is gone too, because it sits under `/run` in the container's
+  writable layer, which the Supervisor discards when it recreates the container.
 
 ---

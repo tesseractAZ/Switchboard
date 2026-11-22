@@ -27,8 +27,8 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   missing. And because it is served inside the Home Assistant frontend, the
   terminal shares HA's browser *origin* — a scripting bug in this page would be a
   bug against your HA session, not merely against a terminal on its own port. The
-  page is served only `xterm.js` and `xterm.css`, from a two-entry allowlist, for
-  that reason.
+  page is served only `xterm.js` and `xterm.css`, from a two-entry allowlist, and
+  its two typefaces, from a separate two-entry font list, for that reason.
 
 - **Browser sign-in** *(the standalone `:8100` terminal only)* — when
   `console_users` is configured that terminal first shows a sign-in page; its
@@ -36,8 +36,9 @@ signals the Ingress dashboard surfaces. Three front-ends onto the same board:
   address are throttled. The sidebar console above needs none of this.
 - **SSH** — `ssh -p 2300 <user>@<ha-host>`, as a `console_users` entry: its
   username, then its password at the prompt. **While `console_users` has no valid
-  entry, every login is refused**; the add-on log says so at start-up and once for
-  each connection that tries. Keys: **↑↓ / j k** move, **R** ring,
+  entry, every login is refused**; the add-on log says so at start-up and, for
+  connections that try, at most once a minute per address, the next such line
+  counting the connections held back. Keys: **↑↓ / j k** move, **R** ring,
   **C** connect, **H** hang up, **T** transfer, **W** set wake-up (type a time —
   `7:30`, `quarter past six`, `noon`), **X** cancel wake-up, **M** message-waiting,
   **P** page all, **L** lights, **?** help, **Q** / Ctrl-C quit. The **lights**

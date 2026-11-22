@@ -12,9 +12,11 @@ sensors keep publishing either way.
 > the cordless's IP auto-follow reads `contact_ip` off the per-phone sensors,
 > and the trunk watchdog runs inside the same poller. Setting
 > **`link_health_enabled: false` therefore also silences gateway health, the
-> trunk sensor and its auto-recovery, and the cordless half of device health** —
-> with no alert to tell you so. Leave it on unless you mean to turn all of that
-> off.
+> trunk sensor and its auto-recovery, and the cordless's registration check and
+> IP auto-follow** (its battery and Wi-Fi checks keep the address link health
+> last published until Home Assistant restarts, then use `cordless_ip`, and with
+> `cordless_ip` blank, the default, stop) — with no alert to tell you so. Leave it on unless you mean to
+> turn all of that off.
 >
 > One thing it does **not** stop: the same service keeps the readable log copy,
 > `/share/switchboard/asterisk.log`, free of SIP accounts, the trunk provider's
@@ -31,9 +33,10 @@ refused, and a phone that had stayed down would never have been reported.
 
 A refused link-health or device-health alert is now kept and posted at the start
 of each later cycle of its monitor (by default device health every 2 minutes,
-link health every 5). It is dropped only if Home Assistant refuses a retry of it
-more than an hour after it was raised, so it always gets at least one retry of
-its own, whatever the poll interval. The late post says it is late and gives the time it was
+link health every 5). Unless the queue is full or the add-on restarts (see
+below), it is dropped only if Home Assistant refuses a retry of it more than an
+hour after it was raised, so it gets at least one retry of its own, whatever the
+poll interval. The late post says it is late and gives the time it was
 written; anything it says about the present (for example "the phones are up
 now") describes that time.
 
@@ -71,9 +74,10 @@ a call ever drops. Publishes:
 A **second detector**, added in v0.79.0, covers the outage no sample can see.
 Asterisk logs every reachability change as it happens, and those lines are read
 each cycle; if half the fleet went unreachable *between* two polls and was back
-before the next one, that is reported too. The one whole-house outage this
-system has had lasted 119 seconds and fell entirely inside a single five-minute
-gap, so both surrounding samples read healthy. Only **phone** extensions count
+before the next one, that is reported too. The outage that motivated it, on
+2026-09-01, took down all eight gateway ports (119 seconds from the first drop to
+the last recovery) and fell entirely inside a single five-minute gap, so both
+surrounding samples read healthy. Only **phone** extensions count
 toward that half: the outside line logs its own reachability changes in the same
 place, and it is not one of the phones the threshold is measured against. Its
 changes still appear in `heartbeat.jsonl`.
@@ -113,9 +117,10 @@ Since v0.119.0:
   threshold) on 2 consecutive settled samples, the same two the alert needs.
   In between, an alert that is out stays out and none is raised, whichever way
   the count moves. It used to clear on the first sample under the threshold,
-  so four gateway ports dead and a fifth re-registering every 15 minutes raised
-  and cleared it every 15 minutes, each recovery counting five phones reachable
-  while four could not ring. A recovery with phones still down names them ("8
+  so four gateway ports dead and a fifth alternating down and back every 15
+  minutes raised and cleared it once every half hour (four of each in 100
+  minutes), each recovery counting five phones reachable while four could not
+  ring. A recovery with phones still down names them ("8
   of 9 phones are reachable again; still down: ext 14"); with none down it
   says all are back.
 - **The outage reaches the phone.** With `wakeup_push_target` set, the outage
@@ -230,7 +235,8 @@ Where that line falls was corrected in v0.97.0. A wake-up counts as delivered
 once the script has reached the **greeting** *and* at least a second of audio has
 left the box — so somebody woken by the greeting who hangs up on it is a success,
 not an alarm. It is `undelivered` when the call stopped before the greeting, or
-when it was answered and carried no audio at all. That second case is the one
+when it was answered and less than a second of audio (under 50 packets) left the
+box, none at all included. That second case is the one
 this whole mechanism exists for: an alarm clock picked up in silence.
 Conversations and the interactive menus alert exactly as before.
 
@@ -267,7 +273,10 @@ jitter, RTT, codec, and duration as attributes). Notifies on a genuinely rough c
 3 % through v0.115.0), high latency (a round-trip **mean over 250 ms** or a
 **peak over 500 ms**, scored across the whole call rather than from the last
 RTCP round), **one-way audio**, or a receive-jitter **peak over 60 ms** on a
-conversation.
+conversation. An answered leg (billsec above 0) that carried no RTP media at all
+notifies too, recorded `no-media` ("answered but carried no RTP media"). A
+wake-up delivery or announcement is the exception: it is judged by delivery
+instead and recorded `undelivered`, which alerts only for a wake-up (see above).
 
 **The jitter alert covers only legs a person hears, and does not set the
 grade.** The figure used is `jitter_rx_peak_local_ms`, the highest value
@@ -279,8 +288,10 @@ that picks up is heard. The operator and directory answer the caller themselves,
 so their legs count only when Asterisk's `DIALSTATUS` for the connecting Dial()
 is `ANSWER`: one that connected nothing spoke only to the speech recogniser.
 Each leg records the value as `dialstatus`. No other kind is gated. An
-unanswered room, outside or inbound call carries no audio and is recorded as
-no-media, and a transferred call was already answered; its `dialstatus`
+unanswered room, outside or inbound call carries no audio and takes the
+unscored no-media record (its `quality` reads `not-answered`, `abandoned`,
+`unreachable` or `no-media` by hangup cause), and a transferred call was
+already answered; its `dialstatus`
 describes the Dial() after the transfer. On a wake-up, announcement or voice menu the
 figure is the handset's microphone. The WiFi cordless peaked at 40–58 ms on 55 of
 its 282 legs, nearly all of them of that kind, 50 with under 0.5 % loss either
@@ -304,7 +315,8 @@ other stream's loss), a receive-jitter peak no higher than 60 ms and a low RTT,
 which is the
 signature of a re-INVITE/transfer glitch rather than of bad audio — or, since
 v0.77.0, when it reports its *other* nothing-to-report constant, the literal
-`88.087887`, on a leg where no RTCP round completed. That one reads as a flawless
+`88.087887`, on a leg whose RTT rests on fewer than two RTCP rounds
+(`rtt_samples` `none` or `single`). That one reads as a flawless
 call rather than an absent one: three such legs were scored `excellent` while a
 fourth, identical but carrying the `0.0` constant, was scored `unknown`. The
 verdict was decided by which of two placeholders Asterisk happened to leave
@@ -471,19 +483,22 @@ point opposite ways because Asterisk names its loss counters after the direction
 of travel and its scores after the report they were built from. `mes_tx` is the
 PBX's score for the handset's microphone, and through v0.115.0 it was the MES
 this check read. A call made **to** the cordless is logged under the caller's
-extension, so its figures describe the caller's phone and never count either way.
+extension, so its figures describe the caller's phone; with `cordless_ext` set
+they never count either way.
 
 Otherwise the score is still published (`last_mos`, with `last_mos_age_s` and
 `last_mos_uncorroborated: true`), but the state stays `ok`. On 2026-09-14 the
 handset scored 2.2 on three calls the ledger measured at 0 % loss and MES 88, and
 raised three false `degraded` alerts. Why it does that is not yet known.
 
-To find out, every score below `mos_min` is captured once, whether it counted or
-not, to `/data/state/cordless-mos.jsonl`. That file is private to the add-on,
-readable by root only, capped at 512 KB, and never copied to `/share`. Each row
-carries the handset's whole RTP record, the ledger leg it matched, `match_rule`
-(`own-ext` for the cordless's own leg; `nearest` for another phone's leg, or when
-`cordless_ext` is not set), the gap between the two clocks, and a `verdict`:
+To find out, every score below `mos_min` is captured, whether it counted or not,
+once per verdict it receives (a score first `unmatched` and later matched gets a
+second row), to `/data/state/cordless-mos.jsonl`. That file is private to the
+add-on, readable by root only, capped at 512 KB, and never copied to `/share`.
+Each row carries the handset's whole RTP record, the ledger leg it matched,
+`match_rule` (`own-ext` for the cordless's own leg; `nearest` for another
+phone's leg, or when `cordless_ext` is not set), the gap between the two clocks,
+and a `verdict`:
 
 | `verdict` | Meaning |
 |-----------|---------|
@@ -494,8 +509,10 @@ carries the handset's whole RTP record, the ledger leg it matched, `match_rule`
 | `unmeasured` | No usable transmit figure for the cordless: Asterisk could not score that direction, or the leg belongs to another phone (such as a call made to the cordless). Published, does not degrade. |
 
 ```
-sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
+sudo docker exec app_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 ```
+
+Older Supervisor releases name the container `addon_<slug>`.
 
 | Sensor | What it tells you |
 |--------|-------------------|
@@ -503,9 +520,9 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 | `sensor.switchboard_gateway_health` | GXW gateway port health |
 | `sensor.switchboard_last_call` | Last **conversation's** audio quality (MES) + details. Machine-initiated legs (wake-up delivery, paging, announcements) are recorded in the ledger but never drive this sensor. They are also exempt from the one-way-audio check, because their one-directional shape would trip it by design. Since v0.104.0 a poor line under one of them (low MES, loss or latency) raises an ordinary call-quality card like any other leg, while a clip that was merely cut short stays quiet. The exception to that silence is a wake-up delivery that was answered but never got a second of audio out, or that stopped before the greeting: that is scored `undelivered` and does alert, because an alarm clock that did not go off is the one thing on this list with a deadline. |
 | `sensor.switchboard_link_<ext>` | Per-phone reachability + latency (ms) |
-| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down). The state is `unavailable` when no phone that has ever registered is reachable (v0.119.0), and `unknown` only when phones are reachable but none has a measured RTT yet. `expected` is the number of phones that have ever registered and `never_registered_exts` the configured extensions that never have; those still appear in `unreachable_exts`, unchanged. **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
+| `sensor.switchboard_link_health` | Fleet rollup (worst RTT, who's down). The state is `unavailable` when phones have registered and none of them is reachable (v0.119.0), and `unknown` when phones are reachable but none has a measured RTT yet, or when no configured phone has ever registered (a fresh install). `expected` is the number of phones that have ever registered and `never_registered_exts` the configured extensions that never have; those still appear in `unreachable_exts`, unchanged. **Its state is a max over *reachable* phones only, so it is not monotonic in fleet health:** when the slowest phone drops off entirely it leaves the sample and the number *improves*. The `worst_rtt_is_partial` attribute is `true` whenever a phone that has ever registered is missing from the sample — including straight after a restart, before that phone has answered again — don't threshold on the state alone. Use `wired_link_health` for latency and `unreachable_exts` for availability. |
 | `sensor.switchboard_trunk_health` | Outside-line SIP registration status (`Registered`/`Rejected`/`Unregistered`/…). Published only when the trunk is enabled **and** registers (`registns: true`); a trunk that authenticates per-INVITE has nothing to watch. `unknown` means Asterisk answered but reported no registration object, which counts as down. A cycle in which Asterisk could not answer at all (for example in the seconds after a restart) publishes nothing, and the sensor keeps its last value. `auto_reregister_attempts` counts the re-registers Asterisk accepted (a refused one is not counted), and `next_reg_s` is the refresh countdown when one is running. A ~24 h silent inbound outage motivated this sensor — see [Registration resilience](sip-trunk.md#registration-resilience). The watchdog lives inside the link-health poller: `link_health_enabled: false` disables this sensor, the automatic re-register, **and** its notification; the notification also honors `link_health_alerts`. |
-| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. The state is `unavailable` when no gateway port that has ever registered is reachable (v0.119.0; it read `unknown` before), and `unknown` only when ports are up with no RTT measured yet. The unit and `state_class` never change, and Home Assistant leaves both `unavailable` and `unknown` out of its statistics. |
+| `sensor.switchboard_wired_link_health` | Median round-trip latency of the **wired GXW ports only** (`gateway_ports`), with `max_rtt_ms` and `ports_measured` attributes. Reported apart from the rollup above because that one is a fleet **worst case**, which the Wi-Fi cordless pins with its far larger latency variance — so the wired ports could degrade from 2 ms to 40 ms without moving it. (When the split was introduced the cordless idled near 250 ms under Wi-Fi power save; on its charger it now idles near 9 ms. The gap narrowed, the masking did not.) This is the number to graph and alert on for the analog phones. The state is `unavailable` when no gateway port that has ever registered is reachable (v0.119.0; it read `unknown` before), and `unknown` when ports are up with no RTT measured yet, when no gateway port has ever registered, or when `gateway_ports` is empty. The unit and `state_class` never change, and Home Assistant leaves both `unavailable` and `unknown` out of its statistics. |
 
 > Pushed sensors are recreated after each poll and clear on a Home Assistant
 > restart until the next push — that's expected. A pushed sensor never expires,
@@ -530,8 +547,9 @@ sudo docker exec addon_<slug> tail -n 5 /data/state/cordless-mos.jsonl
 
 ---
 
-**Where to read them.** The full call-quality ledger is
-`/data/state/callqos.jsonl`, inside the add-on and not readable from outside.
+**Where to read them.** The call-quality ledger, unmasked, is
+`/data/state/callqos.jsonl`: the newest 300 legs, rewritten whole on every
+write, inside the add-on and not readable from outside.
 Three ledgers in the host-mounted `/share/switchboard/` can be read without a
 shell. `callqos-outcomes.jsonl` mirrors the call-quality ledger record for
 record, except that an `ext` longer than an extension (a telephone number on a

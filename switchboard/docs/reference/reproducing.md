@@ -7,19 +7,22 @@ machine) is straightforward.
 ## Rebuild the add-on from GitHub
 
 1. Install **Home Assistant OS** on the new host.
-2. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
-   `https://github.com/tesseractAZ/Switchboard`.
+2. **Settings → Apps → Install app → ⋮ → Repositories**, add
+   `https://github.com/tesseractAZ/Switchboard`. (Before Home Assistant 2026.2,
+   apps were called add-ons: **Settings → Add-ons → Add-on Store → ⋮ →
+   Repositories**.)
 3. Install **Switchboard**. The add-on builds from source in the repo (Asterisk,
    whisper.cpp, espeak-ng, everything) — no external image to host.
 4. To pin an exact prior version, check out that release's tag first: versions
    are tagged (`v0.1.0` … the current release) and published as a **GitHub
-   Release** with the changelog, and each release since v0.81.0 carries a
+   Release** with the changelog, and each release after v0.81.0 carries a
    generated `.docx` + `.pdf` of this manual. `git checkout vX.Y.Z` gives you the
-   precise source that built that release. One exception: **v0.42.1** has a
-   changelog entry but no tag and no release — tagging was a manual step until
-   v0.46.1, and that version was missed. Its source is merge commit `8fcb453`.
+   precise source that built that release. Two exceptions, both from when tagging
+   was a manual step (until v0.46.1): **v0.42.1** has a changelog entry but no
+   tag and no release (its source is merge commit `8fcb453`), and **v0.8.2** has
+   neither a tag nor a changelog entry (its source is commit `20a02fd`).
 
-## Restore your configuration (the one thing not in the repo)
+## Restore your configuration
 
 Your **runtime configuration** — room names, SIP `secret`s, the trunk
 credentials, the cordless address — is **not** in the (public) repository by
@@ -33,6 +36,14 @@ to restore it:
   configuration.
 - **Re-enter by hand.** It's a handful of fields in the **Configuration** tab
   (rooms + secrets, and the trunk block if you use an outside line).
+
+Besides the options, some per-install state is not in the repository either:
+custom prompt recordings in the add-on's config folder
+(`/app_configs/<slug>/prompts`, since 0.120.0), `options-overlay.json` in that
+folder if you use one, and the SSH console's host key in
+`/data/ssh_host_ed25519_key`. Re-entering the options by hand restores none of
+them: copy the config folder across as well, and expect SSH clients to warn that
+the host key has changed (see [The operator console](operator-console.md)).
 
 ## The gateway and cordless are separate devices
 
@@ -49,5 +60,5 @@ devices, in which case:
   [`tools/`](../../../tools/) (`wp826.mjs`, `wp826-pcodes.md`).
 
 Point the rebuilt gateway/cordless at the new host's IP as the SIP server and the
-phones re-register — the add-on regenerates all of Asterisk's config from your
-options on start.
+phones re-register — the add-on regenerates the Asterisk configuration files it
+manages from your options on start.

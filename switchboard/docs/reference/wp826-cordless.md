@@ -29,10 +29,14 @@ cordless integrates in three extra ways:
 - **Device-health monitoring** — set `cordless_ext` (its extension) and
   `cordless_password` and the add-on polls the phone's own API for battery, WiFi
   signal, and per-call MOS, publishing `sensor.switchboard_cordless_health`. With
-  `cordless_ext` set it **auto-follows the phone's IP** from its live registration,
-  so DHCP moving the handset never breaks monitoring (`cordless_ip` is just the
-  fallback), and it checks that the handset is registered: a cordless
-  unregistered on two link-health samples in a row cannot ring and reads
+  `cordless_ext` set it **auto-follows the phone's IP** from its live registration
+  (the `contact_ip` the link-health poller publishes), so a DHCP move does not
+  break monitoring while link health is on (with link health off it keeps the
+  address last published, until Home Assistant restarts). When no address is
+  available (Home Assistant not answering, or the handset unregistered), it
+  falls back to `cordless_ip`, which is blank by default, and a blank value
+  skips the LAN/API probe. It also checks that the handset is registered: a
+  cordless unregistered on two link-health samples in a row cannot ring and reads
   `critical`; a reboot inside one sample raises no registration alert, though
   the LAN probe can still find the handset unreachable
   ([Device health](health-monitoring.md#device-health-device_health_)).
@@ -49,8 +53,10 @@ reference at [`tools/wp826.mjs`](../../../tools/wp826.mjs) and
 The WP826 serves its **own self-signed certificate** and offers no way to install
 a CA-signed one, so ordinary TLS validation can never succeed against it. Both
 the health monitor and `tools/wp826.mjs` therefore skip chain validation — which
-means, unpinned, a device on your LAN could impersonate the handset and capture
-the **admin password** the monitor sends every poll.
+means, unpinned, a device on your LAN could impersonate the handset and harvest
+the salted login hash the monitor sends every poll. That is enough to
+brute-force the **admin password** offline, or to relay it to the real handset
+for a live admin session.
 
 Pinning the certificate closes that. Read the fingerprint:
 

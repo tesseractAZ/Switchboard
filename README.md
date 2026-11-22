@@ -4,11 +4,12 @@
 an **Asterisk 20 + PJSIP** PBX packaged as a native **Home Assistant add-on**. It
 turns rotary desk sets, Western Electric wall phones and a WiFi cordless into one
 exchange with an on-box voice operator. Then it measures that exchange: every link
-between calls, both audio directions of every call leg, and every wake-up and
-announcement, which it tracks until a ledger records whether it arrived.
+between calls, both audio directions of one leg of every call, and every wake-up
+and handset announcement, which it tracks until a ledger records whether it
+arrived.
 
-> **Scale:** ten supervised services and about 25,000 lines of service code.
-> **Verification:** 1,218 tests, mutation testing on selected releases, and CodeQL
+> **Scale:** ten supervised services and about 28,000 lines of service code.
+> **Verification:** 1,652 tests, mutation testing on selected releases, and CodeQL
 > `security-extended` full scans on every pull request.
 > **Runtime:** a narrowed AppArmor profile; G.711 µ-law is the only codec on the
 > wire, so calls are never converted between codecs; speech recognition and
@@ -50,7 +51,10 @@ over SSH on port 2300, with a password:
   **"lights"**, **"directory"**, **"page the house"**, **"announce"**. Recognition
   is **whisper.cpp** on the box. A confident room name beats the time, weather,
   directory, page and announce words; "wake me up" and "lights" are checked
-  before any room name. The operator asks again rather than guess wrong.
+  before any room name. The operator asks again when it hears no room name or
+  two rooms that match almost equally well. A close-but-imperfect name ("kitten"
+  for Kitchen) is connected after "Connecting you now.", without the room being
+  named.
 - **Directory assistance (`411`)**, a **talking clock (`41`)**, **dial-a-status
   (`45`)** for live Home Assistant readings, and a **lights menu (`43`)**.
 - **Wake-up calls (`42`).** Speak a time ("seven thirty", "quarter past six"). The
@@ -65,9 +69,9 @@ over SSH on port 2300, with a password:
 - **A local voice assistant (`47`, off by default)** that answers through Home
   Assistant's built-in conversation agent.
 - **Your own recordings for the prompts.** A WAV or µ-law file named after a
-  prompt, in the add-on's config folder, replaces the built-in recording at the
-  next start; a file that fails a check is skipped and the built-in one plays
-  ([custom prompts](switchboard/DOCS.md#custom-prompts)).
+  prompt, in a `prompts` folder inside the add-on's config folder, replaces the
+  built-in recording at the next start; a file that fails a check is skipped and
+  the built-in one plays ([custom prompts](switchboard/DOCS.md#custom-prompts)).
 - **An outside line.** Enable a SIP trunk for inbound and outbound calls. Dial
   the prefix (`9` by default) first, or turn on **direct dial** and dial `1` and
   the 10-digit number like a cell phone. Requiring the leading `1` keeps the
@@ -223,13 +227,14 @@ doesn't stop when it has queued a call; it records what actually happened.
   refuses to ring an endpoint that is already unreachable. An announcement whose
   audio never played is sent again once the phone reports itself registered and
   idle (`announce_retry_attempts`, default 2, each within 150 s of the original
-  send). An identical repeat to the same phone within five minutes, with
-  nothing different played to it in between, is answered as a duplicate, not
-  played twice.
+  send). The retry runs in the wake-up scheduler, so it is off while wake-up
+  calls are disabled. An identical repeat to the same phone within five
+  minutes, with nothing different played to it in between, is answered as a
+  duplicate, not played twice.
 - **[Measured behaviour](switchboard/PERFORMANCE.md)** is built from these
   ledgers. Every figure names the rows it is drawn from, and a table lists which
-  detectors have ever fired, with the reason each silent one is silent: healthy,
-  never exercised, or unable to fire.
+  detectors had fired when it was counted (v0.100.3), with the reason each
+  silent one was silent: healthy, never exercised, or unable to fire.
 
 ---
 
@@ -281,7 +286,7 @@ reporting process are in [SECURITY.md](switchboard/SECURITY.md).
 
 ## How it's verified
 
-- **1,218 tests** (about 31,000 lines) run in CI on pull requests and pushes to
+- **1,652 tests** (about 42,000 lines) run in CI on pull requests and pushes to
   `main`.
 - **Mutation testing on selected releases.** Releases 0.77–0.80 and 0.96–0.100
   applied 130 deliberate defects to the source, and their release records count
@@ -352,9 +357,11 @@ tones pass through cleanly. See
    as its port comes online. Pick up a phone and dial another room. Done.
 
 Changing options and restarting the add-on regenerates the Asterisk
-configuration files the add-on controls — **the add-on options, plus the optional
+configuration files the add-on controls. **Those files are generated from the
+add-on options, plus the optional
 [options overlay](switchboard/docs/reference/configuration.md#the-options-overlay-advanced)
-file, are the single source of truth**; hand edits to those files are
+file and the [custom prompts](switchboard/DOCS.md#custom-prompts) folder, which
+decides which recordings the dial plan plays.** Hand edits to those files are
 overwritten on every start.
 
 ## Feature codes at a glance
@@ -377,7 +384,8 @@ Every feature code `41`–`47` and `411` is configurable (`*_ext`) and can be
 disabled (`*_enabled`); dial `0` (the operator) can be turned off but not
 re-assigned. `911` and `933` are always emitted and cannot be moved. On a live call, analog phones
 blind-transfer with `##` and attended-transfer with `*2` (internal destinations
-only). The table shows the defaults.
+only), except on an incoming outside call that rang them straight from the line.
+The table shows the defaults.
 
 ## How it's built
 
@@ -454,16 +462,18 @@ WP826 WiFi cordless ──────WiFi────────────�
 - **[Measured behaviour](switchboard/PERFORMANCE.md)** — what the system is
   observed doing in service, from its own ledgers: call quality, link health,
   wake-up and announcement delivery, the voice assistant, whether anything is
-  transcoded, which alarms have ever actually fired, and test coverage.
+  transcoded, which alarms had actually fired by v0.100.3, and test coverage.
 - **Printable manual** — a [GitHub Release](https://github.com/tesseractAZ/Switchboard/releases)
   carries the README, the operator guide, the reference and the security model
-  assembled into a **Word (`.docx`)** and **PDF** you can read offline. (Releases v0.69.0 through v0.80.0 shipped
-  without one — the build waited on an event a bot-created release does not
-  emit. Repaired in v0.81.0; every release since carries both files.)
+  assembled into a **Word (`.docx`)** and **PDF** you can read offline. (Releases v0.69.0 through v0.81.0 shipped
+  without one: the build waited on an event a bot-created release does not
+  emit, and v0.81.0's own fix lacked the permission to start the build. Every
+  release after v0.81.0 carries both files.)
 
 Every version from v0.43.0 on is tagged and released, so `git checkout vX.Y.Z`
-reproduces the exact source that built it. One older version, **v0.42.1**, was
-never tagged: tagging was manual until v0.46.1 and that one was missed. See
+reproduces the exact source that built it. Two older versions, **v0.8.2** and
+**v0.42.1**, were never tagged: tagging was manual until v0.46.1 and both were
+missed (v0.8.2 also has no changelog entry; its source is commit `20a02fd`). See
 [*Reproducing on new hardware*](switchboard/docs/reference/reproducing.md).
 
 ## License

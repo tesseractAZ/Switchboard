@@ -24,17 +24,23 @@ fixes for older versions — update to the current release.
 
 Every push to `main` and every pull request into it is analysed by **CodeQL**
 (`security-extended`) for both Python and JavaScript, and the tree is re-analysed
-weekly. There is **no** dependency-manifest scanning: every
-runtime dependency is installed by `apk add` / `pip install` inside
-`switchboard/Dockerfile`, which GitHub's dependency graph does not parse, so
-Dependabot raises no advisories for this repository.
+weekly. There is **no** dependency-manifest scanning. The runtime dependencies
+come from the base image named in `switchboard/Dockerfile`
+(`ghcr.io/home-assistant/base:3.21`), from `apk add` / `pip install` inside that
+Dockerfile, from whisper.cpp, cloned there at a pinned tag and built, from files
+the Dockerfile fetches with `wget` (the whisper model and Asterisk's core
+sounds), and from `xterm.js`, vendored in the tree. GitHub's dependency graph
+parses none of these, so Dependabot raises no advisories for this repository.
 Findings surface in the repository's Security tab, and CI additionally **fails**
 on any error-level or high-severity (>= 7.0) result that is not listed in
 `.github/codeql-baseline.json` — a small, explicit exemption file (currently 5
 rules, each pinned to specific paths) for findings that were reviewed and
 accepted, such as the developer-only WP826 tool's `rejectUnauthorized: false`.
 The gate fails closed if that file is unreadable, and reports how many findings
-it silenced. An upload alone files an alert but would not stop a merge.
+it silenced. An upload alone files an alert but does not fail the CodeQL job.
+`main` has no required status checks, so a failing gate blocks a merge only when
+the person or job merging waits for it. The Dependabot auto-merge below waits
+for the CI workflow, not for CodeQL.
 
 Most of the add-on's Python is executed by name. CodeQL's Python extractor
 reads the shebang, so the extensionless scripts (`switchboard-config` and its
@@ -146,10 +152,12 @@ handset clips too.
 `POST /api/announce/*` is exempt **only** when it carries a valid announce token
 (see [below](#5-the-announce-endpoint)).
 
-Every operator action validates its extension against both the configured room set
-**and** a `^[0-9]{2,6}$` pattern before any Manager call, and rejects channel names
-containing CR/LF — so the JSON API cannot be used to inject Manager protocol lines
-or smuggle a dial string. Client-facing errors are generic (`forbidden`,
+Every operator action that reaches the Manager checks its extension against the
+configured room set, and before building a channel string the Manager helpers
+refuse any extension that is not 1–6 digits. Announce and message-waiting also
+apply the `^[0-9]{2,6}$` pattern themselves. Hang up and transfer reject channel
+names containing CR/LF — so the JSON API cannot be used to inject Manager protocol
+lines or smuggle a dial string. Client-facing errors are generic (`forbidden`,
 `unreachable`); detail is logged server-side only.
 
 Each refused HTTP request is logged server-side with the client address, the
@@ -160,8 +168,9 @@ query string are never logged. So that these lines cannot use up the journal rat
 limit every container shares, only the first refusal per address and reason in
 each 10 minutes is logged in full; the rest are counted and reported in one summary
 line, which is also written when the web UI stops. The web server itself (uvicorn)
-logs a refused WebSocket handshake and a malformed request once per attempt, with
-the request's path and query string; those lines are not rate-limited.
+logs each refused WebSocket handshake with the client address, the request's path
+and its query string. It logs each malformed HTTP request as `Invalid HTTP request
+received.`, with no address or path. Neither line is rate-limited.
 
 ### 2. The Asterisk Manager (AMI) is loopback-only, split into two accounts
 
@@ -214,44 +223,53 @@ and run programs.
   holds, including the call secret and the SIP passwords. Status sessions carry
   only fixed actions and digit-checked extensions.
 - **The call account can originate into any dialplan context the add-on
-  generates.** The web app pins each origination to a fixed target (below), but
+  generates.** The add-on pins each origination to a fixed target (below), but
   Asterisk does not restrict the account to those targets.
 
-Every web-app origination is pinned to a **fixed internal target**:
+Every origination the add-on places is pinned to a **fixed internal target**.
+Test-ring, connect and page come from the web app or the operator console,
+announce from the web app (its retries from the wake-up scheduler), and wake-ups
+from the wake-up scheduler:
 - test-ring runs a fixed `Playback` to a known room;
 - connect, wake-up, page and announce originate into a fixed internal dialplan
   context (`rooms`, `wakeup-deliver`, `page` and `switchboard-announce-play`
   respectively).
 
 Announce moved off `Playback` in v0.57.0 so that it has a hangup extension and
-therefore a quality record; the target is no less fixed for it. Every extension is
-validated against the configured room set before the call, so an origination can
-only ever ring an internal phone. It cannot be steered into an outside call even
-with the privilege. Hang up refuses Asterisk's `/regex/` channel form, which would
-end every matching call.
+therefore a quality record; the target is no less fixed for it. Every extension
+the web app or console sends is checked against the configured room set before
+the call. A wake-up's room is checked when it is set (the web app and the console
+take it from the configured room set; dial 42 uses the calling phone's own
+extension), and the scheduler rings it only when Asterisk lists it as an idle
+PJSIP endpoint. So an origination can only ever ring an internal phone. It cannot
+be steered into an outside call even with the privilege. Hang up refuses
+Asterisk's `/regex/` channel form, which would end every matching call.
 
 ### The SIP listener (`5060/udp`) and the resident recognizer
 
 The largest LAN surface is Asterisk's SIP listener on `5060/udp` (the add-on
-runs with host networking). Every endpoint is a named room with its own secret
-— a REGISTER must authenticate against that room's `secret`, there is no
-anonymous or guest context, and the dial plan only exists for authenticated
-endpoints. Live call audio uses the `rtp_start`–`rtp_end` UDP range. This is a
-LAN-only surface by deployment (nothing here should ever be port-forwarded);
-the per-room secrets are the authentication boundary, which is why the
-placeholder `change-me-…` secrets must actually be changed. Since v0.112.0 every
-room endpoint also carries an address ACL: a request from, or a contact at, an
-address outside the private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
-`192.168.0.0/16`) is refused, so a room secret, including the never-registered
-test extension's, is useless from outside even where the port is reachable. The
-trunk has its own endpoint and is not affected. Asterisk's internal database
+runs with host networking). Every room endpoint has its own secret — a REGISTER
+must authenticate against that room's `secret`, and there is no anonymous or
+guest endpoint. The one exception is the trunk, when enabled: its endpoint has no
+inbound credentials, is matched by the provider's address (`[trunk-identify]`),
+and its `from-trunk` context can only ring room phones. Live call audio uses the
+`rtp_start`–`rtp_end` UDP range. This is a LAN-only surface by deployment
+(nothing here should ever be port-forwarded); the per-room secrets are the
+authentication boundary, which is why the placeholder `change-me-…` secrets
+must actually be changed. Since v0.112.0 every room endpoint also carries an
+address ACL: a request from, or a contact at, an address outside the private
+ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) is refused, so a room
+secret, including that of a room whose phone has never registered, is useless
+from outside even where the port is reachable. The trunk has its own endpoint
+and is not affected. Asterisk's internal database
 (`astdb.sqlite3`, which holds each phone's registered contact) is kept in
 `/data/state`, so it is in add-on backups.
 
-The resident speech recognizer (`whisper-server`) binds `127.0.0.1:8126`
-loopback-only and runs unprivileged — with host networking, a LAN-visible bind
-would expose an unauthenticated inference server, so the bind address is the
-control.
+The resident speech recognizer (`whisper-server`) binds `127.0.0.1:8126` and
+runs unprivileged. Under host networking, a LAN-visible bind would expose an
+unauthenticated inference server, so the loopback bind keeps it off the LAN. It
+does not keep it from other host-network add-ons or processes on the host: they
+share that loopback and need no credential to use it.
 
 ### 3. Secret handling & scrubbing
 
@@ -271,7 +289,7 @@ control.
 
   | Destination | Carries | Kept | Readable from outside the add-on |
   | --- | --- | --- | --- |
-  | Add-on journal: Asterisk's console, plus the stdout and stderr of every service and the stderr of every voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account and the provider's host; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's LAN IPv4 address and its IPv6 address, which res_pjsip logs at every Asterisk start (`Local IPv4/IPv6 address determined to be`). At every level, the web UI's refused-request lines: the address, method and path (speaker-clip names masked) of the first refused HTTP request per address and reason in each 10 minutes, then a count | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
+  | Add-on journal: Asterisk's console, plus the stdout and stderr of every service (except whisper-server's stdout, which is discarded) and the stderr of every voice script | notice, warning, error; with `log_level` `info` (the default), `debug` or `trace`, also **verbose** — the full dialplan trace, every dialled and calling number included. Trunk registration retries with the SIP account and the provider's host; with `debug` or `trace`, also every trunk REGISTER attempt with the SIP account. Failed qualifies with each phone's LAN address (errors, so at every level); with `info`, `debug` or `trace`, also each phone's registration and reachability lines with its LAN address. Recognised speech when `assistant_transcripts` is `true` (see below). With `info`, `debug` or `trace`, also the host's LAN IPv4 address and its IPv6 address, which res_pjsip logs at every Asterisk start (`Local IPv4/IPv6 address determined to be`). At every level, the web UI's refused-request lines: the address, method and path (speaker-clip names masked) of the first refused HTTP request per address and reason in each 10 minutes, then a count | about two days, **across a host reboot** | **yes** — to anyone with Supervisor log access (the add-on's Log tab and the Supervisor logs API) |
   | `/data/state/asterisk.log` | notice, warning, error, **verbose** — the full dialplan trace, numbers included | trimmed at boot past 8 MB | **no**, except inside an add-on backup |
   | `/share/switchboard/asterisk.log` | notice, warning, error — **no verbose**, and scrubbed (below) | trimmed at boot past 32 MB | **yes** |
 
@@ -304,8 +322,8 @@ control.
   (verbosity 3; earlier text here called it verbosity 2). Until then the durable
   log did not keep it:
   across twenty-five days it held no record of whether the phones were
-  reachable, so the one whole-fleet outage this system has had could not be
-  investigated from the copy that survives. The expectation was that
+  reachable, so the 119-second outage of all eight wired ports on 2026-09-01
+  could not be investigated from the copy that survives. The expectation was that
   `verbose(2)` would stop short of the verbosity-3 dialplan trace. It does not —
   Asterisk's per-channel level does not filter those lines. On a running system
   the file held 2,043 `pbx.c: Executing` lines over eight days and 16 lines
@@ -313,14 +331,16 @@ control.
   on 2026-09-15 the same file held 2,385 and 18. The figures move because the
   file rolls — the shape does not. So the private copy carries the whole
   call flow; it is kept because the link-health poller reads the reachability
-  lines from it. The file is trimmed at boot to its newest half whenever it
-  passes 8 MB. The `/share` copy is capped the same way at 32 MB — and until
-  v0.100.3 that cap **emptied the file** rather than keeping its newest half,
-  which would have discarded the whole readable history the first time it fired.
+  lines from it. The file is cut at boot to its newest 4 MB (half the cap),
+  starting at a line boundary, whenever it passes 8 MB. The `/share` copy is
+  capped the same way at 32 MB, keeping its newest 16 MB — and until v0.100.3
+  that cap **emptied the file** instead, which would have discarded the whole
+  readable history the first time it fired.
 
   Of the two files, the `/share` copy is the one to reason about: `/share` is
   host-mounted, readable by anything with access to the shared folder, and
-  captured in add-on backups.
+  captured in any backup that includes the Share folder (which the Supervisor
+  archives separately from this add-on's own data).
 
   **Since v0.94.7 it carries no verbose class at all.** It used to, on the
   reasoning that the link-health poller reconstructs endpoint outages from
@@ -338,10 +358,14 @@ control.
     nothing already written. On the deployment this was found on, the readable
     copy still held 6,613 verbose lines — 58 carrying a telephone number — two
     days after the fix. Closing a tap does not drain the bucket.
-  - **The SIP account in a registration URI.** This one is not historical: a
-    trunk registration retry writes the full URI at **WARNING**, a class this
-    channel still carries, so it returns on the next hiccup. Masked rather than
-    dropped — that line is how you learn your trunk is flapping.
+  - **The user part of every `sip:<user>@` URI**, on any line. The one this is
+    for is the SIP account in a trunk registration URI, and it is not
+    historical: a trunk registration retry writes the full URI at **WARNING**, a
+    class this channel still carries, so it returns on the next hiccup. Masked
+    rather than dropped — that line is how you learn your trunk is flapping. A
+    phone's contact URI on a failed-qualify line loses its user part (the
+    extension) the same way; the AOR at the end of that line still names the
+    phone.
   - **The trunk provider's host** (v0.119.3). Until then it was kept, on the
     reasoning that it made the retry line diagnostic and identified nobody. A
     provider's host is usually a regional point of presence, often named for a
@@ -419,7 +443,12 @@ control.
   anything that is not a regular file, and does the rest through that open
   descriptor. A link planted in place of one of these files makes the write,
   trim, chmod or chown fail, rather than land on the file the link points at. A
-  heartbeat or delivery record that fails this way is logged. The wake-up
+  heartbeat record that fails this way is logged, and so is a delivery record
+  from the web UI, the wake-up scheduler, the operator console or the phone's
+  wake-up menu. One from `switchboard-callqos` (detached, its output on
+  `/dev/null`) leaves no line. One from the wake-up delivery AGI is printed to
+  that script's stdout, which Asterisk reads as AGI commands, not to the
+  journal. The wake-up
   reconciler treats a delivery ledger that is not a regular file as unwritable,
   and declines to judge the ring rather than escalate it. Asterisk's own logger
   is outside this: it opens `asterisk.log` by name, as `asterisk`.
@@ -451,17 +480,24 @@ control.
   transcript lines — and that stderr is the journal. With
   `assistant_transcripts: true` (the default) those lines quote what was heard
   at the operator, the wake-up menu, home automation, dial-a-status, the
-  directory and the assistant, and the assistant's reply when its voice fails.
+  directory, the speaker announcement (`announce_ext`) and the assistant, and
+  the assistant's reply when its voice fails.
   With `false` they carry the outcome and the length of what was said, and no
   words. A policy the scripts cannot read counts as `false` for the journal.
   The voice assistant's own record goes to `/data/state/assistant.jsonl`, which
-  is not readable from outside at all and is not mirrored to `/share`. Tests
-  (`test_privacy_invariants.py`) fail the build if any voice script starts
-  routing speech through Asterisk's logger, which would move it into both
-  files, or writes recognised text to stderr outside that policy.
-- **The other files in the shared folder.** Three JSONL mirrors sit beside the
-  readable log so that an audit can read outcomes without a shell. They are
-  exactly as readable, and as backed up, as that log:
+  is not readable from outside at all and is not mirrored to `/share`. A test
+  in `test_privacy_invariants.py` fails the build if an AGI script sends
+  Asterisk a `VERBOSE` or `NOOP` command. A verbose line lands in
+  `/data/state/asterisk.log` and, at `log_level` `info`, `debug` or `trace`, in
+  the journal; the `/share` copy has carried no verbose class since v0.94.7.
+  That test scans the `.agi` files only, not `agi_speech.py`, and does not
+  catch an `EXEC Verbose` or `EXEC NoOp`. Another test fails the build if a
+  voice script writes recognised text to stderr outside that policy.
+- **The other files in the shared folder.** Three JSONL ledgers sit beside the
+  readable log. `callqos-outcomes.jsonl` mirrors the call ledger in `/data`;
+  `delivery-outcomes.jsonl` and `heartbeat.jsonl` exist only here, and the
+  wake-up scheduler and the web UI act on `delivery-outcomes.jsonl` (see above).
+  They are exactly as readable, and as backed up, as that log:
 
   - `callqos-outcomes.jsonl` — one row per call leg: time, extension, the kind
     of call (`tag`, which is `emergency` for a call to an emergency number),
@@ -501,8 +537,9 @@ control.
 
 ### 4. Home Assistant access
 
-Light/scene/media/climate control and sensor/notification pushes use the add-on's
-own `SUPERVISOR_TOKEN` through the Supervisor's Core proxy — there is **no separate
+Light, scene and media-player control, state reads (thermostats included) and
+sensor/notification pushes use the add-on's own `SUPERVISOR_TOKEN` through the
+Supervisor's Core proxy — there is **no separate
 stored credential**. Generic service calls are restricted to an allow-list of
 domains (`light`, `scene`, `media_player`, `tts`, `climate`), the service name must
 be `[a-z_]+`, and every entity ID is domain-validated before a call is made.
@@ -527,17 +564,19 @@ its arguments checked, and refuses and logs anything else:
 
 | Request | What the broker accepts |
 |---|---|
-| Reads | one entity's state, all states, the fixed lights template, the home location, a calendar's events in a date range |
+| Reads | the API status ping (`GET /`), one entity's state, all states, the fixed lights template, the home location, a calendar's events in a date range |
 | Lights | `light.turn_on` and `light.turn_off` on one `light.` entity |
 | Scenes | `scene.turn_on` on `scene.` entities |
 | Announcements | `media_player.play_media` of this add-on's own clip URL on `media_player.` entities |
 | Assistant | Home Assistant's built-in local conversation agent only |
 | Pushes | `sensor.switchboard_last_call`, and a persistent notification |
 
-Reads are trimmed before they are returned: a state carries only its entity, its
-value, and the two attributes the callers use (a name and a current temperature),
-so no camera access token, picture URL or tracker coordinate passes; the
-configuration read carries only the home's coordinates and temperature unit. An
+State and configuration reads are trimmed before they are returned: a state
+carries only its entity, its value, and the two attributes the callers use (a
+name and a current temperature), so no camera access token, picture URL or
+tracker coordinate passes; the configuration read carries only the home's
+coordinates and temperature unit. The calendar read is returned as Home
+Assistant sends it: every field of the events in the asked range. An
 announcement must be this add-on's own clip URL, on this host's web UI port.
 
 Everything else the token allows (other services and domains, `tts` and `climate`,
@@ -572,9 +611,12 @@ these defenses are generated automatically:
   leading 1 and never matches a bare 10-digit number.
 - **Dial-flag hygiene.** Inbound calls carry no transfer or feature flags, only
   `r` and a `b()` pre-dial handler that tags the call with the outside-line ring,
-  so an outside caller is never given the in-call `##`/`*2` DTMF transfer/feature
-  codes. Outbound calls use `rT` — your internal caller may transfer, but the far
-  PSTN party may not invoke your feature codes.
+  so an outside caller is not given the in-call `##`/`*2` DTMF transfer/feature
+  codes on the inbound call itself. Once a household phone transfers the caller
+  onward (to a room, or to the operator, which connects them itself or through
+  the directory), the `Dial` that next rings a room carries `T` and the caller
+  can key `##`/`*2`, but only into the internal-only transfer context below. Outbound calls use `rT` — your internal
+  caller may transfer, but the far PSTN party may not invoke your feature codes.
 - **Internal-only transfers.** DTMF transfers resolve in a dedicated context that
   contains only internal room extensions (plus the operator) and has **no outbound
   rule and no catch-all**, so a transferred-in outside caller keying `## 9 1 900…`
@@ -586,10 +628,11 @@ these defenses are generated automatically:
 - **Dialled-number filter** (since v0.110.0). Only digits, `*` and `#` reach the
   trunk `Dial`, and only digits reach a room `Dial` or the test that decides it is a
   room; a dialled string from which the filter removed anything is refused. The
-  outbound and room patterns' `.` matches any character, and `Dial` reads `&`,
-  `/`, `@` and `,` in its argument, so before this a dialled string was passed
-  through as written. `+` is not allowed: it would bypass the `011` international
-  block.
+  outbound pattern in prefix mode (`_9.` with the default `dial_prefix`) and the
+  room pattern (`_X.`) end in `.`, which matches any character, and `Dial` reads
+  `&`, `/`, `@` and `,` in its argument, so before this a dialled string was
+  passed through as written. `+` is not allowed: it would bypass the `011`
+  international block.
 - **The operator keeps outside callers out of the house** (since v0.110.0). A
   transferred-in outside caller can still be connected to a room, ask the directory
   or hear the clock. Asked for lights, the status readout, an announcement or a
@@ -615,7 +658,8 @@ fit your network. Where the add-on can flag one at start-up it does — the web
 terminal logs a NOTICE when it does not start for want of a valid
 `console_users` entry, and its bind when it does; the SSH console logs its bind, its host-key
 fingerprint and how many console users can log in, with a WARNING when none can;
-and a blank `cordless_cert_sha256` prints a NOTE — but the
+and, when the device-health monitor runs with a `cordless_password` set, a blank
+`cordless_cert_sha256` prints a NOTE — but the
 AppArmor and developer-tool items are structural and emit no start-up line, so
 this list is the record of them.
 
@@ -667,8 +711,13 @@ every SSH login needs a password:
   holding a backup could present the console's host key.
 - **Logs**: no log line carries a username, a password or a command line, and
   asyncssh's own logger is held at WARNING, below which it names users. Client
-  addresses are logged for every admitted connection, before any login, and with
-  each login result.
+  addresses are logged when a connection is refused at the caps (at most one
+  line per 30 s, carrying a count of the refusals since the last line), with
+  every successful login, and with failed or throttled logins and the no-users
+  refusal (at most one line per address and kind per 60 s, with a count of
+  those held back). Later lines about an authenticated connection (a refused
+  request, an idle close, its end) carry it too. An admitted connection that
+  closes without trying a password leaves no line.
 - **The process** runs as root (it reads the host key and holds the passwords)
   under the add-on's main AppArmor profile, and is started without the Supervisor
   token. The `console_users` passwords reach it through an environment variable,
@@ -698,15 +747,17 @@ remains.**
 `/console/` on the Ingress port, where Home Assistant's own session authenticates
 it and the guard in §1 pins the caller to the Supervisor. It needs no
 `console_users` entry because there is no second front door to protect — which
-also means no login to leave disabled. The standalone `:8100` terminal remains
-for now and is scheduled for removal.
+also means no login to leave disabled. The standalone `:8100` terminal is the
+alternative; since v0.125.0 it runs only with a `console_users` sign-in.
 
 **The cost of that move, stated plainly:** the terminal now runs inside the Home
 Assistant frontend's *origin*. A cross-site-scripting bug in the console page is
 no longer confined to a terminal on its own port — it is an XSS against the HA
-session. Only `xterm.js` and `xterm.css` are served to that page, from an
-exact-match allowlist of two filenames (no directory serving, no path joining on
-the parameter), which is the surface that keeps that trade acceptable.
+session. Besides the page itself, the only files served to it are `xterm.js` and
+`xterm.css` (an exact-match allowlist of two filenames) and the two typefaces
+`CutiveMono-Regular.ttf` and `Federo-Regular.ttf` (a second two-name table).
+There is no directory serving and no path joining on the parameter, which is
+the surface that keeps that trade acceptable.
 
 **Mitigations you control:** `console_bind: 127.0.0.1` keeps SSH on the Home
 Assistant host. `console_web_bind` stays on loopback unless you change it; the
@@ -818,14 +869,16 @@ The WP826 presents a self-signed certificate that cannot be replaced, so the
 device-health monitor and the maintenance tool cannot validate it by chain.
 Set **`cordless_cert_sha256`** (obtain it with `WP826_HOST=<cordless-ip> node tools/wp826.mjs fingerprint`)
 and the device-health monitor verifies the exact certificate **before**
-transmitting the admin password, refusing to continue on a mismatch. The
+sending the login (a salted hash of the admin password), refusing to continue
+on a mismatch. The
 maintenance tool does not read add-on options: it takes the same fingerprint
 from the `WP826_CERT_SHA256` environment variable and, since v0.125.0, checks it
 on every connection before that connection carries a request, the login
 included, refusing on a mismatch. (Before, it checked once on a separate
 connection and then sent the login on new connections nobody checked.) Left blank (or, for the tool, unset), the connection
 still works but is unauthenticated (the tool prints a warning): a LAN-positioned
-attacker could impersonate the handset and capture that password.
+attacker could impersonate the handset and capture that hash, then recover the
+password offline or relay the login.
 
 ### Device tooling accepts a self-signed certificate
 
@@ -849,7 +902,7 @@ where they remain listed among the closed alerts.)
 
 1. **Change the default room secrets** (`change-me-101`, `change-me-102`, …) before
    your phones register. Use a strong, unique `secret` per room; the validator
-   rejects `;`, whitespace, and control characters.
+   rejects `;`, control characters, and leading or trailing whitespace.
 2. **A `console_users` entry, to use the SSH console or the standalone web
    terminal.** With none, every SSH login is refused and the web terminal does
    not start; with one, both ask for it. The web terminal defaults to

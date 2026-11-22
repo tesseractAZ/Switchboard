@@ -3,6 +3,55 @@
 Earlier Switchboard releases, newest first. The most recent ones are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.116.0
+
+**Each call-quality score is judged against its own stream; loss alerts at
+1.5 %; a conversation with an abnormal jitter peak alerts.**
+
+- Asterisk names its two quality scores the opposite way round to its loss
+  counters: `rxmes` scores the audio the PBX sends and `txmes` the audio it
+  receives, while `rxploss` and `txploss` count the reverse. The filter that
+  discards a collapsed score as a re-INVITE glitch paired them by name, so each
+  score was checked against the other stream's loss. A wake-up on 2026-09-25 that
+  lost 43.8 % of its audio on the way to the cordless scored 20 for that stream;
+  the filter compared the 20 with the microphone's 0 % loss and dropped it. Each
+  score is now checked against its own stream, and that wake-up's record would
+  show the 20.
+- A short call that loses a few dozen packets now alerts in either direction:
+  the loss alert moves from 3 % to 1.5 %, where loss alone already takes a call
+  below `good`. Asterisk's score could not be relied on to catch it. The score
+  for the audio the PBX sends falls on the running total of lost packets (41
+  lost early in a 38-second call take it from 88 to 28); the score for the
+  audio it receives falls on the loss per 5-second report (the same burst leaves
+  it near 81). Across the last 300 recorded legs this adds two notifications,
+  both short calls from the cordless to set a wake-up.
+- The cordless's own low call score degrades its health sensor only when the
+  PBX's record agrees. That check read `mes_tx`, the PBX's score for the
+  handset's microphone, and now reads `mes_rx`, the score for what the handset
+  heard. Replayed on the 42 low scores captured since 2026-09-15, every verdict
+  is unchanged.
+- A conversation whose receive-jitter peak goes above 60 ms now raises a
+  call-quality notification naming the peak. That covers answered room-to-room,
+  outside, inbound and transferred calls, calls connected by the operator or
+  directory, and pages. An operator or directory call counts only when its
+  connecting Dial() reports `ANSWER`, since one that connected nothing spoke
+  only to the speech recogniser. Each leg now records that value as
+  `dialstatus` (ledger schema 7). The
+  excellent/good/fair/poor grade is unchanged, as with a round-trip alert.
+  Wake-ups, announcements and the voice menus are not checked: the figure
+  measures the stream the PBX receives, which on those legs is a handset
+  microphone nobody hears. There the WiFi cordless often peaks at 40–58 ms, 50
+  times in 33 days with under 0.5 % loss. Across the last 300 recorded legs the
+  check would have raised one notification.
+- The filter that discards a collapsed score caused by a re-INVITE or transfer
+  now reads the same receive-jitter peak, at the same 60 ms line. It used two
+  single-moment readings before. One of those, the far end's last report, read
+  as high as 136 ms on talking-clock and assistant legs whose received audio
+  was steady, so a glitch on such a leg could stay in the score as a false
+  "poor". No verdict in the current ledger changes.
+- Asterisk 20.11.1's own score (MES) gives jitter almost no weight, because it
+  multiplies the jitter in seconds. The README and the health-monitoring
+  reference now say so.
 ## 0.115.0
 
 **Documentation opens quickly in Home Assistant.** No change to how the add-on runs.
@@ -692,10 +741,10 @@ other whose audio never played (v0.105.0):
 - `skipped-busy` — the phone is in a call or ringing. The clip is replayed once
   the line is free, rather than ringing through as call waiting.
 
-The same limits apply: two attempts, never started more than 150 seconds after
-the original send, and only the newest announcement to a room. Both rows now
-carry the clip name, which is what lets the retry find them. The response your
-automation receives is unchanged.
+The same limits apply: the `announce_retry_attempts` budget (two by default),
+never started more than 150 seconds after the original send, and only the newest
+announcement to a room. Both rows now carry the clip name, which is what lets
+the retry find them. The response your automation receives is unchanged.
 
 A refused announcement that is never replayed gets no `announce-undelivered`
 verdict — it was never handed to Asterisk — and its history ends with the
@@ -732,7 +781,7 @@ The retry runs in the same 20-second loop as the announce reconciler, and it wil
 
 It is the audio that decides, not the reason it was missing, so **an announcement nobody answers is retried too** — on a room phone with no auto-answer that means one message can ring the room up to three times inside two and a half minutes. The new **Announce Retry Attempts** option (`announce_retry_attempts`, default 2) is how you change that: set it to 1, or to 0 to switch the whole thing off.
 
-Bounded at two attempts, and **never started more than 150 seconds** after the original send — dinner being ready is not worth saying twenty minutes late. Two attempts a poll apart straddle the 30-45 seconds a cordless handset takes to come back after a restart. The 150 seconds is measured against how long a clip lives on disk (five minutes), not against the 120-second settling window: the phone is not even available until most of a minute into that window, and at 120 the second attempt could not happen at all for a handset that comes back slowly.
+Bounded at two attempts by default (`announce_retry_attempts` accepts 0 to 3), and **never started more than 150 seconds** after the original send — dinner being ready is not worth saying twenty minutes late. Two attempts a poll apart straddle the 30-45 seconds a cordless handset takes to come back after a restart. The 150 seconds is measured against how long a clip lives on disk (five minutes), not against the 120-second settling window: the phone is not even available until most of a minute into that window, and at 120 the second attempt could not happen at all for a handset that comes back slowly.
 
 - **Never two calls at once to one phone.** Only the newest announcement queued to a room is replayed; an older one waiting for the same handset is retired as `ext-superseded` rather than rung in behind it. A second call to a handset that is mid-announcement cannot auto-answer — it would ring as call waiting — and the room would hear yesterday's message after today's.
 - Each attempt is recorded as `announce-retry-attempted` with the clip, the attempt number and the handset state that cleared it. The row is written **before** the call is placed and the call is abandoned if it could not be written: an attempt that cannot be counted cannot be limited, and the count lives on disk so a restart cannot hand a clip a fresh budget.
@@ -740,7 +789,7 @@ Bounded at two attempts, and **never started more than 150 seconds** after the o
 - The undelivered deadline is now measured from the newest attempt, so a replay that is still ringing or playing is not reported as never delivered.
 - A refused announcement no longer starts the duplicate-suppression window when the registration check **could not judge**. That night the window was armed by an announcement nobody heard, so an identical re-send would have been answered "duplicate" for audio that never existed.
 - Clip storage and what a legal clip name is now live in one module shared by the web UI and the scheduler, and a replayed clip is re-validated against it: the right name for the right room, a real file inside the announce directory, never a link, and still short enough to play.
-- A restart inside the retry window abandons the retry, deliberately: the clip lives in memory-backed storage that the restart clears, and a run that may not judge an announcement may certainly not replay one.
+- A restart inside the retry window abandons the retry, deliberately: the clip lives under `/run`, in the container layer the Supervisor discards when it recreates the container at the restart, and a run that may not judge an announcement may certainly not replay one.
 
 No new notifications. 68 new tests (802 → 870).
 
@@ -760,7 +809,7 @@ reasoning was sound, and it was guarding the wrong door: a clip cut short is
 handled somewhere else entirely and never reached the rule. All the rule actually
 silenced was a bad connection to the phone — the same connection the next real
 conversation on it will use. Over the last fifty days it hid five of them. The
-worst was an announcement just after midnight on the 15th that played all the way
+worst was an announcement on the evening of the 14th that played all the way
 through, lost not a single packet, and was still arriving at the cordless
 sounding like a bad mobile call, with round trips peaking near nine tenths of a
 second. Nothing else in the house noticed, because the phone was reachable the
@@ -769,18 +818,19 @@ which on the same fifty days works out at about three extra cards a month. A cli
 genuinely cut short still stays quiet, and a wake-up call that did not go off
 still wakes you about itself.
 
-**An announcement nobody could check on.** On the 15th an announcement went to
-the cordless 8.4 seconds after the add-on restarted, before that handset had
-finished re-registering. It never played, and nothing told you: the system has a
-check for exactly this — is the phone actually there? — but that check asks
-Asterisk, Asterisk was not answering yet, and a check that cannot get an answer
-lets the announcement through rather than risk silencing an alert. That is still
-what it does, and deliberately so. What it does now as well is write down that it
-could not tell. "The handset looked fine" and "nobody could tell" used to look
-identical in the record; they no longer do. An announcement the phone system
-refuses outright is also recorded properly now, naming the clip it was about.
+**An announcement nobody could check on.** On the evening of the 14th an
+announcement went to the cordless 8.4 seconds after the add-on restarted, before
+that handset had finished re-registering. It never played, and nothing told you:
+the system has a check for exactly this — is the phone actually there? — but
+that check asks Asterisk, Asterisk was not answering yet, and a check that
+cannot get an answer lets the announcement through rather than risk silencing an
+alert. That is still what it does, and deliberately so. What it does now as well
+is write down that it could not tell. "The handset looked fine" and "nobody
+could tell" used to look identical in the record; they no longer do. An
+announcement the phone system refuses outright is also recorded properly now,
+naming the clip it was about.
 
-**A wake-up that quietly replaced another.** The same morning, a 06:20 wake-up was
+**A wake-up that quietly replaced another.** The next morning, a 06:20 wake-up was
 replaced by a 04:00 one less than five minutes before the first was due, and the
 record showed the 06:20 being set and then nothing at all — no ring, no cancel —
 which is also exactly what a wake-up the system had lost would look like. A room
@@ -997,8 +1047,8 @@ one, so truncating the readable copy loses nothing that matters.
 **The cap on that file emptied it.** Past 32 MB it was rewritten to zero bytes
 rather than trimmed, so the first time it filled, the entire readable history
 would have vanished — the exact defect the delivery ledger had and fixed in
-v0.77.0, whose note reads "an empty ledger and a quiet system look identical".
-It now keeps its newest half, cut at a line boundary.
+v0.77.0, whose note reads "an empty ledger and a quiet, healthy system look
+identical to every reader". It now keeps its newest half, cut at a line boundary.
 
 **A log line said the opposite of what it meant.** The first real firing of the
 post-restart settling window reported an announcement "queued 117s inside the
@@ -1036,7 +1086,7 @@ differently.
 Genuine misses during ordinary running are unaffected, which is the point of
 the feature and is tested from both sides of the boundary.
 
-**Also: the documentation check added yesterday had a blind spot, and this
+**Also: the documentation check added in 0.100.1 had a blind spot, and this
 release walked straight into it.** It read outcome names written directly at the
 point of use, but the announcement outcomes are written through shared constants
 so that two programs spell them identically — so the new one was invisible to it
@@ -1069,9 +1119,10 @@ No behaviour changes.
 
 **A wake-up that failed usually told nobody.** There are four ways one can fail,
 and only one of them raised the alert. The phone system refusing to place the
-call, the second attempt being skipped because the handset had gone offline, and
-the second attempt failing when it was tried — all three wrote a line to a log
-file and stopped. The log is not what wakes you at six in the morning.
+call, the second attempt being skipped because the handset was not idle (busy,
+offline or unreadable), and the second attempt failing when it was tried — all
+three wrote a line to a log file and stopped. The log is not what wakes you at
+six in the morning.
 
 The give-away was sitting in the code. A carefully worded sentence for "the
 second attempt was not made" had been written, reviewed and corrected once, for
@@ -1083,13 +1134,16 @@ returns, so there is no longer a way to record a missed alarm quietly.
 
 Each alert says what actually happened and nothing more — whether the phone rang
 twice, rang once, or never rang at all, and if the second attempt was not made,
-why. A network blip while placing the call is still not treated as a failure: it
-retries, as before, rather than crying wolf.
+why. A network blip while placing the first ring is still not treated as a
+failure: the wake-up stays due and is tried again on the next pass, as before,
+rather than crying wolf. A blip at the second attempt is reported — as the phone
+system not being reachable, or as the handset not being available if it struck
+while the handset's state was being read.
 
 **The operator board now scrolls.** It never did. A roster taller than the
-window was simply cut off at the terminal's last row — and the bottom row is
-where the list of keys lives, so the first thing you lost was the reminder of
-what you could press. Ten rooms and one wake-up already overflowed a standard
+window was simply cut off at the terminal's last row — the status message first,
+then the list of keys just above it, so a little more overflow cost the reminder
+of what you could press. Ten rooms and one wake-up already overflowed a standard
 window.
 
 The roster now follows the selection and says how many rooms are above and
@@ -1178,8 +1232,8 @@ account of what the software did.
 
 ## 0.98.1
 
-**The announcement reconciler shipped in 0.98.0 reported its first failure ten
-minutes later, and it was wrong.**
+**The announcement reconciler shipped in 0.98.0 reported its first failure the
+moment it was installed, and it was wrong.**
 
 An announcement went out to the cordless at 6:36 pm and played perfectly — the
 call-quality log scored that call `excellent`. It had been sent by the previous
@@ -1233,7 +1287,9 @@ call itself, so the request and the result identify each other exactly. Pairing
 them by "closest in time to the same phone" would have matched every
 announcement in the current log correctly — but only because the closest two
 happen to be eight minutes apart. Three alerts in eight minutes is what a real
-incident looks like, and that is precisely when the log has to be right.
+incident looks like, and that is precisely when the log has to be right. (As
+shipped, Asterisk stripped the hyphens from that name on the way back, so the
+two never matched; fixed in 0.98.2.)
 
 An announcement cut off partway through still counts as having arrived, with
 how far it got recorded alongside. It did not meet its contract, and the
@@ -1366,8 +1422,8 @@ number attached to it does nothing.
 Both the lines worth keeping and the lines that leak are the same class, so no
 setting on that file can separate them. What separates them is which file the
 reader looks at. The fleet-outage detector now reads the private log, which
-cannot be read from outside the add-on, and the shared copy keeps only warnings
-and errors — no call trace, and so no numbers.
+cannot be read from outside the add-on, and the shared copy keeps only notices,
+warnings and errors — no call trace, and so no numbers.
 
 The shared log has been cleaned again in place. As before: a backup taken before
 today contains those numbers.
@@ -1395,7 +1451,9 @@ the problem exactly and set a level limit — on the *private* log, which nobody
 outside the add-on can read, leaving the shared one unlimited. That is now
 corrected, and the shared log keeps only what the fleet-outage detector reads
 from it. Verified against the same file: every leaking line is removed, and every
-line the detector needs is kept.
+line the detector needs is kept. (This fix proved inert — Asterisk's level number
+does not filter these lines — and the shared log kept the trace until 0.94.7
+removed `verbose` from it.)
 
 The existing file has been cleaned in place. Anyone who took a backup before now
 should be aware it contains those numbers.
@@ -1405,7 +1463,7 @@ should be aware it contains those numbers.
 **The documentation had drifted, and two of its security statements were wrong in
 the direction that matters — they claimed more protection than exists.**
 
-The readme still said the telephone console was unauthenticated on your network
+The readme still said the telnet console was unauthenticated on your network
 and told you to lock it down yourself. That stopped being true five releases ago,
 when both standalone consoles moved to your Home Assistant machine only. It also
 never mentioned that the console now lives in the Home Assistant sidebar, which
@@ -1416,7 +1474,7 @@ every dependency is installed inside the container image, which the scanner
 cannot read, so it has never raised anything here. It also had the two console
 address settings the wrong way round, said two accepted code-scanning findings
 were dismissed when they deliberately remain visible, and stated that turning
-either console off leaves the sidebar one alone. Turning off the telephone
+either console off leaves the sidebar one alone. Turning off the telnet
 console in fact stops the sidebar one working, because that is what it connects
 to. And it described an empty sign-in list as the only way the login is off —
 a list that fails to parse, or whose entries are missing a name or a password,
@@ -1577,16 +1635,18 @@ the request type they were written for. The list of permitted callers is now a
 single address: the loopback entries it used to carry are, on this add-on, the
 *host's* loopback and shared with everything else on the box.
 
-**A resize message would have rung a phone.** The browser sends its window size
-as text, and the check that recognises it was written for a different transport
-where it arrives as raw bytes — a comparison that is simply false for text, with
-no error. The message would have been typed into the board as keystrokes
-instead, and the board reads single letters as commands: `r` rings, `c`
-connects, `p` pages the house. The page sends that message the instant it
-opens. Opening the console would have rung a room and then walked the board
-through connect, page and lights. Found before shipping; the check now
-normalises the message first, and refuses to type anything that looks like a
-control message.
+**A resize message would have been read as board commands.** The browser sends
+its window size as text, and the check that recognises it was written for a
+different transport where it arrives as raw bytes — a comparison that is simply
+false for text, with no error. The message would have been typed into the board
+as keystrokes instead, and the board reads single letters as commands. The page
+sends that message the instant it opens. The first letter to take effect is the
+`p` of `type`, which asks whether to page every room and then ignores every key
+but a yes or a no — so opening the console would have left the board one Enter
+or `Y` away from paging the house. Had the selected room been on a call, the `t`
+before it would have opened a transfer instead, and the rest would have been
+ignored. Found before shipping; the check now normalises the message first, and
+refuses to type anything that looks like a control message.
 
 **The console runs without blocking the phone system.** The web server handles
 one thing at a time, and the older terminal's design waits on its socket — which
@@ -1672,7 +1732,7 @@ documentation workflow is tidied at the same time.
 **Two documents claimed every version is tagged. One is not.** `v0.42.1` has a
 changelog entry and a merge commit but no tag and no release — tagging was a
 manual step until `v0.46.1`, and that one was missed. Rather than mint a tag now
-(which would set the release machinery running against four-month-old sources),
+(which would set the release machinery running against seven-week-old sources),
 both documents now state the exception and name the commit.
 
 **The performance notes carried a stale version, a stale test count, and one
@@ -1686,8 +1746,8 @@ after. Each figure now states its own scope, and there is no file-level date.
 
 **`933` works, and it is no longer the number nobody has dialled.** `933` is the
 FCC's number for testing an emergency setup without engaging dispatch, and until
-now it had been reasoned about rather than tried — it shares a dialplan block
-with `911`, so it "almost certainly" worked. A test call from the cordless
+now it had been reasoned about rather than tried — it is generated by the same
+loop as `911`, so it "almost certainly" worked. A test call from the cordless
 handset confirmed it end to end: the call answered, played the spoken notice
 from the µ-law file, was tagged as an emergency attempt in the call ledger, and
 finished with no warning, error or notice anywhere in the log.
@@ -1721,10 +1781,10 @@ Two test calls settled two things that no amount of reading could.
 **A phone that rings out no longer fills the log with warnings.** Every
 unanswered call used to leave four warnings behind, because the code asked
 Asterisk about audio statistics that a call nobody answered does not have. The
-first attempt to stop that, three releases ago, asked the wrong question — it
-checked whether the call had negotiated audio, which the calling phone always
-has — and the warnings kept coming while two releases of notes said they had
-stopped. It now asks whether anyone answered.
+first attempt to stop that, in 0.77.0, asked the wrong question — it checked
+whether the call had negotiated audio, which the calling phone always has — and
+the warnings kept coming while two releases of notes said they had stopped.
+Since 0.83.0 it asks whether anyone answered.
 
 That could not be tested from a keyboard: it needs a real handset ringing out,
 and the machine cannot make one do that. Two have now happened, and the last
@@ -1760,8 +1820,8 @@ blank disables the alert; they were describing the intention, and the one line
 that decides it disagreed. The line now treats blank as blank, which makes every
 one of those statements true as written.
 
-**A caller's telephone number was still reaching the shared folder.** Five
-releases ago the call-quality records written there were changed to keep only
+**A caller's telephone number was still reaching the shared folder.** In
+0.81.0 the call-quality records written there were changed to keep only
 the last four digits of anything that is not an extension. The same number was
 also being written a second time, in the human-readable log line beside each
 record, and that log goes to the same shared folder in full. Measured on the
@@ -1779,7 +1839,7 @@ meant to be true — the file is out of reach of a file browser or another add-o
 and not out of reach of whoever administers the machine — and now they say so.
 It described announcements pushed from Home Assistant as unmeasurable in a
 paragraph directly beneath a sentence listing them among the things that are
-measured; the first was nine months out of date and is gone.
+measured; the first had been out of date since 0.57.0 and is gone.
 
 Newly written down: the second outage detector, which catches a failure that
 begins and ends between two health checks — the only one this system has had
@@ -1815,7 +1875,7 @@ learn what is written down should not be the last to know.
 **Thirty-one other statements were wrong**, most of them about behaviour that
 changed underneath them. The manual said the durable log ignored one setting
 when it now ignores it differently; that announcements pushed from Home
-Assistant could not be measured, which stopped being true nine months ago; that
+Assistant could not be measured, which stopped being true in 0.57.0; that
 seven speech features hold the recogniser in memory, while listing six. It told
 readers that `933` reads back what a carrier would see — it does not, and that
 one mattered more than the rest, because it describes something a person might
@@ -1890,7 +1950,9 @@ up"* — about a phone that had not rung once.
 
 The second attempt now gets the same check the first one does, and is recorded
 when it is skipped. The alert says only what is known: rung twice, rung once, or
-not rung at all because the handset was not there.
+not rung at all because the handset was not there. (As shipped it did not: the
+skipped case raised no alert and a real second ring was reported as skipped —
+repaired in 0.86.0 and 0.100.0.)
 
 **The long-term log recorded everything about this system except whether the
 phones were reachable.** Those events are emitted at a detail level the durable
@@ -1900,6 +1962,8 @@ explain, was unanswerable from it. The readable copy did have them and is
 size-capped, so the record aged out of the only copy that kept it. The durable
 log now keeps reachability and only reachability: one level up, not the entire
 call trace, which would put a great deal of noise on a disk that never forgets.
+(Not only reachability: the `verbose(2)` level number does not filter, so from
+this release the durable log also carried the dialplan trace — see 0.94.7.)
 
 That disk never forgetting was itself the problem — nothing had ever bounded
 that file. It is bounded now, at boot, before Asterisk opens it, keeping the
@@ -1994,9 +2058,9 @@ The reason it was not simply added to the list of words that hang up is that
 ends the call wherever it appears. A decline only ends the call when the whole
 sentence is one, so "no, turn on the kitchen light" is still a command.
 
-This was invisible before this release's predecessor. Nothing had ever recorded
-what the assistant said back, so a turn that answered the caller and a turn that
-told them it had not understood looked identical everywhere.
+This was invisible before 0.80.0. Nothing had ever recorded what the assistant
+said back, so a turn that answered the caller and a turn that told them it had
+not understood looked identical everywhere.
 
 **Every spoken prompt was being converted, on every playback.** All 28 recorded
 prompts ship as 16-bit PCM, while every phone in the house speaks G.711 u-law
@@ -2177,7 +2241,7 @@ every monitor reported healthy straight across it.
 The repair for this was already written. `endpoint_transitions()` reads
 Asterisk's own log — which records every reachability change as it happens, not
 whenever a sampler wakes up — and has been writing the list of extensions that
-dropped into the heartbeat file since v0.68.0. Nothing read it. The fleet-outage
+dropped into the heartbeat file since v0.65.0. Nothing read it. The fleet-outage
 alert continued to run entirely off point samples, which is the one thing that
 provably cannot see this.
 
@@ -2247,8 +2311,8 @@ apart.
 failure outcomes and no success one, so an announcement that rang out left
 nothing in any ledger — no delivery record, and no call-quality record either,
 because the leg was never answered. Absence in a delivery ledger reads as "we
-never tried". It now records `originate-queued`, named to match the wake-up
-side so one join covers both.
+never tried". It now records `originate-queued`, the announce counterpart of the
+wake-up side's `ring-queued`: both mean AMI accepted the Originate.
 
 ## 0.77.0
 
@@ -2318,6 +2382,9 @@ shape instead of inferring it from a missing key.
 `CHANNEL(rtcp,…)` field on a channel that never negotiated media logs two
 warnings; the guard that skips those legs was correct but ran *after* the reads
 it existed to avoid, so it silenced nothing. The media check now comes first.
+(It did not stop them — the calling leg has negotiated audio even when nobody
+answers, so the warnings continued until 0.83.0 gated on whether the call was
+answered.)
 
 ## 0.76.0
 
@@ -2352,10 +2419,9 @@ error — so following that advice would have silently disabled one of the two.
 **And a guard for the class:** every `Playback(switchboard/…)` in the generated
 dialplan must exist as a shipped `.wav`. A Playback of a missing file is a silent
 no-op — Asterisk warns and carries on, and the caller simply hears nothing where
-the explanation should be. The new misdial prompt was generated with the add-on's
-own piper voice at 8 kHz mono to match the existing prompts, and the guard was
-verified by pointing a Playback at a file that does not exist and watching the
-build fail.
+the explanation should be. The new misdial prompt was generated at 8 kHz mono to
+match the existing prompts, and the guard was verified by pointing a Playback at
+a file that does not exist and watching the build fail.
 
 ## 0.75.0
 
@@ -2627,10 +2693,11 @@ behaves.
 **Who can reach it.** The previous text left this to inference. Dial `47` is
 reachable by anyone who can pick up a house phone — and *not* by an outside
 caller, for two independent reasons that are worth stating rather than assuming:
-the inbound trunk `Dial` uses `r` only and never `t`/`T`, so no in-call DTMF
-transfer is armed for the outside party; and transfers are confined by
-`__TRANSFER_CONTEXT` to `[internal-xfer]`, which contains only room extensions
-and `0` — no feature codes at all.
+the inbound trunk `Dial` uses `r` plus a `b()` pre-dial handler (the
+outside-line ring) and never `t`/`T`, so no in-call DTMF transfer is armed for
+the outside party; and transfers are confined by `__TRANSFER_CONTEXT` to
+`[internal-xfer]`, which contains only room extensions and `0` — no feature
+codes at all.
 
 **What the exposure list really is.** It is the security boundary, so the section
 now says plainly that a garage door or lock does not belong on it, and that an
@@ -2722,9 +2789,10 @@ house, is why the option ships off.
 
 A call's recorded kind is no longer just the context it hung up in.
 
-`[rooms]` hosts five distinct call types — room-to-room dialling, outbound PSTN
-via the dial prefix, the operator, the talking clock and paging — and all five
-hang up in `[rooms]`, so all five were filed as `tag=rooms`. An audit found that
+`[rooms]` hosts several distinct call types — room-to-room dialling, outbound
+PSTN via the dial prefix, the talking clock and paging, plus any operator session
+the operator routes on to the clock or page — and all of them hang up in
+`[rooms]`, so all of them were filed as `tag=rooms`. An audit found that
 **none of the four records tagged "rooms" was actually a room-to-room call**:
 they were two outbound PSTN calls, an operator session and a paging leg. Any
 per-type quality trend drawn from that field was wrong.
@@ -2999,7 +3067,8 @@ poller stopped.
 The same record carries the trunk's registration state, which previously had **no
 timestamped history on any surface** — it lived only in a pushed HA sensor with
 no history, which freezes at its last value if the add-on dies. The trunk is the
-outside line and the open E911 path.
+outside line. (It is not an emergency path: this PBX has no E911 service, and 911
+is answered locally with a spoken notice, never dialled out the trunk.)
 
 An AMI-down cycle reports `reachable: null`, never `0`: no phones measured is not
 the same as no phones up.
@@ -3204,8 +3273,10 @@ confirmation that a dead phone system was healthy.
 `rollup_is_stale()` already covered one poller dying while another survived to
 notice and publish `unknown`. Nothing inside the add-on can cover the add-on
 itself being gone: no code is left running to say anything. That is detectable
-only from outside, by comparing a timestamp against now — so every sensor now
-carries `measured_at` and `poll_interval_s`, not just `link_health`:
+only from outside, by comparing a timestamp against now — so every health sensor
+now carries `measured_at` and `poll_interval_s`, as the link-health rollup and the
+wired sensor already did (the per-phone `sensor.switchboard_link_<ext>` sensors
+and `sensor.switchboard_last_call` are not stamped):
 
 - `sensor.switchboard_trunk_health`
 - `sensor.switchboard_cordless_health`
@@ -3237,9 +3308,9 @@ The call-quality ledger now covers every context that carries audio.
 - Only four contexts emitted the hangup extension that feeds
   `switchboard-callqos`, so wake-ups, wake-up delivery, paging, announcements
   and the voice menus produced **no record at all**. In one observed window ten
-  legs ran and exactly one was logged — the ledger was under-reporting activity
-  roughly fivefold, which is why a 3 a.m. wake-up session traced in the journal
-  was invisible to it. All six now report.
+  legs ran and exactly one was logged, and overall the ledger was under-reporting
+  activity roughly fivefold, which is why a 3 a.m. wake-up session traced in the
+  journal was invisible to it. All six now report.
 
 **Recorded is not the same as alerted.** The three legs the PBX originates to
 play something *at* a phone — wake-up delivery, paging, announcements — are
@@ -3344,7 +3415,9 @@ person fail to use the system.
   destination's — so `linkhealth.jsonl` silently became root-only `0600` where
   it had been `0664`. Nothing in the shipped image reads it, so nothing broke,
   but `/data/state` is the asterisk-owned directory precisely so non-root
-  components can. Restored, with a test that asserts the mode.
+  components can. It is now `0640` (root writes, group `asterisk` reads, no
+  world access) — tighter than before, because this ledger has a single writer —
+  and a test asserts the mode.
 
 **The sensor you are told to alert on describes its own freshness.**
 
@@ -3471,8 +3544,9 @@ audit — the items that were real but not urgent enough to hold up v0.49/v0.50.
 - Both consoles were described as unauthenticated; the web terminal takes a
   sign-in whenever `console_users` is set (§10, §15, and a §2 row that
   contradicted the row below it).
-- `/phonebook.xml` — the cordless handset's remote directory, and the one
-  unauthenticated LAN GET on the ingress port — is documented for the first
+- `/phonebook.xml` — the cordless handset's remote directory, one of two
+  unauthenticated LAN GETs on the ingress port (the other serves announcement
+  clips to media players under `/announce/`) — is documented for the first
   time, with the handset settings that point at it.
 - `log_level` documents its three real outcomes: four of the seven values are
   identical to each other.
@@ -3495,7 +3569,7 @@ Every code change is mutation-verified.
 A documentation-vs-reality audit compared every promise in the README, the
 reference, the security model and the Configuration-tab labels against what the
 code actually does. Where they disagreed, this release fixes whichever side was
-wrong — usually the code.
+wrong — the code in three places, the documentation in five.
 
 **Dial-a-status "power" worked on exactly one installation: this author's.**
 
@@ -3534,7 +3608,9 @@ wrong — usually the code.
 - `mwi_enabled` only controls the dial-0 auto-clear; it never switched the
   message-waiting indicator off. The Configuration-tab label also promised a
   "voicemail or missed-call" indicator — this system has neither.
-- `inbound_ext` fails open: a typo rings the whole house rather than nothing.
+- `inbound_ext` fails open: an entry that is not a configured room is dropped
+  (logged at start), and if no valid entry is left the call rings the whole
+  house rather than nothing.
 - SECURITY.md no longer claims every accepted LAN-local risk logs a start-up
   warning (two of four do), and now names `.github/codeql-baseline.json`, the
   exemption file the CI gate consults before failing a build.
@@ -3545,8 +3621,10 @@ Every code change is mutation-verified, including the tempting wrong fixes.
 
 ## 0.49.0
 
-Fixes four defects that the v0.48.0 durable log and three days of production
-telemetry exposed — including one in v0.48.0 itself.
+Fixes six defects that the v0.48.0 durable log and three days of production
+telemetry exposed — including four in what v0.48.0 itself added (the RTCP octet
+flags, the trunk watchdog's AMI-down guard and its re-register kick, and the
+comments on the speech-to-text budget it raised).
 
 **The new log caught a bug in the release that shipped it.**
 
@@ -3596,9 +3674,11 @@ telemetry exposed — including one in v0.48.0 itself.
   in the dial plan matched `911`. In the default **prefix** mode the outbound
   pattern `_9.` matched it and dialed the remainder, `11`, out to the PSTN: a
   wrong call placed during an emergency. In direct-dial mode it fell through to
-  an unexplained congestion tone. Both modes now match `911` (and the prefixed
-  `9911`) explicitly and answer with a spoken "this line cannot reach emergency
-  services — hang up and use a mobile" before any trunk pattern can match.
+  an unexplained congestion tone. Both modes now match `911` explicitly —
+  prefix mode also the prefixed form (`<dial_prefix>911`, `9911` by default),
+  direct-dial mode also the `933` test number — and answer with a spoken "this
+  line cannot reach emergency services — hang up and use a mobile" before any
+  trunk pattern can match.
 
 **The trunk auto-re-register was inert and is now real.**
 
@@ -3611,7 +3691,8 @@ telemetry exposed — including one in v0.48.0 itself.
   works with **no widening of AMI privilege**. A new test ties the chosen action
   to the granted classes, so neither half can drift again.
 
-All four fixes are mutation-verified: reintroducing each defect fails its test.
+Every behavioural fix is mutation-verified: reintroducing each defect fails its
+test (the speech-to-text change corrects comments only).
 
 ## 0.48.1
 
@@ -3637,7 +3718,9 @@ silently killed inbound calling for 24 hours.
     arise;
   - the link-health poller now watches the registration, publishes a new
     **`sensor.switchboard_trunk_health`**, and auto-sends a re-register if it
-    ever sees Rejected/Stopped;
+    ever sees Rejected/Stopped (as shipped, that kick used the AMI `Command`
+    action, which the add-on's AMI account is not permitted to send, so it was
+    inert until 0.49.0 switched to `PJSIPRegister`);
   - a persistent notification fires after 2 consecutive bad cycles and clears
     itself on recovery.
 
@@ -3678,8 +3761,9 @@ silently killed inbound calling for 24 hours.
   operator session no longer logs as 2 s); the raw value is kept in
   `billsec_raw`.
 - The dialplan now passes the extended RTCP telemetry (max/stdev RTT, max rx
-  jitter, octet counts) the ledger has carried null columns for since they
-  were added.
+  jitter) the ledger has carried null columns for since they were added. (It
+  also requested octet counts, which Asterisk rejects; they stayed null and the
+  request was dropped in 0.49.0.)
 
 **Speech that waits its turn.**
 
@@ -3776,9 +3860,9 @@ Per-room wake-up scenes.
   room.
 - `wakeup_scene` remains the fallback for rooms without an entry, so existing
   installs keep their current behavior unchanged.
-- Rows are validated against the configured rooms: an unknown extension or a
-  non-`scene.` entity is logged and dropped rather than staged into a wake-up
-  that would silently fail at 6 a.m.
+- Rows are validated against the configured rooms: an unknown extension is
+  logged and dropped, and a non-`scene.` entity is dropped, rather than staged
+  into a wake-up that would silently fail at 6 a.m.
 - The delivering AGI derives its room from the channel it is running on
   (`PJSIP/<ext>-…`) and falls back to the whole-house scene when the channel is
   not a room endpoint.
@@ -3904,8 +3988,8 @@ source. No add-on behaviour changes.
   DOCS all declare `amd64`/`aarch64` only.
 - Corrected a stale `switchboard-config` comment that described the tmpfs AMI secret
   file as `0600`; it is created `0640`, as `SECURITY.md` already documents.
-- Genericized the SIP-trunk POP hostname in the test fixtures to `losangeles.voip.ms`,
-  matching the documentation and completing the 0.42.2 hygiene pass.
+- Genericized the SIP-trunk POP hostname in the test fixtures to the provider POP
+  the documentation uses as its example, completing the 0.42.2 hygiene pass.
 
 ## 0.42.2
 
@@ -3946,10 +4030,10 @@ Documentation: a generated Word + PDF manual, built and attached automatically.
 
 `scripts/build-docs-docx.py` assembles README + SECURITY + DOCS.md into one
 printable manual — an editable **.docx** (via pandoc) and a reader-friendly
-**.pdf** (via LibreOffice, no LaTeX) — and a new `docs` CI workflow builds both on
-every push/PR (uploaded as an artifact, so a DOCS.md that stops converting fails
-the check) and attaches them to each published GitHub Release. Same process the
-ecoflow-panel and zwave repos use.
+**.pdf** (via LibreOffice, no LaTeX) — and a new `docs` CI workflow builds both
+on every push to main and every pull request into main (uploaded as an artifact,
+so a DOCS.md that stops converting fails the check) and attaches them to each
+published GitHub Release. Same process the ecoflow-panel and zwave repos use.
 
 The reference itself was refreshed for the current release: the real
 prefix-free **direct-dial GXW dial plan** and the **SSH CLI** config path (with
@@ -4051,8 +4135,8 @@ Operator greeting now advertises the voice features, plus public-repo hygiene.
 
 - **Greeting** — dial-0 now says "Say a room name, or ask for the time, weather,
   directory, or lights," so the voice features (added in 0.33.0) are discoverable
-  instead of hidden. Inbound outside calls ring only the cordless by default now
-  (`inbound_ext` example trimmed to a single ext; re-add a second to group-ring).
+  instead of hidden. (Inbound outside calls still ring every room by default:
+  `inbound_ext` stays blank; set it to the cordless's extension to ring only it.)
 - **Public-readiness** (the add-on is open-source): genericized the example
   provider username and caller-ID in the test fixtures to fictional values
   (`100000_switchboard`, a 555-0100 reserved number) so no real account identifier
@@ -4106,7 +4190,7 @@ Outside line: **dial numbers directly, without the `9` prefix** (opt-in).
 
 A new trunk toggle **`direct_dial`** (default off) lets you dial a phone number
 straight, like a cell phone — no outside-line prefix. When it's on, a **10-digit**
-(`602-555-1234`) or **11-digit** (`1-602-555-1234`) US/Canada number routes out the
+(`202-555-0123`) or **11-digit** (`1-202-555-0123`) US/Canada number routes out the
 trunk, while your 2–3-digit extensions and feature codes still ring internally. The
 system tells them apart by number **length** (NANP patterns), since without a prefix
 that's the only signal. `011` international and `900`/`1-900` premium stay blocked,
@@ -4168,7 +4252,7 @@ publishes each phone's registered contact IP (`contact_ip` on
 (default `19`) — so it auto-follows wherever DHCP puts the phone. `cordless_ip`
 remains as the fallback (used when the cordless is unregistered / rtpmon is off /
 `cordless_ext` is blank). No reservation required; a lease change no longer blinds
-monitoring. IP changes are logged for the durable forensic trail added in 0.31.0.
+monitoring. IP changes are logged to the add-on log.
 
 
 ## 0.31.0
@@ -4189,7 +4273,9 @@ Forensics: much longer log retention + a durable log that survives reboots.
   **and host reboots** — so the next time something like the RTP `Network
   unreachable` collapse happens, the evidence is still there afterward. Scoped to
   `notice,warning,error` (no verbose/debug, no security flood), so it grows
-  glacially: negligible SD wear, no rotation needed.
+  glacially: negligible SD wear, no rotation needed. (This did not take effect:
+  the channels were written under `[general]`, which Asterisk ignores, so the
+  file first appeared in 0.48.0.)
 
 No functional/telephony change. Note: the *host* systemd journal is still
 RAM-backed and erased by a reboot — capturing host/kernel/Supervisor logs across a
@@ -4304,10 +4390,11 @@ gateway). It publishes `sensor.switchboard_cordless_health` + `sensor.switchboar
 (graphable), and fires a one-shot `persistent_notification` on an unhealthy transition
 (consecutive-cycle hysteresis, escalation re-alerts, recovery collapses the entry) —
 CRITICAL when the cordless is offline or its battery is discharging under 15%, or all
-gateway ports drop; DEGRADED for weak/lost Wi-Fi, a low-but-charging battery, poor recent
-MOS, or some gateway ports down. Off by default until `cordless_password` is set for the
-deep (battery/Wi-Fi/MOS) checks; reachability + gateway health work without it. New
-options: `device_health_enabled|interval|alerts`, `cordless_ip|password`, `gateway_ports`,
+gateway ports drop; DEGRADED for weak/lost Wi-Fi, a low battery that is discharging but
+still above the critical level, poor recent MOS, or some gateway ports down. Off by
+default until `cordless_password` is set for the deep (battery/Wi-Fi/MOS) checks;
+reachability + gateway health work without it. New options:
+`device_health_enabled|interval|alerts`, `cordless_ip|password`, `gateway_ports`,
 `cordless_battery_crit_pct|warn_pct`, `cordless_wifi_min_signal`.
 
 
@@ -4348,8 +4435,9 @@ Make the cordless a home-wide announcer and give it a distinctive outside-line r
 
 **Announce endpoint (`POST /api/announce/{ext}`).** Speaks a message OUT a room
 handset: render TTS (`{"text": ...}` via espeak, or `{"url": ...}` fetching a WAV,
-e.g. `tts.piper`) to an 8 kHz clip Asterisk `Playback` can read, then originate an
-auto-answer call so it plays on the speaker. This is the SIP equivalent of a
+e.g. `tts.piper`) to an 8 kHz clip Asterisk `Playback` can read, then originate a
+call to that handset (meant to auto-answer; as shipped it rang instead, until
+0.25.1 added the `Call-Info` intercom header). This is the SIP equivalent of a
 `media_player` — a companion HA custom-component exposes it as
 `media_player.cordless_speaker`, so any HA TTS/automation (and the ecoflow-panel's
 audible alerts) can announce to the cordless exactly like the ecobee speakers. The
@@ -4362,9 +4450,11 @@ GS-Phonebook XML for the WP826's Remote Phonebook, so the cordless shows room NA
 on caller-ID and dials by name.
 
 **Distinctive ring for outside calls.** Inbound trunk calls tag the INVITE to the
-answering handset with a Bellcore `Alert-Info` (via a `b()` pre-dial subroutine), so
-the WP826 cordless rings differently for an outside call than a room-to-room call.
-Analog handsets ignore the header; the inbound leg stays `r`-only (no re-armed
+answering handset with a Bellcore `Alert-Info` (via a `b()` pre-dial subroutine),
+meant to make the WP826 cordless ring differently for an outside call than a
+room-to-room call (it did not: the bare `Bellcore-dr2` token was not recognized —
+see 0.25.1 — and a Bellcore tag changes only the ring cadence — see 0.26.0). Analog
+handsets ignore the header; the inbound leg stays `r`-only (no re-armed
 DTMF-transfer toll-fraud path).
 
 New `announce_asterisk.py` (dependency-free 8 kHz resample; no ffmpeg/audioop).
@@ -4541,7 +4631,7 @@ So every phone-originated call now really does log a `[rtpqos]` line — grep th
 add-on log for it — with jitter, packet loss, round-trip, codec, duration, hangup
 cause, and the **Media Experience Score** (rxmes/txmes, ~88 ≈ MOS 4.3). Verified on
 live room-to-room calls (0 loss, ~2 ms RTT, MES ~88). Trunk legs are skipped because
-VoIP.ms sends no RTCP — nothing to measure there.
+the trunk provider sends no RTCP — nothing to measure there.
 
 This also simplified the dialplan: the 0.19.0 per-Dial `b()` handler and caller-side
 pushes are gone (they were the broken path), so the Dials are back to their plain,
@@ -4557,7 +4647,8 @@ Per-call RTP quality telemetry — the numbers to tune call quality precisely.
   packet loss, jitter and round-trip time, the negotiated codec, the call duration,
   the hangup cause, and Asterisk's **Media Experience Score** (rxmes/txmes, a
   0–100 MOS-like rating). Grep the add-on log for `[rtpqos]` to see, for any call,
-  exactly what each end experienced.
+  exactly what each end experienced. (As shipped this logged nothing: chan_pjsip
+  needs `CHANNEL(rtcp,…)`, read in the `h` extension; fixed in 0.20.0.)
 - **Both legs are captured.** A hangup handler is registered on the caller (before
   each Dial) and on the callee (via each Dial's pre-bridge gosub), so a room-to-room
   call reports both phones, an outbound call reports both your phone and the trunk
@@ -4620,9 +4711,10 @@ could take the wrong action, and a broken announce that failed silently.
   were two entity IDs that no longer exist in Home Assistant, and HA returns
   "success" for a play to a missing entity — so the operator said "announcing on
   the speakers" while nothing played. The default now points at the real speakers,
-  the announce flow verifies each speaker exists before recording (a stale ID is
-  now an honest "the speakers are unavailable"), and `ha_client` logs every
-  rejected HA call instead of swallowing it.
+  the announce flow checks each configured speaker exists after recording and
+  before playing (stale IDs are dropped and logged, and if none of them exists the
+  caller hears an honest "the speakers are unavailable"), and `ha_client` logs
+  every rejected HA call instead of swallowing it.
 - **Directory (411) can't mis-dial a room when it mishears "list".** On a
   narrowband line whisper hears "list" as *lift* / *least* / *last* / *listing*,
   which used to clear the fuzzy room threshold and **connect a call to the wrong
@@ -4695,7 +4787,9 @@ respond noticeably faster.
   kill, never stacking a slow CLI run on top.
 - **Least privilege + resource-aware.** Binds loopback only (never the LAN),
   runs as the unprivileged `asterisk` user, and idles (holding no RAM) when the
-  new `stt_resident` option is off or when no speech feature is enabled.
+  new `stt_resident` option is off or when the operator, wake-up and automation
+  features are all off (dial-a-status and announce then use per-call
+  `whisper-cli`; 0.15.0 widened the gate).
 - **One-flip rollback:** set `stt_resident: false` to idle the server and revert
   to exactly the old per-call `whisper-cli` behaviour, no other change needed.
 
@@ -4735,10 +4829,11 @@ advertised feature, and itself a toll vector.
 Call-audio tuning, the second batch from the deep audit (the call-path changes,
 kept separate from the v0.13.0 control-plane fixes).
 
-- **Adaptive jitter buffer on the inbound trunk leg.** Audio from VoIP.ms crosses
-  the public internet (jittery); the LAN legs don't. `[from-trunk]` now sets
-  `JITTERBUFFER(adaptive)` on the trunk channel before dialing the handset, so
-  the answering cordless/FXS hears a de-jittered stream instead of choppy audio.
+- **Adaptive jitter buffer on the inbound trunk leg.** Audio from the SIP trunk
+  provider crosses the public internet (jittery); the LAN legs don't.
+  `[from-trunk]` now sets `JITTERBUFFER(adaptive)` on the trunk channel before
+  dialing the handset, so the answering cordless/FXS hears a de-jittered stream
+  instead of choppy audio.
 - **RTP watchdog on the NAT'd trunk.** `rtp_timeout = 60` / `rtp_timeout_hold =
   300` on the `[trunk]` endpoint tear a channel down if its media stalls
   (provider drops it, NAT pinhole closes mid-call) instead of hanging forever and
@@ -4759,17 +4854,19 @@ operator console no longer hammers Asterisk's manager 24/7.
   churn filled the Asterisk log ring buffer (real call/error events scrolled out
   within ~2 minutes) and was constant SD-card write pressure on a Pi already
   prone to card wear. A `ClientGate` (threading.Condition, no lost-wakeup race)
-  parks the poller with zero AMI traffic when no telnet/ttyd client is attached,
-  and wakes it on connect so the first frame is fresh. Idle console → zero churn.
+  parks the poller with zero AMI traffic when no telnet or browser-terminal
+  (console-web) client is attached, and wakes it on connect so the first frame
+  is fresh. Idle console → zero churn.
 - **`logger.conf` writes one channel, not two.** The redundant `messages =>` file
   duplicated every log line to the SD card (unrotated, read by nobody — the
   console stream already reaches the add-on log via journald). Dropped.
 - **`cdr_csv` no longer loads.** It appended `Master.csv` to the SD synchronously
   per call for records nothing reads (VoIP.ms keeps the authoritative CDR).
-- **`/api/status` has a short-TTL single-flight cache.** An open dashboard
-  refreshes every 4s and the transfer pre-check reads the same data; they (and
-  extra browser tabs) now coalesce onto one AMI session instead of each opening
-  their own. Errors propagate uncached, so callers keep their fail-open handling.
+- **`/api/status` has a short-TTL (2 s) cache.** An open dashboard refreshes
+  every 4s and the transfer pre-check reads the same data; requests inside the
+  TTL (extra browser tabs included) now reuse one AMI result instead of each
+  opening their own session, though a rare concurrent miss still fetches on its
+  own. Errors propagate uncached, so callers keep their fail-open handling.
 - **Config-generator correctness:** a room/trunk secret containing `;` or
   leading/trailing whitespace is now rejected loudly (Asterisk would silently
   truncate it and break registration); a **disabled** clock no longer falsely
@@ -4788,10 +4885,11 @@ Talking clock (dial 41): fuller military phrasing.
   cardinal ("five", "thirty", "zero") set off by the "hours, and" prompt so they
   no longer blend into the hour/minute groups.
 - The words that don't exist in Asterisk's core-sounds ("hours"/"and"/"seconds")
-  are two short espeak prompts (`sw-hours-and`, `sw-seconds`) in the same voice
-  as the other synthesized prompts; the number digits keep the professional
-  recorded voice. `clock_speak` and its 400-case test sweep were updated to the
-  new phrasing.
+  are two short espeak prompts (`sw-hours-and`, `sw-seconds`) in the same 8 kHz
+  mono 16-bit format as the other prompts, though in espeak's voice rather than
+  that of the operator and wake-up prompts; the number digits keep the
+  professional recorded voice. `clock_speak` and its 400-case test sweep were
+  updated to the new phrasing.
 
 ## 0.12.6
 
@@ -4809,7 +4907,7 @@ Fancier talking clock (dial 41): 24-hour time, with seconds, on a loop.
   digit sound files Asterisk ships (there are no "hours"/"minutes"/"seconds" word
   files), so the exact spoken sequence for any time is testable without a phone.
 - The loop lives in the dialplan, so hanging up simply ends the call. New espeak
-  preamble prompt `sw-at-sound-tone` (same voice/format as the existing prompts).
+  preamble prompt `sw-at-sound-tone` (same format as the existing prompts).
 
 ## 0.12.5
 
@@ -4976,13 +5074,14 @@ your house.
   your chosen media players (HomePod, Family Room Soundbar, Garage, …) via your
   local Piper TTS — an intercom from any handset to the whole house.
 
-New config: `status_ext`/`announce_ext` (dial codes 45/46, collision-checked like
-the others), `announce_players` + `announce_tts_engine`, and `wakeup_scene` /
-`wakeup_weather` / `wakeup_calendar`. Feature settings are staged to an
-asterisk-readable `/run/switchboard/features.json` (the AGIs run as the asterisk
-user and can't read root-only `/data/options.json`). `ha_client` gains generic
-`get_state` / `call_service` (allow-listed domains) / calendar / location helpers;
-new `weather.py` (NWS), `ha_reports.py` (spoken read-outs), and a shared
+New config: `status_enabled`/`status_ext` and `announce_enabled`/`announce_ext`
+(dial codes 45/46, collision-checked like the others), `announce_players` +
+`announce_tts_engine`, and `wakeup_scene` / `wakeup_weather` / `wakeup_calendar`.
+Feature settings are staged to an asterisk-readable
+`/run/switchboard/features.json` (the AGIs run as the asterisk user and can't
+read root-only `/data/options.json`). `ha_client` gains generic `get_state` /
+`call_service` (allow-listed domains) / calendar / location helpers; new
+`weather.py` (NWS), `ha_reports.py` (spoken read-outs), and a shared
 `agi_speech.py` for the voice flows.
 
 ## 0.10.4
@@ -5248,13 +5347,18 @@ tone (DOCS §4.2).
 
 ## 0.8.1
 
-Fix the message-waiting (MWI) stutter tone, found by live testing v0.8.0.
-`MWIUpdate` was rejected because Asterisk's `res_mwi_external` **declines to load
-while `app_voicemail` is loaded** (they both own a mailbox's MWI), and the stock
-autoload loads `app_voicemail`. The add-on now generates `modules.conf` that
-noloads the voicemail apps (we run no voicemail) and explicitly loads
-`res_mwi_external` + `res_mwi_external_ami` (and `app_confbridge`/`app_page` for
-the page intercom). No other behavior change.
+Attempted fix for the message-waiting (MWI) stutter tone, found by live testing
+v0.8.0, where `MWIUpdate` was rejected. The theory was that Asterisk's
+`res_mwi_external` **declines to load while `app_voicemail` is loaded** (they
+both own a mailbox's MWI), and the stock autoload loads `app_voicemail`. The
+add-on now generates `modules.conf` that noloads the voicemail apps (we run no
+voicemail) and explicitly loads `res_mwi_external` + `res_mwi_external_ami` (and
+`app_confbridge`/`app_page` for the page intercom). This did not fix it:
+`MWIUpdate` was still rejected, and 0.8.3 found `res_mwi_external` is not built
+into the Alpine package. Side effect: the generated `modules.conf` replaces the
+curated 0.1.3 file at every start, so its noloads (`chan_alsa`, `chan_console`,
+`chan_dahdi`, the ADSI modules and the SQLite CDR/CEL backends) no longer apply;
+`chan_alsa`/`chan_console` were noloaded again in 0.12.2.
 
 ## 0.8.0
 
@@ -5280,11 +5384,11 @@ a house-wide page intercom, and message-waiting stutter tones.
   (TUI **M** / dashboard ✉) so its phone gives the classic **stutter dial tone** —
   "call the operator". It **clears automatically** when that room dials 0, and the
   ✉ badge persists across restarts (re-asserted on startup). Requires the
-  Grandstream's "MWI → stutter tone" setting (see DOCS §; one-time per port).
+  Grandstream's "MWI → stutter tone" setting (see DOCS §4.2; one-time per port).
 - New options: `automation_enabled`/`automation_ext` (43), `page_enabled`/
   `page_ext` (44), `mwi_enabled`. No change to existing room/trunk config.
 - New shared modules (`ha_client`, `mwi_store`) + CLIs (`switchboard-tts`,
-  `switchboard-mwi`); all pure logic unit-tested (suite 411 → 495 checks).
+  `switchboard-mwi`); all pure logic unit-tested (suite 260 → 495 checks).
   Built as five parallel workstreams, then hardened by a five-dimension
   adversarial review (10 findings fixed, incl. restart MWI-replay, the offline
   "Unassigned"-area voice path, and operator-answer latency).
@@ -5329,8 +5433,9 @@ help overlay and a live time preview.
 - **Help overlay:** press **?** for a one-screen key reference.
 - This is the TUI's first text-entry mode, which needed two small enabling
   fixes: `parse_input` now recognizes Backspace/Delete (the web terminal sends
-  `0x7f`), and **q**/**Q** only quit from the board — a literal `q` while typing
-  a time (e.g. "quarter") stays text (Ctrl-C is always a hard exit).
+  `0x7f`), and **q**/**Q** quit from anywhere except the wake-up time field — a
+  literal `q` while typing a time (e.g. "quarter") stays text (Ctrl-C is always
+  a hard exit).
 - No new options, services, or dependencies. Wake-ups set in the TUI are
   delivered by the existing scheduler exactly like voice-set ones.
 
@@ -5453,9 +5558,10 @@ Actually fix the dashboard showing every registered phone as "Offline" (the
 - **Root cause (diagnosed live):** `PJSIPShowEndpoints` parsing was fine —
   `/api/status` already returned `DeviceState: "Not in use"` for all 8 rooms.
   The failure was isolated to two places: (1) `registered` was derived *only*
-  from a `PJSIPShowContacts` match that never landed because the AMI client read
-  fields with the wrong casing (`AOR`/`URI`/`Status` vs Asterisk's `Aor`/`Uri`),
-  so every contact keyed on `""`; and (2) the browser pill used
+  from a `PJSIPShowContacts` match that never landed because the AMI client
+  keyed contacts on an `AOR` field that `ContactList` does not carry (its
+  identity is `Endpoint`) and read `URI` where Asterisk sends `Uri`, so every
+  contact keyed on `""`; and (2) the browser pill used
   `device_state.includes('use')`, which matches `"Not in use"` and painted idle
   phones orange.
 - **Case-insensitive AMI parse:** `_ami_command` now lower-cases every response
@@ -5465,8 +5571,8 @@ Actually fix the dashboard showing every registered phone as "Offline" (the
   no reachable contact and `Not in use` once one binds — so `registered` is now
   taken from `DeviceState` (the signal Asterisk already aggregates), with
   contact reachability as a secondary confirm. The per-contact row is enrichment
-  (status text + RTT) only. Contacts are keyed by `aor`/`endpointname` with an
-  `objectname` fallback so a renamed field can't silently drop them.
+  (status text + RTT) only. Contacts are keyed by `endpoint` (then `aor`) with an
+  `objectname`-prefix fallback so a renamed field can't silently drop them.
 - **Pill fix:** `"Not in use"` → green **Registered**; only an active call state
   (`In use`/`Ringing`/`Busy`/`On Hold`) → orange; otherwise red **Offline**.
 - **Contacts keyed correctly:** the `ContactList` event has no `Aor` field — the
@@ -5635,7 +5741,8 @@ change is the AMI least-privilege tightening below).
   classes (was `system,call,command,reporting,originate`); it only ever reads.
 - **Robust parsing:** a malformed `options.json` and non-numeric port/RTP values
   no longer crash the init oneshot (which would take the whole add-on down);
-  they fall back to defaults with a clear log.
+  they fall back to defaults (a malformed `options.json` is logged; non-numeric
+  port/RTP values fall back silently).
 - **Web UI XSS fix:** room labels and AMI caller-ID (attacker-controlled on
   inbound trunk calls) are HTML-escaped before rendering; AMI errors are
   reported to the browser as a generic message and logged server-side.
@@ -5668,8 +5775,8 @@ Build fix.
 - Drop the non-existent `asterisk-pjsip` and `asterisk-sounds-en` Alpine
   packages that broke the image build. PJSIP ships inside the main `asterisk`
   package; `asterisk-sample-config` provides modules.conf so it autoloads.
-- Music-on-hold sounds and the Opus codec are now installed best-effort, so a
-  missing optional package can never fail the build.
+- Music-on-hold sounds are now installed best-effort (like the Opus codec
+  already was), so a missing optional package can never fail the build.
 - Invalid-extension handling uses a generated congestion tone instead of a
   prompt sound file (no sounds package required for core calling).
 
@@ -5677,7 +5784,7 @@ Build fix.
 
 Initial release.
 
-- Asterisk 21 + PJSIP packaged as a Home Assistant add-on (Ingress + AppArmor).
+- Asterisk 20 + PJSIP packaged as a Home Assistant add-on (Ingress + AppArmor).
 - Room-to-room calling: each `rooms` entry becomes a PJSIP endpoint for one
   Grandstream GXW4216 V2 FXS port.
 - Configurable codecs (`codecs` option). Default prefers G.711 µ-law for the

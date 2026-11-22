@@ -25,7 +25,9 @@ is reproduced, and see [Known exposure](#known-exposure).
 on one gateway, one WiFi cordless, and one softphone that has never registered —
 plus one trunk. An existence proof, not a distribution.
 
-**Software version 0.100.3.** Quantiles are nearest-rank.
+**Figures were cut on software version 0.100.3** unless they name a later
+release (the §6 test count is from 0.115.0); later releases are named where they
+change what a figure means. Quantiles are nearest-rank.
 
 There is deliberately no single "data as of" line. There was one, and it was the
 document's own second rule being broken at file scope: §1's ledger figures were
@@ -38,8 +40,11 @@ figure below states the population it covers.
 ## 1. Call quality
 
 252 records spanning **2026-07-11 → 2026-09-06** (56.5 days), from
-`/data/state/callqos.jsonl`. One row per hung-up leg, including two that carried
-no media at all.
+`/data/state/callqos.jsonl`. One row per hung-up leg that ran a call context's
+`h` extension: the phone that dialled, the inbound trunk, or the phone's own leg
+of a wake-up, page or announcement the PBX originated. A leg that `Dial()`
+reaches (the phone that answers a room-to-room or inbound call) runs no context
+and is never recorded. Two of the rows carried no media at all.
 
 | Verdict | Legs | |
 | --- | ---: | --- |
@@ -91,8 +96,8 @@ eightieth of it — and would have been graded on that alone.
 
 Loss is zero at the 90th percentile in both directions — the expected reading for
 wired handsets on a quiet LAN. It is not, however, quiet: **the loss threshold
-has fired five times**, and four of those five were the transmit direction, at
-10.7%, 12.0% and 32.9%. A first draft of this section reported receive loss
+has fired five times**, and four of those five were the transmit direction, the
+highest at 32.9%. A first draft of this section reported receive loss
 alone and concluded from its 6% ceiling that the threshold had never fired. Both
 halves were wrong, and the second was wrong *because* of the first — the column
 that fired was the column not shown.
@@ -101,9 +106,11 @@ that fired was the column not shown.
 `slin` row predates 0.77.0, when the field carried Asterisk's internal read
 format rather than the negotiated one — `slin` is a codec `pjsip.conf` forbids,
 which is what exposed the bug. Six legs have been recorded since; **four carry
-`codec: ulaw` and `read_format: ulaw`**, confirming on live calls that
-`CHANNEL(audionativeformat)` resolves. The other two are the no-media legs, which
-populate neither field.
+`codec: ulaw` and `read_format: ulaw`**. That pair alone does not prove
+`CHANNEL(audionativeformat)` resolves, because `codec` falls back to the read
+format when it is empty; the `[rtpqos]` Verbose line, which prints the two
+separately, is the place to confirm it. The other two are the no-media legs,
+which populate neither field.
 
 **Sampling.** Of the 63 legs carrying the derived flag: 53 `multi`, 4 `single`,
 6 `none`. `single` means the RTT figures rest on one RTCP round — statistically
@@ -117,14 +124,19 @@ fields.
 sudo docker exec app_<slug> sh -c 'cat /data/state/callqos.jsonl'
 ```
 
+This prints the ledger as it stands now: a rolling window of the last 300 legs.
+It no longer holds all 252 rows counted above, so it cannot regenerate these
+figures.
+
 ---
 
 ## 2. Link health
 
 1,704 cycles spanning **2026-09-01 → 2026-09-06** (5.6 days), from
-`/share/switchboard/heartbeat.jsonl`. The add-on has run since 2026-08-11, so
-the file is younger than the deployment; at 350 KB against a 4 MB cap it has
-never rotated, and why it begins on 1 September is not established here.
+`/share/switchboard/heartbeat.jsonl`. The add-on has been writing call-quality
+rows since 2026-07-11 (§1), so the file is younger than the deployment; at
+350 KB against a 4 MB cap it has never rotated, and why it begins on 1 September
+is not established here.
 
 **Read the populations.** The `settled` and `phase` keys shipped mid-window and
 exist on 288 rows only. Figures below are labelled with the set they cover;
@@ -138,9 +150,13 @@ mixing them is how the first draft of this section produced four wrong numbers.
 
 The 100% columns are real and cover less than a day. The 98.4% and 94.9% are the
 figures for the stated window, and the shortfall in both is restart convergence,
-not fault: **27 poller restarts** occurred in the window, counted from the
-`ami: unreachable` first-cycle signature that is present throughout. Only 8 of
-those carry the `poller_started` flag, which shipped on 2026-09-05 — counting
+not fault: **27 poller restarts** occurred in the window, counted from the rows
+carrying `ami: unreachable`, the one signature present throughout the window. It
+is not a guaranteed restart marker: whether a restarted poller's first cycle
+reaches AMI is a race, so a restart can leave no such row, and any cycle without
+an AMI summary writes it, restart or not. The guaranteed marker, from 0.72.0, is
+`poller_started: true` with `since_prev_s: null`. Only 8 of the 27 carry the
+`poller_started` flag, which shipped on 2026-09-05 — counting
 the flag instead of the signature undercounts restarts by 3.4×.
 
 **Wired round-trip.** The eight analog ports, restricted to the 262 cycles that
@@ -154,9 +170,10 @@ ports mid-warmup and are excluded).
 
 **Receive-jitter peak, wired versus cordless.** The four legs recorded on wired
 handsets since the field was renamed read 0.12, 0.88, 1.12 and 1.25 ms. The
-cordless reaches 58.25 ms. Two orders of magnitude, on the same PBX, at the same
-moment — which is why a single fleet figure is useless and the two are separated
-everywhere in this document.
+cordless reached 58.25 ms on a leg recorded before the rename (the same
+quantity, then named `jitter_rx_max_ms`): roughly 47 to 485 times the wired
+readings, on the same PBX — which is why a single fleet figure is useless and
+the two are separated everywhere in this document.
 
 **Fleet worst, including the cordless** — a third population again:
 
@@ -179,16 +196,20 @@ not, and calling the detector "exercised" — as a first draft of this section d
 transitions are recoveries from the 27 restarts; 100 of the 174 predate the first
 restart carrying the flag.
 
-The one fleet outage this system is known to have had — all eight ports for 119
-seconds on 2026-09-01 at 01:00 MST — falls **inside** this file's window, at
+The one fleet outage this system is known to have had — all eight ports dropping
+from 01:00:07 MST on 2026-09-01 and all back by 01:02:06, 119 seconds from first
+drop to last recovery — falls **inside** this file's window, at
 08:00 UTC. It is absent because it fell entirely between two five-minute samples:
 the cycles at 07:58:47 and 08:03:47 UTC both read `reachable: 9, total: 10`. That is
 the defect 0.79.0 was written for, preserved here as the clearest evidence that a
 point sampler cannot see it.
 
 ```
-sudo docker exec app_<slug> sh -c 'tail -n 5 /share/switchboard/heartbeat.jsonl'
+sudo docker exec app_<slug> sh -c 'cat /share/switchboard/heartbeat.jsonl'
 ```
+
+This prints the file as it stands now. It is trimmed to its newest half whenever
+it passes 4 MB, so the 2026-09-01 → 09-06 rows may no longer be in it.
 
 ---
 
@@ -204,18 +225,18 @@ it began.
 | `announce-undelivered` | 3 | new in 0.98.0. **2 of the 3 are known false positives** from defects fixed the same night — one judged across an upgrade boundary (0.98.1), one whose join key Asterisk had mangled (0.98.2). The third is genuine and was caused by an add-on restart. |
 | `announce-unsettled` | 1 | new in 0.100.2, and **verified by induced failure** on 2026-09-11: an announcement queued 10 s after a restart, its dialog refused with `invalid URI`, recorded not-judged rather than failed. |
 | `audio-delivered` (announce) | 7 | new in 0.98.0 |
-| `audio-delivered` (wake-up) | 2 | new in 0.97.0 |
 | `originate-queued` (announce) | 36 | new in 0.78.0 — the announce path recorded only failures before it |
 | `originate-refused` (announce) | 1 | AMI reachable and refusing, during a restart |
 | `unreachable` (announce) | 4 | the pre-flight device check refused to ring a dead endpoint |
 | `answered` (wake-up) | 10 | |
 | `answered-silent` (wake-up) | 2 | picked up, nothing played |
+| `audio-delivered` (wake-up) | 2 | new in 0.97.0 |
 | `no-answer` (wake-up) | 2 | |
 | `ring-queued` (wake-up) | 12 | |
 | `ring-requeued` (wake-up) | 4 | the second ring |
 | `spoken` (wake-up) | 8 | |
 | `undelivered` (wake-up) | 2 | |
-| `permcheck` (self-test) | 1 | the writability probe added in 0.74.0 |
+| `permcheck` (self-test) | 1 | a one-off write test, not a shipped probe: no release writes this outcome, and the 0.74.0 writability probe (`is_writable()`) checks access and writes no row |
 
 **The reconciler is no longer unexercised.** The 0.94.4 edition of this document
 recorded it as covered by tests only; it has since judged real wake-ups and real
@@ -237,9 +258,11 @@ somebody to dial the announce code.
 counted here: the wake-up `set`, `cancelled` and `snoozed` rows (0.101.0);
 `announce-originate-failed`, which replaces the announce path's
 `originate-refused` / `originate-error` rows, and `announce-guard-unjudged`
-(0.104.0); `announce-retry-attempted` and `announce-retry-skipped` (0.105.0); and
+(0.104.0); `announce-retry-attempted` and `announce-retry-skipped` (0.105.0);
 `duplicate-pending` (0.106.0), when `duplicate-suppressed` (written since 0.62.0)
-also began to be decided from the ledger. From 0.105.2 a pre-send
+also began to be decided from the ledger; and the wake-up `missed` row, with
+`reason` `not-running` or `grace-expired`, for a wake-up whose time passed
+without a ring (0.108.2). From 0.105.2 a pre-send
 guard refusal (`unreachable`, `skipped-busy`) carries its clip and is replayed by
 the automatic retry under the same limits, rather than ending that
 announcement's history.
@@ -340,16 +363,16 @@ quiet because the system is healthy or because they cannot fire.
 | Assistant health | — | No ledger before 0.80.0 (§4). |
 | Emergency notice (`911`, `933`) | 2 calls | **Both verified by hand** 2026-09-06, one per handset family: `911` from a wired FXS port (`PJSIP/12`), `933` from the WiFi cordless (`PJSIP/19`). Each ran its whole block — Answer, `SW_TAG=emergency`, `sw-no-emergency.ulaw`, `Congestion(5)` — and wrote an `emergency`-tagged row, with no WARNING, ERROR or NOTICE anywhere in either window. |
 | Fleet drop (between samples) | 0 | Shipped 0.79.0. Its input half runs (174 transitions read); its deciding half has never seen a candidate — all 174 were recoveries (§2). |
-| Fleet outage (point sample) | 0 | Structurally blind to an outage shorter than two poll intervals. The one real outage lasted 119 s. |
+| Fleet outage (point sample) | 0 | Needs the outage on two consecutive samples, so it cannot see one shorter than a single poll interval (300 s by default) and is certain to see one only from two intervals. The one real outage lasted 119 s. |
 | Poor-call alert | 11 legs | Fired, but not on every leg it should have. Until 0.104.0 a wake-up, page or announcement leg whose clip played could cross the MES, loss or round-trip threshold and raise nothing; a later pass over 50 days of the ledger found 5 such legs. From 0.104.0 those legs alert like any other. A truncated page or announcement still raises nothing; a truncated wake-up raises its own `undelivered` alert. |
 | Round-trip threshold | 0 | **Could not fire.** Tested against `rtt_ms`, whose maximum across all 244 legs is 311.66 ms, against a 400 ms threshold — while `rtt_max_ms` in the same records reaches 845.93 ms. Fixed in 0.77.0: it now alerts on `rtt_mean_ms` above 250 ms or `rtt_max_ms` above 500 ms, and applies the 400 ms test to `rtt_ms` only when neither is recorded. |
-| Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, the expected rate at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
+| Unanswered-leg media gate | 2 legs | **Verified in BOTH directions** 2026-09-06. It skips when it should: two unanswered legs since it shipped, both routed to `no-media`, and the last media warning anywhere in the log is still 13:17:35 — the final unanswered call before the fix. It also does *not* skip when it shouldn't: on the answered `933` call the gate evaluated `GotoIf("0?nomedia")`, fell through, and read `RXC=621 TXC=621` over 12 s (≈52 packets/s, close to the 50 packets/s expected at 20 ms ptime). That second half is the one worth having, because a gate stuck permanently open produces the same zero-warning reading while silently discarding every call's RTP telemetry. |
 | Wake-up undelivered | 5 legs | **Fired, and was wrong all five times.** Every notifying row in the QoS ledger falls on 2026-09-08/09 and each was a delivered wake-up scored `undelivered` because the scorer's terminal-stage list had drifted from the dialplan. Fixed in 0.97.0; **zero notifying rows since**, against 2 wake-ups delivered on 2026-09-11 that both scored `excellent`. A detector's first firing being a false positive is the argument for this table. |
 | Announce undelivered | 3 | New in 0.98.0. 2 of 3 were false positives from defects fixed the same night; the third was genuine (a restart). See §3. |
 | Announce settling window | 1 | New in 0.100.2. **Verified by induced failure** rather than by waiting: an announcement queued 10 s after a deliberate restart, dialog refused, recorded `announce-unsettled`. The only detector here whose first firing was arranged on purpose. |
 | No-media split (4 verdicts) | 0 | Shipped 0.96.0. 10 legs recorded since and none was a no-media leg, so all four verdicts are unexercised — accruing, not proven. |
 | Wake-up snoozed from the ringing phone | — | Not counted here. From 0.101.0 a set or cancel dialled on the ringing room's own phone records `snoozed` in place of a re-ring and a critical alert; before it, a snooze was escalated as an unanswered wake-up. A change from the dashboard or console does not count. Accruing from 0.101.0. |
-| Cordless degraded (handset's own score) | — | Not counted here. From 0.102.0 a low handset score marks the cordless degraded only when the PBX's record of the same call corroborates it (at least 1 % loss on the way to the handset, or an MES below 78 for that stream; from 0.116.0 that MES is `mes_rx`, having been the microphone stream's `mes_tx`); otherwise the sensor stays `ok` and flags the score `last_mos_uncorroborated`. Every low score is captured once to the root-only `/data/state/cordless-mos.jsonl` (512 KB cap). Accruing from 0.102.0. |
+| Cordless degraded (handset's own score) | — | Not counted here. From 0.102.0 a low handset score marks the cordless degraded only when the PBX's record of the same call corroborates it (at least 1 % loss on the way to the handset, or an MES below 78 for that stream; from 0.116.0 that MES is `mes_rx`, having been the microphone stream's `mes_tx`); otherwise the sensor stays `ok` and flags the score `last_mos_uncorroborated`. Every low score is captured to the root-only `/data/state/cordless-mos.jsonl` (512 KB cap), once per verdict: a record first seen unmatched and judged again once its call is in the ledger gives two rows. Accruing from 0.102.0. |
 
 **Of the eleven detectors counted at 0.100.3, five have never fired.** One is genuinely quiet, two have not been
 exercised, one has never received a candidate input, and one was structurally
@@ -361,10 +384,10 @@ stays unproven until a person walks to a handset.
 
 The gate is the one to learn from. Its first verification looked complete and
 was half a result: "zero warnings" is equally consistent with a gate that works
-and a gate jammed shut, and only an *answered* call — which nothing in a shell
-can produce — separates them. Two of the five silent detectors above are silent
-for exactly that reason, and no amount of reading the code would have told them
-apart either.
+and a gate stuck permanently open, diverting every leg to `nomedia`, and only an
+*answered* call — which nothing in a shell can produce — separates them. Two of
+the five silent detectors above are silent for exactly that reason, and no
+amount of reading the code would have told them apart either.
 Separating those three cases is the only reason this table is worth keeping — a
 detector that cannot fire and a healthy system produce identical silence.
 
@@ -377,14 +400,15 @@ detector that cannot fire and a healthy system produce identical silence.
 | Tests | **1188** at 0.115.0, ~20 s | `pytest`, below |
 | Mutants applied, 0.77.0–0.80.0 | 64 | release commits |
 | Killed | 64 | release commits |
-| Survived their first run | 10 | release commits |
+| Survived their first run | not recorded (the messages give kill counts only; test comments those releases added describe at least 6) | release diffs |
 | Mutants applied, 0.96.0–0.100.3 | 66 | release commits |
 | Killed | 66 | release commits |
 | Survived their first run | 7 | release commits |
 
 The mutation figures are the one place this document breaks its own first rule:
-they come from the release commit messages, not from a ledger on disk, and
-cannot be reproduced by running anything in this repository. They are recorded
+they come from the release commits (the kill counts from their messages), not
+from a ledger on disk, and cannot be reproduced by running anything in this
+repository. They are recorded
 because the alternative is omitting the most informative number here.
 
 A mutant is a deliberate defect applied to the source; it is *killed* when a
@@ -437,22 +461,30 @@ was made deliberately complete on the reasoning that a partial mirror is *"not a
 smaller truth, it is a different claim"* — which was argued about auditing
 completeness and never about disclosure.
 
-Most belong to people who called this house. Two are numbers it called — which
-is the more sensitive direction, and the one a first draft of this section
+Ten belong to people who called this house. The 32 `rooms` rows hold the caller
+ID the dialplan sets before an outbound call, which `switchboard-callqos`'s own
+note identifies as the household's public number. Two are numbers it called —
+which is the more sensitive direction, and the one a first draft of this section
 asserted was not present.
 
-**Fixed across 0.81.0 and 0.86.0, and the gap between them is the lesson.** The
-`/share` mirror keeps only the last four digits of anything longer than an
-extension and marks the row redacted; the private `/data` ledger keeps the number
-in full, and the one historical row already in the mirror was remediated.
+**Fixed across 0.81.0, 0.87.0 and 0.99.0, and the gaps between them are the
+lesson.** The `/share` mirror keeps only the last four digits of anything longer
+than an extension and marks the row redacted; the private `/data` ledger keeps
+the number in full, and the one historical row already in the mirror was
+remediated.
 
 That was 0.81.0, and it was only half. The same number reached the same directory
 by a second route: the per-call hangup hook also writes a human-readable
 `Verbose` line, and `/share/switchboard/asterisk.log` then took the full verbose
 class (it has taken none since 0.94.7). Measured on the live system after the "fix": **14 such lines carrying 2
 distinct telephone numbers.** Redacting one writer and not the other left the
-disclosure intact and the record of it looking closed. 0.86.0 truncates the
+disclosure intact and the record of it looking closed. 0.87.0 truncates the
 number in that line too, on the same six-digit rule.
+
+The mirror's own mask had a gap as well: 0.81.0 applied it only to an all-digit
+value, so a number arriving with a leading `+` was still written to the mirror
+in full. From 0.99.0 it applies to anything longer than an extension, `+`, `*`
+and `#` included.
 
 > The commands in this document print raw ledger rows, which contain the data
 > described above. Read them on the machine; do not paste the output anywhere.

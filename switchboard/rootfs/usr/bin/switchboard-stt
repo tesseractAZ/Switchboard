@@ -84,7 +84,7 @@ def transcripts_allowed() -> bool:
     forwards its stderr, and Asterisk's stderr is the add-on journal: served by
     the Supervisor to anyone with log access, kept about two days, and kept
     across a host reboot. The `heard=` lines below put every operator, wake-up,
-    home-automation, status, directory and assistant recognition there verbatim,
+    home-automation, status, announce, directory and assistant recognition there verbatim,
     whatever `assistant_transcripts` said — that option reached only the
     assistant's private ledger, while comments across the repo called the
     journal short-lived.
@@ -348,8 +348,8 @@ def resolve_rooms_text(text: str, rooms: list, synonyms: dict | None = None,
       * feature-first would let a bare feature word swallow a handset genuinely
         NAMED after it (a room called "Weather" → dial-a-status, never the room);
       * room-first would let match()'s fuzzy scorer misroute a bare feature word
-        to an unrelated room that merely shares letters — e.g. "page" scores 0.67
-        against a room named "Garage" (both clear the 0.6 room threshold), so the
+        to an unrelated room that merely shares letters — e.g. "page" scores 0.60
+        against a room named "Garage" (exactly the 0.6 room threshold, which it clears), so the
         caller who said "page" would reach the Garage phone, not the intercom.
 
     So: a CONFIDENT room match (exact name/synonym, full-word, or a clipped
