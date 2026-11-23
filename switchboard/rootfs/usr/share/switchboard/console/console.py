@@ -999,8 +999,9 @@ def render(board: dict, sess: dict, now: float) -> list[str]:
     # Everything here is fixed except three lists that all grow with the
     # household: the roster, the active calls and the wake-ups. Past the
     # terminal's height the surplus was simply clipped — and the bottom is where
-    # the key bar lives, so the first thing an operator lost was the list of what
-    # they could press. Ten rooms plus one wake-up already overflows 24 rows.
+    # the status message sits, with the key bar just above it, so the first thing
+    # an operator lost was the message, and a little more overflow cost the list
+    # of what they could press. Ten rooms plus one wake-up already overflows 24 rows.
     #
     # What is given up, in order:
     #   1. the roster scrolls, following the selection — the lights list's rule,

@@ -639,6 +639,58 @@ def test_the_whole_run_script_starts_the_terminal_only_with_a_login():
     outcome, log = _run_console_web(good, enabled="false")
     check(f"console-web/run end to end: console_web_enabled false -> IDLE (got {outcome})", outcome == "IDLE")
 
+
+def test_an_ipv6_bind_is_written_in_brackets_beside_its_port():
+    """v0.128.0: '::1:8100' reads as an address with no port; the run script
+    writes an IPv6 bind as [::1]:8100, as server.py does, in either input form."""
+    good = '[{"username":"op","password":"pw"}]'
+    for bind in ("::1", "[::1]"):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run: bind {bind} -> SERVER (got {outcome}, {log})", outcome == "SERVER")
+        check(f"console-web/run: bind {bind} start-up lines ({log})",
+              "INFO: Starting Switchboard console web terminal on [::1]:8100 ..." in log
+              and any("login gate ACTIVE (1 user(s)), bound to [::1]." in l for l in log))
+    outcome, log = _run_console_web("[]", bind="::")
+    check(f"console-web/run: the NOTICE brackets it too ({log})",
+          any("through [::]:8100." in l for l in log) and outcome == "IDLE")
+
+
+def test_the_run_script_logs_the_address_the_server_binds():
+    """v0.128.0: the run script reads console_web_bind with the server's own
+    consoleproto.bind_address, so for any value the two agree on the address
+    and on whether it is loopback (a second, shell reading disagreed for
+    "[127.0.0.1]", "[ ::1 ]" and non-ASCII whitespace)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "rootfs" / "usr" / "share"
+                           / "switchboard" / "console-web"))
+    try:
+        import consoleproto
+    finally:
+        sys.path.pop(0)
+    good = '[{"username":"op","password":"pw"}]'
+    for bind in ("[127.0.0.1]", "[ ::1 ]", " 0.0.0.0 ", " ", "[ ]", "\x1c", "[::]",
+                 "127.0.0.1", "::1", "", "null"):
+        outcome, log = _run_console_web(good, bind=bind)
+        _, host, shown = consoleproto.bind_address("" if bind == "null" else bind)
+        check(f"console-web/run: bind {bind!r} -> SERVER (got {outcome})", outcome == "SERVER")
+        check(f"console-web/run: bind {bind!r} logs {shown}:8100 like the server ({log})",
+              f"INFO: Starting Switchboard console web terminal on {shown}:8100 ..." in log)
+        loop = host.startswith("127.") or host == "::1"
+        check(f"console-web/run: bind {bind!r} loopback={loop} in the log ({log})",
+              any(("bound to " + shown + ".") in l for l in log) == loop)
+
+
+def test_a_bind_blank_inside_its_brackets_is_loopback_in_the_log_too():
+    """server.py reads "[]", "[ ]" and whitespace as blank and listens on
+    127.0.0.1; the run script must not log those as reachable from the LAN."""
+    good = '[{"username":"op","password":"pw"}]'
+    for bind in ("[]", " [ ] ", "   "):
+        outcome, log = _run_console_web(good, bind=bind)
+        check(f"console-web/run: bind {bind!r} -> SERVER (got {outcome})", outcome == "SERVER")
+        check(f"console-web/run: bind {bind!r} is logged as loopback ({log})",
+              "INFO: Starting Switchboard console web terminal on 127.0.0.1:8100 ..." in log
+              and any("bound to 127.0.0.1." in l for l in log)
+              and not any("reachable from the LAN" in l for l in log))
+
 def _code(svc):
     """A run script with its comment lines removed."""
     return "\n".join(ln for ln in (_S6 / svc / "run").read_text().splitlines()

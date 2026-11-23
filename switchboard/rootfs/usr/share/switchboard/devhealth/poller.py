@@ -848,7 +848,7 @@ def classify_cordless(snap: dict, th: dict,
     """(level, reasons) for the cordless. level ∈ {'ok','degraded','critical'}.
     CRITICAL = the alarm endpoint is offline, not registered, or its battery is
     about to die (discharging under the critical %%). DEGRADED = a quality/robustness risk that
-    doesn't yet threaten delivery (weak/lost Wi-Fi, low-but-charging battery,
+    doesn't yet threaten delivery (weak/lost Wi-Fi, low battery while discharging,
     recent poor call MOS, or API unreadable while the device still answers TCP).
 
     `snap["sip_registered"]` is its SIP registration as rtpmon's rollup last saw

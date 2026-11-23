@@ -222,7 +222,7 @@ if (isMain) (async () => {
   // Verify the certificate BEFORE login() sends the password.
   await verifyPin();
   const sid = await login();
-  if (cmd === 'login') { console.log('LOGIN OK sid=' + sid.slice(0, 10) + '…'); return; }
+  if (cmd === 'login') { console.log('LOGIN OK (session id received, ' + sid.length + ' characters; not printed)'); return; }
   if (cmd === 'meta') {
     const m = await meta(sid); const kw = (process.argv[3] || '').toLowerCase();
     const entries = Object.entries(m).filter(([, a]) => !kw || (a || '').toLowerCase().includes(kw));

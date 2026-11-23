@@ -1526,7 +1526,8 @@ def _heartbeat(summ: dict | None, trunk_status: str | None,
     (2) The outside line had no timestamped health history on ANY surface. Its
     state lived only in a pushed HA sensor, which has no history a log reader can
     consult and which freezes at its last value if the add-on dies. The trunk is
-    the outside line and the open E911 path.
+    the outside line. (It is not the emergency path: 911 and 933 are answered by
+    a spoken notice whether or not a trunk is configured.)
 
     A dated record every poll cycle fixes both: silence in THIS file means the
     poller stopped, and the trunk's state is on the record with a timestamp. It

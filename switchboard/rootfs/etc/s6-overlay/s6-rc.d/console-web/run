@@ -62,14 +62,39 @@ export CONSOLE_WEB_PORT="${PORT}"
 # "UNAUTHENTICATED on the LAN" could not see the bind that decided whether it was
 # on the LAN at all.
 BIND="$(switchboard-opt console_web_bind)"
-if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    # Fail CLOSED (since v0.94.0). This fires when the option is blank, or on a
-    # transient blank read during a config reload. The old fallback was
-    # 0.0.0.0, so a momentary glitch put a terminal that drives call control
-    # onto the LAN until the next restart. A terminal that is briefly reachable
-    # only from the host is the cheaper failure by far.
-    BIND="127.0.0.1"
+if [ "${BIND}" = "null" ]; then
+    BIND=""
 fi
+# Fail CLOSED (since v0.94.0): a blank value, or a transient blank read during a
+# config reload, means 127.0.0.1. The old fallback was 0.0.0.0, so a momentary
+# glitch put a terminal that drives call control onto the LAN until the next
+# restart. A terminal that is briefly reachable only from the host is the
+# cheaper failure by far.
+#
+# One reading of the bind (v0.128.0): consoleproto.bind_address, the function
+# server.py binds with, gives the host to bind (outer whitespace and brackets
+# stripped; blank, or blank inside brackets, means 127.0.0.1) and the form
+# written beside a port ([::1]). Reading it a second way here let this script
+# log an address the server did not bind ("[]", "[127.0.0.1]"). If python3
+# cannot run it, the value is treated as blank.
+TAB="$(printf '\t')"
+BIND_READ="$(CONSOLE_WEB_BIND="${BIND}" python3 -c "
+import os, sys
+sys.path.insert(0, '/usr/share/switchboard/console-web')
+import consoleproto
+_, host, shown = consoleproto.bind_address(os.environ.get('CONSOLE_WEB_BIND', ''))
+print(host + chr(9) + shown)
+" 2>/dev/null)" || BIND_READ=""
+case "${BIND_READ}" in
+    *"${TAB}"*)
+        BIND="${BIND_READ%%"${TAB}"*}"
+        SHOWN="${BIND_READ#*"${TAB}"}"
+        ;;
+    *)
+        BIND="127.0.0.1"
+        SHOWN="127.0.0.1"
+        ;;
+esac
 export CONSOLE_WEB_BIND="${BIND}"
 
 # v0.71.0 — is this bind address loopback-only?
@@ -100,14 +125,14 @@ sw_is_loopback() {
 # switchboard-opt reads the init snapshot, not bashio, so a transient blank
 # options read cannot reach it.
 if ! [ "${VALID_USERS}" -gt 0 ] 2>/dev/null; then
-    bashio::log.notice "Console web terminal NOT started: console_users has no valid entry (a username and a password), and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${BIND}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add a console_users entry to run this terminal with a sign-in."
+    bashio::log.notice "Console web terminal NOT started: console_users has no valid entry (a username and a password), and with no login anything on this host (under host networking, every host-network add-on too) could drive the operator console through ${SHOWN}:${PORT}. Use the operator console in this add-on's panel in Home Assistant, or add a console_users entry to run this terminal with a sign-in."
     exec sleep infinity
 fi
-bashio::log.info "Starting Switchboard console web terminal on ${BIND}:${PORT} ..."
+bashio::log.info "Starting Switchboard console web terminal on ${SHOWN}:${PORT} ..."
 if sw_is_loopback "${BIND}"; then
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${BIND}."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), bound to ${SHOWN}."
 else
-    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${BIND}:${PORT}."
+    bashio::log.info "Console web terminal login gate ACTIVE (${VALID_USERS} user(s)), reachable from the LAN on ${SHOWN}:${PORT}."
 fi
 # The bridge target is the operator console's Unix socket at a fixed path
 # (server.py's CONSOLE_SOCKET default). console_port is the SSH service's port

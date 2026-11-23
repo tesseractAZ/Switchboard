@@ -1319,9 +1319,11 @@ async def api_announce(ext: str, request: Request) -> JSONResponse:
         # either. The announcement is absent from BOTH ledgers, and absence in a
         # delivery ledger reads as "we never tried".
         #
-        # `ok` here means AMI ACCEPTED the Originate — the same thing
-        # `ring-queued` means on the wake-up side, and deliberately named to
-        # match, so one join covers both paths.
+        # `ok` here means AMI ACCEPTED the Originate — what `ring-queued` means
+        # on the wake-up side. The names differ (this one is pinned as
+        # delivery.ANNOUNCE_QUEUED); delivery.py's announce reconciler joins it,
+        # by the sound filename, to the `audio-delivered` row switchboard-callqos
+        # writes to the delivery ledger from the hangup extension.
         _record_delivery(ext, "announce", "originate-queued",
                          sound=os.path.basename(sound), digest=tag or None)
         # ...and only NOW does the suppression window start. Every path above

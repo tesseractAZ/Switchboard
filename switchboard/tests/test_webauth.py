@@ -40,6 +40,94 @@ def test_parse_users_counts_only_text_or_whole_number_fields() -> None:
     assert webauth.parse_users('[{"username":"op","password":1234}]') == [("op", "1234")]
 
 
+def test_throttle_keys() -> None:
+    k = webauth.throttle_keys
+    assert k("192.0.2.7") == ("192.0.2.7", None)
+    assert k("::ffff:192.0.2.7") == ("192.0.2.7", None)      # dual-stack '::' listener
+    assert k("2001:db8:1:2::5") == ("2001:db8:1:2::5", "2001:db8:1:2::/64")
+    assert k("fe80::1%eth0") == ("fe80::1", "fe80::/64")
+    assert k("?") == ("?", None)
+
+
+# One home LAN = one /64: every device below is a different host on it.
+LAN = "2001:db8:1:2:"
+
+
+def _throttle():
+    return webauth.LoginThrottle(max_attempts=5, window=300, now=lambda: 100.0)
+
+
+def test_each_address_still_gets_five_tries() -> None:
+    t = _throttle()
+    assert [t.charge(LAN + ":a") for _ in range(7)] == [True] * 5 + [False] * 2
+    t4 = _throttle()
+    assert [t4.charge("192.0.2.7") for _ in range(7)] == [True] * 5 + [False] * 2
+
+
+def test_a_neighbour_with_a_stale_password_locks_out_only_itself() -> None:
+    """Before this rule, counting the /64 with the per-address limit let one
+    device on the LAN lock every other IPv6 device out."""
+    t = _throttle()
+    for _ in range(50):
+        t.charge(LAN + "aaaa:bbbb:cccc:1")                # keeps failing
+    assert t.charge(LAN + "1111:2222:3333:4") is True     # another device is unaffected
+
+
+def test_one_host_rotating_addresses_meets_the_64_ceiling() -> None:
+    t = _throttle()
+    allowed = [t.charge(LAN + f":{i:x}") for i in range(1, 101)]
+    assert allowed.count(True) == webauth.MAX_NET_ATTEMPTS == 30, allowed.count(True)
+    assert t.charge("2001:db8:9:9::1") is True               # another /64 is another LAN
+
+
+def test_spraying_fresh_addresses_cannot_evict_the_64_count() -> None:
+    """In one table, ~1024 fresh addresses evicted the /64 entry (created on the
+    attacker's first try) and the ceiling started again: 300 of 10000 got through."""
+    t = _throttle()
+    allowed = sum(t.charge(f"{LAN}:{i >> 16:x}:{i & 0xffff:x}") for i in range(1, 10001))
+    assert allowed == webauth.MAX_NET_ATTEMPTS, allowed
+
+
+def test_a_spray_cannot_evict_an_address_still_being_charged() -> None:
+    """The memory bound drops the entry used longest ago, not the one created
+    first: an address that keeps trying stays counted however many others pass."""
+    t = _throttle()
+    for _ in range(5):
+        t.charge("192.0.2.1")
+    for i in range(2000):
+        t.charge(f"198.51.{i >> 8}.{i & 255}")
+        if i % 100 == 0:
+            assert t.charge("192.0.2.1") is False, i
+
+
+def test_signing_in_correctly_never_uses_up_the_64() -> None:
+    """A success takes back the /64 attempt it spent, so a client that signs in
+    every few seconds is never refused, and neither is its neighbour."""
+    clock = [0.0]
+    t = webauth.LoginThrottle(max_attempts=5, window=300, now=lambda: clock[0])
+    refused = 0
+    for _ in range(720):                       # one hour, every 5 s
+        clock[0] += 5
+        if t.charge(LAN + ":5"):
+            t.clear(LAN + ":5")                # correct password
+        else:
+            refused += 1
+    assert refused == 0, refused
+    assert t.charge(LAN + ":6") is True
+
+
+def test_a_success_clears_only_its_own_address() -> None:
+    """A sign-in takes back its own /64 attempt and nothing more: a rotating
+    attacker's count is not reset."""
+    t = _throttle()
+    for i in range(1, 30):
+        t.charge(LAN + f":{i:x}")                          # attacker: 29 of 30
+    assert t.charge(LAN + ":beef") is True                 # some device signs in...
+    t.clear(LAN + ":beef")                                 # ...and its attempt is refunded
+    assert t.charge(LAN + ":fff0") is True                 # the attacker's 30th
+    assert t.charge(LAN + ":fff1") is False                # the ceiling still holds
+
+
 def test_parse_users_strips_username_not_password() -> None:
     users = webauth.parse_users('[{"username":"  eric  ","password":" p w "}]')
     assert users == [("eric", " p w ")]  # passwords keep their exact bytes

@@ -6,9 +6,10 @@ first thing it gives up.
 ★ THE DEFECT. `center()` clamps the rendered page with `out[:h]` — it truncates
 from the BOTTOM. Three lists on the board grow with the household (the roster,
 the active calls, the wake-ups), and nothing bounded any of them, so past the
-terminal's height the surplus was silently clipped. The bottom is where the key
-bar lives, so the first thing an operator lost was the list of what they could
-press — on a 24-row window, ten rooms plus one wake-up is already over.
+terminal's height the surplus was silently clipped. The bottom is where the
+status message sits, with the key bar just above it, so the first thing an
+operator lost was the message, and a little more overflow cost the list of what
+they could press — on a 24-row window, ten rooms plus one wake-up is already over.
 
 v0.94.4 gave the LIGHTS list a scrolling viewport after exactly this was
 reported from live use ("no way to scroll and truncates at bottom"). The board
