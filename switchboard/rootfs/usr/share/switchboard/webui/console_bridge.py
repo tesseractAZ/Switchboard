@@ -138,8 +138,9 @@ def classify_payload(data):
     confirmation, which swallows every key after it, leaving the board one
     Enter or ``Y`` from paging the whole house. Had the selected room been on a
     call, the ``t`` before it would have opened a transfer instead, which acts
-    only on Enter, Esc and the selection keys (arrows, ``j``, ``k``), none of
-    which the string contains, so nothing after it would have acted either.
+    only on Enter, Esc, Up/Down and ``j``/``k`` (and ``Q`` or Ctrl-C end the
+    session), none of which the string contains, so nothing after it would
+    have acted either.
 
     So: normalise to bytes FIRST, and be stricter than the old server — any text
     frame that parses as a JSON object is a control message and is never

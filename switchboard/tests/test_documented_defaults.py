@@ -16,7 +16,9 @@ is the page most readers see.
 The bind assertions at the bottom are separate: they pin a SECURITY default
 rather than merely a consistent one.
 """
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -212,6 +214,10 @@ def test_the_bind_fallback_also_fails_closed():
     run = (ROOT / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "console-web" / "run").read_text()
     chain = run[run.index('BIND="$(switchboard-opt console_web_bind)"'):]
     chain = chain[:chain.index("export CONSOLE_WEB_BIND")]
+    # Since v0.128.0 the chain reads the value with consoleproto.bind_address:
+    # point it at the source tree's copy, and give it this interpreter.
+    chain = chain.replace("/usr/share/switchboard/console-web",
+                          str(ROOT / "rootfs" / "usr" / "share" / "switchboard" / "console-web"))
     assert 'BIND="0.0.0.0"' not in chain, (
         "the console-web bind chain still falls back to all interfaces")
     for web_bind, want in (("", "127.0.0.1"), ("null", "127.0.0.1"),
@@ -221,7 +227,8 @@ def test_the_bind_fallback_also_fails_closed():
                 'console_bind) printf %s 0.0.0.0 ;; esac; }\n')
         r = subprocess.run(["bash", "-c", stub + chain + '\nprintf "[%s]" "$BIND"'],
                            capture_output=True, text=True, timeout=30,
-                           env={"PATH": "/usr/bin:/bin", "WEB_BIND": web_bind})
+                           env={"PATH": os.path.dirname(sys.executable) + ":/usr/bin:/bin",
+                                "WEB_BIND": web_bind})
         assert r.stdout == f"[{want}]", (
             f"console_web_bind {web_bind!r} resolved to {r.stdout!r}, expected "
             f"[{want}] (stderr: {r.stderr!r})")

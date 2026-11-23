@@ -69,24 +69,9 @@ def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, "").strip() or default)
 
 
-def bind_address(raw: str) -> tuple:
-    """CONSOLE_WEB_BIND -> (address family, host to bind, host as written in logs).
-
-    An IPv6 literal, bare (``::1``) or in brackets (``[::1]``), needs an AF_INET6
-    socket. socketserver's default is AF_INET, which cannot bind one: before
-    v0.128.0 a ``console_web_bind`` of ``::1`` failed with ``gaierror`` before
-    listening, and s6 restarted the service forever while the run script logged
-    it as started. Anything else (an IPv4 address, a host name) stays AF_INET.
-    A value that is blank, or blank inside its brackets ("[]"), means 127.0.0.1:
-    the same fail-closed default the run script applies, never "every
-    interface" (an empty host is INADDR_ANY to the socket layer)."""
-    host = (raw or "").strip()
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1].strip()
-    host = host or "127.0.0.1"
-    if ":" in host:
-        return socket.AF_INET6, host, f"[{host}]"
-    return socket.AF_INET, host, host
+# One reading of console_web_bind, shared with the run script (which imports
+# it from consoleproto to log the same address this server binds).
+bind_address = consoleproto.bind_address
 
 
 # The operator console we bridge to: its Unix socket, 0600 root, the only place

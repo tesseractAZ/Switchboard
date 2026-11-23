@@ -20,8 +20,10 @@ documentation pass are corrected.**
 - Failed logins to the web terminal and the SSH console are still limited to
   5 per address in 5 minutes, and an IPv6 network (`/64`) now also has a
   ceiling of 30 in that time, since one host can pick a fresh address in it for
-  every try. Only attempts their own address was allowed count toward it, so a
-  device on the same LAN retrying a stale password locks out only itself. An
+  every try. Only attempts their own address was allowed count toward it, and
+  a correct password takes its attempt back, so a device on the same LAN
+  retrying a stale password locks out only itself, and devices signing in
+  never use the ceiling up. An
   IPv4 client reached through a dual-stack `::` bind counts as its IPv4
   address. IPv4 clients are counted as before.
 - Code comments, test notes, the operator-console reference and two changelog

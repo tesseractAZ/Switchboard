@@ -41,6 +41,7 @@ MAX_NET_ATTEMPTS = 30       # per IPv6 /64 per window (see throttle_keys)
 WINDOW_SECONDS = 300        # rolling throttle window
 MAX_FORM_BYTES = 4096       # a login form is tiny; anything bigger is abuse
 _MAX_TRACKED_IPS = 1024     # throttle memory bound
+_MAX_TRACKED_NETS = 256     # /64 counters, kept apart (see LoginThrottle)
 _MAX_SESSIONS = 64          # session-store bound (a home has a handful of browsers)
 
 
@@ -135,7 +136,7 @@ class LoginThrottle:
     """Rolling attempt limiter: MAX_ATTEMPTS per source address per window,
     and for IPv6 also MAX_NET_ATTEMPTS per /64 (see throttle_keys). charge()
     records the attempt and says whether it may proceed — call it BEFORE
-    verifying credentials."""
+    verifying credentials; call clear() after a successful sign-in."""
 
     def __init__(self, max_attempts: int = MAX_ATTEMPTS,
                  window: float = WINDOW_SECONDS, now=time.monotonic,
@@ -144,45 +145,56 @@ class LoginThrottle:
         self._net_max = max_net_attempts
         self._window = window
         self._now = now
-        self._hits = {}  # address or /64 key -> [monotonic, ...]
+        self._hits = {}      # address -> [monotonic, ...]
+        # The /64 counts live apart from the address counts, with their own
+        # bound: in one table, an attacker spraying fresh addresses evicted its
+        # own /64 entry after ~1024 of them and the ceiling started again
+        # (v0.128.0 review). A home LAN has a handful of /64s, never hundreds.
+        self._net_hits = {}  # IPv6 /64 -> [monotonic, ...]
         # Every request runs on its own ThreadingTCPServer thread, and charge()
         # is a read-modify-write: without this lock two concurrent attempts can
         # both read the same pre-limit list and both write back, losing a count
         # (i.e. more attempts than the limit allows).
         self._lock = threading.Lock()
 
-    def _recent(self, key: str, t: float) -> list:
-        return [x for x in self._hits.get(key, []) if t - x < self._window]
+    def _store(self, table: dict, key: str, hits: list, bound: int) -> None:
+        """Write ``hits`` as ``key``'s newest entry, then trim to ``bound``.
+        Re-inserting moves the key to the end, so the trim drops the entry
+        used longest ago, never one still being charged. Dropping a key only
+        ever FORGIVES attempts, never blocks a fresh user."""
+        table.pop(key, None)
+        table[key] = hits
+        while len(table) > bound:
+            table.pop(next(iter(table)))
 
     def charge(self, ip: str) -> bool:
         key, net = throttle_keys(ip)
         t = self._now()
         with self._lock:
-            hits = self._recent(key, t)
+            hits = [x for x in self._hits.get(key, []) if t - x < self._window]
             allowed = len(hits) < self._max
             hits.append(t)
-            self._hits[key] = hits
+            self._store(self._hits, key, hits, _MAX_TRACKED_IPS)
             # Only an attempt its own address was allowed counts toward the /64:
             # an address already refused (a neighbour retrying a stale password)
             # must not spend the budget of every other device on the LAN.
             if net is not None and allowed:
-                net_hits = self._recent(net, t)
+                net_hits = [x for x in self._net_hits.get(net, []) if t - x < self._window]
                 allowed = len(net_hits) < self._net_max
                 net_hits.append(t)
-                self._hits[net] = net_hits
-            while len(self._hits) > _MAX_TRACKED_IPS:
-                # Bound memory under an address-spraying flood; dropping the
-                # oldest tracked key only ever FORGIVES attempts, never blocks a
-                # fresh user.
-                self._hits.pop(next(iter(self._hits)))
+                self._store(self._net_hits, net, net_hits, _MAX_TRACKED_NETS)
         return allowed
 
     def clear(self, ip: str) -> None:
-        """A successful login stops penalizing its own address. Not its /64:
-        one device signing in does not reset a rotating neighbour's count."""
-        key, _ = throttle_keys(ip)
+        """A successful sign-in stops penalizing its own address, and takes back
+        the one /64 attempt it spent, so devices signing in correctly never use
+        up the LAN's budget. The rest of the /64 count stays: one device signing
+        in does not reset a rotating neighbour's count."""
+        key, net = throttle_keys(ip)
         with self._lock:
             self._hits.pop(key, None)
+            if net is not None and self._net_hits.get(net):
+                self._net_hits[net].pop()
 
 
 class Sessions:

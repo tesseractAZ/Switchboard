@@ -62,35 +62,40 @@ export CONSOLE_WEB_PORT="${PORT}"
 # "UNAUTHENTICATED on the LAN" could not see the bind that decided whether it was
 # on the LAN at all.
 BIND="$(switchboard-opt console_web_bind)"
-# Read it the way server.py's bind_address does (v0.128.0): outer spaces are
-# trimmed, and a value that is blank inside its brackets ("[]", "[ ]") is
-# blank. Otherwise this script would log "[]" as reachable from the LAN while
-# the server, failing closed, listened on 127.0.0.1.
-BIND="${BIND#"${BIND%%[![:space:]]*}"}"
-BIND="${BIND%"${BIND##*[![:space:]]}"}"
-case "${BIND}" in
-    \[*\])
-        INNER="${BIND#\[}"
-        INNER="${INNER%\]}"
-        case "${INNER}" in *[![:space:]]*) ;; *) BIND="" ;; esac
+if [ "${BIND}" = "null" ]; then
+    BIND=""
+fi
+# Fail CLOSED (since v0.94.0): a blank value, or a transient blank read during a
+# config reload, means 127.0.0.1. The old fallback was 0.0.0.0, so a momentary
+# glitch put a terminal that drives call control onto the LAN until the next
+# restart. A terminal that is briefly reachable only from the host is the
+# cheaper failure by far.
+#
+# One reading of the bind (v0.128.0): consoleproto.bind_address, the function
+# server.py binds with, gives the host to bind (outer whitespace and brackets
+# stripped; blank, or blank inside brackets, means 127.0.0.1) and the form
+# written beside a port ([::1]). Reading it a second way here let this script
+# log an address the server did not bind ("[]", "[127.0.0.1]"). If python3
+# cannot run it, the value is treated as blank.
+TAB="$(printf '\t')"
+BIND_READ="$(CONSOLE_WEB_BIND="${BIND}" python3 -c "
+import os, sys
+sys.path.insert(0, '/usr/share/switchboard/console-web')
+import consoleproto
+_, host, shown = consoleproto.bind_address(os.environ.get('CONSOLE_WEB_BIND', ''))
+print(host + chr(9) + shown)
+" 2>/dev/null)" || BIND_READ=""
+case "${BIND_READ}" in
+    *"${TAB}"*)
+        BIND="${BIND_READ%%"${TAB}"*}"
+        SHOWN="${BIND_READ#*"${TAB}"}"
+        ;;
+    *)
+        BIND="127.0.0.1"
+        SHOWN="127.0.0.1"
         ;;
 esac
-if [ -z "${BIND}" ] || [ "${BIND}" = "null" ]; then
-    # Fail CLOSED (since v0.94.0). This fires when the option is blank, or on a
-    # transient blank read during a config reload. The old fallback was
-    # 0.0.0.0, so a momentary glitch put a terminal that drives call control
-    # onto the LAN until the next restart. A terminal that is briefly reachable
-    # only from the host is the cheaper failure by far.
-    BIND="127.0.0.1"
-fi
 export CONSOLE_WEB_BIND="${BIND}"
-# The bind as written beside a port in the lines below: an IPv6 literal goes in
-# brackets ([::1]:8100), as server.py writes it. server.py takes either form.
-case "${BIND}" in
-    \[*) SHOWN="${BIND}" ;;
-    *:*) SHOWN="[${BIND}]" ;;
-    *) SHOWN="${BIND}" ;;
-esac
 
 # v0.71.0 — is this bind address loopback-only?
 #
