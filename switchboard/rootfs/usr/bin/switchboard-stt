@@ -355,16 +355,19 @@ _CANCEL_VETO = frozenset({"dont", "not", "didnt", "wont", "doesnt", "keep", "lea
 # _TIME_PROMPT's words (test_wakeup_cancel holds it), so a prompt edit forces an
 # update here.
 _PROMPT_FRAMING = ("a time of day for example", "or say cancel to clear it")
-# One word, or two run together ("Can sell", "Camp full"), shaped like "cancel":
-# a /k/ or /p/ onset, a vowel, a nasal, then the smeared middle — a fricative or
-# a lip stop (Campbell's b), with an optional stop after the nasal (the p of
-# Camp-) — a vowel, and a final l. Built from the observed renderings, not from
-# English: it accepts Campbell, Campful, Canful, Pencil, Council, Can sell and
-# rejects candle, castle, camel, canal, channel, cancer, Kansas, campus, careful,
-# handful, gamble, tinsel, dental (test_wakeup_cancel lists them all).
+# One word, or two run together ("Can sell", "Can't feel"), shaped like
+# "cancel": a /k/ or /p/ onset, a vowel, a nasal, then the smeared middle — a
+# fricative or a lip stop (Campbell's b), with an optional stop after the nasal
+# (the p of Camp-, the t of Can't) — a vowel, and a final l (Console's e
+# allowed). Built from the observed renderings, not from English: it accepts
+# Campbell, Campful, Canful, Pencil, Council, Console, Can sell, Can't feel and
+# rejects candle, castle, camel, canal, channel, cancer, Kansas, campus,
+# careful, handful, gamble, tinsel, dental (test_wakeup_cancel lists them all).
+# Over the 234,454 words of an English dictionary it accepts 25, every one a
+# word nobody says to a wake-up prompt (cymbal, pinball, painful ...).
 _CANCEL_SHAPE = re.compile(
-    r"(?:ck|[ckqp])[aeiouy]{1,2}[nm]{1,2}[pbk]?"
-    r"(?:ph|sh|[szfvb]|c(?=[eiy])){1,2}[aeiouy]{1,2}l{1,2}")
+    r"(?:ck|[ckqp])[aeiouy]{1,2}[nm]{1,2}[pbkt]?"
+    r"(?:ph|sh|[szfvb]|c(?=[eiy])){1,2}[aeiouy]{1,2}l{1,2}e?")
 # What is left of the word when "okay" has swallowed its /k/: "Okay, I'm full."
 _CANCEL_TAIL = re.compile(r"(?:ph|sh|[szfvb]|c(?=[eiy])){1,2}[aeiouy]{1,2}l{1,2}")
 

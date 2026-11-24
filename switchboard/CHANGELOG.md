@@ -16,19 +16,27 @@ sound-alike, and a call that understood nothing says the wake-up is still set.**
   a wake-up is set, a reply shaped like "cancel" (the whole reply, at most two
   words besides fillers such as "okay") now cancels it, as the word does. With
   no wake-up set it counts as not understood. Times are read first, as before.
-  CORPUS_PLACEHOLDER
+  Checked against 1,288 recordings of 28 synthetic voices sent through the same
+  8 kHz channel and recogniser: 535 of 560 spoken cancels now cancel (516
+  before), and none of the 728 spoken times and other replies becomes one.
 - **A "don't" stops a cancel.** "I don't want to cancel" and "never mind, keep
   it" used to cancel. A "don't", "not", "keep" or "leave" anywhere in the reply
-  now cancels nothing, and the call asks again. An echo of the recogniser's own
+  now cancels nothing; the reply counts as not understood. An echo of the recogniser's own
   prompt, which read as a cancel or as 6:53 PM, now does nothing.
 - **A call that understood nothing ends with the wake-up that is still set.**
   It used to end "No wake-up call was set", which was false whenever one was. It
   now plays the recording that opens the call, "You already have a wake-up
   call…", and the time.
-- **A reply of only "Oh." or "zero" no longer sets midnight.** Read as the hour
-  0, it replaced a set wake-up with 12:00 AM. "Oh seven hundred", "seven oh
-  five" and "zero zero thirty" read as before.
-- **Each wake-up recording leaves a breadcrumb in the log**: its length and why
+- **Two kinds of reply no longer replace a wake-up with the wrong time.** A
+  zero with no other number after it ("Oh.", or whisper's "Oh, oh, oh." on
+  noise) was read as the hour 0 and set midnight. A length of time ("ten more
+  minutes", "one second") was read as that hour. Both now count as not
+  understood. "Oh seven hundred", "seven oh five", "zero zero thirty" and
+  "ten past seven" read as before.
+- **A recording with no speech in it is not transcribed.** When nothing rose
+  above the silence threshold, whisper still answered something, and any
+  answer could act on the wake-up. The attempt now counts as a miss.
+- **Each wake-up recording leaves a line in the log** with its length and why
   it ended, never the words, as the operator's recordings already do.
 
 ## 0.128.0

@@ -161,9 +161,22 @@ def recognize(attempt: int) -> str:
     wav = rec + ".wav"
     # The WAV is deleted after transcription, so this line is the only evidence
     # afterwards of how long a recording was and why it ended (sizes, never
-    # words). On 2026-11-23 two misses left nothing to say whether the caller
-    # was cut off or spoke the whole word.
-    sys.stderr.write(f"[wakeup] rec attempt={attempt} {_rec_summary(reply, wav)}\n")
+    # words). On 2026-11-23 two misses left nothing to say how long either
+    # recording was or why it ended.
+    summary = _rec_summary(reply, wav)
+    sys.stderr.write(f"[wakeup] rec attempt={attempt} {summary}\n")
+    if summary.endswith(" no-speech"):
+        # Nothing crossed the silence threshold: the file is only RECORD's
+        # silence remainder. whisper hands back something for silence anyway
+        # ("You", "Thank you.", a piece of its own prompt), and here any answer
+        # can cancel or replace a wake-up. So it is not transcribed, and the
+        # attempt is a miss: the caller is asked again.
+        sys.stderr.write("[wakeup] no speech in the recording: not transcribed\n")
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+        return ""
     out = ""
     # Start STT before the "one moment" prompt so inference overlaps its playback
     # (the child only touches the WAV + loopback whisper-server, not the AGI channel).

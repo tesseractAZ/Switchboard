@@ -14,12 +14,15 @@ recogniser fills the gap with a word it knows: "cancel" has come back as
 "Campbell", "Campful", "Pencil" and "Okay, I'm full". So when a wake-up is set,
 a reply shaped like "cancel" cancels it as the word does. It must be the whole
 reply, at most two words besides fillers such as "okay" or "please". With no
-wake-up set, the same reply counts as not understood, and the call asks again.
-A spoken time is always read as a time first, and a reply that is only "oh"
-or "zero" is not read as midnight. A "don't", "not", "keep" or "leave"
-anywhere in a reply cancels nothing. Every call ends by saying what is now true: the time it is
-set for, that it was cancelled, or, when a wake-up was set and nothing was
-understood, the time it is still set for.
+wake-up set, the same reply counts as not understood.
+A spoken time is always read as a time first. Two kinds of reply are not
+read as a time at all: a zero with no other number after it ("oh", "oh, oh,
+oh"), which used to be midnight, and a length of time ("ten more minutes",
+"one second"), which used to be that hour. A "don't", "not", "keep" or "leave"
+anywhere in a reply cancels nothing, and a recording in which nothing rose
+above the silence threshold is not sent to the recogniser. When a wake-up was
+set and nothing was understood, the call ends by reading out the time it is
+still set for.
 
 - **One wake-up per room.** Setting a new one replaces the old.
 - At the set time the room rings for `wakeup_ring_seconds` (default 60). Once

@@ -604,10 +604,12 @@ def test_no_voice_script_writes_recognised_words_to_stderr_ungated():
     assert not offenders, (
         "recognised speech reaches stderr, which is the add-on journal, without "
         "said():\n  " + "\n  ".join(offenders))
-    # ...and the scan SEES the sites it is there for: the six heard= lines in
-    # switchboard-stt, the assistant's per-turn line, and agi_speech.say()'s two
-    # failure lines. Fewer means a rename blinded it, not that the lines went away.
-    assert gated["switchboard-stt"] >= 6, gated
+    # ...and the scan SEES the sites it is there for: the nine heard= lines in
+    # switchboard-stt (six wake-up outcomes: time, cancel, cancel-like, negated,
+    # echo, none; one transcribe; two rooms), the assistant's per-turn line, and
+    # agi_speech.say()'s two failure lines. Fewer means a rename blinded it, not
+    # that the lines went away.
+    assert gated["switchboard-stt"] >= 9, gated
     assert gated["switchboard-assistant.agi"] >= 1, gated
     assert gated["agi_speech.py"] >= 2, gated
 

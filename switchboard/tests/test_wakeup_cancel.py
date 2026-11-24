@@ -82,9 +82,13 @@ def test_the_same_mishearings_written_differently(heard):
 
 # What synthetic voices saying "cancel" produced through the same channel (8 kHz
 # G.711 u-law) and the add-on's own recogniser (whisper.cpp base.en, the live
-# prompt), 2026-11-23. Each is a reply a caller would have given in full.
+# prompt), 2026-11-23: 1,288 recordings of 28 voices, of which 535 of 560
+# cancels now cancel (516 before) and none of 728 times and other replies
+# becomes one. Each is a reply a caller would have given in full.
 SYNTHETIC = [
-    "Pencil.", "Pencil, please.", "Pencil the wake up.", "Cancellate.",
+    "Campbell.", "Pencil.", "Pencil, please.", "Pencil that.", "Pencil the wake up.",
+    "Cancellate.", "Can't feel.", "Can't feel it.", "Can't feel that.",
+    "Can't feel the wake up.", "Console it.",
 ]
 
 
@@ -111,12 +115,18 @@ def test_the_shape_generalises_a_little(heard):
     "Candle.", "Castle.", "Camel.", "Canal.", "Channel.", "Cancer.", "Kansas.",
     "Campus.", "Capful.", "Careful.", "Handful.", "Gamble.", "Cannibal.",
     "Kennel.", "Chancel.", "Compel.", "Hansel.", "Tinsel.", "Dental.", "Kendall.",
-    "Damsel.", "Console.", "Casual.", "Just casual.", "Castle the wake up!",
+    "Damsel.", "Casual.", "Just casual.", "Castle the wake up!", "Castle, please.",
+    "Can't live.", "Can't do it.", "Can't be weird.", "Can't sleep.",
+    # A word that only CONTAINS the shape is not shaped like it.
+    "Councilman.", "Pencils.", "Encouncil.", "Pinballs.",
     # What is left of the word, alone, is not the word.
     "Full.", "Fell.", "Bell.", "Fill.", "Call.", "Can call.", "I'm full.", "Cool.",
     # A sound-alike inside a longer reply is not the whole reply.
     "Can sell tomorrow.", "Pencil sharpener.", "Council meeting.", "Campbell soup.",
     "Okay, I'm full now.", "I'm full, okay.", "Okay, I'm cool.",
+    # "Okay, I'm" followed by a word that only STARTS like the tail.
+    "Okay, I'm fully up.", "Okay, I'm feeling up.", "Okay, I'm fuller.",
+    "Okay, I'm feeling it.",
     # Real replies that are not cancel.
     "Okay, I'm fine.", "Okay, I'm up.", "Okay, I'm awake.", "Okay, I'm well.",
     "Keep it.", "Leave it.", "No.", "Yes.", "Okay.", "Thank you.",
@@ -132,9 +142,28 @@ def test_near_words_and_ordinary_replies_do_nothing(heard):
     "Don't cancel.", "No, don't cancel it.", "Do not cancel.",
     "I don't want to cancel.", "Never mind, keep it.", "Cancel? No, keep it.",
     "Don’t cancel.", "Not cancel.", "Leave it, don't clear it.",
+    # One reply per veto word, each the only veto in it.
+    "Never mind, leave it.", "Stop, leave it.", "I didn't say cancel.",
+    "No, I won't cancel it.", "That doesn't mean cancel.", "Didn't cancel.",
+    "Won't cancel.", "Doesn't cancel.", "Keep it, never mind.",
 ])
 def test_a_negated_cancel_is_only_a_retry(heard):
     assert reply(heard) == ("", "negated"), heard
+
+
+def test_the_veto_words_are_these():
+    assert stt._CANCEL_VETO == {"dont", "not", "didnt", "wont", "doesnt", "keep", "leave"}
+
+
+# Written out, not read from the module: trimming the set must fail here.
+FILLER = ["okay", "ok", "um", "uh", "so", "oh", "please", "yeah", "hmm", "well",
+          "the", "it", "just", "that", "my", "wake", "up", "call", "alarm"]
+
+
+@pytest.mark.parametrize("w", FILLER)
+def test_every_filler_around_a_sound_alike_still_cancels(w):
+    assert reply(f"{w.capitalize()}, Campful.") == ("CANCEL-LIKE", "cancel-like")
+    assert reply(f"Campbell, {w}.") == ("CANCEL-LIKE", "cancel-like")
 
 
 @pytest.mark.parametrize("heard", [
@@ -162,6 +191,12 @@ def test_a_prompt_echo_does_nothing():
     assert reply(stt._TIME_PROMPT) == ("", "echo")
     assert reply("Or say cancel to clear it.") == ("", "echo")
     assert reply("A time of day, for example, six thirty.") == ("", "echo")
+    # Exactly four words of the framing is already an echo (the window is 4).
+    assert reply("Cancel to clear it.") == ("", "echo")
+    assert reply("Time of day for.") == ("", "echo")
+    assert reply("Say cancel to clear it.") == ("", "echo")
+    # Three are not: a real "Or say cancel." still cancels.
+    assert reply("Or say cancel.") == ("CANCEL", "cancel")
     words = " ".join(stt._reply_tokens(stt._TIME_PROMPT))
     for framing in stt._PROMPT_FRAMING:
         assert framing in words, framing    # edit the prompt, update the veto
@@ -227,8 +262,13 @@ def test_no_spoken_time_is_ever_touched():
 # 4. A lone zero is not midnight.
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("heard", ["Oh.", "Oh!", "O.", "oh", "zero", "Zero.", "0.", "0", "00"])
-def test_a_lone_zero_sets_nothing(heard):
+@pytest.mark.parametrize("heard", [
+    "Oh.", "Oh!", "O.", "oh", "zero", "Zero.", "0.", "0", "00",
+    # whisper's repetition loop on noise, and a zero before a non-number.
+    "Oh, oh.", "Oh, oh, oh.", "Oh, oh, oh, oh, oh, oh, oh, oh.", "Oh... oh... oh...",
+    "Zero, zero, zero.", "O, O, O.", "0 0", "0.00", "Oh, oh, okay.", "Oh, oh, wait.",
+])
+def test_a_zero_with_no_other_number_sets_nothing(heard):
     """whisper writes a breath or a clipped word as "Oh." Read as the hour 0, it
     REPLACED a set wake-up with midnight; at the change prompt that is a lost
     alarm, as costly as a false cancel."""
@@ -236,12 +276,37 @@ def test_a_lone_zero_sets_nothing(heard):
     assert reply(heard) == ("", "none")
 
 
+def test_a_stuttered_cancel_is_a_cancel_not_midnight():
+    assert reply("Oh, oh, cancel.") == ("CANCEL", "cancel")
+
+
 @pytest.mark.parametrize("heard, hhmm", [
     ("oh seven hundred", "07:00"), ("zero seven thirty", "07:30"),
     ("oh five", "05:00"), ("seven oh five", "07:05"), ("zero zero thirty", "00:30"),
-    ("midnight", "00:00"), ("twelve am", "00:00"), ("0:30", "00:30"),
+    ("oh oh five", "00:05"), ("oh oh hundred", "00:00"), ("midnight", "00:00"),
+    ("twelve am", "00:00"), ("0:30", "00:30"), ("0:00", "00:00"), ("0000", "00:00"),
+    ("0.30", "00:30"), ("0 45", "00:45"),
 ])
 def test_zero_inside_a_time_still_reads(heard, hhmm):
+    assert tp.parse(heard) == hhmm
+
+
+@pytest.mark.parametrize("heard", [
+    "One second.", "Hold on, one second.", "One moment, please.", "Ten more minutes.",
+    "Five more minutes.", "Fifteen minutes.", "Two hours.", "Five more.",
+])
+def test_a_length_of_time_is_not_a_clock_time(heard):
+    """A caller dialling in mid-ring to snooze says "ten more minutes"; read as
+    10:00 it replaced the wake-up."""
+    assert tp.parse(heard) is None
+    assert reply(heard) == ("", "none")
+
+
+@pytest.mark.parametrize("heard, hhmm", [
+    ("ten past seven", "07:10"), ("five to six", "05:55"), ("twenty minutes past six", "06:20"),
+    ("quarter past seven", "07:15"), ("seven thirty", "07:30"),
+])
+def test_relative_times_still_read(heard, hhmm):
     assert tp.parse(heard) == hhmm
 
 
@@ -400,37 +465,62 @@ def test_an_unknown_answer_is_a_miss_not_a_cancel(call):
     assert call.var("WAKEUP_RESULT") == "kept" and call.store.get("19") is not None
 
 
-def test_the_recording_leaves_a_breadcrumb_without_words(call, monkeypatch, capsys):
-    """recognize() itself: the RECORD reply and the file's length reach stderr,
-    the recognised words do not."""
+def _recorded(call, monkeypatch, tmp, frames):
+    """Run the REAL recognize() with RECORD writing `frames` of 8 kHz audio and
+    switchboard-stt stubbed to answer CANCEL-LIKE. Returns (result, stt spawns)."""
+    monkeypatch.setattr(call.agi, "ASR_DIR", tmp)
+    spawned = []
+
+    def agi(cmd):
+        m = re.match(r"RECORD FILE (\S+) wav", cmd)
+        if m:
+            with wave.open(m.group(1) + ".wav", "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b"\0\0" * frames)
+            return f"200 result=0 (timeout) endpos={frames}"
+        return "200 result=0"
+
+    class _Proc:
+        def communicate(self, timeout=None):
+            return ("CANCEL-LIKE\n", "[switchboard-stt] heard=<8 chars> -> CANCEL-LIKE\n")
+
+    def popen(*a, **k):
+        spawned.append(a)
+        return _Proc()
+
+    monkeypatch.setattr(call.agi, "agi", agi)
+    monkeypatch.setattr(call.agi.subprocess, "Popen", popen)
+    return call.agi.recognize(0), len(spawned)
+
+
+def test_a_recording_with_no_speech_is_not_transcribed(call, monkeypatch, capsys):
+    """Only RECORD's 1.02 s silence remainder: whisper would answer something
+    for it anyway, and here an answer can cancel or replace a wake-up."""
     tmp = tempfile.mkdtemp()
     try:
-        monkeypatch.setattr(call.agi, "ASR_DIR", tmp)
-
-        def agi(cmd):
-            m = re.match(r"RECORD FILE (\S+) wav", cmd)
-            if m:
-                with wave.open(m.group(1) + ".wav", "wb") as w:
-                    w.setnchannels(1)
-                    w.setsampwidth(2)
-                    w.setframerate(8000)
-                    w.writeframes(b"\0\0" * 8160)       # the 1.02 s silence remainder
-                return "200 result=0 (timeout) endpos=8160"
-            return "200 result=0"
-
-        class _Proc:
-            def communicate(self, timeout=None):
-                return ("CANCEL-LIKE\n",
-                        "[switchboard-stt] heard=<8 chars> -> CANCEL-LIKE\n")
-
-        monkeypatch.setattr(call.agi, "agi", agi)
-        monkeypatch.setattr(call.agi.subprocess, "Popen", lambda *a, **k: _Proc())
         capsys.readouterr()
-        assert call.agi.recognize(0) == "CANCEL-LIKE"
+        assert _recorded(call, monkeypatch, tmp, 8160) == ("", 0)
         err = capsys.readouterr().err
         assert "[wakeup] rec attempt=0 bytes=16364 secs=1.02 end=timeout no-speech" in err
-        assert "campful" not in err.lower()
+        assert "[wakeup] no speech in the recording: not transcribed" in err
         assert not os.listdir(tmp)                       # the WAV is still deleted
+    finally:
+        for f in os.listdir(tmp):
+            os.unlink(os.path.join(tmp, f))
+        os.rmdir(tmp)
+
+
+def test_a_recording_with_speech_is_transcribed_and_leaves_no_words(call, monkeypatch, capsys):
+    tmp = tempfile.mkdtemp()
+    try:
+        capsys.readouterr()
+        assert _recorded(call, monkeypatch, tmp, 32800) == ("CANCEL-LIKE", 1)   # 4.10 s
+        err = capsys.readouterr().err
+        assert "[wakeup] rec attempt=0 bytes=65644 secs=4.10 end=timeout\n" in err
+        assert "no speech" not in err and "campful" not in err.lower()
+        assert not os.listdir(tmp)
     finally:
         for f in os.listdir(tmp):
             os.unlink(os.path.join(tmp, f))
