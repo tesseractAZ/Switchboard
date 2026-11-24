@@ -197,8 +197,9 @@ def test_server_disabled_uses_cli() -> None:
 def test_time_prompt_primes_the_cancel_vocabulary() -> None:
     """The wake-up flow OFFERS "cancel" aloud, so the recognizer must expect it.
 
-    sw-wakeup-change says "say a new time, or say cancel", and switchboard-stt's
-    time mode accepts cancel/clear/remove/delete/never mind/stop/forget — but
+    sw-wakeup-change says "To set a new time, say it now. To cancel, say
+    cancel.", and switchboard-stt's time mode accepts cancel/clear/remove/
+    delete/never mind/stop/forget — but
     whisper needs a PRIOR for those words or it returns a sound-alike. Observed
     live 2026-08-21 05:58:35 and 05:58:51: a caller said "cancel" twice at that
     prompt and got 'Campbell.' then 'Campful.'; neither matched, both attempts

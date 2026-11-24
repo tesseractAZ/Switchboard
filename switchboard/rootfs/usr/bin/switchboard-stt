@@ -304,17 +304,135 @@ def _recording_to_text(infile: str, prompt: str) -> str:
 
 
 # Time vocabulary to bias whisper for the wake-up flow.
-# The caller is offered "say a new time, or say cancel" (sw-wakeup-change), and
-# the parser below accepts cancel/clear/remove/delete/never mind/stop/forget —
-# but whisper needs a PRIOR for those words or it returns a sound-alike. Observed
-# live 2026-08-21 05:58: a caller said "cancel" twice at the change prompt and got
-# 'Campbell.' then 'Campful.', so nothing matched, both attempts burned, and the
-# 06:00 wake-up they were trying to call off stayed set. This is the identical
-# failure the lights menu already documents for "list" ('Left'/'Lift'); priming
-# the vocabulary is the same fix. Times still win — timeparse runs first.
+# The caller is offered "To set a new time, say it now. To cancel, say cancel."
+# (sw-wakeup-change), and time_reply below accepts cancel/clear/remove/delete/
+# never mind/stop/forget — but whisper needs a PRIOR for those words or it
+# returns a sound-alike. Observed live 2026-08-21 05:58: a caller said "cancel"
+# twice at the change prompt and got 'Campbell.' then 'Campful.', so nothing
+# matched, both attempts burned, and the 06:00 wake-up they were trying to call
+# off stayed set. This is the identical failure the lights menu already
+# documents for "list" ('Left'/'Lift'); priming the vocabulary was the first
+# fix. It is not enough on its own: on 2026-11-23 06:29, with this prompt sent,
+# "cancel" came back as "Okay, I'm full." then 'Campful.' again, and the 06:30
+# wake-up rang. time_reply's sound-alike tier is the second. Times still win —
+# timeparse runs first.
 _TIME_PROMPT = ("A time of day, for example: seven a.m., six thirty, "
                 "quarter past seven, ten forty five, half past six, noon, midnight. "
                 "Or say cancel to clear it.")
+
+# ---- The wake-up reply: a time, cancel, a sound-alike of cancel, or nothing ----
+#
+# WHY CANCEL NEEDS MORE THAN THE WORD. Every call reaches whisper as G.711 at
+# 8 kHz, so nothing above 4 kHz survives — where most of an /s/ lives. "Cancel"
+# arrives with its middle consonant smeared or gone and its vowels intact, and
+# whisper fills the gap with a word it knows: 'Campbell.', 'Campful.' (2026-08-21
+# and 2026-11-23, live), "Okay, I'm full." (2026-11-23, live: the /k/ swallowed
+# by "okay"), 'Pencil.' and 'Cancellate.' (synthetic voices through the same
+# channel and recogniser, 2026-11-23). The prompt prime above does not stop it.
+#
+# THE COST IS LOPSIDED. A missed cancel rings a caller who is already awake. A
+# FALSE cancel deletes the wake-up, and they oversleep. So the new tier is narrow
+# and fenced:
+#   * timeparse runs first, so nothing it reads as a time is ever a cancel;
+#   * a sound-alike is a separate answer, CANCEL-LIKE, which the wake-up AGI acts
+#     on only when a wake-up is set — the one time cancel was offered;
+#   * it must be the WHOLE reply (at most two words once fillers are dropped);
+#   * a "don't", "not", "keep" or "leave" anywhere stops any cancel;
+#   * an echo of this prompt's own framing does nothing at all.
+# The literal tier is the regex the wake-up flow has always used, unchanged.
+_CANCEL_WORDS = re.compile(r"\b(cancel|clear|remove|delete|never mind|nevermind|stop|forget)\b")
+# Filler a short reply may carry around the word. "no", "dont" and "not" are NOT
+# filler: they carry meaning.
+_CANCEL_FILLER = frozenset({"okay", "ok", "um", "uh", "so", "oh", "please", "yeah",
+                            "hmm", "well", "the", "it", "just", "that", "my", "wake",
+                            "up", "call", "alarm"})
+# Anywhere in the reply, these stop a cancel: "I don't want to cancel",
+# "never mind, keep it". Both directions of doubt end in a retry, never a delete.
+_CANCEL_VETO = frozenset({"dont", "not", "didnt", "wont", "doesnt", "keep", "leave"})
+# The prompt's own framing. whisper can hand a prompt back on a near-silent
+# recording; read as a reply, the full prompt parses as 18:53 and its tail as a
+# cancel. Any 4-word run of these does nothing. Each must stay a run of
+# _TIME_PROMPT's words (test_wakeup_cancel holds it), so a prompt edit forces an
+# update here.
+_PROMPT_FRAMING = ("a time of day for example", "or say cancel to clear it")
+# One word, or two run together ("Can sell", "Camp full"), shaped like "cancel":
+# a /k/ or /p/ onset, a vowel, a nasal, then the smeared middle — a fricative or
+# a lip stop (Campbell's b), with an optional stop after the nasal (the p of
+# Camp-) — a vowel, and a final l. Built from the observed renderings, not from
+# English: it accepts Campbell, Campful, Canful, Pencil, Council, Can sell and
+# rejects candle, castle, camel, canal, channel, cancer, Kansas, campus, careful,
+# handful, gamble, tinsel, dental (test_wakeup_cancel lists them all).
+_CANCEL_SHAPE = re.compile(
+    r"(?:ck|[ckqp])[aeiouy]{1,2}[nm]{1,2}[pbk]?"
+    r"(?:ph|sh|[szfvb]|c(?=[eiy])){1,2}[aeiouy]{1,2}l{1,2}")
+# What is left of the word when "okay" has swallowed its /k/: "Okay, I'm full."
+_CANCEL_TAIL = re.compile(r"(?:ph|sh|[szfvb]|c(?=[eiy])){1,2}[aeiouy]{1,2}l{1,2}")
+
+
+def _reply_tokens(text: str) -> list[str]:
+    """Lowercase letter-runs, apostrophes dropped (don't -> dont), O.K. -> ok."""
+    t = (text or "").lower().replace("’", "'").replace("'", "")
+    t = re.sub(r"\bo\.?\s?k\b\.?", " ok ", t)
+    return [w for w in re.split(r"[^a-z]+", t) if w]
+
+
+def _content(tokens: list[str]) -> list[str]:
+    """`tokens` without filler, and without a word repeating the one before it
+    ("Cancel, cancel." is one cancel)."""
+    out: list[str] = []
+    for w in tokens:
+        if w in _CANCEL_FILLER or (out and out[-1] == w):
+            continue
+        out.append(w)
+    return out
+
+
+def _grams(words: list[str], n: int = 4) -> set:
+    return {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+_ECHO = set().union(*(_grams(p.split()) for p in _PROMPT_FRAMING))
+
+
+def _sounds_like_cancel(tokens: list[str]) -> bool:
+    """Is the whole reply a sound-alike of "cancel"? Pure; see _CANCEL_SHAPE."""
+    rest = _content(tokens)
+    if not rest or len(rest) > 2:
+        return False
+    if len(rest) == 1:
+        # Cancelled., Canceled., Cancellate., Cancellation please. — but only as
+        # the whole reply: "Is it cancelled?" asks, it does not tell.
+        return rest[0].startswith("cancel") or bool(_CANCEL_SHAPE.fullmatch(rest[0]))
+    if _CANCEL_SHAPE.fullmatch(rest[0] + rest[1]):
+        return True       # Can sell., Camp full.
+    # "Okay, cancel" with the /k/ absorbed into "okay": "Okay, I'm full."
+    i = tokens.index(rest[0])
+    return (rest[0] == "im" and i > 0 and tokens[i - 1] in ("okay", "ok")
+            and bool(_CANCEL_TAIL.fullmatch(rest[1])))
+
+
+def time_reply(text: str, parse) -> tuple[str, str]:
+    """The wake-up flow's decision on one transcript. Pure (no I/O, no logging):
+    `parse` is timeparse.parse, passed in so tests can stub it.
+
+    Returns (stdout, outcome). stdout is what the wake-up AGI reads: 'HH:MM',
+    'CANCEL', 'CANCEL-LIKE', or '' (nothing). outcome is a constant label for
+    the log line — time, cancel, cancel-like, echo, negated or none — and never
+    a word from the transcript."""
+    tokens = _reply_tokens(text)
+    if _grams(tokens) & _ECHO:
+        return "", "echo"
+    hhmm = parse(text)
+    if hhmm:
+        return hhmm, "time"
+    joined = " ".join(tokens)
+    literal = bool(_CANCEL_WORDS.search(joined))
+    alike = not literal and _sounds_like_cancel(tokens)
+    if literal or alike:
+        if (_CANCEL_VETO & set(tokens)) or "do not" in joined:
+            return "", "negated"
+        return ("CANCEL", "cancel") if literal else ("CANCEL-LIKE", "cancel-like")
+    return "", "none"
 
 # Above this match score a room result is treated as CONFIDENT and wins over the
 # feature words; below it (but still >= the room threshold) the feature words get
@@ -399,15 +517,22 @@ def main() -> int:
         sys.path.insert(0, "/usr/share/switchboard/wakeup")
         import timeparse  # noqa: E402
         text = _recording_to_text(args.infile, _TIME_PROMPT)
-        hhmm = timeparse.parse(text)
-        if hhmm:
-            log(f"heard={said(text, words)} -> time={hhmm}")
-            print(hhmm)
-        elif re.search(r"\b(cancel|clear|remove|delete|never mind|nevermind|stop|forget)\b", text.lower()):
+        out, outcome = time_reply(text, timeparse.parse)
+        # One said()-gated line per outcome (test_privacy_invariants counts them).
+        if outcome == "time":
+            log(f"heard={said(text, words)} -> time={out}")
+        elif outcome == "cancel":
             log(f"heard={said(text, words)} -> CANCEL")
-            print("CANCEL")
+        elif outcome == "cancel-like":
+            log(f"heard={said(text, words)} -> CANCEL-LIKE")
+        elif outcome == "negated":
+            log(f"heard={said(text, words)} -> ignored (negated cancel)")
+        elif outcome == "echo":
+            log(f"heard={said(text, words)} -> ignored (prompt echo)")
         else:
             log(f"heard={said(text, words)} -> time=None")
+        if out:
+            print(out)
         return 0
 
     # rooms mode (the voice operator).

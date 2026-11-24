@@ -777,7 +777,12 @@ def render_operator_context(joined: str, automation_on: bool = False,
 def render_wakeup_context() -> list[str]:
     """The [wakeup] context (dial the code -> AGI sets/changes/cancels a wake-up,
     then the dialplan reads it back) and [wakeup-deliver] (the scheduler service
-    originates the room INTO this to actually ring it at the chosen time)."""
+    originates the room INTO this to actually ring it at the chosen time).
+
+    WAKEUP_RESULT=kept means a wake-up was set, nothing the caller said was
+    understood, and it is still set: the call ends by reading it back with the
+    same recording that opened it (sw-wakeup-exists), not with sw-wakeup-none's
+    "No wake-up call was set", which on that path is the opposite of the truth."""
     return [
         ";; ----- Wake-up calls -----",
         "[wakeup]",
@@ -789,11 +794,15 @@ def render_wakeup_context() -> list[str]:
         " same = n,NoOp(wakeup result=${WAKEUP_RESULT} epoch=${WAKEUP_EPOCH})",
         " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"set\"]?setdone)",
         " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"cancelled\"]?cancelled)",
+        " same = n,GotoIf($[\"${WAKEUP_RESULT}\" = \"kept\"]?kept)",
         " same = n,Goto(none)",
         f" same = n(setdone),Playback({prompt('sw-wakeup-set')})",
         " same = n,SayUnixTime(${WAKEUP_EPOCH},,IMp)",
         " same = n,Goto(bye)",
         f" same = n(cancelled),Playback({prompt('sw-wakeup-cancelled')})",
+        " same = n,Goto(bye)",
+        f" same = n(kept),Playback({prompt('sw-wakeup-exists')})",
+        " same = n,SayUnixTime(${WAKEUP_EPOCH},,IMp)",
         " same = n,Goto(bye)",
         f" same = n(none),Playback({prompt('sw-wakeup-none')})",
         f" same = n(bye),Playback({prompt('sw-goodbye')})",

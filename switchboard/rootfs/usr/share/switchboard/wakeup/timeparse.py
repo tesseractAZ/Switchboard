@@ -183,6 +183,15 @@ def parse(text: str):
         if hour is not None:
             return _apply_ampm(hour, 0, ampm)
 
+    # A lone zero is not a time. whisper writes a breath, a cough or a clipped
+    # word as "Oh." / "O." / "0."; read as the bare hour 0 it set 00:00, which at
+    # the change prompt silently REPLACED a 6:30 wake-up with midnight. Only the
+    # whole reply being one zero is refused: "zero zero thirty" (00:30), "oh
+    # seven hundred" and "seven oh five" never reach here as a single token, and
+    # "midnight" is read above.
+    if len(tokens) == 1 and tokens[0] in ("oh", "o", "zero", "0", "00"):
+        return None
+
     # "<hour> [oh] <minutes>" / "<hour> <minutes>" / bare "<hour>"
     hour, rest = _two_word_number(tokens)
     if hour is None:
