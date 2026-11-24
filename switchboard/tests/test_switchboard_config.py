@@ -814,6 +814,19 @@ def test_wakeup_dialplan() -> None:
     check("wakeup: [wakeup] context runs the AGI", "[wakeup]" in on and "AGI(switchboard-wakeup.agi)" in on)
     check("wakeup: [wakeup-deliver] context greets + says the time",
           "[wakeup-deliver]" in on and "switchboard/sw-wakeup-greeting" in on and "SayUnixTime(,,IMp)" in on)
+    # A call that understood nothing while a wake-up was set ends by reading it
+    # back as still set (the opening recording), not with "No wake-up call was set".
+    ctx = on.split("[wakeup]\n", 1)[1].split("\n[", 1)[0].splitlines()
+    kept_if = ' same = n,GotoIf($["${WAKEUP_RESULT}" = "kept"]?kept)'
+    check("wakeup: kept is routed before the fall-through to none",
+          kept_if in ctx and ctx.index(kept_if) < ctx.index(" same = n,Goto(none)"))
+    i = ctx.index(" same = n(kept),Playback(switchboard/sw-wakeup-exists)")
+    check("wakeup: kept reads the wake-up back, then says goodbye",
+          ctx[i + 1:i + 3] == [" same = n,SayUnixTime(${WAKEUP_EPOCH},,IMp)",
+                               " same = n,Goto(bye)"])
+    check("wakeup: none and cancelled still play their own recordings",
+          " same = n(none),Playback(switchboard/sw-wakeup-none)" in ctx
+          and " same = n(cancelled),Playback(switchboard/sw-wakeup-cancelled)" in ctx)
     default_on = sbc.render_extensions({"rooms": rooms, "trunk": {}})
     check("wakeup: on by default at 42", "exten = 42,1,NoOp(Wake-up call)" in default_on)
     off = sbc.render_extensions({"rooms": rooms, "wakeup_enabled": False, "trunk": {}})

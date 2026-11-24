@@ -25,6 +25,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _OPERATOR_AGI = _ROOT / "rootfs" / "var" / "lib" / "asterisk" / "agi-bin" / "switchboard-operator.agi"
 _SPEECH = _ROOT / "rootfs" / "usr" / "share" / "switchboard" / "operator" / "agi_speech.py"
+_WAKEUP_AGI = _ROOT / "rootfs" / "var" / "lib" / "asterisk" / "agi-bin" / "switchboard-wakeup.agi"
 
 _failures = 0
 
@@ -64,10 +65,31 @@ CAPPED = 80000       # 10.00 s: the operator's RECORD_MS cap
 SILENCE_REPLY = "200 result=0 (timeout) endpos=8160"
 
 
+def _wakeup():
+    """The wake-up AGI imports `store` and `delivery` at module level; stub them
+    and restore sys.path and sys.modules (conftest's tripwire)."""
+    import sys
+    import types
+    saved_mods = {k: sys.modules.get(k) for k in ("store", "delivery")}
+    saved_path = list(sys.path)
+    sys.modules["store"] = types.ModuleType("store")
+    sys.modules["delivery"] = types.ModuleType("delivery")
+    try:
+        return SourceFileLoader("sb_wakeup_agi_recdiag", str(_WAKEUP_AGI)).load_module()
+    finally:
+        sys.path[:] = saved_path
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
 def _twins():
-    """Both copies of the rule, each under its own name."""
-    op, sp = _operator(), _speech()
-    return (("operator", op._rec_summary), ("speech", sp.rec_summary))
+    """Every copy of the rule, each under its own name."""
+    op, sp, wk = _operator(), _speech(), _wakeup()
+    return (("operator", op._rec_summary), ("speech", sp.rec_summary),
+            ("wakeup", wk._rec_summary))
 
 
 def test_a_silent_capture_is_sized_and_flagged() -> None:

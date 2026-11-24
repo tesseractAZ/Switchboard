@@ -1,7 +1,43 @@
 # Changelog
 
-Recent releases. Releases up to 0.117.0 are in the
+Recent releases. Releases up to 0.118.0 are in the
 [changelog archive](https://github.com/tesseractAZ/Switchboard/blob/main/switchboard/CHANGELOG-ARCHIVE.md).
+
+## 0.129.0
+
+**A wake-up can be cancelled when the phone line turns "cancel" into a
+sound-alike, and a call that understood nothing says the wake-up is still set.**
+
+- **A "cancel" that comes back as another word now cancels.** Telephone audio
+  loses most of an "s", and the recogniser wrote "cancel" as "Campbell." and
+  "Campful." on 2026-08-21 and as "Okay, I'm full." and "Campful." on
+  2026-11-23, the second time with the prompt hint added after the first in
+  place. Both times nothing matched and the wake-up being called off rang. When
+  a wake-up is set, a reply shaped like "cancel" (the whole reply, at most two
+  words besides fillers such as "okay") now cancels it, as the word does. With
+  no wake-up set it counts as not understood. Times are read first, as before.
+  Checked against 1,288 recordings of 28 synthetic voices sent through the same
+  8 kHz channel and recogniser: 535 of 560 spoken cancels now cancel (516
+  before), and none of the 728 spoken times and other replies becomes one.
+- **A "don't" stops a cancel.** "I don't want to cancel" and "never mind, keep
+  it" used to cancel. A "don't", "not", "keep" or "leave" anywhere in the reply
+  now cancels nothing; the reply counts as not understood. An echo of the recogniser's own
+  prompt, which read as a cancel or as 6:53 PM, now does nothing.
+- **A call that understood nothing ends with the wake-up that is still set.**
+  It used to end "No wake-up call was set", which was false whenever one was. It
+  now plays the recording that opens the call, "You already have a wake-up
+  call…", and the time.
+- **Two kinds of reply no longer replace a wake-up with the wrong time.** A
+  zero with no other number after it ("Oh.", or whisper's "Oh, oh, oh." on
+  noise) was read as the hour 0 and set midnight. A length of time ("ten more
+  minutes", "one second") was read as that hour. Both now count as not
+  understood. "Oh seven hundred", "seven oh five", "zero zero thirty" and
+  "ten past seven" read as before.
+- **A recording with no speech in it is not transcribed.** When nothing rose
+  above the silence threshold, whisper still answered something, and any
+  answer could act on the wake-up. The attempt now counts as a miss.
+- **Each wake-up recording leaves a line in the log** with its length and why
+  it ended, never the words, as the operator's recordings already do.
 
 ## 0.128.0
 
@@ -385,34 +421,3 @@ documentation pass are corrected.**
   means only reachable but not yet measured. Units and `state_class` do not
   change.
 - A failed push no longer names its target in the add-on log.
-
-## 0.118.0
-
-**The "phones dropped" card says only what is true of each phone it names.**
-
-- The link-health monitor also catches a fleet that drops between two samples,
-  from Asterisk's log. Its card said the phones "came back before the next
-  health check" and were "up now, not a current outage" whenever enough phones
-  had gone Unreachable since the last sample, without looking at the sample it
-  was judged on. Twice that sample showed them down: 2026-11-02 01:01 MST
-  (08:01 UTC), the gateway's weekly reboot caught mid-reboot (8 wired ports
-  down), and 2026-11-07 19:06 MST (02:06 UTC on 11-08), a router reboot (all 9
-  phones down). Both fleets were back by the next sample.
-- The card is now judged per phone against the sample. A "dropped briefly ...
-  up now" card is posted only when every phone that dropped is reachable in
-  it. Otherwise a "phones dropped" card is posted at once, naming the phones
-  still unreachable at that check, and a later check replaces it under the
-  same id: who was back, and who, if anyone, still was not. "Not a current
-  outage" is said only once every one of them is back and the sample is not a
-  fleet outage. Phones re-register one at a time, so a sample can show one to
-  three still down while the fleet is below the outage threshold; judged per
-  fleet, that read as healed.
-- "All phones" and "nothing was reachable" are said only when every
-  registered phone dropped. The threshold is half the fleet, and a phone that
-  stayed up (often the cordless, which the outside line rings) kept working.
-- If the phones stay down, the outage alert ("phones unreachable") follows as
-  before and the card says so when the outage threshold is met. A second drop
-  while a card is open gets a card of its own; each is updated under its own
-  id.
-- Asterisk's log is now read just before each sample rather than after it, so
-  every drop counted was logged before the sample that judges it.

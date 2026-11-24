@@ -398,6 +398,8 @@ def test_a_phone_set_before_the_ring_is_not_a_snooze(tmp_path, mst, set_at):
 @pytest.mark.parametrize("second, change, new_hhmm", [
     ("06:25", "set", "06:25"),
     ("CANCEL", "cancelled", None),
+    # A sound-alike of cancel ("Campful.") with the 06:20 just set: a cancel.
+    ("CANCEL-LIKE", "cancelled", None),
 ])
 def test_the_newest_phone_change_names_the_snooze(tmp_path, mst, second, change,
                                                   new_hhmm):

@@ -7,7 +7,9 @@ utterance, shell out to ``switchboard-stt --mode time`` for offline recognition,
 then SET / CHANGE / CANCEL the caller's wake-up. The AGI only records the request
 in the store and sets channel vars (WAKEUP_RESULT, WAKEUP_EPOCH); the *dialplan*
 reads the confirmation back (Playback + SayUnixTime). The scheduler service rings
-the room at the chosen time.
+the room at the chosen time. WAKEUP_RESULT is set, cancelled, kept (a wake-up
+was already set and nothing was understood, so it is read back as still set) or
+none.
 
 The caller's room ext is taken from the channel name (PJSIP/<ext>-...), so it
 works regardless of caller-ID config.
@@ -20,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import wave
 
 sys.path.insert(0, "/usr/share/switchboard/wakeup")
 import store  # noqa: E402
@@ -46,6 +49,16 @@ ASR_DIR = "/run/switchboard/asr"
 MAX_ATTEMPTS = 2
 RECORD_MS = 7000
 SILENCE_S = 3
+# switchboard-stt's answer for a reply that SOUNDS like "cancel" without being
+# the word ("Campful.", "Okay, I'm full." — see time_reply there). It cancels
+# only where cancel was just offered, which is when a wake-up is set; anywhere
+# else it is a miss. An AGI that predates it compares == "CANCEL" and so treats
+# it as a miss too.
+CANCEL_LIKE = "CANCEL-LIKE"
+# RECORD's leading-silence remainder, as in switchboard-operator.agi: with s=N,
+# res_agi rewinds N-1 s once N s of silence have passed, so a recording in which
+# nothing crossed the threshold keeps only the last 1.02 s WHATEVER N is.
+SILENT_REMAINDER_S = (0.95, 1.1)
 
 
 def read_env() -> dict:
@@ -100,12 +113,70 @@ def channel_ext(channel: str) -> str:
     return ext if ext.isdigit() else ""
 
 
+def _rec_summary(reply: str, wav: str) -> str:
+    """The `bytes=B secs=S end=E [no-speech]` part of the rec breadcrumb.
+
+    Twin of agi_speech.rec_summary and of switchboard-operator.agi's
+    _rec_summary (this AGI imports nothing from operator/);
+    test_operator_agi.py holds all three to the same output. `secs` comes from
+    the WAV header, else from the size (8 kHz 16-bit mono: 16000 B/s behind a
+    44-byte header). `end` is the bracketed word in Asterisk's RECORD reply,
+    whichever it is: "timeout" for both the silence cutoff and the RECORD_MS cap
+    (secs tells them apart), "hangup", "dtmf", or a failure such as "waitfor" or
+    "writefile". A reply without one (an empty read) logs no `end`. `no-speech`
+    marks a file that is only the silence remainder: nothing crossed the silence
+    threshold, which a silent caller and a muted or dead microphone produce
+    alike. Only the silence cutoff leaves that remainder, so no reply but
+    "timeout" earns the flag, whatever the size."""
+    # Letters only: Asterisk's own reason word, never free text in the journal.
+    m = re.search(r"\(([a-z]+)\)", reply or "")
+    end = m.group(1) if m else ""
+    tail = f" end={end}" if end else ""
+    try:
+        size = os.path.getsize(wav)
+    except OSError:
+        return "bytes=-1" + tail          # RECORD wrote nothing
+    secs = None
+    try:
+        with wave.open(wav, "rb") as w:
+            if w.getframerate() > 0 and w.getnframes() > 0:
+                secs = w.getnframes() / w.getframerate()
+    except Exception:  # noqa: BLE001  (a breadcrumb must never end the call)
+        pass           # a short or odd header: the size below still answers
+    if secs is None:
+        secs = max(size - 44, 0) / 16000
+    out = f"bytes={size} secs={secs:.2f}{tail}"
+    lo, hi = SILENT_REMAINDER_S
+    if end == "timeout" and lo <= secs <= hi:
+        out += " no-speech"
+    return out
+
+
 def recognize(attempt: int) -> str:
-    """Record one utterance; return an 'HH:MM', 'CANCEL', or '' (nothing)."""
+    """Record one utterance; return an 'HH:MM', 'CANCEL', 'CANCEL-LIKE' (a
+    sound-alike of cancel, see CANCEL_LIKE), or '' (nothing)."""
     rec = f"{ASR_DIR}/wake-{os.getpid()}-{attempt}"
     stream(prompt("sw-beep"))
-    agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
+    reply = agi(f'RECORD FILE {rec} wav "" {RECORD_MS} s={SILENCE_S}')
     wav = rec + ".wav"
+    # The WAV is deleted after transcription, so this line is the only evidence
+    # afterwards of how long a recording was and why it ended (sizes, never
+    # words). On 2026-11-23 two misses left nothing to say how long either
+    # recording was or why it ended.
+    summary = _rec_summary(reply, wav)
+    sys.stderr.write(f"[wakeup] rec attempt={attempt} {summary}\n")
+    if summary.endswith(" no-speech"):
+        # Nothing crossed the silence threshold: the file is only RECORD's
+        # silence remainder. whisper hands back something for silence anyway
+        # ("You", "Thank you.", a piece of its own prompt), and here any answer
+        # can cancel or replace a wake-up. So it is not transcribed, and the
+        # attempt is a miss: the caller is asked again.
+        sys.stderr.write("[wakeup] no speech in the recording: not transcribed\n")
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+        return ""
     out = ""
     # Start STT before the "one moment" prompt so inference overlaps its playback
     # (the child only touches the WAV + loopback whisper-server, not the AGI channel).
@@ -205,11 +276,22 @@ def main() -> None:
                     agi(f"EXEC SayUnixTime {tgt},,IMp")
             else:
                 stream(prompt("sw-wakeup-didnt-catch"))
-            stream(prompt("sw-wakeup-change"))  # "…say a new time, or say cancel."
+            stream(prompt("sw-wakeup-change"))  # "To set a new time, say it now. To cancel, say cancel."
         else:
             stream(prompt("sw-wakeup-ask") if attempt == 0 else prompt("sw-wakeup-didnt-catch"))
 
         result = recognize(attempt)
+        if result == CANCEL_LIKE:
+            # The line turned "cancel" into something that only sounds like it.
+            # It counts only where cancel was just offered: with no wake-up set
+            # the caller was asked for a time, so it is a miss and they are asked
+            # again. (A failed store read above also lands here, erring toward
+            # keeping the alarm.)
+            if existing:
+                sys.stderr.write("[wakeup] a sound-alike of cancel, with a wake-up set: cancelling\n")
+                result = "CANCEL"
+            else:
+                sys.stderr.write("[wakeup] a sound-alike of cancel, with no wake-up set: asking again\n")
         if result == "CANCEL":
             removed = store.cancel(ext)
             record_change(ext, removed=removed)
@@ -222,7 +304,32 @@ def main() -> None:
             set_var("WAKEUP_RESULT", "set")
             return
 
+    if existing:
+        # Nothing understood, and a wake-up was set when the call began. Say it
+        # is still set rather than "No wake-up call was set", which a caller who
+        # just tried to cancel hears as the opposite of the truth. Read the store
+        # again: the claim must be about what is set NOW.
+        epoch = _still_set(ext)
+        if epoch:
+            set_var("WAKEUP_EPOCH", str(epoch))
+            set_var("WAKEUP_RESULT", "kept")
+            return
     set_var("WAKEUP_RESULT", "none")
+
+
+def _still_set(ext: str) -> int | None:
+    """The target epoch of the wake-up stored for `ext` now, or None if there is
+    none, it is unreadable, or its epoch is not a positive int. Never raises: a
+    doubt means "none", so the call never claims a wake-up that may not exist."""
+    try:
+        entry = store.get(ext)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[wakeup] store re-read failed: {exc}\n")
+        return None
+    tgt = entry.get("target_epoch") if isinstance(entry, dict) else None
+    if isinstance(tgt, int) and not isinstance(tgt, bool) and tgt > 0:
+        return tgt
+    return None
 
 
 if __name__ == "__main__":

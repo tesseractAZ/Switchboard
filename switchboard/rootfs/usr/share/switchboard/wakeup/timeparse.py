@@ -21,6 +21,16 @@ _ONES = {
     "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
 }
 _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50}
+# The ways whisper writes a zero, and the words that make a count a duration.
+_ZEROS = ("oh", "o", "zero", "0", "00")
+_DURATION = frozenset({"more", "minute", "minutes", "min", "mins", "second", "seconds",
+                       "sec", "secs", "moment", "hour", "hours"})
+
+
+def _nonzero(word: str) -> bool:
+    """Is `word` a number other than zero (a number word, a tens word, digits)?"""
+    return ((word in _ONES and _ONES[word] > 0) or word in _TENS
+            or (word.isdigit() and int(word) > 0))
 
 
 def _normalize(text: str) -> str:
@@ -182,6 +192,22 @@ def parse(text: str):
         hour, _ = _two_word_number(tokens[: tokens.index("oclock")])
         if hour is not None:
             return _apply_ampm(hour, 0, ampm)
+
+    # A zero with no other number after it is not a time. whisper writes a
+    # breath, a cough or a clipped word as "Oh." / "O." / "0.", and noise as a
+    # repetition loop ("Oh, oh, oh."); read as the hour 0 each set 00:00, which
+    # at the change prompt silently REPLACED a 6:30 wake-up with midnight.
+    # "zero zero thirty" (00:30) and "oh oh five" keep their minutes; "oh seven
+    # hundred", "seven oh five", "midnight" and a digit clock are read above or
+    # never start with a zero.
+    if tokens and tokens[0] in _ZEROS and not any(_nonzero(w) for w in tokens[1:]):
+        return None
+    # A count followed by a length of time is not a clock time: "ten more
+    # minutes" (a caller dialling in mid-ring to snooze) set 10:00 and "one
+    # second" 01:00, each replacing the wake-up. Relative times ("ten past
+    # seven", "five to six") are read above and never reach here.
+    if any(w in _DURATION for w in tokens[1:]):
+        return None
 
     # "<hour> [oh] <minutes>" / "<hour> <minutes>" / bare "<hour>"
     hour, rest = _two_word_number(tokens)

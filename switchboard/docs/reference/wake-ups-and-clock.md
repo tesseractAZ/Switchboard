@@ -9,6 +9,21 @@ and reads it back before it hangs up. If it is wrong, dial the code again: it
 reads out the time that is set and asks for a new one or "cancel". Say
 "cancel" (or "clear", "never mind") to remove a pending wake-up.
 
+**"Cancel" on a phone line.** Telephone audio loses most of an "s", and the
+recogniser fills the gap with a word it knows: "cancel" has come back as
+"Campbell", "Campful", "Pencil" and "Okay, I'm full". So when a wake-up is set,
+a reply shaped like "cancel" cancels it as the word does. It must be the whole
+reply, at most two words besides fillers such as "okay" or "please". With no
+wake-up set, the same reply counts as not understood.
+A spoken time is always read as a time first. Two kinds of reply are not
+read as a time at all: a zero with no other number after it ("oh", "oh, oh,
+oh"), which used to be midnight, and a length of time ("ten more minutes",
+"one second"), which used to be that hour. A "don't", "not", "keep" or "leave"
+anywhere in a reply cancels nothing, and a recording in which nothing rose
+above the silence threshold is not sent to the recogniser. When a wake-up was
+set and nothing was understood, the call ends by reading out the time it is
+still set for.
+
 - **One wake-up per room.** Setting a new one replaces the old.
 - At the set time the room rings for `wakeup_ring_seconds` (default 60). Once
   answered, the call fires the wake-up scene (if one is set), speaks a greeting
